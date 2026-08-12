@@ -1,0 +1,55 @@
+# Build output
+bridge.exe
+bridge
+build/
+web/dist/
+web/node_modules/
+
+# 测试产物
+internal/core/data/
+
+# Installed skills (via npx skills)
+.agents/
+skills-lock.json
+
+# Claude Code local config
+.claude/
+
+# iLink token cache
+data/wechat_token.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Debug logs
+data/*.log
+data/*.err
+bridge.err
+bridge.out
+
+# 运行时数据(tasks/worktrees/sessions/mappings 由后端生成)
+data/tasks/
+data/worktrees/
+data/sessions/
+data/mappings/
+data/*.png
+
+# 调试临时产物(base64 截图、cloudflared 日志、commit 草稿、临时脚本)
+data/*.b64
+data/*.out
+data/commit-msg.txt
+data/test-running.js
+data/*.ps1
+data/*-task-id.txt
+data/choice-verify-sysprompt.txt
+
+# Scratch：方向性 spike / 验证脚本（临时产物，不进 git）
+.scratch/
+
+# OS
+.DS_Store
+Thumbs.db
+bridge.exe~
+data/approvals.json

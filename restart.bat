@@ -1,0 +1,18 @@
+@echo off
+title Claude Bridge (restart)
+cd /d "G:\viomi_workspace\claude-bridge"
+
+echo Restarting Claude Bridge...
+echo.
+
+REM 杀掉占用 3000 端口的旧进程（go run 临时 exe 或 bridge.exe）
+for /f "tokens=5" %%a in ('netstat -ano -p TCP ^| findstr ":3000 " ^| findstr "LISTENING"') do (
+  echo killing old process PID=%%a
+  taskkill /F /PID %%a >nul 2>&1
+)
+
+echo.
+echo Starting go run ./cmd/bridge ...
+echo.
+go run ./cmd/bridge
+pause
