@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"claude-bridge/internal/channel"
-	"claude-bridge/internal/model"
+	"pieqi/internal/channel"
+	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
 )

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"claude-bridge/internal/config"
-	"claude-bridge/internal/core"
-	"claude-bridge/internal/model"
+	"pieqi/internal/config"
+	"pieqi/internal/core"
+	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"

@@ -49,7 +49,7 @@ async function apiDelete(path) {
 
 // 分组 key：统一分隔符并转小写（Windows 路径大小写不敏感）。
 // 同一项目可能因历史数据混用 "/" 与 "\"（如 G:/... vs G:\...）而呈现不同字符串，
-// 归一后归为同一分组，避免侧栏出现重复分组（如 claude-bridge 出现两次）。
+// 归一后归为同一分组，避免侧栏出现重复分组（如 pieqi 出现两次）。
 function groupKey(p) {
   return String(p || '').replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '').toLowerCase();
 }

@@ -1,4 +1,4 @@
-// Din Agent service worker
+// Pieqi service worker
 //
 // 缓存策略（核心目标：前端一更新，设备端自动拉到新版本，不再"时灵时不灵"）：
 //  - 导航请求 / index.html：network-first —— 每次拉最新 HTML，从而引用最新带 hash 的 bundle；
@@ -6,8 +6,8 @@
 //  - API / WS 一律不缓存。
 // 版本号随每次前端发布递增，activate 时清掉旧版本缓存，强制刷新。
 const VERSION = 'v2';
-const SHELL_CACHE = `din-agent-shell-${VERSION}`;
-const ASSET_CACHE = `din-agent-assets-${VERSION}`;
+const SHELL_CACHE = `pieqi-shell-${VERSION}`;
+const ASSET_CACHE = `pieqi-assets-${VERSION}`;
 
 self.addEventListener('install', () => {
   // 新 SW 立即接管，不等旧页面关掉

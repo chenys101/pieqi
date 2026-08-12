@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 	"go.uber.org/zap"
 )
 
@@ -58,8 +58,8 @@ func TestWorktreeManager_CreateAndCleanup(t *testing.T) {
 	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
 		t.Fatalf("worktree path not created: %s", wtPath)
 	}
-	if !branchExists(t, repo, "din/task-1") {
-		t.Fatal("branch din/task-1 not found")
+	if !branchExists(t, repo, "pieqi/task-1") {
+		t.Fatal("branch pieqi/task-1 not found")
 	}
 	if _, err := os.Stat(filepath.Join(wtPath, "README.md")); err != nil {
 		t.Fatal("worktree missing README.md")
@@ -71,7 +71,7 @@ func TestWorktreeManager_CreateAndCleanup(t *testing.T) {
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Fatal("worktree dir should be removed after cleanup")
 	}
-	if branchExists(t, repo, "din/task-1") {
+	if branchExists(t, repo, "pieqi/task-1") {
 		t.Fatal("branch should be deleted after cleanup")
 	}
 }
@@ -122,8 +122,8 @@ func TestWorktreeManager_ConcurrentCreatesSerialize(t *testing.T) {
 		t.Fatalf("concurrent create failed: %v", err)
 	}
 	for i := 0; i < n; i++ {
-		if !branchExists(t, repo, "din/task-c-"+strconv.Itoa(i)) {
-			t.Fatalf("branch din/task-c-%d missing after concurrent creates", i)
+		if !branchExists(t, repo, "pieqi/task-c-"+strconv.Itoa(i)) {
+			t.Fatalf("branch pieqi/task-c-%d missing after concurrent creates", i)
 		}
 	}
 }

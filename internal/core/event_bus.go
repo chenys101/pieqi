@@ -4,7 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 )
 
 // Event 任务状态变更事件，由 TaskRunner 发布，WS 层订阅转发。

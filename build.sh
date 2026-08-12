@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 构建并打包 Claude Bridge 发布物。
+# 构建并打包 Pieqi 发布物。
 # 用法: ./build.sh [版本号]   (默认 v1.0)
-# 产物: build/claude-bridge-<version>.tar.gz 与 .zip
+# 产物: build/pieqi-<version>.tar.gz 与 .zip
 set -euo pipefail
 cd "$(dirname "$0")"
 VERSION="${1:-v1.0}"
@@ -19,15 +19,15 @@ echo "==> 构建 windows/amd64"
 GOOS=windows GOARCH=amd64 go build -o "$OUT/bridge-windows-amd64.exe" ./cmd/bridge
 
 # 发布目录：bridge 二进制的两个平台 + 示例配置 + 文档 + 启动脚本
-RELEASE="$OUT/claude-bridge-$VERSION"
+RELEASE="$OUT/pieqi-$VERSION"
 mkdir -p "$RELEASE"
 cp "$OUT/bridge-linux-amd64" "$OUT/bridge-windows-amd64.exe" "$RELEASE/"
 cp config.yaml README.md "$RELEASE/"
 cp start.bat restart.bat "$RELEASE/"
 
 echo "==> 打包 tar.gz + zip"
-tar -C "$OUT" -czf "$OUT/claude-bridge-$VERSION.tar.gz" "claude-bridge-$VERSION"
-powershell -NoProfile -Command "Compress-Archive -Path '$RELEASE' -DestinationPath '$OUT/claude-bridge-$VERSION.zip' -Force"
+tar -C "$OUT" -czf "$OUT/pieqi-$VERSION.tar.gz" "pieqi-$VERSION"
+powershell -NoProfile -Command "Compress-Archive -Path '$RELEASE' -DestinationPath '$OUT/pieqi-$VERSION.zip' -Force"
 
 echo "==> 完成:"
 ls -la "$OUT"

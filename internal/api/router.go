@@ -3,8 +3,8 @@ package api
 import (
 	"net/http"
 
-	"claude-bridge/internal/config"
-	"claude-bridge/internal/core"
+	"pieqi/internal/config"
+	"pieqi/internal/core"
 
 	"github.com/gin-gonic/gin"
 )

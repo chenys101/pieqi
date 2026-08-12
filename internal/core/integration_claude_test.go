@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 
 	"go.uber.org/zap"
 )
@@ -299,7 +299,7 @@ func TestSessionContextReuse(t *testing.T) {
 	defer sr.Shutdown()
 
 	// === Step 1: 首条消息 → oneShot 创建会话 ===
-	msg1 := makeMsg("记住：这个项目的名称是 Claude Bridge，回复 ok")
+	msg1 := makeMsg("记住：这个项目的名称是 Pieqi，回复 ok")
 	t.Log("Step 1: First message (oneShot → create session)")
 	bridge.handleMessage(msg1)
 
@@ -341,7 +341,7 @@ func TestSessionContextReuse(t *testing.T) {
 
 	// 验证上下文：回复中包含第一次对话的内容
 	lower := strings.ToLower(result)
-	if strings.Contains(lower, "claude bridge") || strings.Contains(lower, "bridge") {
+	if strings.Contains(lower, "pieqi") || strings.Contains(lower, "bridge") {
 		t.Log("✅ session context maintained via --resume")
 	} else {
 		t.Errorf("context lost: %s", result[:min(len(result), 300)])
@@ -361,7 +361,7 @@ func TestResumeDirectPipe(t *testing.T) {
 
 	// Step 1: one-shot 创建会话
 	oneShotArgs := []string{
-		"-p", "记住：项目名称是 Claude Bridge，回复 ok",
+		"-p", "记住：项目名称是 Pieqi，回复 ok",
 		"--session-id", sessionID,
 		"--model", modelName(),
 	}
@@ -437,7 +437,7 @@ func TestResumeDirectPipe(t *testing.T) {
 			label = "Stderr"
 		}
 		t.Logf("%s (%d bytes): %s", label, len(r.data), r.data[:min(len(r.data), 400)])
-		if strings.Contains(strings.ToLower(r.data), "claude bridge") ||
+		if strings.Contains(strings.ToLower(r.data), "pieqi") ||
 			strings.Contains(strings.ToLower(r.data), "bridge") {
 			t.Log("✅ --resume pipe communication works!")
 		}

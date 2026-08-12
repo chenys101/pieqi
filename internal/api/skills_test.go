@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"claude-bridge/internal/config"
-	"claude-bridge/internal/core"
+	"pieqi/internal/config"
+	"pieqi/internal/core"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"

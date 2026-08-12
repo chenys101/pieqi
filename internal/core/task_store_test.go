@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 )
 
 func TestTaskStore_CreateGet(t *testing.T) {

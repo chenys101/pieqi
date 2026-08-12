@@ -14,7 +14,7 @@ type Config struct {
 	Session  SessionConfig  `mapstructure:"session"`
 	Channels ChannelsConfig `mapstructure:"channels"`
 	API      APIConfig      `mapstructure:"api"`
-	Din      DinConfig      `mapstructure:"din"`
+	Pieqi      PieqiConfig      `mapstructure:"pieqi"`
 }
 
 // ServerConfig HTTP 服务配置
@@ -71,8 +71,8 @@ type APIConfig struct {
 	CORSOrigins []string `mapstructure:"cors_origins"`
 }
 
-// DinConfig Din Agent 后端总开关与行为参数
-type DinConfig struct {
+// PieqiConfig Pieqi 后端总开关与行为参数
+type PieqiConfig struct {
 	Enabled             bool          `mapstructure:"enabled"`
 	WorktreeBase        string        `mapstructure:"worktree_base"`   // worktree 根目录
 	SkillsDirs          []string      `mapstructure:"skills_dirs"`     // 空 = 默认 ~/.claude/skills
@@ -105,15 +105,15 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("session.ttl", "30m")
 	v.SetDefault("session.data_dir", "./data/sessions")
 	v.SetDefault("api.enabled", true)
-	v.SetDefault("din.enabled", false)
-	v.SetDefault("din.permission_mode", "bypassPermissions")
-	v.SetDefault("din.cleanup_worktrees", true)
-	v.SetDefault("din.legacy_im_path", false)
-	v.SetDefault("din.hook_timeout", "30m")
-	v.SetDefault("din.hook_tools", []string{"Bash", "Write", "Edit", "NotebookEdit"})
-	v.SetDefault("din.max_concurrent_per_project", 4)
-	v.SetDefault("din.worktree_base", "./data/worktrees")
-	v.SetDefault("din.base_branch", "main")
+	v.SetDefault("pieqi.enabled", false)
+	v.SetDefault("pieqi.permission_mode", "bypassPermissions")
+	v.SetDefault("pieqi.cleanup_worktrees", true)
+	v.SetDefault("pieqi.legacy_im_path", false)
+	v.SetDefault("pieqi.hook_timeout", "30m")
+	v.SetDefault("pieqi.hook_tools", []string{"Bash", "Write", "Edit", "NotebookEdit"})
+	v.SetDefault("pieqi.max_concurrent_per_project", 4)
+	v.SetDefault("pieqi.worktree_base", "./data/worktrees")
+	v.SetDefault("pieqi.base_branch", "main")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config: %w", err)

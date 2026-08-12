@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 
 	"go.uber.org/zap"
 )

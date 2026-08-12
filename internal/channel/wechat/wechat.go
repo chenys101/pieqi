@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"claude-bridge/internal/channel"
-	"claude-bridge/internal/model"
+	"pieqi/internal/channel"
+	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
 	qrcode "github.com/skip2/go-qrcode"

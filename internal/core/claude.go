@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 )
 
 // Runner 管理 Claude Code 子进程调用

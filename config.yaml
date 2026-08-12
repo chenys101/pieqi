@@ -22,16 +22,16 @@ channels:
   wecom:
     enabled: false
   wechat:
-    enabled: false     # 演示用：关掉 wechat 避免扫码阻塞，只看 Din 后端 + PWA
+    enabled: false     # 演示用：关掉 wechat 避免扫码阻塞，只看 Pieqi 后端 + PWA
     base_url: ""  # 默认 https://ilinkai.weixin.qq.com
 
-# Din Agent 后端：worktree 并行任务 + 移动端监控 PWA
+# Pieqi 后端：worktree 并行任务 + 移动端监控 PWA
 api:
   enabled: true
   token: ""           # 空 = 不鉴权（仅本地）；绑 0.0.0.0 必须设
   cors_origins: []    # 空 = 允许所有（本地 dev）
 
-din:
+pieqi:
   enabled: true                  # 总开关；开启后 IM 消息走 TaskCreator 而非旧 SessionRunner
   worktree_base: ./data/worktrees
   skills_dirs: []                # 空 = 默认 ~/.claude/skills + CLAUDE_CONFIG_DIR/.claude/skills
@@ -41,4 +41,4 @@ din:
   hook_timeout: 30m              # hook 等人类决策的上限
   hook_tools: [Bash, Write, Edit, NotebookEdit]  # PreToolUse 拦截的工具；读类不拦
   max_concurrent_per_project: 4
-  base_branch: master            # worktree 基准分支；本机 claude-bridge 主分支为 master
+  base_branch: master            # worktree 基准分支；本机 pieqi 主分支为 master

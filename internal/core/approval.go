@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 )
 
 // PendingRequest 等待审批的 Claude 操作

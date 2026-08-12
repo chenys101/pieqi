@@ -1,13 +1,13 @@
-# Claude Bridge (Din Agent)
+# Pieqi
 
 多渠道（飞书 / 企业微信 / 微信）到 **Claude Code CLI** 的桥接服务，核心特性是**跨渠道会话共享**：同一用户从飞书发起的对话，切到微信能无缝继续。
 
-当前为 **Din Agent 后端**形态：通过 worktree 并行运行开发任务，并提供一个**移动端监控 PWA** 来新建/查看/干预任务。
+当前为 **Pieqi 后端**形态：通过 worktree 并行运行开发任务，并提供一个**移动端监控 PWA** 来新建/查看/干预任务。
 
 ```
-飞书 / 企微 / 微信 ──→ Claude Bridge ──→ Claude Code CLI (claude -p --session-id / --resume)
+飞书 / 企微 / 微信 ──→ Pieqi ──→ Claude Code CLI (claude -p --session-id / --resume)
                       ├── 跨渠道统一会话
-                      ├── Din Agent 后端（worktree 并行任务）
+                      ├── Pieqi 后端（worktree 并行任务）
                       └── 移动端监控 PWA（:3000）
 ```
 
@@ -16,7 +16,7 @@
 ## 特性
 
 - **跨渠道会话共享**：身份映射（`data/users.json`）把各渠道用户 ID 归一为统一身份，会话按 `user:<identity>:<session>` 共享上下文。
-- **Din Agent 后端**：任务可在任意本地路径直接运行（也可建 worktree 隔离并行），每项目并发上限控制；`bypassPermissions` + PreToolUse hook 实现人类审批。
+- **Pieqi 后端**：任务可在任意本地路径直接运行（也可建 worktree 隔离并行），每项目并发上限控制；`bypassPermissions` + PreToolUse hook 实现人类审批。
 - **移动端 PWA**：新建任务、查看事件流、补充续问、工具调用折叠、URL 会话路由（`/session/<id>` 深链接）。
 - **会话恢复健壮化**：自动捕获 claude 真实 session_id 供续问；会话丢失时回退新会话，保证消息必被提交。
 - **单二进制部署**：前端经 `//go:embed` 嵌入，`bridge.exe` 单文件自包含。
@@ -40,7 +40,7 @@
 ## 目录结构
 
 ```
-claude-bridge/
+pieqi/
 ├── cmd/bridge/main.go        # 入口（含 registerStatic / pre-tool-use hook 入口）
 ├── web/
 │   ├── src/                  # PWA 前端源码（main.js / styles.css）
@@ -101,7 +101,7 @@ claude:
   model: deepseek-v4-pro-202606   # claude -p 使用的模型
   effort: high
   timeout: 300s
-din:
+pieqi:
   enabled: true
   worktree_base: ./data/worktrees
   permission_mode: bypassPermissions

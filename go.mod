@@ -1,4 +1,4 @@
-module claude-bridge
+module pieqi
 
 go 1.25.0
 

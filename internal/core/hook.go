@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 )
 
 // HookService 管理 PreToolUse hook 的待决策注册与阻塞等待。

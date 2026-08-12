@@ -1,8 +1,8 @@
 @echo off
-title Claude Bridge (restart)
-cd /d "G:\viomi_workspace\claude-bridge"
+title Pieqi (restart)
+cd /d "G:\viomi_workspace\pieqi"
 
-echo Restarting Claude Bridge...
+echo Restarting Pieqi...
 echo.
 
 REM 杀掉占用 3000 端口的旧进程（go run 临时 exe 或 bridge.exe）

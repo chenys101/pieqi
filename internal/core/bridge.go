@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"claude-bridge/internal/channel"
-	"claude-bridge/internal/model"
+	"pieqi/internal/channel"
+	"pieqi/internal/model"
 
 	"go.uber.org/zap"
 )
@@ -29,20 +29,20 @@ type Bridge struct {
 	userLocks map[string]*sync.Mutex
 	locksMu   sync.Mutex
 
-	// Din Agent 模式（din.enabled 时注入）
-	din *dinMode
+	// Pieqi 模式（pieqi.enabled 时注入）
+	pieqi *pieqiMode
 }
 
-// dinMode Din Agent 模式的依赖集合。
-type dinMode struct {
+// pieqiMode Pieqi 模式的依赖集合。
+type pieqiMode struct {
 	store    *TaskStore
 	runner   *TaskRunner
 	bus      *EventBus
 }
 
-// EnableDin 注入 Din Agent 依赖，IM 消息走 TaskCreator 路径而非旧 SessionRunner。
-func (b *Bridge) EnableDin(store *TaskStore, runner *TaskRunner, bus *EventBus) {
-	b.din = &dinMode{store: store, runner: runner, bus: bus}
+// EnablePieqi 注入 Pieqi 依赖，IM 消息走 TaskCreator 路径而非旧 SessionRunner。
+func (b *Bridge) EnablePieqi(store *TaskStore, runner *TaskRunner, bus *EventBus) {
+	b.pieqi = &pieqiMode{store: store, runner: runner, bus: bus}
 }
 
 func NewBridge(logger *zap.Logger, userCtx *UserContext, sessionRunner *SessionRunner, timeout time.Duration) *Bridge {
@@ -81,9 +81,9 @@ func (b *Bridge) handleMessage(msg model.Message) {
 
 	content := strings.TrimSpace(msg.Content)
 
-	// Din Agent 模式：解析 #项目标签 -> 创建任务
-	if b.din != nil {
-		b.handleDinMessage(msg, content)
+	// Pieqi 模式：解析 #项目标签 -> 创建任务
+	if b.pieqi != nil {
+		b.handlePieqiMessage(msg, content)
 		return
 	}
 
@@ -178,7 +178,7 @@ func (b *Bridge) handleCommand(msg model.Message, identity string, sessionID *st
 		return true, strings.Join(ls, "\n")
 
 	case c == "/status":
-		return true, fmt.Sprintf("✅ Claude Bridge\nclaude --resume %s", *sessionID)
+		return true, fmt.Sprintf("✅ Pieqi\nclaude --resume %s", *sessionID)
 
 	case c == "/new" || c == "新对话":
 		newID := b.userCtx.NewSession(identity)
@@ -377,11 +377,11 @@ func splitText(text string, maxLen int) []string {
 }
 
 
-// handleDinMessage Din 模式下处理 IM 消息。
+// handlePieqiMessage Pieqi 模式下处理 IM 消息。
 //
 // 项目不再预注册，IM 渠道无法用 #标签 解析目标项目，故 IM 仅作通知通道：
 // 回复固定提示，引导用户在 PWA 新建任务。任务执行结果仍会通过 OriginChannel
 // 回推到原 IM 会话（由 TaskRunner.notify 触发）。
-func (b *Bridge) handleDinMessage(msg model.Message, content string) {
+func (b *Bridge) handlePieqiMessage(msg model.Message, content string) {
 	b.reply(msg, "💡 请在 PWA 新建任务（选择项目 + 填写描述），任务进展会推送到这里。")
 }

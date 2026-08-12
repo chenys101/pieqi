@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"

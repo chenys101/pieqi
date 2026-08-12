@@ -1,7 +1,7 @@
 @echo off
-title Claude Bridge
-cd /d "G:\viomi_workspace\claude-bridge"
-echo Starting Claude Bridge...
+title Pieqi
+cd /d "G:\viomi_workspace\pieqi"
+echo Starting Pieqi...
 echo.
-G:\viomi_workspace\claude-bridge\bridge.exe
+G:\viomi_workspace\pieqi\bridge.exe
 pause

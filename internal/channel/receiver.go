@@ -3,7 +3,7 @@ package channel
 import (
 	"context"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
 )

@@ -8,14 +8,14 @@ import (
 	"strings"
 	"sync"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 
 	"go.uber.org/zap"
 )
 
 // WorktreeManager 为每个任务在项目 repo 下创建并管理 git worktree。
 //
-// 每任务一个 worktree + 新分支 din/<taskID>，让多个编码任务在同一 repo 上并行隔离。
+// 每任务一个 worktree + 新分支 pieqi/<taskID>，让多个编码任务在同一 repo 上并行隔离。
 // git worktree 操作碰 .git/worktrees/ 不并发安全，单个 sync.Mutex 串行所有 Create。
 type WorktreeManager struct {
 	logger      *zap.Logger
@@ -32,10 +32,10 @@ func NewWorktreeManager(logger *zap.Logger, worktreeBase string) *WorktreeManage
 	}
 }
 
-// Create 在 project 的 repo 下建一个 worktree + 新分支 din/<taskID>。
+// Create 在 project 的 repo 下建一个 worktree + 新分支 pieqi/<taskID>。
 // 返回 worktree 绝对路径。
 func (wm *WorktreeManager) Create(ctx context.Context, project *model.Project, taskID string) (string, error) {
-	branch := "din/" + taskID
+	branch := "pieqi/" + taskID
 	worktreePath := filepath.Join(wm.worktreeBase, project.ID, taskID)
 
 	wm.mu.Lock()
@@ -56,7 +56,7 @@ func (wm *WorktreeManager) Create(ctx context.Context, project *model.Project, t
 
 // Cleanup 删除 worktree 及其分支。对已删除的 worktree 幂等（吞 not found）。
 func (wm *WorktreeManager) Cleanup(ctx context.Context, project *model.Project, taskID, worktreePath string) error {
-	branch := "din/" + taskID
+	branch := "pieqi/" + taskID
 
 	wm.mu.Lock()
 	defer wm.mu.Unlock()

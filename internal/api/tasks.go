@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"claude-bridge/internal/core"
-	"claude-bridge/internal/model"
+	"pieqi/internal/core"
+	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
 )

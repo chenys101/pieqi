@@ -3,7 +3,7 @@ package channel
 import (
 	"context"
 
-	"claude-bridge/internal/model"
+	"pieqi/internal/model"
 )
 
 // MessageSender 消息发送接口。
