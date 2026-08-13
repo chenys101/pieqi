@@ -127,7 +127,7 @@ Qoder / Codex / Reasonix / Grok / Omp 直接 spawn 各自 `--acp` 进程，走�
 
 ## 6. 调研结论（已核实）
 
-> 以下结论来自对 `acp-go-sdk`（`github.com/coder/acp-go-sdk` v0.13.5）、官方 TS 适配器、`helloxz/zacp` 源码与文档的核实。
+> 以下结论来自对 `acp-go-sdk`（`github.com/coder/acp-go-sdk` v0.13.5）、官方 TS 适配器及各 agent 官方文档的核实。
 
 ### 6.1 Claude Code 接入 ACP 的方式
 
@@ -139,7 +139,7 @@ Qoder / Codex / Reasonix / Grok / Omp 直接 spawn 各自 `--acp` 进程，走�
 
 ### 6.2 其他主流 agent 的 ACP 支持
 
-经 `helloxz/zacp`（v0.6.0）生产验证，以下 agent **原生支持 ACP**，无需适配器：
+经各 agent 官方文档核实，以下 agent **原生支持 ACP**，无需适配器：
 
 | Agent | 接入方式 |
 |-------|---------|
@@ -163,7 +163,6 @@ Qoder / Codex / Reasonix / Grok / Omp 直接 spawn 各自 `--acp` 进程，走�
 - 封装全部 ACP 协议细节（NDJSON 帧解析、请求/响应关联、通知分发）。
 - 提供 `Client` 接口（`SessionUpdate` / `RequestPermission` / `ReadTextFile` / `WriteTextFile` / Terminal 系列）。
 - 自带 `example/claude-code`、`example/gemini` 桥接示例，可照抄。
-- 已被 zacp 生产验证。
 
 ### 6.5 决策
 
