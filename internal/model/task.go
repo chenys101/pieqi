@@ -101,6 +101,7 @@ type Task struct {
 	ProjectPath     string     `json:"project_path"`     // repo root，REQ-01 分组依据
 	WorktreePath    string     `json:"worktree_path"`    // worktree 建好后填
 	ClaudeSessionID string     `json:"claude_session_id"` // uuid.New()，--resume 目标
+	ACPSessionID    string     `json:"acp_session_id,omitempty"` // ACP 路径：真实协议 sessionId（session/load/resume 目标）。PrintAgent 回退路径仍用 ClaudeSessionID。
 	Status          TaskStatus `json:"status"`
 	Prompt          string     `json:"prompt"`
 	Title           string     `json:"title,omitempty"` // 一句话标题（异步大模型摘要生成；缺失时前端用 prompt 智能截断兜底）

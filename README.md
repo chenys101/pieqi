@@ -5,7 +5,8 @@
 当前为 **Pieqi 后端**形态：通过 worktree 并行运行开发任务，并提供一个**移动端监控 PWA** 来新建/查看/干预任务。
 
 ```
-飞书 / 企微 / 微信 ──→ Pieqi ──→ Claude Code CLI (claude -p --session-id / --resume)
+飞书 / 企微 / 微信 ──→ Pieqi ──→ AgentAdapter ──→ ACP (claude-code / qodercli / codex ...)
+                      │              └─ 回退：claude -p --session-id / --resume
                       ├── 跨渠道统一会话
                       ├── Pieqi 后端（worktree 并行任务）
                       └── 移动端监控 PWA（:3000）
@@ -17,9 +18,31 @@
 
 - **跨渠道会话共享**：身份映射（`data/users.json`）把各渠道用户 ID 归一为统一身份，会话按 `user:<identity>:<session>` 共享上下文。
 - **Pieqi 后端**：任务可在任意本地路径直接运行（也可建 worktree 隔离并行），每项目并发上限控制；`bypassPermissions` + PreToolUse hook 实现人类审批。
+- **多 Agent 支持（Phase 2）**：经 ACP（Agent Client Protocol）统一驱动 claude-code / qodercli / codex 等任意 ACP agent；真流式（内容增量逐字）、协议级权限审批（RequestPermission → IM/PWA 卡片 → Approve/Deny）；ACP 适配器不可用时透明回退 `claude -p`。
 - **移动端 PWA**：新建任务、查看事件流、补充续问、工具调用折叠、URL 会话路由（`/session/<id>` 深链接）。
 - **会话恢复健壮化**：自动捕获 claude 真实 session_id 供续问；会话丢失时回退新会话，保证消息必被提交。
 - **单二进制部署**：前端经 `//go:embed` 嵌入，`bridge.exe` 单文件自包含。
+
+---
+
+## Phase 2：ACP 多 Agent
+
+经 [Agent Client Protocol](https://agentclientprotocol.com/)（ACP）统一驱动任意 coding agent，突破 Phase 1 `claude -p` 的结构性限制（非真流式 / 审批靠 hook hack / 绑死单一 CLI / 会话续问脆弱）。
+
+- **真流式**：ACP `SessionUpdate` 内容增量 → EventBus → WS → 前端逐字追加（替换 Phase 1 整块 text）。
+- **协议级审批**：ACP `RequestPermission` → task `waiting_input(approval)` → IM/PWA 卡片 → Approve/Deny（替换 `bypassPermissions` + PreToolUse hook）。
+- **多 Agent**：`AgentAdapter` 接口抽象，`ACPAgent`（JSON-RPC over stdio）+ `PrintAgent`（claude -p 回退）双实现；`AgentManager` 统一调度多会话/并发/透明回退。
+- **会话持久化**：ACP `session/load` / `session/resume` 复用上下文（替换脆弱的 `--session-id` / `--resume` 匹配）；会话丢失由协议层 surface，不静默失败。
+
+支持的 agent：
+| Agent | 接入方式 |
+|-------|---------|
+| claude-code | 经官方 TS 适配器 `npx -y @agentclientprotocol/claude-agent-acp@latest` |
+| qodercli | 原生 `qodercli --acp` |
+| codex | 原生 `codex --acp` |
+| 其他 | `<agent> --acp` 兜底 |
+
+配置见 `config.yaml` 的 `pieqi.acp` 段。规划细节见 `docs/phase2-acp.md`。
 
 ---
 
@@ -31,7 +54,7 @@
 | Web | gin |
 | 配置 | viper（YAML） |
 | 日志 | zap |
-| Claude 调用 | `os/exec` 子进程 `claude -p --session-id` / `--resume`，`--output-format stream-json` 逐事件解析 |
+| Agent 驱动 | Phase 2：ACP（`github.com/coder/acp-go-sdk`，JSON-RPC over stdio）驱动 claude-code（经官方 TS 适配器）/ qodercli / codex 等；回退 Phase 1 `claude -p --session-id` / `--resume` + `--output-format stream-json` 逐事件解析 |
 | 前端 | Vite 构建，嵌入二进制 |
 | 存储 | 文件系统 JSON（`data/`） |
 
@@ -41,7 +64,6 @@
 
 ```
 pieqi/
-├── cmd/bridge/main.go        # 入口（含 registerStatic / pre-tool-use hook 入口）
 ├── web/
 │   ├── src/                  # PWA 前端源码（main.js / styles.css）
 │   ├── public/sw.js          # service worker（vite 拷入 dist 正确下发）
@@ -49,15 +71,15 @@ pieqi/
 │   ├── embed.go              # //go:embed 嵌入 web/dist
 │   └── vite.config.js
 ├── internal/
+│   ├── agent/                # Phase 2：AgentAdapter 接口 + ACPAgent / PrintAgent / AgentManager
 │   ├── api/                  # 任务/技能/命令/WS/hook HTTP API
 │   ├── config/config.go      # 配置加载
 │   ├── model/                # 数据结构（Task / TaskEvent / Decision 等）
-│   ├── core/                 # 调度：TaskRunner / TaskStore / EventBus / HookService / Worktree / 流解析
+│   ├── core/                 # 调度：TaskRunner / TaskStore / EventBus / HookService / Worktree / 流解析 / ACP wire 连接器
 │   └── channel/              # 渠道适配器（lark / wecom / wechat）
 ├── data/                     # 运行时数据（tasks / worktrees / sessions / mappings / users.json）
+├── docs/phase2-acp.md        # Phase 2 ACP 迁移规划
 ├── config.yaml
-├── PLAN.md                   # 原始方案（v2）
-├── CONTEXT.md                # 领域词汇表
 └── README.md
 ```
 
@@ -68,14 +90,11 @@ pieqi/
 ### 开发运行
 
 ```bash
-# 构建
-go build -o bridge ./cmd/bridge
-
-# 开发模式运行（监听 :3000）
-go run ./cmd/bridge
+# 构建（library 形态；消费方自行 wire main 入口）
+go build ./...
 
 # 测试
-go test ./internal/... -v
+go test ./internal/...
 ```
 
 ### 前端

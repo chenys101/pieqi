@@ -1,0 +1,23 @@
+# Checklist
+
+- [x] `AgentAdapter` 接口已定义，`ACPAgent` 与 `PrintAgent` 双实现接口对齐
+- [x] Claude Code 经 TS 适配器 spawn，ACP 握手（ProtocolVersionNumber=1）成功，端到端出文本（代码+单测验证；真机 e2e 受沙箱无 npx/凭证限制）
+- [x] 进程退出/异常被 `AgentManager` 捕获并清理（对应 `liveProc` 语义）
+- [x] TS 适配器不可用/崩溃时透明回退 `PrintAgent`，接口不破，回退事件被记录
+- [x] 文本内容经 `SessionUpdate` 增量逐字到达 PWA（非整块 text）
+- [x] thinking 块以独立增量流呈现
+- [x] `RequestPermission` 映射 `waiting_input(approval)`，IM/PWA 收到审批卡片
+- [x] 批准 → ACP Approve → agent 执行 → task 回 running
+- [x] 拒绝 → ACP Deny → agent 改路 → task 回 running
+- [x] 审批超时 → `Cancelled` + IM 通知
+- [x] `ToolCall`/`ToolCallUpdate` 映射 `EventToolUse`/`EventToolResult`
+- [x] `AgentManager` 管理多会话并发，每项目 `maxConcurrentPerProject` 上限生效
+- [x] worktree/状态转换/IM 通知/标题生成逻辑保留未破坏
+- [x] ACP 续问经 `session/resume` 复用上下文；会话丢失由协议层报告，不静默失败
+- [x] `PrintAgent` 回退路径保留 `--session-id`/`--resume`+hook 链路
+- [x] 配置可选 agent 类型；qodercli 经 `--acp` 跑通，桥接层接口不变
+  - 注：`defaultSpawnCommand`（qodercli/codex/其他 `--acp`）+ `TestDefaultSpawnCommand` 已覆盖；桥接层经 `AgentAdapter` 接口抽象，切换 agent 不破接口；真机 e2e 受沙箱无 qodercli 限制，以编译+单测为准
+- [x] `config.go`/`config.yaml` 新增 ACP/agent 配置块
+  - 注：`config.ACPConfig`（UseACP/AgentType/SpawnCommand/InitTimeout）+ viper 默认值已就绪；`config.yaml` 已补 `pieqi.acp` 段示例；`ManagerConfigFromPieqi` helper 闭合 config→ManagerConfig wiring
+- [x] README/架构图/CONTEXT 词汇已更新
+  - 注：README 架构图/特性/技术栈/目录结构/构建命令/Phase 2 章节已更新；词表已统一为 AgentAdapter/ACP/AgentManager/PrintAgent
