@@ -96,24 +96,83 @@ agent 要执行 Bash/Write
 
 取代 Phase 1 的 `bypassPermissions` + PreToolUse hook 注入。
 
+### Claude Code 接入路径（方案 A：官方 TS 适配器）
+
+```
+Go 桥接层（acp-go-sdk client）
+   ↓ exec: npx -y @agentclientprotocol/claude-agent-acp@latest
+TS 适配器（Node.js 进程）
+   ↓ 内部调用
+Claude Agent SDK → Claude 能力
+```
+
+- `ACPAgent` spawn 的 command 是 `npx ... claude-agent-acp`，**不是** `claude`。
+- 通信走 ACP JSON-RPC over stdio，由 acp-go-sdk 封装。
+- `PrintAgent`（回退到 `claude -p`）仅在适配器不可用时启用。
+
+### 其他 agent 接入路径（原生 ACP）
+
+Qoder / Codex / Reasonix / Grok / Omp 直接 spawn 各自 `--acp` 进程，走同一套 acp-go-sdk client，无需适配器。
+
 ---
 
 ## 5. 迁移路径（建议里程碑）
 
-- **M1 · ACP 会话内核**：桥接层实现 `ACPAgent`（stdin/stdout JSON-RPC、握手、`NewSession`/`SendPrompt`/收增量）。先用 claude-code 验证 ACP 端到端出文本。
+- **M1 · ACP 会话内核**：引入 `github.com/coder/acp-go-sdk`，实现 `Client` 接口（`SessionUpdate`/`RequestPermission` 等）。参考 `example/claude-code` 跑通 Claude Code 端到端出文本（spawn TS 适配器）。
 - **M2 · 流式落地**：内容增量 → WS → 前端逐字追加渲染（替换 Phase 1 整块 text 事件）。
 - **M3 · 权限审批**：`PermissionRequest` → IM/PWA 审批 → Approve/Deny。替换 hook 链路。
 - **M4 · 多 Agent 抽象**：定义 `AgentAdapter` 接口，`ACPAgent` + `PrintAgent` 双实现；`AgentManager` 统一调度。
 - **M5 · 会话/续问**：Session 资源持久化，替代 `--session-id`/`--resume` 脆弱链路。
 - **M6 · 落地第二个 agent**：接 qodercli 等，验证统一接口。
 
-## 6. 需要核实的点（下一站调研）
+## 6. 调研结论（已核实）
 
-> [待调研结果填充] Claude Code 暴露 ACP 的确切命令/子命令与版本；qodercli 等哪些 agent 已支持 ACP 及成熟度；ACP 规范版本号与流式/权限资源的确切字段；回退策略边界。
+> 以下结论来自对 `acp-go-sdk`（`github.com/coder/acp-go-sdk` v0.13.5）、官方 TS 适配器及各 agent 官方文档的核实。
+
+### 6.1 Claude Code 接入 ACP 的方式
+
+- **不原生支持 ACP**，需经官方 TS 适配器 `@agentclientprotocol/claude-agent-acp`（原 `@zed-industries/claude-code-acp`）桥接。
+- **spawn 目标**：`npx -y @agentclientprotocol/claude-agent-acp@latest`（参见 acp-go-sdk `example/claude-code/main.go`）。
+- **链路**：Go 桥接层（acp-go-sdk client）→ stdin/stdout ACP JSON-RPC → TS 适配器 → Claude Agent SDK → Claude 能力。
+- **runtime 代价**：引入 Node.js。但 Phase 1 的 `claude` CLI 本身即 npm 包，Node.js 已是既有依赖，非新增；额外代价是进程链路多一层，调试链路变长。
+- **计费**：走 Agent SDK 额度（自 2026-06-15 起与交互式对话额度分离），需单独评估。
+
+### 6.2 其他主流 agent 的 ACP 支持
+
+经各 agent 官方文档核实，以下 agent **原生支持 ACP**，无需适配器：
+
+| Agent | 接入方式 |
+|-------|---------|
+| Qoder | `qodercli --acp` |
+| Codex | 原生 ACP |
+| Reasonix / Grok / Omp | 原生 ACP |
+
+> 主流 coding agent 中，仅 Claude Code 与 Gemini CLI 非原生 ACP。Gemini CLI 为单向 JSONL，定位偏只读分析。
+
+### 6.3 协议字段（ACP v1）
+
+- **协议版本**：`ProtocolVersionNumber = 1`
+- **流式增量**：`SessionUpdate` 回调 → `AgentMessageChunk.Content.Text`（逐字）/ `AgentThoughtChunk`（思考过程）
+- **权限审批**：`RequestPermission` 回调 → `Options[]`（`AllowOnce` / `AllowAlways` / `Deny`）→ 返回 `Selected{OptionId}` 或 `Cancelled`
+- **会话恢复**：`session/load` / `session/resume` / `session/list`（实验性）/ `session/fork`
+- **工具调用**：`ToolCall`（开始）/ `ToolCallUpdate`（状态变更）
+
+### 6.4 Go SDK 选型
+
+采用 `github.com/coder/acp-go-sdk`：
+- 封装全部 ACP 协议细节（NDJSON 帧解析、请求/响应关联、通知分发）。
+- 提供 `Client` 接口（`SessionUpdate` / `RequestPermission` / `ReadTextFile` / `WriteTextFile` / Terminal 系列）。
+- 自带 `example/claude-code`、`example/gemini` 桥接示例，可照抄。
+
+### 6.5 决策
+
+- **Claude Code 接入路径**：采用官方 TS 适配器（方案 A）。理由：协议稳定、能力完整、有官方示例可照抄；Node.js 为既有依赖。
+- **回退策略边界**：若 TS 适配器进程崩溃 / 未安装，回退到 Phase 1 的 `claude -p` + stream-json 解析（`PrintAgent`）。
 
 ## 7. 风险与回退
 
-- **ACP 生态成熟度**：若某 agent 未支持 ACP，用 `PrintAgent` 回退，接口不破。
+- **ACP 生态成熟度**：主流 agent（Qoder/Codex/Reasonix/Grok/Omp）已原生支持 ACP；Claude Code 经官方 TS 适配器接入。若适配器不可用，用 `PrintAgent` 回退到 `claude -p`，接口不破。
+- **Node.js runtime 依赖**：Claude Code 路径依赖 Node.js（TS 适配器）。Phase 1 的 `claude` CLI 本身即 npm 包，Node.js 为既有依赖；额外代价是进程链路多一层（Go → TS 适配器 → Agent SDK），调试链路变长。
 - **状态与复杂度**：ACP 会话有更多状态，需严谨的进程/消息生命周期管理（对应 `liveProc`）。
 - **协议演进**：ACP 规范仍在演进，能力协商 + 版本检测可兼容。
 - **IM 审批往返延迟**：审批是异步的人机交互，需超时/过期策略（可参考 Phase 1 hook_timeout）。
@@ -122,7 +181,7 @@ agent 要执行 Bash/Write
 
 ## 附：待办（进入第二阶段后）
 
-- [ ] 调研并确认 ACP 细节（见 §6）
+- [x] 调研并确认 ACP 细节（见 §6，已核实）
 - [ ] 建 `internal/agent/` 目录：`adapter.go` / `acp.go` / `print.go` / `manager.go`
 - [ ] 可行性 spike：claude-code ACP 最小端到端
 - [ ] 更新 README / 架构文档 / CONTEXT 词汇
