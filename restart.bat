@@ -1,6 +1,6 @@
 @echo off
 title Pieqi (restart)
-cd /d "G:\viomi_workspace\pieqi"
+cd /d "G:\workspace\pieqi"
 
 echo Restarting Pieqi...
 echo.

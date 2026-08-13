@@ -160,7 +160,7 @@ func TestClaudeConnectivity(t *testing.T) {
 // TestApprovalFlowReal 模拟微信用户输入 "/tls-query-skill ..." 的完整审批链路
 //
 // 步骤:
-//  1. 发送 "/tls-query-skill 查询生产环境问题，viomi-warehouse 最近三个异常日志，并分析原因"
+//  1. 发送 "/tls-query-skill 查询生产环境问题，warehouse 最近三个异常日志，并分析原因"
 //     Claude 根据 SKILL.md 指令提出 Python 命令行调用 → needsApproval 自动检测并设置 Pending
 //  2. 发送 "同意" → gate.Approve → retryWithBypass
 //  3. retryWithBypass 用 bypassPermissions 执行 Claude → 得到执行结果
@@ -178,7 +178,7 @@ func TestApprovalFlowReal(t *testing.T) {
 	identity := "chenyusheng"
 
 	// === Step 1: 模拟微信用户发送消息 ===
-	prompt := "/tls-query-skill 查询生产环境问题，viomi-warehouse 最近三个异常日志，并分析原因"
+	prompt := "/tls-query-skill 查询生产环境问题，warehouse 最近三个异常日志，并分析原因"
 	msg := makeMsg(prompt)
 	t.Logf("Step 1: Sending message (simulating WeChat user input)")
 	t.Logf("  Content: %s", prompt)

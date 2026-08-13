@@ -270,7 +270,7 @@ function renderDetail() {
             <select id="nt-project"></select>
             <button type="button" id="nt-custom-toggle" class="custom-toggle">自定义路径</button>
           </div>
-          <input id="nt-project-path" class="hidden" type="text" placeholder="输入绝对路径，如 G:\viomi_workspace\viomi-erp" />
+          <input id="nt-project-path" class="hidden" type="text" placeholder="输入绝对路径，如 G:\workspace\erp" />
         </div>
         <div class="iv-input-wrap">
           <textarea id="nt-prompt" rows="2" placeholder="描述要做什么..."></textarea>

@@ -3,7 +3,7 @@ server:
   mode: debug
 
 claude:
-  work_dir: G:/viomi_workspace
+  work_dir: G:/workspace
   model: deepseek-v4-pro-202606
   effort: high
   timeout: 300s

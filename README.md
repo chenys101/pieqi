@@ -97,7 +97,7 @@ npm run dev          # 开发服务器（:5174，代理到 :3000）
 server:
   port: 3000
 claude:
-  work_dir: G:/viomi_workspace
+  work_dir: G:/workspace
   model: deepseek-v4-pro-202606   # claude -p 使用的模型
   effort: high
   timeout: 300s
