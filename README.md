@@ -64,6 +64,7 @@
 
 ```
 pieqi/
+├── cmd/bridge/main.go        # 服务入口（HTTP + PWA + 渠道 + pre-tool-use hook 子命令）
 ├── web/
 │   ├── src/                  # PWA 前端源码（main.js / styles.css）
 │   ├── public/sw.js          # service worker（vite 拷入 dist 正确下发）
@@ -90,8 +91,11 @@ pieqi/
 ### 开发运行
 
 ```bash
-# 构建（library 形态；消费方自行 wire main 入口）
-go build ./...
+# 构建二进制（cmd/bridge 入口）
+go build -o bridge ./cmd/bridge
+
+# 或直接运行
+go run ./cmd/bridge
 
 # 测试
 go test ./internal/...
