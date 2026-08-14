@@ -36,7 +36,7 @@ pieqi:
   # agent_type 选 claude-code（经官方 TS 适配器）/ qodercli / codex / 其他原生 ACP agent。
   # acp_spawn_command 留空则按 agent_type 取默认；非空则整体覆盖（如自定义适配器路径）。
   acp:
-    use_acp: false                  # 默认 false，避免影响 Phase 1；切 true 启用 ACP 路径
+    use_acp: true                   # 切 true 启用 ACP 路径（claude-code TS 适配器）
     agent_type: claude-code         # claude-code | qodercli | codex | <其他>
     acp_spawn_command: []           # 空 = 按 agent_type 取默认；如 ["qodercli","--acp","--port","1234"]
     init_timeout: 30s               # initialize / newSession 握手超时
