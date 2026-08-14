@@ -2,16 +2,6 @@ server:
   port: 3000
   mode: debug
 
-claude:
-  work_dir: G:/workspace
-  model: deepseek-v4-pro-202606
-  effort: high
-  timeout: 300s
-
-session:
-  ttl: 30m
-  data_dir: ./data/sessions
-
 channels:
   lark:
     enabled: false
@@ -32,12 +22,11 @@ api:
   cors_origins: []    # 空 = 允许所有（本地 dev）
 
 pieqi:
-  enabled: true                  # 总开关；开启后 IM 消息走 TaskCreator 而非旧 SessionRunner
+  enabled: true                  # 总开关；开启后 IM 消息走 TaskCreator
   worktree_base: ./data/worktrees
   skills_dirs: []                # 空 = 默认 ~/.claude/skills + CLAUDE_CONFIG_DIR/.claude/skills
   permission_mode: bypassPermissions  # claude 自身不拦，由 PreToolUse hook 拦截
   cleanup_worktrees: true        # 任务完成即清 worktree
-  legacy_im_path: false          # 迁移期保留旧 ApprovalGate 路径
   hook_timeout: 30m              # hook 等人类决策的上限
   hook_tools: [Bash, Write, Edit, NotebookEdit]  # PreToolUse 拦截的工具；读类不拦
   max_concurrent_per_project: 4

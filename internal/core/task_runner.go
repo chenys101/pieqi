@@ -93,7 +93,7 @@ type acpWires struct {
 // 仅 permissionMode=="bypassPermissions" 时注入（plan 模式下 claude 自身会 ask）。
 // maxConcurrent 为每项目并发上限，<=0 表示不限制。
 // baseBranch 为 worktree 基准分支，空则默认 "main"。
-func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bus *EventBus, hooks *HookService, model, sysPrompt, permissionMode string, cleanupWorktrees bool, execPath string, port int, hookTools []string, hookTimeoutSec, maxConcurrent int, baseBranch string) *TaskRunner {
+func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bus *EventBus, hooks *HookService, sysPrompt, permissionMode string, cleanupWorktrees bool, execPath string, port int, hookTools []string, hookTimeoutSec, maxConcurrent int, baseBranch string) *TaskRunner {
 	if permissionMode == "" {
 		permissionMode = "bypassPermissions"
 	}
@@ -110,7 +110,6 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 		bus:              bus,
 		hooks:            hooks,
 		baseBranch:       baseBranch,
-		model:            model,
 		sysPrompt:        sysPrompt,
 		permissionMode:   permissionMode,
 		cleanupWorktrees: cleanupWorktrees,
