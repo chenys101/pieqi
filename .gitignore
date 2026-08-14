@@ -1,6 +1,8 @@
 # Build output
 /pieqi.exe
 /pieqi
+/bridge.exe
+/bridge.exe~
 build/
 web/dist/
 web/node_modules/
@@ -28,6 +30,8 @@ data/*.log
 data/*.err
 pieqi.err
 pieqi.out
+bridge.err
+bridge.out
 
 # 运行时数据(tasks/worktrees/sessions/mappings 由后端生成)
 data/tasks/

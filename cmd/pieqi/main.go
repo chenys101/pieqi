@@ -97,6 +97,12 @@ func main() {
 	// ACP 路径（Phase 2）：use_acp=true 时注入 AgentManager
 	if cfg.Pieqi.ACP.UseACP {
 		mgr := agent.NewAgentManager(agent.ManagerConfigFromPieqi(cfg.Pieqi), logger)
+		// 透明回退时记录真实 primaryErr（此前只记通用文案"ACP 适配器不可用"，失败原因黑盒）。
+		// 回退本身不阻塞 Open（异步触发）；这里把触发回退的 primary 失败原因落到日志，便于定位。
+		mgr.SetFallbackHook(func(taskID string, primaryErr error) {
+			logger.Warn("acp adapter unavailable, fell back to claude -p",
+				zap.String("task", taskID), zap.Error(primaryErr))
+		})
 		runner.SetAgentManager(mgr, cfg.Pieqi.ACP.UseACP, cfg.Pieqi.HookTimeout)
 		logger.Info("acp agent manager enabled", zap.String("agent_type", cfg.Pieqi.ACP.AgentType))
 	}
