@@ -1,7 +1,7 @@
 package core
 
 // hook_settings.go 在 worktree 里写入 .claude/settings.json，配置 PreToolUse hook，
-// 把 claude 的工具调用导向 `bridge pre-tool-use` 子命令，从而触发 HookService 决策闭环。
+// 把 claude 的工具调用导向 `pieqi pre-tool-use` 子命令，从而触发 HookService 决策闭环。
 //
 // 协议事实来自本机生产 ~/.claude/settings.json（jira-permission.ps1 hook）：
 //   - hooks.PreToolUse 是数组，每项 {matcher, hooks[]}，hook 项 {type:"command", command, timeout}
@@ -36,7 +36,7 @@ type settingsFile struct {
 
 // WriteHookSettings 往 worktreePath/.claude/settings.json 写入 PreToolUse hook 配置。
 //
-// hookCmd 是调 bridge pre-tool-use 的完整命令行（含 --task/--port）。
+// hookCmd 是调 pieqi pre-tool-use 的完整命令行（含 --task/--port）。
 // tools 是要拦截的工具名列表（如 ["Bash","Write","Edit","NotebookEdit"]）。
 // timeoutSec 是 hook 等人类决策的上限（秒），应 ≥ HookService 超时，否则 hook 先超时放行/拒绝。
 //
@@ -63,8 +63,8 @@ func WriteHookSettings(worktreePath, hookCmd string, tools []string, timeoutSec 
 }
 
 // buildHookCmd 构造 PreToolUse hook 的 command 字符串。
-// execPath 是 bridge 可执行文件绝对路径；taskID 是当前任务 ID；port 是主进程端口。
-// 返回形如 `"C:\...\bridge.exe" pre-tool-use --task <id> --port <port>`。
+// execPath 是 pieqi 可执行文件绝对路径；taskID 是当前任务 ID；port 是主进程端口。
+// 返回形如 `"C:\...\pieqi.exe" pre-tool-use --task <id> --port <port>`。
 func buildHookCmd(execPath, taskID string, port int) string {
 	return `"` + execPath + `" pre-tool-use --task ` + taskID + ` --port ` + strconv.Itoa(port)
 }

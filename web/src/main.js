@@ -571,6 +571,91 @@ function upsertTask(t) {
   else state.tasks.push(t);
 }
 
+// applyTaskDelta 处理 task_delta 事件（M2 真流式）。
+// 把增量文本累积进本地 task 状态（镜像后端 appendTextDelta：扩最后一个同类型 event 的 text，
+// 类型不同则新建；非思考增量追加到 output），并对当前选中且正在查看的 task 直接增量追加 DOM，
+// 不触发 render()/renderDetail() 全量重绘。找不到目标 DOM 时回退为仅更新本地状态
+// （下次全量重绘时由持久化的累积文本正确还原）。
+function applyTaskDelta(ev) {
+  const t = state.tasks.find(x => x.id === ev.task_id);
+  if (!t) return; // 未知任务（快照未到/已删除）：丢弃，等 task_updated 兜底
+  const delta = ev.delta || {};
+  const text = delta.text || '';
+  const isThought = !!delta.is_thought;
+  if (!text) return;
+
+  // 1. 更新本地状态：与后端 appendTextDelta 逻辑一致
+  const targetType = isThought ? 'thinking' : 'text';
+  const events = t.events || (t.events = []);
+  if (events.length > 0 && events[events.length - 1].type === targetType) {
+    events[events.length - 1].text = (events[events.length - 1].text || '') + text;
+  } else {
+    events.push({ seq: events.length + 1, type: targetType, text });
+  }
+  if (!isThought) {
+    t.output = (t.output || '') + text;
+  }
+
+  // 2. 仅对当前选中且正在查看的 task 做增量 DOM 追加；非选中任务只更新本地状态
+  if (state.selectedId !== ev.task_id) return;
+  appendDeltaDOM(text, isThought);
+}
+
+// appendDeltaDOM 把单个增量文本直接追加到详情区 DOM（M2 真流式，不全量重绘）。
+// 目标：#events 最后一个子元素若为目标类型（ev-text/ev-thinking）则追加到其 bubble/body；
+// 否则新建一个目标类型元素（保持跨类型切换后流式连续）。增量文本经 escapeHtml 后追加防 XSS。
+// 用户原本在底部则追加后跟随滚动。找不到 #events 容器则静默（状态已更新，下次重绘正确）。
+function appendDeltaDOM(text, isThought) {
+  const eventsEl = document.getElementById('events');
+  if (!eventsEl) return;
+  const targetClass = isThought ? 'ev-thinking' : 'ev-text';
+  const innerSelector = isThought ? '.ev-body' : '.ev-bubble';
+
+  // 追加前判断用户是否在底部（决定追加后是否跟随滚动）
+  const scroller = document.querySelector('.detail-content');
+  const wasNearBottom = scroller ? (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120) : false;
+
+  let inner = null;
+  const last = eventsEl.lastElementChild;
+  if (last && last.classList.contains(targetClass)) {
+    inner = last.querySelector(innerSelector);
+  }
+  if (!inner) {
+    // 最后一个事件类型不同（或无事件）：新建目标类型元素，保证后续同类型增量继续流入
+    const node = document.createElement('div');
+    if (isThought) {
+      // 思考块：流式期间 body 展开（无 collapsed）让用户看到逐字；head 保留折叠交互
+      node.className = 'ev ev-thinking';
+      node.innerHTML = `<div class="ev-head"><span class="icon">💭</span>思考<span class="ev-toggle">▾</span></div><div class="ev-body"></div>`;
+    } else {
+      node.className = 'ev ev-text';
+      node.innerHTML = `<div class="ev-bubble"></div>`;
+    }
+    eventsEl.appendChild(node);
+    inner = node.querySelector(innerSelector);
+    // 思考 head 点击折叠交互（与 renderEvents 对齐）
+    if (isThought) {
+      const head = node.querySelector('.ev-head');
+      head.addEventListener('click', () => {
+        const body = node.querySelector('.ev-body');
+        const toggle = head.querySelector('.ev-toggle');
+        if (body) {
+          const collapsed = body.classList.toggle('collapsed');
+          if (toggle) toggle.style.transform = collapsed ? 'rotate(-90deg)' : '';
+        }
+      });
+    }
+  }
+  if (!inner) return;
+  // 增量文本 escapeHtml 后追加（防 XSS）
+  inner.insertAdjacentHTML('beforeend', escapeHtml(text));
+
+  // 跟随滚动：用户原本在底部时追加后滑到底
+  if (wasNearBottom && scroller) {
+    scroller.scrollTop = scroller.scrollHeight;
+  }
+}
+
 // --- WebSocket ---
 function connectWS() {
   const qs = token ? `?token=${encodeURIComponent(token)}` : '';
@@ -578,6 +663,11 @@ function connectWS() {
   state.ws = new WebSocket(`${proto}://${location.host}/api/ws${qs}`);
   state.ws.onmessage = (e) => {
     const ev = JSON.parse(e.data);
+    // M2 真流式：内容增量逐字追加到本地状态 + DOM，不触发 render()/renderDetail() 全量重绘
+    if (ev.type === 'task_delta') {
+      applyTaskDelta(ev);
+      return;
+    }
     if (ev.type === 'snapshot') {
       state.tasks = ev.tasks || [];
       applyUrlSelection(); // 从 URL 恢复会话选中（刷新/深链接进入）

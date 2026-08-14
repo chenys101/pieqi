@@ -1,7 +1,7 @@
 @echo off
 title Pieqi
-cd /d "G:\workspace\pieqi"
+cd /d "%~dp0"
 echo Starting Pieqi...
 echo.
-G:\workspace\pieqi\bridge.exe
+pieqi.exe
 pause

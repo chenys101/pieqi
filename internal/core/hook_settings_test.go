@@ -9,7 +9,7 @@ import (
 
 func TestWriteHookSettings_CreatesFileAndDir(t *testing.T) {
 	wt := t.TempDir()
-	hookCmd := `"/path/to/bridge" pre-tool-use --task t1 --port 3000`
+	hookCmd := `"/path/to/pieqi" pre-tool-use --task t1 --port 3000`
 	tools := []string{"Bash", "Write", "Edit", "NotebookEdit"}
 
 	if err := WriteHookSettings(wt, hookCmd, tools, 1800); err != nil {
@@ -81,8 +81,8 @@ func TestWriteHookSettings_OverwritesExisting(t *testing.T) {
 }
 
 func TestBuildHookCmd(t *testing.T) {
-	got := buildHookCmd(`C:\app\bridge.exe`, "task-abc", 39998)
-	want := `"C:\app\bridge.exe" pre-tool-use --task task-abc --port 39998`
+	got := buildHookCmd(`C:\app\pieqi.exe`, "task-abc", 39998)
+	want := `"C:\app\pieqi.exe" pre-tool-use --task task-abc --port 39998`
 	if got != want {
 		t.Fatalf("got=%q, want=%q", got, want)
 	}

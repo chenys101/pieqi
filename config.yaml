@@ -2,16 +2,6 @@ server:
   port: 3000
   mode: debug
 
-claude:
-  work_dir: G:/workspace
-  model: deepseek-v4-pro-202606
-  effort: high
-  timeout: 300s
-
-session:
-  ttl: 30m
-  data_dir: ./data/sessions
-
 channels:
   lark:
     enabled: false
@@ -32,13 +22,26 @@ api:
   cors_origins: []    # 空 = 允许所有（本地 dev）
 
 pieqi:
-  enabled: true                  # 总开关；开启后 IM 消息走 TaskCreator 而非旧 SessionRunner
-  worktree_base: ./data/worktrees
+  enabled: true                  # 总开关；开启后 IM 消息走 TaskCreator
+  # 运行时数据根目录：留空 = ~/.pieqi（或环境变量 PIEQI_HOME 覆盖）。
+  # tasks/worktrees/sessions 等全部数据存到用户主目录，不入仓库。
+  worktree_base: ""              # worktree 根目录；留空默认 ~/.pieqi/worktrees
   skills_dirs: []                # 空 = 默认 ~/.claude/skills + CLAUDE_CONFIG_DIR/.claude/skills
   permission_mode: bypassPermissions  # claude 自身不拦，由 PreToolUse hook 拦截
   cleanup_worktrees: true        # 任务完成即清 worktree
-  legacy_im_path: false          # 迁移期保留旧 ApprovalGate 路径
   hook_timeout: 30m              # hook 等人类决策的上限
   hook_tools: [Bash, Write, Edit, NotebookEdit]  # PreToolUse 拦截的工具；读类不拦
   max_concurrent_per_project: 4
   base_branch: master            # worktree 基准分支；本机 pieqi 主分支为 master
+  # ACP 协议（Phase 2）：use_acp=true 时 agent 驱动走 AgentAdapter（ACPAgent），
+  # false（默认）保持 Phase 1 的 claude -p + stream-json 路径不变。
+  # agent_type 选 claude-code（经官方 TS 适配器）/ qodercli / codex / 其他原生 ACP agent。
+  # acp_spawn_command 留空则代码自动解析 adapter 入口：先找项目本地 node_modules，
+  # 再找 %APPDATA%\npm 全局安装（npm i -g @agentclientprotocol/claude-agent-acp），
+  # 用 `node <入口>` 直接拉起（绕开 Windows 下 Go spawn npx 会永久挂死的问题），
+  # 都找不到才回退 npx。非空则整体覆盖。
+  acp:
+    use_acp: true                   # 切 true 启用 ACP 路径（claude-code TS 适配器）
+    agent_type: claude-code         # claude-code | qodercli | codex | <其他>
+    acp_spawn_command: []           # 空 = 代码自动解析；如 ["qodercli","--acp","--port","1234"]
+    init_timeout: 30s               # initialize / newSession 握手超时

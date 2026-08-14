@@ -24,7 +24,7 @@ func setupWSTest(t *testing.T) (*gin.Engine, *core.TaskStore, *core.EventBus) {
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(5 * time.Second)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "m", "", "", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "", false, "", 0, nil, 0, 0, "main")
 	cfg := &config.Config{}
 	srv := NewServer(cfg, store, runner, hooks, bus, nil, nil)
 	r := gin.New()

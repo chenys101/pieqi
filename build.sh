@@ -13,15 +13,15 @@ echo "==> 构建前端 (web/dist)"
 (cd web && npm run build)
 
 echo "==> 构建 linux/amd64"
-GOOS=linux GOARCH=amd64 go build -o "$OUT/bridge-linux-amd64" ./cmd/bridge
+GOOS=linux GOARCH=amd64 go build -o "$OUT/pieqi-linux-amd64" ./cmd/pieqi
 
 echo "==> 构建 windows/amd64"
-GOOS=windows GOARCH=amd64 go build -o "$OUT/bridge-windows-amd64.exe" ./cmd/bridge
+GOOS=windows GOARCH=amd64 go build -o "$OUT/pieqi-windows-amd64.exe" ./cmd/pieqi
 
-# 发布目录：bridge 二进制的两个平台 + 示例配置 + 文档 + 启动脚本
+# 发布目录：pieqi 二进制的两个平台 + 示例配置 + 文档 + 启动脚本
 RELEASE="$OUT/pieqi-$VERSION"
 mkdir -p "$RELEASE"
-cp "$OUT/bridge-linux-amd64" "$OUT/bridge-windows-amd64.exe" "$RELEASE/"
+cp "$OUT/pieqi-linux-amd64" "$OUT/pieqi-windows-amd64.exe" "$RELEASE/"
 cp config.yaml README.md "$RELEASE/"
 cp start.bat restart.bat "$RELEASE/"
 

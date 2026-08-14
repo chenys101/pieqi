@@ -25,7 +25,7 @@ func setupAPITest(t *testing.T) (*Server, *core.TaskStore, *gin.Engine) {
 	hooks := core.NewHookService(5 * time.Second)
 	// TaskRunner 用真构造但 Start 不会在本测试真跑（不调 createTask 的 Start 路径校验）
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "test", "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
 	cfg := &config.Config{}
 	srv := NewServer(cfg, store, runner, hooks, bus, nil, nil)
 	r := gin.New()
@@ -156,7 +156,7 @@ func TestAPI_AuthMiddleware(t *testing.T) {
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(5 * time.Second)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "m", "", "", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "", false, "", 0, nil, 0, 0, "main")
 	cfg := &config.Config{}
 	cfg.API.Token = "secret"
 	srv := NewServer(cfg, store, runner, hooks, bus, nil, nil)

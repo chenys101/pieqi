@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"pieqi/internal/agent"
 	"pieqi/internal/model"
 
 	"github.com/google/uuid"
@@ -28,13 +29,12 @@ type TaskRunner struct {
 	bus       *EventBus
 	hooks     *HookService
 	baseBranch string // worktree 基准分支，默认 "main"
-	model     string
 	sysPrompt string
 	permissionMode string
 	cleanupWorktrees bool
 
 	// hook 注入：仅 permissionMode==bypassPermissions 时写 settings.json
-	execPath       string   // bridge 可执行文件绝对路径，os.Executable() 取
+	execPath       string   // pieqi 可执行文件绝对路径，os.Executable() 取
 	port           int      // 主进程端口，hook 子进程回连 /internal/hook 用
 	hookTools      []string // 拦截的工具名，如 ["Bash","Write","Edit","NotebookEdit"]
 	hookTimeoutSec int      // hook 等决策上限（秒），应 ≥ HookService 超时
@@ -46,6 +46,14 @@ type TaskRunner struct {
 	// notify IM 回执回调（由 Bridge 注入，避免循环依赖）。
 	// task 进 waiting_input/完成/失败时，若有 OriginChannel 则往原渠道 push 通知。
 	notify func(task *model.Task, text string)
+
+	// ACP 路径（Task 4.4）：agentMgr 非空且 useACP=true 时 run 走 AgentManager 驱动；
+	// 否则保持 Phase 1 claude -p 路径。新增字段零值默认走旧路径，不破坏 Phase 1。
+	agentMgr    agentRunner // nil = Phase 1 claude -p 路径（默认）
+	useACP      bool
+	permTimeout time.Duration // ACP 路径 WirePermission 超时；<=0 用默认（30min）
+	wireMu      sync.Mutex
+	wires       map[string]*acpWires // taskID -> ACP 路径的 wire 句柄
 
 	mu      sync.Mutex
 	running map[string]*liveProc // taskID -> 活跃进程
@@ -59,12 +67,32 @@ type liveProc struct {
 	done    chan struct{} // claude 进程退出
 }
 
+// agentRunner 抽象 TaskRunner 所需的 AgentManager 能力。
+// 生产由 *agent.AgentManager 实现；测试注入 fake。方法签名须与 *agent.AgentManager 完全一致。
+type agentRunner interface {
+	Open(ctx context.Context, taskID, projectID string, cfg agent.SessionConfig) (agent.AgentAdapter, bool, error)
+	Run(ctx context.Context, taskID, prompt string) error
+	Cancel(ctx context.Context, taskID string) error
+	Close(taskID string) error
+	Adapter(taskID string) agent.AgentAdapter
+	// SessionID 返回 task 的 sessionID（无则 ""）。runACP 持久化真实 session ID 时用它取
+	// NewSession 返回的句柄，喂给 adapter.RealSessionID 拿到真实协议/claude session ID。
+	SessionID(taskID string) string
+}
+
+// acpWires 一个 ACP 任务注册的 wire 句柄集合（runACP 注册，结束/取消时拆卸）。
+type acpWires struct {
+	delta *DeltaHandle
+	perm  *PermissionWire
+	tool  *ToolCallHandle
+}
+
 // NewTaskRunner 创建 runner。
 // execPath/port/hookTools/hookTimeoutSec 用于往 worktree 注入 PreToolUse hook settings；
 // 仅 permissionMode=="bypassPermissions" 时注入（plan 模式下 claude 自身会 ask）。
 // maxConcurrent 为每项目并发上限，<=0 表示不限制。
 // baseBranch 为 worktree 基准分支，空则默认 "main"。
-func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bus *EventBus, hooks *HookService, model, sysPrompt, permissionMode string, cleanupWorktrees bool, execPath string, port int, hookTools []string, hookTimeoutSec, maxConcurrent int, baseBranch string) *TaskRunner {
+func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bus *EventBus, hooks *HookService, sysPrompt, permissionMode string, cleanupWorktrees bool, execPath string, port int, hookTools []string, hookTimeoutSec, maxConcurrent int, baseBranch string) *TaskRunner {
 	if permissionMode == "" {
 		permissionMode = "bypassPermissions"
 	}
@@ -81,7 +109,6 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 		bus:              bus,
 		hooks:            hooks,
 		baseBranch:       baseBranch,
-		model:            model,
 		sysPrompt:        sysPrompt,
 		permissionMode:   permissionMode,
 		cleanupWorktrees: cleanupWorktrees,
@@ -91,6 +118,7 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 		hookTimeoutSec:   hookTimeoutSec,
 		maxConcurrent:    maxConcurrent,
 		running:          make(map[string]*liveProc),
+		wires:            make(map[string]*acpWires),
 	}
 	// hook 触发时置 waiting_input（hook 是 waiting_input 的权威信号，见 plan A.6）
 	if hooks != nil {
@@ -105,6 +133,16 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 // task 进 waiting_input/完成/失败时回调被触发；notify 可为 nil（无 IM 渠道时）。
 func (tr *TaskRunner) SetNotifier(fn func(task *model.Task, text string)) {
 	tr.notify = fn
+}
+
+// SetAgentManager 注入 AgentManager 并启用 ACP 路径（Task 4.4）。
+// useACP=true 且 mgr!=nil 时 run 走 ACP 路径；否则保持 Phase 1 claude -p 路径。
+// 不改 NewTaskRunner 签名，避免动所有调用方；由 Bridge 在启用 ACP 时显式注入。
+// permTimeout<=0 时 WirePermission 用其默认（30min）。
+func (tr *TaskRunner) SetAgentManager(mgr agentRunner, useACP bool, permTimeout time.Duration) {
+	tr.agentMgr = mgr
+	tr.useACP = useACP
+	tr.permTimeout = permTimeout
 }
 
 // semaphore 轻量计数信号量，用于每项目并发上限。
@@ -175,8 +213,30 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 	if !resumable {
 		return fmt.Errorf("task not resumable: %s", t.Status)
 	}
-	if t.WorktreePath == "" || t.ClaudeSessionID == "" {
-		return fmt.Errorf("task missing worktree or session, cannot resume")
+	if t.WorktreePath == "" {
+		return fmt.Errorf("task missing worktree, cannot resume")
+	}
+
+	// ACP 路径（Task 5）：续问经 session/load/resume 复用已有会话上下文（M4 的 re-Open 丢失
+	// 上下文限制已修复）。runACP 据 task.ACPSessionID 构造 SessionConfig.ResumeFrom 触发 load/resume。
+	if tr.useACP && tr.agentMgr != nil {
+		// 双保险：上轮 adapter 已 Close（不应还在 open）。
+		if tr.agentMgr.Adapter(taskID) != nil {
+			return fmt.Errorf("task still has a live agent session, use intervene instead")
+		}
+		// ACP 路径无 ACPSessionID（且未回退落 ClaudeSessionID）说明首跑未成功持久化真实 sid，
+		// 无法 resume——不应到此（首跑 completed/failed 时 sid 已落库），异常情况明确报错。
+		if t.ACPSessionID == "" && t.ClaudeSessionID == "" {
+			return fmt.Errorf("task missing session, cannot resume")
+		}
+		tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text})
+		go tr.runACP(context.Background(), t, text)
+		return nil
+	}
+
+	// 原 claude -p 路径：复用同一 ClaudeSessionID 与 --resume 续上下文。
+	if t.ClaudeSessionID == "" {
+		return fmt.Errorf("task missing session, cannot resume")
 	}
 	// 双保险：确认进程确实已死（不在 tr.running），避免对路径 A 误 resume 起第二个 claude。
 	tr.mu.Lock()
@@ -211,7 +271,7 @@ func (tr *TaskRunner) generateTitle(taskID string) {
 	defer cancel()
 
 	prompt := "用不超过 20 个字的一句话概括下面这个开发任务，直接输出标题本身，不要引号、不要前缀、不要解释：\n\n" + t.Prompt
-	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--model", tr.model, "--output-format", "text")
+	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--output-format", "text")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -266,6 +326,12 @@ func cleanTitle(s string) string {
 //
 // 每项目并发上限：阻塞等槽位（任务仍是 pending 状态，直到获得槽位才往下走）
 func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePrompt string) {
+	// ACP 路径（Task 4.4）：useACP 且已注入 AgentManager 时走 AgentManager 驱动。
+	// 放在 projectSem 之前——ACP 的并发上限由 AgentManager 自己的 sem 管，不能重复 acquire。
+	if tr.useACP && tr.agentMgr != nil {
+		tr.runACP(parentCtx, task, resumePrompt)
+		return
+	}
 	sem := tr.projectSem(task.ProjectID)
 	sem.acquire()
 	defer sem.release()
@@ -317,7 +383,6 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 			args = append(args, "-p", prompt, "--session-id", sessionID)
 		}
 		args = append(args,
-			"--model", tr.model,
 			"--permission-mode", tr.permissionMode,
 			"--output-format", "stream-json",
 			"--verbose",
@@ -405,6 +470,164 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 	if tr.cleanupWorktrees {
 		_ = tr.wm.Cleanup(context.Background(), project, task.ID, task.WorktreePath)
 	}
+}
+
+// runACP ACP 路径（Task 4.4）：建 worktree（复用 run 逻辑）-> AgentManager.Open ->
+// Wire* 连接器注册回调 -> AgentManager.Run -> 据 result 完成/失败 -> defer Close+Unwire。
+// 保留 transition/appendEvent/notify/generateTitle 等 Phase 1 状态机逻辑；仅把 agent 驱动
+// 部分从 claude -p 子进程换成 AgentManager（ACP / Print 透明切换）。
+func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resumePrompt string) {
+	project := &model.Project{ID: task.ProjectID, RepoPath: task.ProjectPath, BaseBranch: tr.baseBranch}
+	if task.WorktreePath == "" {
+		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
+		if err != nil {
+			tr.failTask(task.ID, "create worktree: "+err.Error())
+			return
+		}
+		updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
+			t.WorktreePath = wtPath
+			return true
+		})
+		if err != nil {
+			tr.failTask(task.ID, "store worktree path: "+err.Error())
+			return
+		}
+		task = updated
+	}
+
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	// TrimSpace：PWA 文本框常带末尾换行，发给 agent 前统一去首尾空白（与 claude -p 路径一致）。
+	prompt := strings.TrimSpace(task.Prompt)
+	if resumePrompt != "" {
+		prompt = strings.TrimSpace(resumePrompt)
+	}
+
+	// 构造 SessionConfig：续问（resumePrompt 非空）且已有真实 ACP session id 时，
+	// 设 ResumeFrom 让 adapter 走 session/load/resume 复用上下文（替代 M4 的 re-Open 新会话）。
+	cfg := agent.SessionConfig{Cwd: task.WorktreePath}
+	if resumePrompt != "" && task.ACPSessionID != "" {
+		cfg.ResumeFrom = task.ACPSessionID
+	}
+
+	adapter, fellBack, err := tr.agentMgr.Open(ctx, task.ID, task.ProjectID, cfg)
+	if err != nil {
+		// 续问路径 Open 失败多为原会话丢失（ACP load/resume 报错，或 PrintAgent --resume
+		// 报 "No conversation found"）。由协议层 surface：追加 status 事件 + 置 failed 带明确原因，
+		// 不静默失败。
+		if cfg.ResumeFrom != "" {
+			tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
+				Text: "续问失败：原会话已丢失（" + err.Error() + "），请重新发起任务"})
+			// 续问时 task 处终态（completed/failed/cancelled），failTask 经 transition 终态守卫为 no-op；
+			// 用 forceFailTask 强制置 failed，确保状态/Error/通知落库，明确 surface 不静默失败。
+			tr.forceFailTask(task.ID, "agent open: "+err.Error())
+		} else {
+			tr.failTask(task.ID, "agent open: "+err.Error())
+		}
+		return
+	}
+	if fellBack {
+		tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
+			Text: "ACP 适配器不可用，已回退到 claude -p 路径"})
+	}
+	defer tr.agentMgr.Close(task.ID)
+
+	dh := WireContentDelta(adapter, tr.bus, tr.store, task.ID)
+	ph := WirePermission(adapter, tr.bus, tr.store, task.ID, tr.notify, tr.permTimeout)
+	th := WireToolCall(adapter, tr.bus, tr.store, task.ID)
+	tr.setWires(task.ID, dh, ph, th)
+	defer func() {
+		tr.clearWires(task.ID)
+		dh.Unwire()
+		ph.Unwire()
+		th.Unwire()
+	}()
+
+	// Open 成功后立即持久化真实 session ID（续问用）。
+	// ACP 路径（!fellBack）：sessionID 即真实协议资源 ID，存 ACPSessionID。
+	// PrintAgent 回退路径（fellBack）：存 ClaudeSessionID（Phase 1 字段语义；首跑 SendPrompt 前
+	// realSessionID 可能未知，RealSessionID 兜底返回 sessionID 句柄，续问时 runACP 仅据 ACPSessionID
+	// 走 resume，故该值主要供诊断/Phase 1 路径兼容）。
+	realSid := adapter.RealSessionID(tr.agentMgr.SessionID(task.ID))
+	if realSid != "" {
+		if updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
+			if !fellBack {
+				if t.ACPSessionID != realSid {
+					t.ACPSessionID = realSid
+					return true
+				}
+			} else {
+				if t.ClaudeSessionID != realSid {
+					t.ClaudeSessionID = realSid
+					return true
+				}
+			}
+			return false
+		}); err == nil && updated != nil {
+			task = updated
+		}
+	}
+
+	tr.setRunning(task.ID)
+	runErr := tr.agentMgr.Run(ctx, task.ID, prompt)
+
+	// Cancel 路径会先把 task 置 cancelled；此处若是 cancelled 就直接收尾，不再 fail/complete。
+	if t, ok := tr.store.Get(task.ID); ok && t.Status == model.TaskCancelled {
+		if tr.cleanupWorktrees {
+			_ = tr.wm.Cleanup(context.Background(), project, task.ID, task.WorktreePath)
+		}
+		return
+	}
+	if runErr != nil {
+		tr.failTask(task.ID, "agent run: "+runErr.Error())
+		return
+	}
+	// 正常结束但未达终态：与 claude -p 路径一致的空输出兜底——无任何产出则标 failed，
+	// 有产出则标 completed（adapter 内部已通过 wire 把增量持久化进 Output/Events）。
+	if t, ok := tr.store.Get(task.ID); ok && t.Status != model.TaskCompleted && t.Status != model.TaskFailed {
+		if t.Output == "" && !taskHasContent(t) {
+			tr.failTask(task.ID, "agent 结束但未产出任何内容")
+		} else {
+			tr.completeTask(task.ID, t.Output)
+		}
+	}
+
+	if tr.cleanupWorktrees {
+		_ = tr.wm.Cleanup(context.Background(), project, task.ID, task.WorktreePath)
+	}
+}
+
+// setWires 登记 ACP 路径的 wire 句柄（供 Intervene 审批决策取 PermissionWire）。
+func (tr *TaskRunner) setWires(taskID string, dh *DeltaHandle, ph *PermissionWire, th *ToolCallHandle) {
+	tr.wireMu.Lock()
+	defer tr.wireMu.Unlock()
+	tr.wires[taskID] = &acpWires{delta: dh, perm: ph, tool: th}
+}
+
+// clearWires 摘除 task 的 wire 句柄登记（句柄本身的 Unwire 由调用方负责）。
+func (tr *TaskRunner) clearWires(taskID string) {
+	tr.wireMu.Lock()
+	defer tr.wireMu.Unlock()
+	delete(tr.wires, taskID)
+}
+
+// permWire 返回 task 的 PermissionWire（ACP 审批决策用）；无则 nil。
+func (tr *TaskRunner) permWire(taskID string) *PermissionWire {
+	tr.wireMu.Lock()
+	defer tr.wireMu.Unlock()
+	if w, ok := tr.wires[taskID]; ok {
+		return w.perm
+	}
+	return nil
+}
+
+// isACPPath task 是否走在 ACP 路径（useACP 且 adapter 仍 open）。
+func (tr *TaskRunner) isACPPath(taskID string) bool {
+	if !tr.useACP || tr.agentMgr == nil {
+		return false
+	}
+	return tr.agentMgr.Adapter(taskID) != nil
 }
 
 // injectHookSettings 往 task 的 worktree 写 .claude/settings.json，配置 PreToolUse hook。
@@ -527,6 +750,18 @@ func (tr *TaskRunner) handleLine(taskID, line string, pending map[string]string)
 
 // Intervene 对 waiting_input 任务投递决策或追加 prompt。
 func (tr *TaskRunner) Intervene(taskID string, in model.Intervention) error {
+	// ACP 路径（Task 4.4）：审批决策经 PermissionWire.Resolve 投递到 adapter.Approve/Deny。
+	// append_prompt 在 ACP 路径不支持 stdin 注入（agent 自行执行工具）；引导用 Resume 续问。
+	if tr.isACPPath(taskID) {
+		if in.Kind == "decision" {
+			ph := tr.permWire(taskID)
+			if ph == nil {
+				return fmt.Errorf("no pending permission on task %s", taskID)
+			}
+			return ph.Resolve(in.DecisionID, in.Choice)
+		}
+		return fmt.Errorf("append_prompt not supported on ACP path; use resume")
+	}
 	if in.Kind == "decision" {
 		if err := tr.hooks.Resolve(taskID, in.DecisionID, in.Choice); err != nil {
 			return err
@@ -556,6 +791,20 @@ func (tr *TaskRunner) Intervene(taskID string, in model.Intervention) error {
 // 路径 B 的 waiting_input（choice）进程已死、不在 tr.running，直接置 cancelled
 // 不依赖杀进程。路径 A 的 waiting_input 进程仍活着，走原杀进程逻辑。
 func (tr *TaskRunner) Cancel(taskID string) error {
+	// ACP 路径（Task 4.4）：先置 cancelled（终态），再中断 Run；runACP 的 defer 会 Close+Unwire。
+	if tr.isACPPath(taskID) {
+		updated := tr.transition(taskID, model.TaskCancelled, func(t *model.Task) {
+			if t.Status == model.TaskRunning || t.Status == model.TaskWaitingInput {
+				now := time.Now()
+				t.FinishedAt = &now
+			}
+		})
+		if updated == nil {
+			return fmt.Errorf("task not cancellable: %s", taskID)
+		}
+		_ = tr.agentMgr.Cancel(context.Background(), taskID)
+		return nil
+	}
 	tr.mu.Lock()
 	lp, ok := tr.running[taskID]
 	tr.mu.Unlock()
@@ -792,6 +1041,28 @@ func (tr *TaskRunner) failTask(taskID, errMsg string) {
 		t.FinishedAt = &now
 	})
 	tr.logger.Error("task failed", zap.String("task", taskID), zap.String("err", errMsg))
+	tr.notifyFinished(updated, "❌ 任务失败: "+errMsg)
+}
+
+// forceFailTask 强制把 task 置 failed（绕过 transition 的终态守卫），用于续问时原会话丢失等
+// 需在终态任务上明确 surface 失败的场景。failTask 经 transition 的终态守卫，对 completed/
+// failed/cancelled 任务是 no-op（状态不变、Error 不写、不通知）；续问 Open 失败（会话丢失）时
+// task 仍处终态，故走本方法确保状态/Error/通知均落库，由协议层 surface，不静默失败。
+func (tr *TaskRunner) forceFailTask(taskID, errMsg string) {
+	updated, err := tr.store.Update(taskID, func(t *model.Task) bool {
+		t.Status = model.TaskFailed
+		t.Error = errMsg
+		t.CurrentDecision = nil
+		now := time.Now()
+		t.FinishedAt = &now
+		return true
+	})
+	if err != nil {
+		tr.logger.Error("force fail task", zap.String("task", taskID), zap.String("err", errMsg), zap.Error(err))
+		return
+	}
+	tr.logger.Error("task failed", zap.String("task", taskID), zap.String("err", errMsg))
+	tr.bus.Publish(Event{Type: "task_updated", TaskID: taskID, Task: updated})
 	tr.notifyFinished(updated, "❌ 任务失败: "+errMsg)
 }
 
