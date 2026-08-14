@@ -59,21 +59,29 @@ func main() {
 	}
 	defer logger.Sync()
 
-	// --- 数据目录 ---
-	for _, dir := range []string{"data/tasks", "data/worktrees"} {
+	// --- 数据目录（默认 ~/.pieqi，PIEQI_HOME 可覆盖；运行时数据不入仓库） ---
+	dataRoot := config.DefaultDataRoot()
+	for _, dir := range []string{
+		filepath.Join(dataRoot, "tasks"),
+		filepath.Join(dataRoot, "worktrees"),
+	} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			logger.Fatal("mkdir data dir", zap.String("dir", dir), zap.Error(err))
 		}
 	}
 
 	// --- 核心组件 ---
-	store, err := core.NewTaskStore("data/tasks")
+	store, err := core.NewTaskStore(filepath.Join(dataRoot, "tasks"))
 	if err != nil {
 		logger.Fatal("init task store", zap.Error(err))
 	}
 
 	bus := core.NewEventBus()
-	wm := core.NewWorktreeManager(logger, cfg.Pieqi.WorktreeBase)
+	worktreeBase := cfg.Pieqi.WorktreeBase
+	if worktreeBase == "" {
+		worktreeBase = filepath.Join(dataRoot, "worktrees")
+	}
+	wm := core.NewWorktreeManager(logger, worktreeBase)
 	hooks := core.NewHookService(cfg.Pieqi.HookTimeout)
 	skills := core.NewSkillScanner(logger, cfg.Pieqi.SkillsDirs)
 	commands := core.NewCommandScanner(logger, nil)

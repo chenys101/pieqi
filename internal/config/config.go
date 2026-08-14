@@ -2,10 +2,25 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/viper"
 )
+
+// DefaultDataRoot 返回运行时数据根目录：$PIEQI_HOME 优先，否则 ~/.pieqi。
+// tasks/worktrees 等运行时数据统一存这里，不入仓库。取不到 home 时退回 "."。
+func DefaultDataRoot() string {
+	if h := os.Getenv("PIEQI_HOME"); h != "" {
+		return h
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	return filepath.Join(home, ".pieqi")
+}
 
 // Config 全局配置
 type Config struct {
@@ -100,7 +115,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pieqi.hook_timeout", "30m")
 	v.SetDefault("pieqi.hook_tools", []string{"Bash", "Write", "Edit", "NotebookEdit"})
 	v.SetDefault("pieqi.max_concurrent_per_project", 4)
-	v.SetDefault("pieqi.worktree_base", "./data/worktrees")
+	v.SetDefault("pieqi.worktree_base", "") // 空 = DefaultDataRoot()/worktrees（main 侧解析）
 	v.SetDefault("pieqi.base_branch", "main")
 	v.SetDefault("pieqi.acp.use_acp", false)
 	v.SetDefault("pieqi.acp.agent_type", "claude-code")

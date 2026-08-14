@@ -1,6 +1,6 @@
 @echo off
 title Pieqi (restart)
-cd /d "G:\workspace\pieqi"
+cd /d "%~dp0"
 
 echo Restarting Pieqi...
 echo.
@@ -12,7 +12,7 @@ for /f "tokens=5" %%a in ('netstat -ano -p TCP ^| findstr ":3000 " ^| findstr "L
 )
 
 echo.
-echo Starting go run ./cmd/pieqi ...
+echo Starting pieqi.exe ...
 echo.
-go run ./cmd/pieqi
+pieqi.exe
 pause

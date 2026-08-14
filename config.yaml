@@ -23,7 +23,9 @@ api:
 
 pieqi:
   enabled: true                  # 总开关；开启后 IM 消息走 TaskCreator
-  worktree_base: ./data/worktrees
+  # 运行时数据根目录：留空 = ~/.pieqi（或环境变量 PIEQI_HOME 覆盖）。
+  # tasks/worktrees/sessions 等全部数据存到用户主目录，不入仓库。
+  worktree_base: ""              # worktree 根目录；留空默认 ~/.pieqi/worktrees
   skills_dirs: []                # 空 = 默认 ~/.claude/skills + CLAUDE_CONFIG_DIR/.claude/skills
   permission_mode: bypassPermissions  # claude 自身不拦，由 PreToolUse hook 拦截
   cleanup_worktrees: true        # 任务完成即清 worktree
@@ -34,12 +36,12 @@ pieqi:
   # ACP 协议（Phase 2）：use_acp=true 时 agent 驱动走 AgentAdapter（ACPAgent），
   # false（默认）保持 Phase 1 的 claude -p + stream-json 路径不变。
   # agent_type 选 claude-code（经官方 TS 适配器）/ qodercli / codex / 其他原生 ACP agent。
-  # acp_spawn_command 留空则按 agent_type 取默认；非空则整体覆盖（如自定义适配器路径）。
+  # acp_spawn_command 留空则代码自动解析 adapter 入口：先找项目本地 node_modules，
+  # 再找 %APPDATA%\npm 全局安装（npm i -g @agentclientprotocol/claude-agent-acp），
+  # 用 `node <入口>` 直接拉起（绕开 Windows 下 Go spawn npx 会永久挂死的问题），
+  # 都找不到才回退 npx。非空则整体覆盖。
   acp:
     use_acp: true                   # 切 true 启用 ACP 路径（claude-code TS 适配器）
     agent_type: claude-code         # claude-code | qodercli | codex | <其他>
-    # 本机 Go spawn `npx` 会永久挂死（batch shim + FOR /F 无控制台，零输出），ACP 握手必 30s 超时回退。
-    # 修复：直接 `node` 拉起已全局安装的 @agentclientprotocol/claude-agent-acp，绕开 npx。
-    # 安装方式：npm i -g @agentclientprotocol/claude-agent-acp@0.67.0
-    acp_spawn_command: ["node", "F:\\appData\\Roaming\\npm\\node_modules\\@agentclientprotocol\\claude-agent-acp\\dist\\index.js"]
+    acp_spawn_command: []           # 空 = 代码自动解析；如 ["qodercli","--acp","--port","1234"]
     init_timeout: 30s               # initialize / newSession 握手超时

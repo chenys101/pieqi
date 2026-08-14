@@ -44,7 +44,12 @@ func TestDTODefaults(t *testing.T) {
 }
 
 // TestNewACPAgent_ConfigDefaults 校验 NewACPAgent 对空 InitTimeout 的兜底与 cmd 字段填充。
+// adapterResolver 覆盖为"找不到"，保证走 npx 默认分支（环境无关，不依赖本机是否装了 adapter）。
 func TestNewACPAgent_ConfigDefaults(t *testing.T) {
+	old := adapterResolver
+	adapterResolver = func() (string, bool) { return "", false }
+	defer func() { adapterResolver = old }()
+
 	a := NewACPAgent(config.ACPConfig{AgentType: "claude-code"}, nil)
 	if a.cfg.InitTimeout <= 0 {
 		t.Fatal("InitTimeout not defaulted")

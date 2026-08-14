@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -60,6 +62,71 @@ func TestDefaultSpawnCommand(t *testing.T) {
 				t.Errorf("agentType=%q args[%d]=%q want %q", c.agentType, i, args[i], c.wantArgs[i])
 			}
 		}
+	}
+}
+
+// TestBuildSpawnCommand_ResolvesLocalAdapter 验证 claude-code 默认命令会优先解析到
+// 已安装的 adapter（项目本地 node_modules），绕开 npx 的 Windows 挂死问题，且结果
+// 是绝对路径（无绝对路径依赖 cwd 之外的配置）。环境无关：用临时目录伪造 adapter。
+func TestBuildSpawnCommand_ResolvesLocalAdapter(t *testing.T) {
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	tmp := t.TempDir()
+	adapter := filepath.Join(tmp, "node_modules", "@agentclientprotocol", "claude-agent-acp", "dist", "index.js")
+	if err := os.MkdirAll(filepath.Dir(adapter), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(adapter, []byte("// fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+
+	name, args := buildSpawnCommand(config.ACPConfig{AgentType: "claude-code"})
+	if name != "node" {
+		t.Fatalf("name=%q want node (resolve adapter, not npx)", name)
+	}
+	if len(args) != 1 || args[0] != adapter {
+		t.Fatalf("args=%v want [%q]", args, adapter)
+	}
+	if !filepath.IsAbs(args[0]) {
+		t.Fatalf("resolved path must be absolute, got %q", args[0])
+	}
+}
+
+// TestResolveClaudeCodeAdapter_GlobalCandidate 验证 Windows 全局候选路径形态
+// （%APPDATA%\npm\node_modules\...），不依赖全局是否真实安装。
+func TestResolveClaudeCodeAdapter_GlobalCandidate(t *testing.T) {
+	oldAppData, had := os.LookupEnv("APPDATA")
+	oldWd, _ := os.Getwd()
+	defer func() {
+		if had {
+			os.Setenv("APPDATA", oldAppData)
+		} else {
+			os.Unsetenv("APPDATA")
+		}
+		_ = os.Chdir(oldWd)
+	}()
+
+	tmp := t.TempDir()
+	os.Setenv("APPDATA", tmp)
+	os.Chdir(t.TempDir()) // 本地无 node_modules
+
+	global := filepath.Join(tmp, "npm", "node_modules", "@agentclientprotocol", "claude-agent-acp", "dist", "index.js")
+	os.MkdirAll(filepath.Dir(global), 0755)
+	os.WriteFile(global, []byte("// fake"), 0644)
+
+	p, ok := resolveClaudeCodeAdapter()
+	if !ok {
+		t.Fatal("should resolve global adapter")
+	}
+	if p != global {
+		t.Fatalf("got %q want %q", p, global)
 	}
 }
 

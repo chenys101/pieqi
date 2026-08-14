@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"time"
@@ -130,7 +132,43 @@ func buildSpawnCommand(cfg config.ACPConfig) (string, []string) {
 	if len(cfg.SpawnCommand) > 0 {
 		return cfg.SpawnCommand[0], cfg.SpawnCommand[1:]
 	}
-	return defaultSpawnCommand(cfg.AgentType)
+	name, args := defaultSpawnCommand(cfg.AgentType)
+	// claude-code 默认经 npx 拉起官方 TS 适配器；但 Windows 下 Go spawn npx 的 batch shim
+	// 会永久挂死（零输出，initialize 必超时回退）。这里先尝试直接 node 拉起已安装的
+	// adapter（项目本地 node_modules 或 %APPDATA%\npm 全局），命中即绕开 npx；
+	// 找不到才退回 npx（Unix 上 npx 正常）。config 无需写绝对路径。
+	if name == "npx" && cfg.AgentType == "claude-code" {
+		if p, ok := adapterResolver(); ok {
+			return "node", []string{p}
+		}
+	}
+	return name, args
+}
+
+// adapterResolver 定位 claude-code adapter 入口的可覆盖钩子（测试注入用）；
+// 生产默认 resolveClaudeCodeAdapter。
+var adapterResolver = resolveClaudeCodeAdapter
+
+// resolveClaudeCodeAdapter 定位 @agentclientprotocol/claude-agent-acp 的 dist/index.js。
+// 依次尝试：项目本地 node_modules（npm i -D/--save-dev 安装）、Windows 全局
+// %APPDATA%\npm\node_modules（npm i -g 安装）。返回绝对路径，不依赖进程 cwd。
+func resolveClaudeCodeAdapter() (string, bool) {
+	rel := filepath.Join("@agentclientprotocol", "claude-agent-acp", "dist", "index.js")
+	var candidates []string
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, "node_modules", rel))
+	}
+	if appdata := os.Getenv("APPDATA"); appdata != "" {
+		candidates = append(candidates, filepath.Join(appdata, "npm", "node_modules", rel))
+	}
+	for _, p := range candidates {
+		if abs, err := filepath.Abs(p); err == nil {
+			if _, err := os.Stat(abs); err == nil {
+				return abs, true
+			}
+		}
+	}
+	return "", false
 }
 
 // defaultSpawnCommand 按 agent 类型返回默认 spawn 命令分词。
