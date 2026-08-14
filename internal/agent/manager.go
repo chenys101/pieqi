@@ -373,26 +373,25 @@ func (s *semaphore) release() {
 	}
 }
 
-// ManagerConfigFromPieqi 由 config.PieqiConfig + 顶层 ClaudeConfig 构建 ManagerConfig。
+// ManagerConfigFromPieqi 由 config.PieqiConfig 构建 ManagerConfig。
 //
-// 把 PieqiConfig.ACP 映射到 ManagerConfig.UseACP/ACPConfig；PrintConfig 由 ClaudeConfig.Model +
-// PieqiConfig.PermissionMode 填充（PrintAgent 回退路径用）；MaxConcurrent 取自 PieqiConfig.MaxConcurrentPerProject。
+// 把 PieqiConfig.ACP 映射到 ManagerConfig.UseACP/ACPConfig；PrintConfig.PermissionMode 取自
+// PieqiConfig.PermissionMode（PrintAgent 回退路径用）；MaxConcurrent 取自 PieqiConfig.MaxConcurrentPerProject。
 //
 // 消费方（main/wire 层）用法：
 //
-//	mgr := agent.NewAgentManager(agent.ManagerConfigFromPieqi(cfg.Pieqi, cfg.Claude), logger)
+//	mgr := agent.NewAgentManager(agent.ManagerConfigFromPieqi(cfg.Pieqi), logger)
 //	runner.SetAgentManager(mgr, cfg.Pieqi.ACP.UseACP, cfg.Pieqi.HookTimeout)
 //
 // 注：AgentType/SpawnCommand/InitTimeout 都在 cfg.ACP 里，原样透传给 ACPAgent。
-// PrintConfig.Binary 留空（NewPrintAgent 兜底为 "claude"）；SysPrompt 留空（Phase 1 sysPrompt
-// 经 TaskRunner 注入 worktree settings，不经 PrintConfig）。
-func ManagerConfigFromPieqi(pieqi config.PieqiConfig, claude config.ClaudeConfig) ManagerConfig {
+// PrintConfig.Binary 留空（NewPrintAgent 兜底为 "claude"）；Model 留空（claude 自决，由 ~/.claude 维护）；
+// SysPrompt 留空（Phase 1 sysPrompt 经 TaskRunner 注入 worktree settings，不经 PrintConfig）。
+func ManagerConfigFromPieqi(pieqi config.PieqiConfig) ManagerConfig {
 	return ManagerConfig{
 		UseACP:        pieqi.ACP.UseACP,
 		MaxConcurrent: pieqi.MaxConcurrentPerProject,
 		ACPConfig:     pieqi.ACP,
 		PrintConfig: PrintConfig{
-			Model:          claude.Model,
 			PermissionMode: pieqi.PermissionMode,
 		},
 	}

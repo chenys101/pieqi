@@ -376,7 +376,7 @@ func newACPTestRunner(t *testing.T, script fakeScript, fellBack bool) (*TaskRunn
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
-	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "test-model", "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
 	fake := newFakeAgentRunner(script, fellBack)
 	tr.SetAgentManager(fake, true, 0)
 	return tr, store, bus, fake
@@ -818,7 +818,7 @@ func TestTaskRunner_ACP_DefaultPathUnaffected(t *testing.T) {
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
-	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "m", "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
 	task, _ := store.Create(&model.Task{ProjectID: "cb", WorktreePath: "/wt", Prompt: "p"})
 
 	if tr.isACPPath(task.ID) {

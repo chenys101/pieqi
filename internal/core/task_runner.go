@@ -29,7 +29,6 @@ type TaskRunner struct {
 	bus       *EventBus
 	hooks     *HookService
 	baseBranch string // worktree 基准分支，默认 "main"
-	model     string
 	sysPrompt string
 	permissionMode string
 	cleanupWorktrees bool
@@ -272,7 +271,7 @@ func (tr *TaskRunner) generateTitle(taskID string) {
 	defer cancel()
 
 	prompt := "用不超过 20 个字的一句话概括下面这个开发任务，直接输出标题本身，不要引号、不要前缀、不要解释：\n\n" + t.Prompt
-	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--model", tr.model, "--output-format", "text")
+	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--output-format", "text")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -384,7 +383,6 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 			args = append(args, "-p", prompt, "--session-id", sessionID)
 		}
 		args = append(args,
-			"--model", tr.model,
 			"--permission-mode", tr.permissionMode,
 			"--output-format", "stream-json",
 			"--verbose",

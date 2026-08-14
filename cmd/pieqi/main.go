@@ -60,7 +60,7 @@ func main() {
 	defer logger.Sync()
 
 	// --- 数据目录 ---
-	for _, dir := range []string{"data/tasks", "data/sessions", "data/mappings", "data/worktrees"} {
+	for _, dir := range []string{"data/tasks", "data/worktrees"} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			logger.Fatal("mkdir data dir", zap.String("dir", dir), zap.Error(err))
 		}
@@ -89,27 +89,20 @@ func main() {
 
 	runner := core.NewTaskRunner(
 		logger, store, wm, bus, hooks,
-		cfg.Claude.Model, "", cfg.Pieqi.PermissionMode, cfg.Pieqi.CleanupWorktrees,
+		"", cfg.Pieqi.PermissionMode, cfg.Pieqi.CleanupWorktrees,
 		execPath, cfg.Server.Port, cfg.Pieqi.HookTools, hookTimeoutSec,
 		cfg.Pieqi.MaxConcurrentPerProject, cfg.Pieqi.BaseBranch,
 	)
 
 	// ACP 路径（Phase 2）：use_acp=true 时注入 AgentManager
 	if cfg.Pieqi.ACP.UseACP {
-		mgr := agent.NewAgentManager(agent.ManagerConfigFromPieqi(cfg.Pieqi, cfg.Claude), logger)
+		mgr := agent.NewAgentManager(agent.ManagerConfigFromPieqi(cfg.Pieqi), logger)
 		runner.SetAgentManager(mgr, cfg.Pieqi.ACP.UseACP, cfg.Pieqi.HookTimeout)
 		logger.Info("acp agent manager enabled", zap.String("agent_type", cfg.Pieqi.ACP.AgentType))
 	}
 
 	// --- Bridge（IM 渠道编排） ---
-	userCtx, err := core.NewUserContext("data/users.json", "data/sessions", "data/mappings", cfg.Session.TTL)
-	if err != nil {
-		logger.Fatal("init user context", zap.Error(err))
-	}
-
-	sessionRunner := core.NewSessionRunner(logger, cfg.Claude.WorkDir, cfg.Claude.Model, "", cfg.Claude.Timeout)
-
-	bridge := core.NewBridge(logger, userCtx, sessionRunner, cfg.Claude.Timeout)
+	bridge := core.NewBridge(logger)
 	if cfg.Pieqi.Enabled {
 		bridge.EnablePieqi(store, runner, bus)
 	}

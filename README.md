@@ -119,11 +119,6 @@ npm run dev          # 开发服务器（:5174，代理到 :3000）
 ```yaml
 server:
   port: 3000
-claude:
-  work_dir: G:/workspace
-  model: deepseek-v4-pro-202606   # claude -p 使用的模型
-  effort: high
-  timeout: 300s
 pieqi:
   enabled: true
   worktree_base: ./data/worktrees
@@ -133,7 +128,7 @@ pieqi:
   base_branch: master
 ```
 
-`data/users.json`：渠道身份 → 统一身份映射。
+> Agent 模型由 `claude` CLI 自身维护（`~/.claude` 配置），pieqi 不传 `--model`，让 agent 自决。
 
 ---
 

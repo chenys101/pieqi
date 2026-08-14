@@ -26,7 +26,7 @@ func TestAPI_ListSkills(t *testing.T) {
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(0)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "m", "", "", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "", false, "", 0, nil, 0, 0, "main")
 	scanner := core.NewSkillScanner(zap.NewNop(), []string{dir})
 	cfg := &config.Config{}
 	srv := NewServer(cfg, store, runner, hooks, bus, scanner, nil)

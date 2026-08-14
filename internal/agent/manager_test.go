@@ -720,7 +720,7 @@ func TestAgentManager_Open_ResumePrimaryFails_Fallback(t *testing.T) {
 	}
 }
 
-// TestManagerConfigFromPieqi 校验由 config.PieqiConfig + ClaudeConfig 构建 ManagerConfig 的字段映射。
+// TestManagerConfigFromPieqi 校验由 config.PieqiConfig 构建 ManagerConfig 的字段映射。
 func TestManagerConfigFromPieqi(t *testing.T) {
 	pieqi := config.PieqiConfig{
 		PermissionMode:          "bypassPermissions",
@@ -732,9 +732,8 @@ func TestManagerConfigFromPieqi(t *testing.T) {
 			InitTimeout:  45 * time.Second,
 		},
 	}
-	claude := config.ClaudeConfig{Model: "deepseek-v4-pro-202606"}
 
-	mc := ManagerConfigFromPieqi(pieqi, claude)
+	mc := ManagerConfigFromPieqi(pieqi)
 
 	if !mc.UseACP {
 		t.Errorf("UseACP=false, want true")
@@ -748,8 +747,8 @@ func TestManagerConfigFromPieqi(t *testing.T) {
 	if len(mc.ACPConfig.SpawnCommand) != 4 || mc.ACPConfig.SpawnCommand[0] != "qodercli" {
 		t.Errorf("ACPConfig.SpawnCommand=%v want [qodercli --acp --port 1234]", mc.ACPConfig.SpawnCommand)
 	}
-	if mc.PrintConfig.Model != "deepseek-v4-pro-202606" {
-		t.Errorf("PrintConfig.Model=%q want deepseek-v4-pro-202606", mc.PrintConfig.Model)
+	if mc.PrintConfig.Model != "" {
+		t.Errorf("PrintConfig.Model=%q want empty (claude 自决)", mc.PrintConfig.Model)
 	}
 	if mc.PrintConfig.PermissionMode != "bypassPermissions" {
 		t.Errorf("PrintConfig.PermissionMode=%q want bypassPermissions", mc.PrintConfig.PermissionMode)
@@ -768,9 +767,8 @@ func TestManagerConfigFromPieqi_UseACPFalse(t *testing.T) {
 		MaxConcurrentPerProject: 0, // 不限
 		ACP:                     config.ACPConfig{UseACP: false},
 	}
-	claude := config.ClaudeConfig{Model: "sonnet"}
 
-	mc := ManagerConfigFromPieqi(pieqi, claude)
+	mc := ManagerConfigFromPieqi(pieqi)
 	if mc.UseACP {
 		t.Errorf("UseACP=true, want false")
 	}
