@@ -35,7 +35,7 @@ type TaskRunner struct {
 	cleanupWorktrees bool
 
 	// hook 注入：仅 permissionMode==bypassPermissions 时写 settings.json
-	execPath       string   // bridge 可执行文件绝对路径，os.Executable() 取
+	execPath       string   // pieqi 可执行文件绝对路径，os.Executable() 取
 	port           int      // 主进程端口，hook 子进程回连 /internal/hook 用
 	hookTools      []string // 拦截的工具名，如 ["Bash","Write","Edit","NotebookEdit"]
 	hookTimeoutSec int      // hook 等决策上限（秒），应 ≥ HookService 超时

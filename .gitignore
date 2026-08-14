@@ -1,6 +1,6 @@
 # Build output
-bridge.exe
-bridge
+/pieqi.exe
+/pieqi
 build/
 web/dist/
 web/node_modules/
@@ -26,8 +26,8 @@ data/wechat_token.json
 # Debug logs
 data/*.log
 data/*.err
-bridge.err
-bridge.out
+pieqi.err
+pieqi.out
 
 # 运行时数据(tasks/worktrees/sessions/mappings 由后端生成)
 data/tasks/
@@ -51,5 +51,5 @@ data/choice-verify-sysprompt.txt
 # OS
 .DS_Store
 Thumbs.db
-bridge.exe~
+pieqi.exe~
 data/approvals.json

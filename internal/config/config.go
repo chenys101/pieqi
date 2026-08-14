@@ -103,8 +103,8 @@ func Load(configPath string) (*Config, error) {
 	v.SetConfigFile(configPath)
 	v.SetConfigType("yaml")
 
-	// 环境变量覆盖（如 BRIDGE_SERVER_PORT=3000）
-	v.SetEnvPrefix("BRIDGE")
+	// 环境变量覆盖（如 PIEQI_SERVER_PORT=3000）
+	v.SetEnvPrefix("PIEQI")
 	v.AutomaticEnv()
 
 	// 默认值

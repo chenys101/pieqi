@@ -21,7 +21,7 @@
 - **多 Agent 支持（Phase 2）**：经 ACP（Agent Client Protocol）统一驱动 claude-code / qodercli / codex 等任意 ACP agent；真流式（内容增量逐字）、协议级权限审批（RequestPermission → IM/PWA 卡片 → Approve/Deny）；ACP 适配器不可用时透明回退 `claude -p`。
 - **移动端 PWA**：新建任务、查看事件流、补充续问、工具调用折叠、URL 会话路由（`/session/<id>` 深链接）。
 - **会话恢复健壮化**：自动捕获 claude 真实 session_id 供续问；会话丢失时回退新会话，保证消息必被提交。
-- **单二进制部署**：前端经 `//go:embed` 嵌入，`bridge.exe` 单文件自包含。
+- **单二进制部署**：前端经 `//go:embed` 嵌入，`pieqi.exe` 单文件自包含。
 
 ---
 
@@ -64,7 +64,7 @@
 
 ```
 pieqi/
-├── cmd/bridge/main.go        # 服务入口（HTTP + PWA + 渠道 + pre-tool-use hook 子命令）
+├── cmd/pieqi/main.go        # 服务入口（HTTP + PWA + 渠道 + pre-tool-use hook 子命令）
 ├── web/
 │   ├── src/                  # PWA 前端源码（main.js / styles.css）
 │   ├── public/sw.js          # service worker（vite 拷入 dist 正确下发）
@@ -91,11 +91,11 @@ pieqi/
 ### 开发运行
 
 ```bash
-# 构建二进制（cmd/bridge 入口）
-go build -o bridge ./cmd/bridge
+# 构建二进制（cmd/pieqi 入口）
+go build -o pieqi ./cmd/pieqi
 
 # 或直接运行
-go run ./cmd/bridge
+go run ./cmd/pieqi
 
 # 测试
 go test ./internal/...
@@ -158,16 +158,16 @@ pieqi:
 
 ```bash
 # Linux amd64
-GOOS=linux GOARCH=amd64 go build -o build/bridge-linux-amd64 ./cmd/bridge
+GOOS=linux GOARCH=amd64 go build -o build/pieqi-linux-amd64 ./cmd/pieqi
 
 # Windows amd64
-go build -o build/bridge-windows-amd64.exe ./cmd/bridge
+go build -o build/pieqi-windows-amd64.exe ./cmd/pieqi
 
-# 发布包：bridge + config.yaml + README + 启动脚本
+# 发布包：pieqi + config.yaml + README + 启动脚本
 # （见构建脚本，产物打 zip）
 ```
 
-启动：Windows 双击 `start.bat` / 运行 `bridge.exe`；Linux 用 systemd 托管。
+启动：Windows 双击 `start.bat` / 运行 `pieqi.exe`；Linux 用 systemd 托管。
 
 ---
 

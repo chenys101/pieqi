@@ -11,7 +11,7 @@ import (
 // HookService 管理 PreToolUse hook 的待决策注册与阻塞等待。
 //
 // 流程（见 plan 附录 A.6）：
-//  1. bridge pre-tool-use 子进程从 stdin 读 hook payload -> POST /internal/hook
+//  1. pieqi pre-tool-use 子进程从 stdin 读 hook payload -> POST /internal/hook
 //  2. RegisterPending 把 task 置 waiting_input，返回一个 decision channel
 //  3. TaskRunner.Intervene(decision) -> Resolve 写 choice 到 channel
 //  4. hook 子进程拿到 choice -> 输出 permissionDecision allow/deny -> exit 0

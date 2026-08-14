@@ -210,7 +210,7 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		ClientInfo: &acp.Implementation{
 			Name:    "pieqi",
-			Title:   acp.Ptr("Pieqi Bridge"),
+			Title:   acp.Ptr("Pieqi"),
 			Version: "0.1.0",
 		},
 		ClientCapabilities: acp.ClientCapabilities{

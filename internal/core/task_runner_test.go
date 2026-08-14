@@ -305,7 +305,7 @@ func TestTaskRunner_InjectHookSettings(t *testing.T) {
 	hooks := NewHookService(5 * time.Second)
 	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks,
 		"m", "", "bypassPermissions", false,
-		"/path/to/bridge", 39998, []string{"Bash", "Edit"}, 60, 0, "main")
+		"/path/to/pieqi", 39998, []string{"Bash", "Edit"}, 60, 0, "main")
 
 	wt := t.TempDir() // 假 worktree，不真跑 git
 	task, _ := store.Create(&model.Task{ProjectID: "cb", WorktreePath: wt})
