@@ -96,6 +96,7 @@ func (s *Server) Register(r gin.IRouter) {
 		tunnelOp.POST("/stop", s.tunnelStop)
 		tunnelOp.POST("/reset", s.tunnelReset)
 		r.GET("/api/tunnel/status", corsMiddleware(corsAll, corsOrigins), s.tunnelStatus)
+		r.GET("/api/tunnel/qrcode", corsMiddleware(corsAll, corsOrigins), s.tunnelQRCode)
 	}
 
 	// hook 子进程回连（仅本地，不走 auth）

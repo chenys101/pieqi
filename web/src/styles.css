@@ -590,3 +590,15 @@ textarea { resize: vertical; }
    红底白字刻意扎眼，区别于普通 --failed 失败标记。 */
 .debug-banner { background: #b91c1c; color: #fff; padding: 6px 12px; font-size: 13px; text-align: center; }
 .debug-banner.hidden { display: none; }
+
+/* ============ 外网隧道面板（Lark-mobile-only 控制；status 全员只读） ============ */
+.tunnel-panel-slot { padding: 12px; border-top: 1px solid var(--border); }
+.tunnel-panel h3 { margin: 0 0 8px; font-size: 14px; }
+.tunnel-status { font-size: 13px; color: var(--text-3); margin-bottom: 8px; }
+.tunnel-status.active { color: var(--completed); }
+.tunnel-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.tunnel-controls select { padding: 4px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.tunnel-controls.hidden { display: none; }
+.tunnel-result { font-size: 13px; word-break: break-all; }
+.tunnel-link a, .tunnel-token code { font-family: "SF Mono", "JetBrains Mono", "Cascadia Code", Consolas, monospace; font-size: 12px; }
+.tunnel-qr img { width: 200px; height: 200px; image-rendering: pixelated; }

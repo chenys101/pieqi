@@ -1,6 +1,7 @@
 import './styles.css';
 import { attachAutocomplete } from './autocomplete.js';
 import { authHeaders, isLarkMobile, isFeishuPC, feishuOpenId } from './auth.js';
+import { mountTunnelPanel } from './tunnel.js';
 
 const API = '/api';
 let token = new URLSearchParams(location.search).get('token') || '';
@@ -864,6 +865,9 @@ async function init() {
       }
     }
   } catch {}
+  // Tunnel panel: only render controls on Lark mobile; status always shown.
+  const tunnelSlot = document.getElementById('tunnel-panel');
+  if (tunnelSlot) mountTunnelPanel(tunnelSlot);
   // 拉取补全数据源（commands + skills）
   try {
     const [{ commands }, { skills }] = await Promise.all([apiGet('/commands'), apiGet('/skills')]);

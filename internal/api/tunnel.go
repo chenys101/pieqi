@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/skip2/go-qrcode"
 )
 
 type tunnelStartReq struct {
@@ -81,4 +82,22 @@ func (s *Server) tunnelStatus(c *gin.Context) {
 	}
 	st := s.tunnel.Status()
 	c.JSON(http.StatusOK, st)
+}
+
+// tunnelQRCode handles GET /api/tunnel/qrcode?text=<...> — returns a PNG
+// QR of the given text. Used by the front-end to render the lark:// deep
+// link as a scannable code. Read-only (no token leak beyond what the
+// caller already has — the URL passed in is decided by the frontend).
+func (s *Server) tunnelQRCode(c *gin.Context) {
+	text := c.Query("text")
+	if text == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "text is required"})
+		return
+	}
+	png, err := qrcode.Encode(text, qrcode.Medium, 256)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.Data(http.StatusOK, "image/png", png)
 }
