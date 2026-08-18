@@ -45,3 +45,14 @@ pieqi:
     agent_type: claude-code         # claude-code | qodercli | codex | <其他>
     acp_spawn_command: []           # 空 = 代码自动解析；如 ["qodercli","--acp","--port","1234"]
     init_timeout: 30s               # initialize / newSession 握手超时
+
+# 飞书身份绑定 + Cloudflared 临时隧道安全系统（PRD §8）
+auth:
+  debug_skip_all_auth: false           # true = 跳过所有鉴权（仅本地开发）
+  feishu_binding_file: ""              # 空 = ~/.pieqi/feishu_binding.json
+  cloudflared:
+    binary_path: cloudflared           # PATH 中查找；或绝对路径 /usr/local/bin/cloudflared
+    default_ttl: 15m                   # 15m | 1h | 4h
+  ratelimit:
+    max_failures_per_min: 5            # 5 次/分钟 → 拉黑
+    blacklist_duration: 10m            # 拉黑 10 分钟
