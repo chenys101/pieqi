@@ -297,3 +297,15 @@ func (m *TunnelManager) Status() TunnelStatus {
 		ExpiresAt:    m.expires,
 	}
 }
+
+// wipeTokensOnDebugOff clears all tunnel tokens when the debug switch
+// transitions from ON to OFF. PRD §4.4 lists this as an invalidation
+// trigger. main.go is responsible for calling this at the toggle point
+// (the DebugSwitch itself is just an atomic flag and doesn't know about
+// the token store).
+func wipeTokensOnDebugOff(dbg *DebugSwitch, ts *TokenStore) {
+	if ts == nil {
+		return
+	}
+	ts.InvalidateAll()
+}
