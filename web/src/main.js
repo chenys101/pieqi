@@ -1,12 +1,12 @@
 import './styles.css';
 import { attachAutocomplete } from './autocomplete.js';
+import { authHeaders, isLarkMobile, isFeishuPC, feishuOpenId } from './auth.js';
 
 const API = '/api';
 let token = new URLSearchParams(location.search).get('token') || '';
 function headers() {
-  const h = { 'Content-Type': 'application/json' };
-  if (token) h['Authorization'] = `Bearer ${token}`;
-  return h;
+  // Delegate to auth.js so X-Feishu-Openid is always sent.
+  return authHeaders();
 }
 
 const state = {
@@ -851,6 +851,19 @@ document.getElementById('sidebar-backdrop').addEventListener('click', closeSideb
 // --- 启动 ---
 async function init() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  // Auth status poll — drives debug banner + binding-required prompts.
+  try {
+    const st = await apiGet('/auth/status');
+    const banner = document.getElementById('debug-banner');
+    if (banner) {
+      if (st.debug) {
+        banner.classList.remove('hidden');
+      } else if (!st.bound) {
+        banner.textContent = '⚠ 系统尚未绑定飞书管理员账号 — 请在内网访问 /api/auth/bind 完成';
+        banner.classList.remove('hidden');
+      }
+    }
+  } catch {}
   // 拉取补全数据源（commands + skills）
   try {
     const [{ commands }, { skills }] = await Promise.all([apiGet('/commands'), apiGet('/skills')]);

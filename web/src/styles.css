@@ -584,3 +584,9 @@ textarea { resize: vertical; }
   .detail-content { padding: 0 16px 16px; }
   .detail-footer { padding: 10px 16px; }
 }
+
+/* ============ 调试 / 未绑定横幅 ============ */
+/* 警示色横幅：debug 模式开启 或 系统未绑定飞书管理员时由 main.js init() 取消 hidden。
+   红底白字刻意扎眼，区别于普通 --failed 失败标记。 */
+.debug-banner { background: #b91c1c; color: #fff; padding: 6px 12px; font-size: 13px; text-align: center; }
+.debug-banner.hidden { display: none; }
