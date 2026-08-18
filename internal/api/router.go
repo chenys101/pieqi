@@ -57,8 +57,15 @@ func (s *Server) Register(r gin.IRouter) {
 		}
 	}
 
+	// 业务 API：wired 了 auth 走 ExternalAuthMiddleware（外网身份+token；内网放行），
+	// 否则回退 legacy Bearer token（旧测试与本地 dev 兼容）。
 	api := r.Group("/api")
-	api.Use(corsMiddleware(corsAll, corsOrigins), authMiddleware(token))
+	api.Use(corsMiddleware(corsAll, corsOrigins))
+	if s.auth != nil {
+		api.Use(s.auth.ExternalAuthMiddleware())
+	} else {
+		api.Use(authMiddleware(token))
+	}
 	{
 		api.GET("/tasks", s.listTasks)
 		api.GET("/tasks/:id", s.getTask)
@@ -69,6 +76,26 @@ func (s *Server) Register(r gin.IRouter) {
 		api.GET("/skills", s.listSkills)   // Phase 6 实现，先占位
 		api.GET("/commands", s.listCommands)
 		api.GET("/ws", s.handleWS)         // Phase 5 实现
+	}
+
+	// Auth (binding) 路由：bind/unbind 仅内网（BindOpGateMiddleware）；
+	// status 公开（前端 boot 轮询，无 gate）。
+	if s.auth != nil {
+		authGrp := r.Group("/api/auth", corsMiddleware(corsAll, corsOrigins), s.auth.BindOpGateMiddleware())
+		authGrp.POST("/bind", s.bind)
+		authGrp.DELETE("/bind", s.unbind)
+		r.GET("/api/auth/status", corsMiddleware(corsAll, corsOrigins), s.authStatus)
+	}
+
+	// Tunnel 路由：start/stop/reset 仅外网飞书移动端（ExternalAuth + TunnelOpGate）；
+	// status 公开只读（无 gate，handler 端不泄露 token）。
+	if s.auth != nil && s.tunnel != nil {
+		tunnelOp := r.Group("/api/tunnel", corsMiddleware(corsAll, corsOrigins),
+			s.auth.ExternalAuthMiddleware(), s.auth.TunnelOpGateMiddleware())
+		tunnelOp.POST("/start", s.tunnelStart)
+		tunnelOp.POST("/stop", s.tunnelStop)
+		tunnelOp.POST("/reset", s.tunnelReset)
+		r.GET("/api/tunnel/status", corsMiddleware(corsAll, corsOrigins), s.tunnelStatus)
 	}
 
 	// hook 子进程回连（仅本地，不走 auth）

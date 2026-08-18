@@ -21,6 +21,7 @@ import (
 
 	"pieqi/internal/agent"
 	"pieqi/internal/api"
+	"pieqi/internal/auth"
 	"pieqi/internal/channel/lark"
 	"pieqi/internal/channel/wechat"
 	"pieqi/internal/config"
@@ -152,9 +153,31 @@ func main() {
 		logger.Info("wechat channel enabled")
 	}
 
+	// --- Auth (Feishu binding + Cloudflared tunnel) ---
+	authBindings, err := auth.NewBindingStore(cfg.Auth.FeishuBindingFile)
+	if err != nil {
+		logger.Fatal("init binding store", zap.Error(err))
+	}
+	authTokens := auth.NewTokenStore()
+	authSvc := &auth.Service{
+		Debug:    auth.NewDebugSwitch(cfg.Auth.DebugSkipAllAuth),
+		Bindings: authBindings,
+		Tokens:   authTokens,
+		Limiter:  auth.NewIPLimiter(cfg.Auth.RateLimit.MaxFailuresPerMin, cfg.Auth.RateLimit.BlacklistDuration),
+		Audit:    auth.NewAuditLogger(logger),
+	}
+	tunnelMgr := auth.NewTunnelManager(auth.TunnelConfig{
+		BinaryPath: cfg.Auth.Cloudflared.BinaryPath,
+		LocalURL:   fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
+		Tokens:     authTokens,
+		Logger:     logger,
+	})
+	defer tunnelMgr.Stop(context.Background())
+
 	// API
 	if cfg.API.Enabled {
 		apiServer := api.NewServer(cfg, store, runner, hooks, bus, skills, commands)
+		apiServer.SetAuth(authSvc, tunnelMgr)
 		apiServer.Register(r)
 		logger.Info("api enabled")
 	}

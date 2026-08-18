@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"pieqi/internal/auth"
 	"pieqi/internal/config"
 	"pieqi/internal/core"
 	"pieqi/internal/model"
@@ -229,5 +230,45 @@ func TestAPI_HookCallback(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("hook callback did not return after intervene")
+	}
+}
+
+func mustNewBindingStore(t *testing.T) *auth.BindingStore {
+	t.Helper()
+	b, err := auth.NewBindingStore(filepath.Join(t.TempDir(), "b.json"))
+	if err != nil {
+		t.Fatalf("binding store: %v", err)
+	}
+	return b
+}
+
+func TestAPI_AuthRoutesRegistered(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store, _ := core.NewTaskStore(t.TempDir())
+	bus := core.NewEventBus()
+	hooks := core.NewHookService(5 * time.Second)
+	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	cfg := &config.Config{}
+	cfg.API.Enabled = true
+	srv := NewServer(cfg, store, runner, hooks, bus, nil, nil)
+	// Wire auth — debug ON for this test so the ExternalAuthMiddleware
+	// on the /api business routes short-circuits (no token needed).
+	authSvc := &auth.Service{
+		Debug:    auth.NewDebugSwitch(true),
+		Bindings: mustNewBindingStore(t),
+		Tokens:   auth.NewTokenStore(),
+		Limiter:  auth.NewIPLimiter(5, 10*time.Minute),
+	}
+	srv.SetAuth(authSvc, nil)
+	r := gin.New()
+	srv.Register(r)
+
+	// GET /api/auth/status should work (public route, no gate)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/auth/status", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("auth/status = %d body=%s", w.Code, w.Body.String())
 	}
 }

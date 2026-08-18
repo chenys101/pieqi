@@ -101,6 +101,7 @@ func TestAuthStatus_ReportsBinding(t *testing.T) {
 	g.GET("/api/auth/status", srv.authStatus)
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/auth/status", nil)
+	req.RemoteAddr = "192.168.1.5:1234" // internal — so authStatus reveals the bound OpenID
 	g.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d", w.Code)
@@ -117,6 +118,33 @@ func TestAuthStatus_ReportsBinding(t *testing.T) {
 	}
 	if resp.Debug {
 		t.Fatal("debug should be false")
+	}
+}
+
+func TestAuthStatus_ExternalHidesOpenID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	srv := &Server{auth: newAuthSvcForTest(t), cfg: &config.Config{}}
+	_, _ = srv.auth.Bindings.Bind(auth.Binding{OpenID: "ou_secret", Nickname: "Boss"})
+	g := gin.New()
+	g.GET("/api/auth/status", srv.authStatus)
+	req, _ := http.NewRequest("GET", "/api/auth/status", nil)
+	req.RemoteAddr = "8.8.8.8:1234" // external
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d", w.Code)
+	}
+	var resp struct {
+		Bound  bool   `json:"bound"`
+		OpenID string `json:"openid"`
+		Debug  bool   `json:"debug"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if !resp.Bound {
+		t.Fatal("bound should be true")
+	}
+	if resp.OpenID != "" {
+		t.Fatalf("external request must not receive bound OpenID, got %q", resp.OpenID)
 	}
 }
 

@@ -50,6 +50,12 @@ func (s *Server) unbind(c *gin.Context) {
 
 // authStatus handles GET /api/auth/status — public (no auth gate).
 // Front-end polls this on boot to know if binding is required + debug state.
+//
+// SECURITY: only internal requests learn the bound OpenID. External
+// requests get just `bound` + `debug` — leaking the bound OpenID would
+// let an attacker spoof X-Feishu-Openid and bypass the identity check
+// (the identity check is exact string match, so knowing the OpenID is
+// sufficient to pass it).
 func (s *Server) authStatus(c *gin.Context) {
 	resp := gin.H{
 		"bound": false,
@@ -57,9 +63,14 @@ func (s *Server) authStatus(c *gin.Context) {
 	}
 	if b, ok := s.auth.Bindings.Get(); ok {
 		resp["bound"] = true
-		resp["openid"] = b.OpenID
-		resp["nickname"] = b.Nickname
-		resp["bound_at"] = b.BoundAt
+		// Only reveal identity details to internal callers. External
+		// callers (PWA on boot, before binding is established) only need
+		// to know whether to prompt for binding.
+		if auth.IsInternalRequest(c.Request) {
+			resp["openid"] = b.OpenID
+			resp["nickname"] = b.Nickname
+			resp["bound_at"] = b.BoundAt
+		}
 	}
 	c.JSON(http.StatusOK, resp)
 }
