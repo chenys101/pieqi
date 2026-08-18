@@ -87,14 +87,24 @@ func (s *Server) Register(r gin.IRouter) {
 		r.GET("/api/auth/status", corsMiddleware(corsAll, corsOrigins), s.authStatus)
 	}
 
-	// Tunnel 路由：start/stop/reset 仅外网飞书移动端（ExternalAuth + TunnelOpGate）；
-	// status 公开只读（无 gate，handler 端不泄露 token）。
+	// Tunnel 路由：
+	//   - /start: bootstrap path, gated ONLY by TunnelOpGate (Lark-mobile + external).
+	//     No pre-existing token is required because /start mints the very first
+	//     token. Requiring ExternalAuth here would deadlock (PRD §4.4 lists tunnel
+	//     start as the token-issuance trigger).
+	//   - /stop, /reset: operate on a running tunnel, so they require a valid
+	//     token + identity (ExternalAuth) IN ADDITION to the Lark-mobile gate.
+	//   - /status, /qrcode: public read-only (handler masks the token).
 	if s.auth != nil && s.tunnel != nil {
-		tunnelOp := r.Group("/api/tunnel", corsMiddleware(corsAll, corsOrigins),
+		tunnelStart := r.Group("/api/tunnel", corsMiddleware(corsAll, corsOrigins),
+			s.auth.TunnelOpGateMiddleware())
+		tunnelStart.POST("/start", s.tunnelStart)
+
+		tunnelMutate := r.Group("/api/tunnel", corsMiddleware(corsAll, corsOrigins),
 			s.auth.ExternalAuthMiddleware(), s.auth.TunnelOpGateMiddleware())
-		tunnelOp.POST("/start", s.tunnelStart)
-		tunnelOp.POST("/stop", s.tunnelStop)
-		tunnelOp.POST("/reset", s.tunnelReset)
+		tunnelMutate.POST("/stop", s.tunnelStop)
+		tunnelMutate.POST("/reset", s.tunnelReset)
+
 		r.GET("/api/tunnel/status", corsMiddleware(corsAll, corsOrigins), s.tunnelStatus)
 		r.GET("/api/tunnel/qrcode", corsMiddleware(corsAll, corsOrigins), s.tunnelQRCode)
 	}

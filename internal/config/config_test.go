@@ -62,3 +62,43 @@ auth:
 		t.Fatalf("ttl = %v, want 1h", cfg.Auth.Cloudflared.DefaultTTL)
 	}
 }
+
+// TestConfig_EmptyFeishuBindingFileFallsBackToDefault verifies that an
+// explicitly-empty feishu_binding_file (as the production-default
+// config.yaml sets) falls back to the default path instead of leaving the
+// field as "" (which would make auth.NewBindingStore("") misbehave).
+// Viper overrides SetDefault with any explicit file value, including "".
+func TestConfig_EmptyFeishuBindingFileFallsBackToDefault(t *testing.T) {
+	want := filepath.Join(DefaultDataRoot(), "feishu_binding.json")
+
+	// Case 1: auth block present with feishu_binding_file: "" explicitly.
+	t.Run("explicit_empty", func(t *testing.T) {
+		p := writeTestConfig(t, "server:\n  port: 3000\nauth:\n  feishu_binding_file: \"\"\n")
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.Auth.FeishuBindingFile == "" {
+			t.Fatal("feishu_binding_file must not be empty when explicitly set to \"\"")
+		}
+		if cfg.Auth.FeishuBindingFile != want {
+			t.Fatalf("feishu_binding_file = %q, want %q", cfg.Auth.FeishuBindingFile, want)
+		}
+	})
+
+	// Case 2: no auth block at all — relies on the Viper default + the
+	// same normalization (defensive: empty default path stays empty).
+	t.Run("no_auth_block", func(t *testing.T) {
+		p := writeTestConfig(t, "server:\n  port: 3000\n")
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.Auth.FeishuBindingFile == "" {
+			t.Fatal("feishu_binding_file must not be empty when no auth block is present")
+		}
+		if cfg.Auth.FeishuBindingFile != want {
+			t.Fatalf("feishu_binding_file = %q, want %q", cfg.Auth.FeishuBindingFile, want)
+		}
+	})
+}

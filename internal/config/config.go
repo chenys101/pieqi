@@ -158,5 +158,14 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	// Normalize: an explicitly-empty feishu_binding_file (e.g. the
+	// production-default config.yaml sets `feishu_binding_file: ""`) must
+	// fall back to the default path. Viper's SetDefault is overridden by
+	// any explicit value in the file, including the empty string, which
+	// would otherwise make auth.NewBindingStore("") try to MkdirAll("").
+	if cfg.Auth.FeishuBindingFile == "" {
+		cfg.Auth.FeishuBindingFile = filepath.Join(DefaultDataRoot(), "feishu_binding.json")
+	}
+
 	return &cfg, nil
 }
