@@ -28,6 +28,7 @@ type Config struct {
 	Channels ChannelsConfig `mapstructure:"channels"`
 	API      APIConfig      `mapstructure:"api"`
 	Pieqi      PieqiConfig      `mapstructure:"pieqi"`
+	Auth       AuthConfig       `mapstructure:"auth"`
 }
 
 // ServerConfig HTTP 服务配置
@@ -94,6 +95,27 @@ type ACPConfig struct {
 	InitTimeout  time.Duration `mapstructure:"init_timeout"`   // initialize/newSession 握手超时
 }
 
+// AuthConfig 飞书身份绑定 + Cloudflared 隧道安全系统配置。
+// 最高优先级是 DebugSkipAllAuth：true 时所有鉴权全部跳过（仅本地开发用）。
+type AuthConfig struct {
+	DebugSkipAllAuth    bool              `mapstructure:"debug_skip_all_auth"`     // 默认 false；true 全量放行（仅开发）
+	FeishuBindingFile   string            `mapstructure:"feishu_binding_file"`    // 绑定账号持久化路径
+	Cloudflared         CloudflaredConfig `mapstructure:"cloudflared"`
+	RateLimit           RateLimitConfig   `mapstructure:"ratelimit"`
+}
+
+// CloudflaredConfig Cloudflared 临时隧道配置。
+type CloudflaredConfig struct {
+	BinaryPath string        `mapstructure:"binary_path"`  // cloudflared 可执行路径；默认 "cloudflared"（PATH 查找）
+	DefaultTTL time.Duration `mapstructure:"default_ttl"`  // 默认 15m；可选 15m/1h/4h
+}
+
+// RateLimitConfig 外网 Token 暴力破解限流。
+type RateLimitConfig struct {
+	MaxFailuresPerMin int           `mapstructure:"max_failures_per_min"`  // 默认 5
+	BlacklistDuration time.Duration `mapstructure:"blacklist_duration"`    // 默认 10m
+}
+
 // Load 从文件和环境变量加载配置
 func Load(configPath string) (*Config, error) {
 	v := viper.New()
@@ -120,6 +142,12 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pieqi.acp.use_acp", false)
 	v.SetDefault("pieqi.acp.agent_type", "claude-code")
 	v.SetDefault("pieqi.acp.init_timeout", "30s")
+	v.SetDefault("auth.debug_skip_all_auth", false)
+	v.SetDefault("auth.feishu_binding_file", filepath.Join(DefaultDataRoot(), "feishu_binding.json"))
+	v.SetDefault("auth.cloudflared.binary_path", "cloudflared")
+	v.SetDefault("auth.cloudflared.default_ttl", "15m")
+	v.SetDefault("auth.ratelimit.max_failures_per_min", 5)
+	v.SetDefault("auth.ratelimit.blacklist_duration", "10m")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
