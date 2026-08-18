@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 
+	"pieqi/internal/auth"
 	"pieqi/internal/config"
 	"pieqi/internal/core"
 
@@ -18,6 +19,8 @@ type Server struct {
 	bus      *core.EventBus
 	skills   *core.SkillScanner
 	commands *core.CommandScanner
+	auth     *auth.Service       // wired by SetAuth; nil-safe for legacy tests
+	tunnel   *auth.TunnelManager // wired by SetAuth; nil-safe for legacy tests
 }
 
 // NewServer 创建 API 服务。
@@ -31,6 +34,14 @@ func NewServer(cfg *config.Config, store *core.TaskStore, runner *core.TaskRunne
 		skills:   skills,
 		commands: commands,
 	}
+}
+
+// SetAuth wires the auth service and tunnel manager. Called by main.go
+// after NewServer. nil-safe: legacy tests that don't call SetAuth leave
+// these nil, and the handlers/middlewares nil-check before use.
+func (s *Server) SetAuth(svc *auth.Service, tunnel *auth.TunnelManager) {
+	s.auth = svc
+	s.tunnel = tunnel
 }
 
 // Register 在 gin router 上挂 /api/* 与 /internal/* 路由。
