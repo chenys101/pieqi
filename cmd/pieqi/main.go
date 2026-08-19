@@ -26,6 +26,7 @@ import (
 	"pieqi/internal/channel/wechat"
 	"pieqi/internal/config"
 	"pieqi/internal/core"
+	"pieqi/internal/larkreg"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -198,6 +199,7 @@ func main() {
 	if cfg.API.Enabled {
 		apiServer := api.NewServer(cfg, store, runner, hooks, bus, skills, commands)
 		apiServer.SetAuth(authSvc, tunnelMgr)
+		apiServer.SetLarkReg(larkreg.NewRegistration(), cfg.Channels.Lark.CredentialsFile)
 		apiServer.Register(r)
 		logger.Info("api enabled")
 	}

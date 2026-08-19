@@ -21,6 +21,12 @@ type Server struct {
 	commands *core.CommandScanner
 	auth     *auth.Service       // wired by SetAuth; nil-safe for legacy tests
 	tunnel   *auth.TunnelManager // wired by SetAuth; nil-safe for legacy tests
+
+	// Lark Device Flow (扫码一键创建飞书应用)。wired by SetLarkReg;
+	// nil-safe for tests that don't exercise larkreg routes.
+	larkRegRunner   larkRegRunner
+	larkRegState    *larkRegState
+	larkRegCredPath string
 }
 
 // NewServer 创建 API 服务。
@@ -107,6 +113,16 @@ func (s *Server) Register(r gin.IRouter) {
 
 		r.GET("/api/tunnel/status", corsMiddleware(corsAll, corsOrigins), s.tunnelStatus)
 		r.GET("/api/tunnel/qrcode", corsMiddleware(corsAll, corsOrigins), s.tunnelQRCode)
+	}
+
+	// Lark Device Flow 路由:扫码一键创建飞书应用。
+	// 仅内网(同 bind/unbind 的 BindOpGateMiddleware)—— 防止从公网触发
+	// 应用创建流程。不能套 ExternalAuthMiddleware(接入前还没有凭据)。
+	if s.auth != nil && s.larkRegRunner != nil {
+		larkRegGrp := r.Group("/api/larkreg", corsMiddleware(corsAll, corsOrigins),
+			s.auth.BindOpGateMiddleware())
+		larkRegGrp.POST("/start", s.larkRegStart)
+		larkRegGrp.GET("/poll", s.larkRegPoll)
 	}
 
 	// hook 子进程回连（仅本地，不走 auth）
