@@ -5,10 +5,16 @@ server:
 channels:
   lark:
     enabled: false
+    # event_mode: webhook(默认,需公网回调) | longconn(长连接,无需公网,推荐)
+    event_mode: webhook
+    # 长连接模式只需 app_id+app_secret;webhook 模式还需 verify_token+encrypt_key
     app_id: ""
     app_secret: ""
     verify_token: ""
     encrypt_key: ""
+    # 一键接入(扫码)拿到的凭据会写入这里,覆盖上面的 app_id/app_secret。
+    # 空 = ~/.pieqi/lark_credentials.json。详见 /api/larkreg/start。
+    credentials_file: ""
   wecom:
     enabled: false
   wechat:
