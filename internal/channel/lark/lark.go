@@ -19,6 +19,7 @@ import (
 	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 // Adapter 飞书渠道适配器，实现 MessageReceiver + MessageSender。
@@ -27,6 +28,8 @@ type Adapter struct {
 	appSecret   string
 	verifyToken string
 	encryptKey  string
+	eventMode   string // "webhook"（默认）| "longconn"
+	logger      *zap.Logger
 	onMessage   func(model.Message)
 	httpClient  *http.Client
 
@@ -36,28 +39,57 @@ type Adapter struct {
 	tokenExpiry time.Time
 }
 
-// New 创建飞书适配器
+// New 创建飞书适配器（默认 webhook 模式）。
 func New(appID, appSecret, verifyToken, encryptKey string) *Adapter {
 	return &Adapter{
 		appID:       appID,
 		appSecret:   appSecret,
 		verifyToken: verifyToken,
 		encryptKey:  encryptKey,
+		eventMode:   "webhook",
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// NewLongConn 创建飞书适配器（长连接模式）。verifyToken/encryptKey
+// 在长连接模式下不需要（SDK 内置鉴权），传空字符串即可。
+func NewLongConn(appID, appSecret string) *Adapter {
+	return &Adapter{
+		appID:      appID,
+		appSecret:  appSecret,
+		eventMode:  "longconn",
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// WithLogger 注入 logger，用于长连接错误日志。nil = 静默。
+func (a *Adapter) WithLogger(l *zap.Logger) *Adapter {
+	a.logger = l
+	return a
 }
 
 // Name 返回渠道名
 func (a *Adapter) Name() string { return "lark" }
 
-// Init 注册飞书 Webhook 路由
+// Init 注册飞书 Webhook 路由（仅 webhook 模式）。
+// 长连接模式不需要公网路由，直接返回 nil。
 func (a *Adapter) Init(router gin.IRouter) error {
+	if a.eventMode == "longconn" {
+		return nil
+	}
 	router.POST("/webhook/lark", a.handleWebhook)
 	return nil
 }
 
-// Start 启动（webhook 模式无需额外启动）
-func (a *Adapter) Start(ctx context.Context) error { return nil }
+// Start 启动渠道。
+//   - webhook 模式：no-op（等飞书回调即可）
+//   - longconn 模式：启动飞书长连接事件订阅（阻塞直到 ctx 取消）
+func (a *Adapter) Start(ctx context.Context) error {
+	if a.eventMode != "longconn" {
+		return nil
+	}
+	return a.startLongConnection(ctx, a.logger)
+}
 
 // OnMessage 注册消息回调
 func (a *Adapter) OnMessage(cb func(model.Message)) {
