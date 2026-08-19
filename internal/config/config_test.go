@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -101,4 +102,34 @@ func TestConfig_EmptyFeishuBindingFileFallsBackToDefault(t *testing.T) {
 			t.Fatalf("feishu_binding_file = %q, want %q", cfg.Auth.FeishuBindingFile, want)
 		}
 	})
+}
+
+func TestConfig_LarkDefaults(t *testing.T) {
+	p := writeTestConfig(t, "server:\n  port: 3000\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Channels.Lark.EventMode != "webhook" {
+		t.Fatalf("EventMode default = %q, want \"webhook\"", cfg.Channels.Lark.EventMode)
+	}
+	if cfg.Channels.Lark.CredentialsFile == "" {
+		t.Fatal("CredentialsFile should default to ~/.pieqi/lark_credentials.json")
+	}
+	// 验证默认路径形态(与 feishu_binding_file 同目录)
+	if !strings.HasSuffix(cfg.Channels.Lark.CredentialsFile, "lark_credentials.json") {
+		t.Fatalf("CredentialsFile default = %q, want suffix lark_credentials.json", cfg.Channels.Lark.CredentialsFile)
+	}
+}
+
+func TestConfig_LarkEmptyCredentialsFileFallsBack(t *testing.T) {
+	body := "server:\n  port: 3000\nchannels:\n  lark:\n    credentials_file: \"\"\n"
+	p := writeTestConfig(t, body)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Channels.Lark.CredentialsFile == "" {
+		t.Fatal("empty credentials_file should fall back to default path")
+	}
 }

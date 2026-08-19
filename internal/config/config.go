@@ -46,11 +46,13 @@ type ChannelsConfig struct {
 
 // LarkConfig 飞书配置
 type LarkConfig struct {
-	Enabled     bool   `mapstructure:"enabled"`
-	AppID       string `mapstructure:"app_id"`
-	AppSecret   string `mapstructure:"app_secret"`
-	VerifyToken string `mapstructure:"verify_token"`
-	EncryptKey  string `mapstructure:"encrypt_key"`
+	Enabled         bool   `mapstructure:"enabled"`
+	AppID           string `mapstructure:"app_id"`
+	AppSecret       string `mapstructure:"app_secret"`
+	VerifyToken     string `mapstructure:"verify_token"`
+	EncryptKey      string `mapstructure:"encrypt_key"`
+	EventMode       string `mapstructure:"event_mode"`      // "webhook"(默认)| "longconn"
+	CredentialsFile string `mapstructure:"credentials_file"` // 一键接入凭据落盘路径;空 = ~/.pieqi/lark_credentials.json
 }
 
 // WeComConfig 企业微信配置
@@ -148,6 +150,8 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("auth.cloudflared.default_ttl", "15m")
 	v.SetDefault("auth.ratelimit.max_failures_per_min", 5)
 	v.SetDefault("auth.ratelimit.blacklist_duration", "10m")
+	v.SetDefault("channels.lark.event_mode", "webhook")
+	v.SetDefault("channels.lark.credentials_file", filepath.Join(DefaultDataRoot(), "lark_credentials.json"))
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -165,6 +169,11 @@ func Load(configPath string) (*Config, error) {
 	// would otherwise make auth.NewBindingStore("") try to MkdirAll("").
 	if cfg.Auth.FeishuBindingFile == "" {
 		cfg.Auth.FeishuBindingFile = filepath.Join(DefaultDataRoot(), "feishu_binding.json")
+	}
+
+	// 空 credentials_file 回退默认路径(同 feishu_binding_file 模式)
+	if cfg.Channels.Lark.CredentialsFile == "" {
+		cfg.Channels.Lark.CredentialsFile = filepath.Join(DefaultDataRoot(), "lark_credentials.json")
 	}
 
 	return &cfg, nil
