@@ -1092,9 +1092,14 @@ func (tr *TaskRunner) notifyFinished(t *model.Task, prefix string) {
 func (tr *TaskRunner) transition(taskID string, target model.TaskStatus, mutator func(*model.Task)) *model.Task {
 	updated, err := tr.store.Update(taskID, func(t *model.Task) bool {
 		if target != "" {
-			// waiting_input 与 running 之间可反复切换；completed/failed/cancelled 是终态
+			// waiting_input 与 running 之间可反复切换；completed/failed/cancelled 是终态。
+			// 但 Resume 续问会把终态任务重新置 running（setRunning 的 mutator 会清 FinishedAt
+			// 重新进入运行），故 终态→running 放行，让续问的状态流转与失败真正落库/推送；
+			// 终态→终态 仍拦截（防止 stray completeTask/failTask 重复完成或覆盖历史终态）。
 			if t.Status == model.TaskCompleted || t.Status == model.TaskFailed || t.Status == model.TaskCancelled {
-				return false
+				if target != model.TaskRunning {
+					return false
+				}
 			}
 			t.Status = target
 		}
