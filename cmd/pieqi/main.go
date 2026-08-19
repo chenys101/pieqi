@@ -48,6 +48,12 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	// 加载 Device Flow 扫码拿到的飞书凭据（若存在则覆盖 config 里的 app_id/app_secret）
+	if err := loadLarkCredentials(cfg); err != nil {
+		// 凭据加载失败不阻断启动，只警告（此时 logger 还没初始化，用 log.Printf）
+		log.Printf("warn: load lark credentials: %v", err)
+	}
+
 	// --- 日志 ---
 	var logger *zap.Logger
 	if cfg.Server.Mode == "release" {
@@ -129,15 +135,29 @@ func main() {
 
 	// 渠道
 	if cfg.Channels.Lark.Enabled {
-		larkAdapter := lark.New(
-			cfg.Channels.Lark.AppID, cfg.Channels.Lark.AppSecret,
-			cfg.Channels.Lark.VerifyToken, cfg.Channels.Lark.EncryptKey,
-		)
+		var larkAdapter *lark.Adapter
+		if cfg.Channels.Lark.EventMode == "longconn" {
+			larkAdapter = lark.NewLongConn(cfg.Channels.Lark.AppID, cfg.Channels.Lark.AppSecret).
+				WithLogger(logger)
+		} else {
+			larkAdapter = lark.New(
+				cfg.Channels.Lark.AppID, cfg.Channels.Lark.AppSecret,
+				cfg.Channels.Lark.VerifyToken, cfg.Channels.Lark.EncryptKey,
+			)
+		}
 		if err := larkAdapter.Init(r); err != nil {
 			logger.Fatal("init lark", zap.Error(err))
 		}
 		bridge.RegisterReceiver(larkAdapter)
-		logger.Info("lark channel enabled")
+		// 长连接模式需要后台 goroutine 启动 wss；webhook 模式 Start 是 no-op
+		larkCtx, larkCancel := context.WithCancel(context.Background())
+		defer larkCancel()
+		go func() {
+			if err := larkAdapter.Start(larkCtx); err != nil {
+				logger.Error("lark long-connection exited", zap.Error(err))
+			}
+		}()
+		logger.Info("lark channel enabled", zap.String("event_mode", cfg.Channels.Lark.EventMode))
 	}
 	if cfg.Channels.WeChat.Enabled {
 		wechatAdapter := wechat.New(logger, cfg.Channels.WeChat.BaseURL)
@@ -191,6 +211,41 @@ func main() {
 	if err := r.Run(addr); err != nil {
 		logger.Fatal("server", zap.Error(err))
 	}
+}
+
+// loadLarkCredentials 从 ~/.pieqi/lark_credentials.json 加载 Device Flow
+// 扫码拿到的 app_id/app_secret，覆盖 config 里的默认值。文件不存在或
+// 损坏时静默跳过（降级到 config 里的 app_id/app_secret）。
+//
+// 该文件由 POST /api/larkreg/poll 在用户扫码确认后写入，见 internal/larkreg。
+func loadLarkCredentials(cfg *config.Config) error {
+	path := cfg.Channels.Lark.CredentialsFile
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // 文件不存在是合法状态（未接入过）
+		}
+		return fmt.Errorf("read lark credentials: %w", err)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	var c struct {
+		AppID     string `json:"app_id"`
+		AppSecret string `json:"app_secret"`
+	}
+	if err := json.Unmarshal(data, &c); err != nil {
+		// 损坏文件：不阻断启动，只警告（无 logger 可用，降级静默）
+		return nil
+	}
+	if c.AppID != "" && c.AppSecret != "" {
+		cfg.Channels.Lark.AppID = c.AppID
+		cfg.Channels.Lark.AppSecret = c.AppSecret
+	}
+	return nil
 }
 
 // --- pre-tool-use 子命令 ---
