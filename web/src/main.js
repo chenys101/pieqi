@@ -399,6 +399,18 @@ function renderDetail() {
         supSend.disabled = true;
         state.lastPrompt[t.id] = text; // running 期间 footer 展示本次提示词
         state.pendingScroll = t.id; // 标记：收到下次更新后强制滑到底
+        // 乐观渲染：发送成功后本地立即在详情区插入右对齐用户气泡，不等 WS 推送。
+        // 后端 Resume 会持久化同一条 user 事件并经 task_updated 推回，届时 renderDetail
+        // 全量重绘会替换本临时节点，故这里不写 state.tasks.events，避免重复气泡。
+        if (state.selectedId === t.id) {
+          const eventsEl = document.getElementById('events');
+          if (eventsEl) {
+            eventsEl.insertAdjacentHTML('beforeend',
+              `<div class="ev ev-user"><div class="ev-bubble">${escapeHtml(text)}</div></div>`);
+            const scroller = document.querySelector('.detail-content');
+            if (scroller) scroller.scrollTop = scroller.scrollHeight;
+          }
+        }
       } catch (err) { alert(err.message); }
     });
     // 斜杠补全（commands + skills 分组）
