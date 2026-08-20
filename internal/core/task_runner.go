@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -78,6 +79,9 @@ type agentRunner interface {
 	// SessionID 返回 task 的 sessionID（无则 ""）。runACP 持久化真实 session ID 时用它取
 	// NewSession 返回的句柄，喂给 adapter.RealSessionID 拿到真实协议/claude session ID。
 	SessionID(taskID string) string
+	// SetOnSessionClosed 注册会话关闭回调：reaper 空闲回收 / Cancel / 删任务 / 关停时触发，
+	// TaskRunner 借此清理会话级资源（unwire + 延迟 worktree 清理）。
+	SetOnSessionClosed(fn func(taskID string))
 }
 
 // acpWires 一个 ACP 任务注册的 wire 句柄集合（runACP 注册，结束/取消时拆卸）。
@@ -143,6 +147,10 @@ func (tr *TaskRunner) SetAgentManager(mgr agentRunner, useACP bool, permTimeout 
 	tr.agentMgr = mgr
 	tr.useACP = useACP
 	tr.permTimeout = permTimeout
+	// 会话关闭（含 reaper 空闲回收/Cancel/删任务/关停）时清理本侧 wires + 延迟 worktree 清理
+	if mgr != nil {
+		mgr.SetOnSessionClosed(tr.onAgentSessionClosed)
+	}
 }
 
 // semaphore 轻量计数信号量，用于每项目并发上限。
@@ -220,13 +228,10 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 	// ACP 路径（Task 5）：续问经 session/load/resume 复用已有会话上下文（M4 的 re-Open 丢失
 	// 上下文限制已修复）。runACP 据 task.ACPSessionID 构造 SessionConfig.ResumeFrom 触发 load/resume。
 	if tr.useACP && tr.agentMgr != nil {
-		// 双保险：上轮 adapter 已 Close（不应还在 open）。
-		if tr.agentMgr.Adapter(taskID) != nil {
-			return fmt.Errorf("task still has a live agent session, use intervene instead")
-		}
-		// ACP 路径无 ACPSessionID（且未回退落 ClaudeSessionID）说明首跑未成功持久化真实 sid，
-		// 无法 resume——不应到此（首跑 completed/failed 时 sid 已落库），异常情况明确报错。
-		if t.ACPSessionID == "" && t.ClaudeSessionID == "" {
+		// 双保险：上轮 adapter 若仍 open（ACP 保活复用），runACP 会直接复用同一会话跑下一轮，
+		// 不重新 Open/LoadSession；这里不拦（老代码拦过"use intervene"，已由保活复用取代）。
+		// 无活会话时续问需要 session id 才能 ResumeFrom；两者皆空则无法续问，明确报错。
+		if tr.agentMgr.Adapter(taskID) == nil && t.ACPSessionID == "" && t.ClaudeSessionID == "" {
 			return fmt.Errorf("task missing session, cannot resume")
 		}
 		tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text})
@@ -504,19 +509,48 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		prompt = strings.TrimSpace(resumePrompt)
 	}
 
-	// 构造 SessionConfig：续问（resumePrompt 非空）且已有真实 ACP session id 时，
-	// 设 ResumeFrom 让 adapter 走 session/load/resume 复用上下文（替代 M4 的 re-Open 新会话）。
-	cfg := agent.SessionConfig{Cwd: task.WorktreePath}
-	if resumePrompt != "" && task.ACPSessionID != "" {
-		cfg.ResumeFrom = task.ACPSessionID
+	// ACP 保活复用：已有活会话（前一轮保活）时直接跑一轮，不重新 Open/LoadSession。
+	// 活会话进程若已死（adapter.Done 关闭），先摘除再走 open 路径。
+	if a := tr.agentMgr.Adapter(task.ID); a != nil {
+		if adapterDead(a) {
+			_ = tr.agentMgr.Close(task.ID)
+		} else {
+			tr.runACPTurn(ctx, task, prompt, true)
+			return
+		}
 	}
 
+	// 无活会话：Open（spawn/握手/LoadSession）+ wire + 持久化真实 sid。
+	// 续问（resumePrompt 非空）且已有 ACP session id 时设 ResumeFrom 复用上下文。
+	resumeFrom := ""
+	if resumePrompt != "" && task.ACPSessionID != "" {
+		resumeFrom = task.ACPSessionID
+	}
+	fellBack := tr.ensureACPSession(ctx, task, resumeFrom)
+	if tr.agentMgr.Adapter(task.ID) == nil {
+		return // Open 失败已 surface（failTask / 续问 status + forceFailTask）
+	}
+	// ACP 路径保活（轮末不关，由空闲回收/取消/删任务/关停关）；PrintAgent 回退一次性（轮末关）
+	tr.runACPTurn(ctx, task, prompt, !fellBack)
+}
+
+// ensureACPSession 为 task 建立 agent 会话：Open（spawn/握手/LoadSession）+ 注册 wires +
+// 持久化真实 session ID。已存在活会话时 no-op（复用，wires 已在 Open 时注册）。
+//
+// resumeFrom 非空 = 续问复用已有会话上下文（ACP 走 session/load/resume；PrintAgent 走
+// --resume）。Open 失败会 surface（首轮 failTask；续问 status 事件 + forceFailTask），
+// 此时无会话登记，调用方应据此返回。返回是否走了 PrintAgent 回退（fellBack）。
+func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, resumeFrom string) bool {
+	if tr.agentMgr.Adapter(task.ID) != nil {
+		return false // 复用活会话（wires 已注册），无回退
+	}
+	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom}
 	adapter, fellBack, err := tr.agentMgr.Open(ctx, task.ID, task.ProjectID, cfg)
 	if err != nil {
 		// 续问路径 Open 失败多为原会话丢失（ACP load/resume 报错，或 PrintAgent --resume
 		// 报 "No conversation found"）。由协议层 surface：追加 status 事件 + 置 failed 带明确原因，
 		// 不静默失败。
-		if cfg.ResumeFrom != "" {
+		if resumeFrom != "" {
 			tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
 				Text: "续问失败：原会话已丢失（" + err.Error() + "），请重新发起任务"})
 			// 续问时 task 处终态（completed/failed/cancelled），failTask 经 transition 终态守卫为 no-op；
@@ -525,24 +559,18 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		} else {
 			tr.failTask(task.ID, "agent open: "+err.Error())
 		}
-		return
+		return fellBack
 	}
 	if fellBack {
 		tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
 			Text: "ACP 适配器不可用，已回退到 claude -p 路径"})
 	}
-	defer tr.agentMgr.Close(task.ID)
 
+	// 注册 wires（跨轮保活：轮末不 unwire，由会话关闭回调 onAgentSessionClosed 统一清理）。
 	dh := WireContentDelta(adapter, tr.bus, tr.store, task.ID)
 	ph := WirePermission(adapter, tr.bus, tr.store, task.ID, tr.notify, tr.permTimeout)
 	th := WireToolCall(adapter, tr.bus, tr.store, task.ID)
 	tr.setWires(task.ID, dh, ph, th)
-	defer func() {
-		tr.clearWires(task.ID)
-		dh.Unwire()
-		ph.Unwire()
-		th.Unwire()
-	}()
 
 	// Open 成功后立即持久化真实 session ID（续问用）。
 	// ACP 路径（!fellBack）：sessionID 即真实协议资源 ID，存 ACPSessionID。
@@ -551,7 +579,7 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 	// 走 resume，故该值主要供诊断/Phase 1 路径兼容）。
 	realSid := adapter.RealSessionID(tr.agentMgr.SessionID(task.ID))
 	if realSid != "" {
-		if updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
+		_, _ = tr.store.Update(task.ID, func(t *model.Task) bool {
 			if !fellBack {
 				if t.ACPSessionID != realSid {
 					t.ACPSessionID = realSid
@@ -564,25 +592,51 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 				}
 			}
 			return false
-		}); err == nil && updated != nil {
-			task = updated
-		}
+		})
 	}
+	return fellBack
+}
 
+// runACPTurn 跑一轮 prompt turn：setRunning → Run(SendPrompt) → 终态转换。
+//
+// keepAlive=true（ACP 路径）：轮末不关会话，跨轮保活复用（下一次 Resume 直接复用同一会话，
+// 不做 LoadSession/重新 spawn，也不产生新的 claude 进程去抢会话锁）；会话由空闲回收器
+// （AgentManager reaper）/Cancel/删任务/服务器关停负责关闭。
+// keepAlive=false（PrintAgent 回退）：轮末关会话并 unwire（一次性进程语义）。
+func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt string, keepAlive bool) {
 	tr.setRunning(task.ID)
 	runErr := tr.agentMgr.Run(ctx, task.ID, prompt)
 
-	// Cancel 路径会先把 task 置 cancelled；此处若是 cancelled 就直接收尾，不再 fail/complete。
+	// Cancel 路径会先把 task 置 cancelled；此处若是 cancelled 就直接收尾（不 fail/complete），
+	// 并摘除会话（取消=停止，不保活）。worktree 清理由会话关闭回调统一处理。
 	if t, ok := tr.store.Get(task.ID); ok && t.Status == model.TaskCancelled {
-		if tr.cleanupWorktrees {
-			_ = tr.wm.Cleanup(context.Background(), project, task.ID, task.WorktreePath)
+		if tr.agentMgr.Adapter(task.ID) != nil {
+			_ = tr.agentMgr.Close(task.ID)
 		}
 		return
 	}
+
 	if runErr != nil {
+		// 续问会话丢失（PrintAgent --resume 找不到原 claude 会话）：提示上下文丢失，
+		// 以全新会话重跑一轮（镜像 Phase 1 run() 的 "No conversation found" 兜底）。
+		if errors.Is(runErr, agent.ErrNoConversation) {
+			tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
+				Text: "续问上下文已丢失，已用全新会话继续"})
+			_ = tr.agentMgr.Close(task.ID)
+			fellBack := tr.ensureACPSession(ctx, task, "") // resumeFrom="" → 全新会话
+			if tr.agentMgr.Adapter(task.ID) != nil {
+				tr.runACPTurn(ctx, task, prompt, !fellBack)
+			}
+			return
+		}
+		// adapter 进程已死（连接断开）：摘除死会话，避免下次 resume 复用死会话。
+		if a := tr.agentMgr.Adapter(task.ID); a != nil && adapterDead(a) {
+			_ = tr.agentMgr.Close(task.ID)
+		}
 		tr.failTask(task.ID, "agent run: "+runErr.Error())
 		return
 	}
+
 	// 正常结束但未达终态：与 claude -p 路径一致的空输出兜底——无任何产出则标 failed，
 	// 有产出则标 completed（adapter 内部已通过 wire 把增量持久化进 Output/Events）。
 	if t, ok := tr.store.Get(task.ID); ok && t.Status != model.TaskCompleted && t.Status != model.TaskFailed {
@@ -593,9 +647,52 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		}
 	}
 
-	if tr.cleanupWorktrees {
-		_ = tr.wm.Cleanup(context.Background(), project, task.ID, task.WorktreePath)
+	// PrintAgent 一次性：轮末关会话并 unwire；ACP 保活：不关（由回收/取消/删任务/关停关）。
+	if !keepAlive && tr.agentMgr.Adapter(task.ID) != nil {
+		_ = tr.agentMgr.Close(task.ID)
 	}
+}
+
+// adapterDead 判断 adapter 底层进程是否已退出/连接断开（adapter.Done 关闭）。
+// 死会话复用会直接失败，故 runACP/runACPTurn 在复用前先摘除。
+func adapterDead(a agent.AgentAdapter) bool {
+	select {
+	case <-a.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// onAgentSessionClosed AgentManager 会话关闭回调：清除并 unwire 该 task 的 wire 句柄，
+// 并对保活会话补做延迟到关闭时刻的 worktree 清理（保活期间轮末不清理，避免续问 cwd 丢失）。
+func (tr *TaskRunner) onAgentSessionClosed(taskID string) {
+	tr.wireMu.Lock()
+	w, ok := tr.wires[taskID]
+	if ok {
+		delete(tr.wires, taskID)
+	}
+	tr.wireMu.Unlock()
+	if w != nil {
+		w.delta.Unwire()
+		w.perm.Unwire()
+		w.tool.Unwire()
+	}
+	// 非 worktree 任务（WorktreePath==ProjectPath，如生产直接跑原目录）不清理，避免误删原项目目录。
+	if tr.cleanupWorktrees {
+		if t, ok := tr.store.Get(taskID); ok && t != nil && t.WorktreePath != "" && t.WorktreePath != t.ProjectPath {
+			project := &model.Project{ID: t.ProjectID, RepoPath: t.ProjectPath, BaseBranch: tr.baseBranch}
+			_ = tr.wm.Cleanup(context.Background(), project, taskID, t.WorktreePath)
+		}
+	}
+}
+
+// CloseAgentSession 关闭 task 的 agent 会话（删除任务时调用，避免保活会话残留为孤儿）。
+func (tr *TaskRunner) CloseAgentSession(taskID string) {
+	if tr.agentMgr == nil {
+		return
+	}
+	_ = tr.agentMgr.Close(taskID)
 }
 
 // setWires 登记 ACP 路径的 wire 句柄（供 Intervene 审批决策取 PermissionWire）。
@@ -791,7 +888,9 @@ func (tr *TaskRunner) Intervene(taskID string, in model.Intervention) error {
 // 路径 B 的 waiting_input（choice）进程已死、不在 tr.running，直接置 cancelled
 // 不依赖杀进程。路径 A 的 waiting_input 进程仍活着，走原杀进程逻辑。
 func (tr *TaskRunner) Cancel(taskID string) error {
-	// ACP 路径（Task 4.4）：先置 cancelled（终态），再中断 Run；runACP 的 defer 会 Close+Unwire。
+	// ACP 路径（Task 4.4）：先置 cancelled（终态），再中断 Run；取消即停止，
+	// 顺带关闭会话并 unwire（不保活，避免取消后会话残留）。runACPTurn 的 defer 见 cancelled
+	// 会再 Close（幂等），worktree 清理由会话关闭回调统一处理。
 	if tr.isACPPath(taskID) {
 		updated := tr.transition(taskID, model.TaskCancelled, func(t *model.Task) {
 			if t.Status == model.TaskRunning || t.Status == model.TaskWaitingInput {
@@ -803,6 +902,7 @@ func (tr *TaskRunner) Cancel(taskID string) error {
 			return fmt.Errorf("task not cancellable: %s", taskID)
 		}
 		_ = tr.agentMgr.Cancel(context.Background(), taskID)
+		_ = tr.agentMgr.Close(taskID)
 		return nil
 	}
 	tr.mu.Lock()

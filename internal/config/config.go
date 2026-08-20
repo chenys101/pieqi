@@ -95,6 +95,7 @@ type ACPConfig struct {
 	AgentType    string        `mapstructure:"agent_type"`     // claude-code / qodercli / codex ...；默认 "claude-code"
 	SpawnCommand []string      `mapstructure:"acp_spawn_command"` // spawn 命令分词，如 [npx,-y,@agentclientprotocol/claude-agent-acp@latest]；空 = 按 agent_type 取默认
 	InitTimeout  time.Duration `mapstructure:"init_timeout"`   // initialize/newSession 握手超时
+	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`   // ACP 会话空闲回收阈值：轮间保活，超过该时长无对话则优雅关闭（避免孤儿进程）；<=0 禁用回收
 }
 
 // AuthConfig 飞书身份绑定 + Cloudflared 隧道安全系统配置。
@@ -144,6 +145,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pieqi.acp.use_acp", false)
 	v.SetDefault("pieqi.acp.agent_type", "claude-code")
 	v.SetDefault("pieqi.acp.init_timeout", "30s")
+	v.SetDefault("pieqi.acp.idle_timeout", "15m") // ACP 会话空闲回收阈值（轮间保活上限）
 	v.SetDefault("auth.debug_skip_all_auth", false)
 	v.SetDefault("auth.feishu_binding_file", filepath.Join(DefaultDataRoot(), "feishu_binding.json"))
 	v.SetDefault("auth.cloudflared.binary_path", "cloudflared")

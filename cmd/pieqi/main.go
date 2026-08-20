@@ -15,8 +15,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"pieqi/internal/agent"
@@ -111,8 +113,10 @@ func main() {
 	)
 
 	// ACP 路径（Phase 2）：use_acp=true 时注入 AgentManager
+	var acpMgr *agent.AgentManager
 	if cfg.Pieqi.ACP.UseACP {
 		mgr := agent.NewAgentManager(agent.ManagerConfigFromPieqi(cfg.Pieqi), logger)
+		acpMgr = mgr
 		// 透明回退时记录真实 primaryErr（此前只记通用文案"ACP 适配器不可用"，失败原因黑盒）。
 		// 回退本身不阻塞 Open（异步触发）；这里把触发回退的 primary 失败原因落到日志，便于定位。
 		mgr.SetFallbackHook(func(taskID string, primaryErr error) {
@@ -121,6 +125,9 @@ func main() {
 		})
 		runner.SetAgentManager(mgr, cfg.Pieqi.ACP.UseACP, cfg.Pieqi.HookTimeout)
 		logger.Info("acp agent manager enabled", zap.String("agent_type", cfg.Pieqi.ACP.AgentType))
+		// 后台空闲回收：ACP 会话跨轮保活，超过 idle_timeout 无对话优雅关闭（避免孤儿进程累积）。
+		// tick 取 idle_timeout 的 1/3，保证回收延迟上限；idle_timeout<=0 时 StartReaper 为 no-op。
+		mgr.StartReaper(cfg.Pieqi.ACP.IdleTimeout / 3)
 	}
 
 	// --- Bridge（IM 渠道编排） ---
@@ -208,6 +215,18 @@ func main() {
 	registerStatic(r)
 
 	// --- 启动 ---
+	// 信号处理：SIGINT/SIGTERM → 优雅关闭所有 ACP 会话（CloseAll 走优雅 Close，
+	// adapter 自行 dispose 清 claude 子进程），避免关停时 adapter/claude 子树残留为孤儿。
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		if acpMgr != nil {
+			_ = acpMgr.CloseAll()
+		}
+		os.Exit(0)
+	}()
+
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	logger.Info("pieqi starting", zap.String("addr", addr), zap.String("mode", cfg.Server.Mode))
 	if err := r.Run(addr); err != nil {

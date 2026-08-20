@@ -51,6 +51,7 @@ pieqi:
     agent_type: claude-code         # claude-code | qodercli | codex | <其他>
     acp_spawn_command: []           # 空 = 代码自动解析；如 ["qodercli","--acp","--port","1234"]
     init_timeout: 30s               # initialize / newSession 握手超时
+    idle_timeout: 15m               # ACP 会话空闲回收：轮间保活，超过该时长无对话优雅关闭（避免孤儿进程）；<=0 禁用
 
 # 飞书身份绑定 + Cloudflared 临时隧道安全系统（PRD §8）
 auth:
