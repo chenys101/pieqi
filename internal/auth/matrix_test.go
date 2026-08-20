@@ -20,17 +20,17 @@ type matrixCase struct {
 	wantStatus int
 }
 
-// TestPermissionMatrix walks every PRD §5 row for business + tunnel + bind
-// endpoints and asserts the documented status code.
+// TestPermissionMatrix walks every external-access row for business + tunnel
+// + bind endpoints and asserts the documented status code.
 //
-// Each case is routed to the middleware that owns its PRD §5 section so the
-// row is actually exercised by the gate the PRD describes:
-//   - §5.1 business API rows ("biz/...") and the debug-on rows → ExternalAuthMiddleware
-//   - §5.2 tunnel op rows ("tunnel/...") → TunnelOpGateMiddleware
-//   - §5.3 bind/unbind rows ("bind/...") → BindOpGateMiddleware
+// Auth policy (2026-08): external business access = token single-factor
+// (no X-Feishu-Openid identity check at HTTP layer). Tunnel ops = Lark
+// mobile external only. Bind ops = internal only. Debug ON bypasses all.
 //
-// The wantStatus values are fixed by PRD §5 and are NOT adjusted to make a
-// case pass — if a case fails, the middleware (not this table) is wrong.
+// Each case is routed to the middleware that owns its section:
+//   - "biz/..." rows and the debug-on rows → ExternalAuthMiddleware
+//   - "tunnel/..." rows → TunnelOpGateMiddleware
+//   - "bind/..." rows → BindOpGateMiddleware
 func TestPermissionMatrix(t *testing.T) {
 	cases := []matrixCase{
 		// --- Debug ON: everything 200 ---
@@ -39,21 +39,23 @@ func TestPermissionMatrix(t *testing.T) {
 		{"debug-on/internal", "192.168.1.1", "", "",
 			func(ts *TokenStore) string { return "" }, 200},
 
-		// --- Debug OFF, business API (PRD §5.1) ---
+		// --- Debug OFF, business API (token single-factor) ---
 		{"biz/internal/no-creds", "192.168.1.1", "", "",
 			func(ts *TokenStore) string { return "" }, 200},
 		{"biz/external/lark-mobile/valid", "4.4.4.4", "Lark/12 (iPhone)", "ou_admin",
 			func(ts *TokenStore) string { tok, _ := ts.Issue(time.Minute); return tok }, 200},
 		{"biz/external/pc-feishu/valid", "4.4.4.4", "Mozilla Chrome", "ou_admin",
 			func(ts *TokenStore) string { tok, _ := ts.Issue(time.Minute); return tok }, 200},
+		{"biz/external/plain-browser/valid-no-openid", "4.4.4.4", "Mozilla Chrome", "",
+			func(ts *TokenStore) string { tok, _ := ts.Issue(time.Minute); return tok }, 200},
+		{"biz/external/valid-token-openid-ignored", "4.4.4.4", "Lark", "ou_other",
+			func(ts *TokenStore) string { tok, _ := ts.Issue(time.Minute); return tok }, 200},
 		{"biz/external/no-token", "4.4.4.4", "Lark", "ou_admin",
 			func(ts *TokenStore) string { return "" }, 401},
-		{"biz/external/wrong-openid", "4.4.4.4", "Lark", "ou_other",
-			func(ts *TokenStore) string { tok, _ := ts.Issue(time.Minute); return tok }, 403},
 		{"biz/external/plain-browser-no-creds", "4.4.4.4", "curl", "",
-			func(ts *TokenStore) string { return "" }, 403},
+			func(ts *TokenStore) string { return "" }, 401},
 
-		// --- Tunnel ops (PRD §5.2): Lark mobile external only ---
+		// --- Tunnel ops (Lark mobile external only) ---
 		{"tunnel/internal-blocked", "192.168.1.1", "Lark", "",
 			func(ts *TokenStore) string { return "" }, 403},
 		{"tunnel/pc-blocked", "4.4.4.4", "Mozilla Chrome", "",
@@ -61,7 +63,7 @@ func TestPermissionMatrix(t *testing.T) {
 		{"tunnel/lark-mobile-allowed", "4.4.4.4", "Lark/12 (iPhone)", "",
 			func(ts *TokenStore) string { return "" }, 200},
 
-		// --- Bind ops (PRD §5.3): internal only ---
+		// --- Bind ops: internal only ---
 		{"bind/internal-allowed", "192.168.1.1", "", "",
 			func(ts *TokenStore) string { return "" }, 200},
 		{"bind/external-blocked", "4.4.4.4", "Lark", "ou_admin",

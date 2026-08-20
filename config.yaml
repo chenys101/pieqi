@@ -4,9 +4,9 @@ server:
 
 channels:
   lark:
-    enabled: false
+    enabled: true
     # event_mode: webhook(默认,需公网回调) | longconn(长连接,无需公网,推荐)
-    event_mode: webhook
+    event_mode: longconn
     # 长连接模式只需 app_id+app_secret;webhook 模式还需 verify_token+encrypt_key
     app_id: ""
     app_secret: ""

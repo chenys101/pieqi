@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net/url"
+	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +23,12 @@ type TunnelConfig struct {
 	LocalURL   string      // upstream local URL cloudflared points at, e.g. http://localhost:3000
 	Tokens     *TokenStore // token store; start/reset mutate this
 	Logger     *zap.Logger // nil = silent
+
+	// PIDFile 可选：cloudflared 子进程 PID 的落盘路径。用于跨重启清理
+	// 孤儿进程 —— 服务被强杀（defer Stop 不执行）时 cloudflared 会残留，
+	// 下次 Start 时按此文件杀掉上一次的残留，避免多份隧道堆积。
+	// 空 = 不启用 PID 文件清理。
+	PIDFile string
 }
 
 // TunnelResult is returned from Start/Reset — sent to the front-end as-is.
@@ -68,15 +77,88 @@ type TunnelManager struct {
 	// against the same instance. It is the same pointer as cfg.Tokens,
 	// surfaced as a public field for direct access (e.g. m.Tokens.Validate).
 	Tokens *TokenStore
+
+	// killFunc 杀掉一个 pid。默认实现真杀；测试注入 fake 记录调用。
+	killFunc func(pid int) error
 }
 
 // NewTunnelManager constructs a manager. Does NOT start anything.
 func NewTunnelManager(cfg TunnelConfig) *TunnelManager {
-	return &TunnelManager{cfg: cfg, Tokens: cfg.Tokens}
+	return &TunnelManager{
+		cfg:    cfg,
+		Tokens: cfg.Tokens,
+		killFunc: func(pid int) error {
+			proc, err := os.FindProcess(pid)
+			if err != nil {
+				return err
+			}
+			return proc.Kill()
+		},
+	}
 }
 
-// urlRegex matches the trycloudflare URL printed by cloudflared to stdout.
+// urlRegex matches the trycloudflare URL printed by cloudflared.
 var urlRegex = regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`)
+
+// cleanupOrphans 杀掉上一次实例残留的 cloudflared 进程（PID 文件机制）。
+// 服务被强杀时 defer Stop 不执行，cloudflared 会变孤儿残留；每次 Start
+// 前清理，避免多份隧道进程堆积。PID 已退出（Kill 报错）时静默忽略。
+// 若 PID 文件指向当前实例正在管理的活跃进程则跳过（交由 stopLocked 处理）。
+func (m *TunnelManager) cleanupOrphans() {
+	if m.cfg.PIDFile == "" || m.killFunc == nil {
+		return
+	}
+	m.mu.Lock()
+	activePID := 0
+	if m.cmd != nil {
+		activePID = m.cmd.Process.Pid
+	}
+	m.mu.Unlock()
+
+	data, err := os.ReadFile(m.cfg.PIDFile)
+	if err != nil {
+		return // 无记录 = 无残留
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return
+	}
+	if pid == activePID {
+		return // 当前实例活跃隧道，stopLocked 负责停它
+	}
+	if m.cfg.Logger != nil {
+		m.cfg.Logger.Info("cleaning orphan cloudflared", zap.Int("pid", pid))
+	}
+	if err := m.killFunc(pid); err != nil {
+		if m.cfg.Logger != nil {
+			m.cfg.Logger.Debug("orphan cloudflared already gone", zap.Int("pid", pid), zap.Error(err))
+		}
+	}
+	_ = os.Remove(m.cfg.PIDFile)
+}
+
+// writePIDFile 原子写入当前 cloudflared 子进程 PID。
+func (m *TunnelManager) writePIDFile(pid int) {
+	if m.cfg.PIDFile == "" {
+		return
+	}
+	tmp := m.cfg.PIDFile + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(pid)), 0600); err != nil {
+		if m.cfg.Logger != nil {
+			m.cfg.Logger.Warn("write pid file", zap.Error(err))
+		}
+		return
+	}
+	_ = os.Rename(tmp, m.cfg.PIDFile)
+}
+
+// removePIDFile 删除 PID 文件（正常 Stop / 进程意外退出时）。
+func (m *TunnelManager) removePIDFile() {
+	if m.cfg.PIDFile == "" {
+		return
+	}
+	_ = os.Remove(m.cfg.PIDFile)
+}
 
 // Start launches (or restarts) the cloudflared tunnel and issues a fresh
 // TTL token. If a tunnel is already running, it is stopped first.
@@ -85,6 +167,11 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 	if ts == nil {
 		return TunnelResult{}, fmt.Errorf("token store not configured")
 	}
+	// 清理上次实例强杀后残留的孤儿 cloudflared（PID 文件机制）。
+	// 必须在 stopLocked 之前：stopLocked 会删除 PID 文件，先清孤儿再停
+	// 当前实例（cleanupOrphans 会跳过当前活跃进程，不误杀）。
+	m.cleanupOrphans()
+
 	// Stop any existing tunnel first (PRD §4.4 trigger: 重新开启新隧道).
 	// stopLocked assumes the mutex is held, so take it here (Stop takes
 	// it itself, but this Start-path call does not go through Stop).
@@ -99,42 +186,60 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 
 	subCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(subCtx, m.cfg.BinaryPath, "tunnel", "--url", m.cfg.LocalURL)
+	// cloudflared 把日志（含 trycloudflare URL）打到 stderr 而非 stdout，
+	// 因此两条管道都要扫。每条管道一个 goroutine，命中 URL 发 urlCh；
+	// 主协程用 select+timer 等结果 —— 阻塞式 Scan 会让 15s deadline 失效。
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
 		return TunnelResult{}, fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return TunnelResult{}, fmt.Errorf("stderr pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return TunnelResult{}, fmt.Errorf("start cloudflared: %w", err)
 	}
 
-	// Wait for the trycloudflare URL on stdout (real cf prints within ~2s).
+	urlCh := make(chan string, 2)
+	doneCh := make(chan struct{}, 2)
+	scanPipe := func(r io.Reader) {
+		scan := bufio.NewScanner(r)
+		for scan.Scan() {
+			if m := urlRegex.FindString(scan.Text()); m != "" {
+				urlCh <- m
+				return
+			}
+		}
+		doneCh <- struct{}{}
+	}
+	go scanPipe(stdout)
+	go scanPipe(stderr)
+
+	// 等 trycloudflare URL（cloudflared 约 2s 内打印）。只有当两条管道都
+	// EOF 才判定"进程退出"——stdout 常常立即 EOF（空），必须继续等 stderr。
 	cfURL := ""
-	deadline := time.Now().Add(15 * time.Second)
-	scan := bufio.NewScanner(stdout)
-	for time.Now().Before(deadline) {
-		if !scan.Scan() {
-			if err := scan.Err(); err != nil {
+	doneCount := 0
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	for cfURL == "" {
+		select {
+		case cfURL = <-urlCh:
+		case <-doneCh:
+			doneCount++
+			if doneCount == 2 {
 				cancel()
 				_ = cmd.Wait()
-				return TunnelResult{}, fmt.Errorf("read cf stdout: %w", err)
+				return TunnelResult{}, fmt.Errorf("cloudflared exited before printing URL")
 			}
-			// EOF before URL: process died
+		case <-timer.C:
 			cancel()
 			_ = cmd.Wait()
-			return TunnelResult{}, fmt.Errorf("cloudflared exited before printing URL")
+			return TunnelResult{}, fmt.Errorf("cloudflared did not print trycloudflare URL within 15s")
 		}
-		line := scan.Text()
-		if match := urlRegex.FindString(line); match != "" {
-			cfURL = match
-			break
-		}
-	}
-	if cfURL == "" {
-		cancel()
-		_ = cmd.Wait()
-		return TunnelResult{}, fmt.Errorf("cloudflared did not print trycloudflare URL within 15s")
 	}
 
 	// Wire the token into the URL and build the Lark deep link. The token
@@ -160,6 +265,7 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 	m.token = tok
 	m.expires = expires
 	m.mu.Unlock()
+	m.writePIDFile(cmd.Process.Pid)
 
 	// Background watcher reaps the process and, on an *unexpected* exit,
 	// clears all tokens (PRD §4.4 trigger: Cloudflared 进程意外退出).
@@ -196,6 +302,7 @@ func (m *TunnelManager) watch(cmd *exec.Cmd, cancel context.CancelFunc) {
 	m.url = ""
 	m.token = ""
 	m.expires = time.Time{}
+	m.removePIDFile()
 	if ts := m.Tokens; ts != nil {
 		ts.InvalidateAll()
 	}
@@ -226,6 +333,7 @@ func (m *TunnelManager) stopLocked(ctx context.Context) error {
 	m.url = ""
 	m.token = ""
 	m.expires = time.Time{}
+	m.removePIDFile()
 	if ts := m.Tokens; ts != nil {
 		ts.InvalidateAll()
 	}

@@ -17,19 +17,21 @@ type Service struct {
 	Audit    *AuditLogger
 }
 
-// ExternalAuthMiddleware enforces PRD §2.2: external requests must have a
-// matching X-Feishu-Openid header AND a valid tunnel token. Internal IPs
-// bypass entirely. Debug switch bypasses everything (highest priority).
+// ExternalAuthMiddleware enforces external access control. Order:
+// debug → internal → rate-limit-blacklist → token.
 //
-// Order: debug → internal → rate-limit-blacklist → identity → token.
+// Auth policy (adjusted 2026-08): external requests are authorized by the
+// tunnel token ALONE (single-factor). The tunnel token is a 32-char random
+// value issued only to the tunnel creator (bound admin), so possession of a
+// valid token is treated as sufficient identity — this lets plain desktop /
+// mobile browsers open the tunnel URL directly without any Feishu identity
+// header, which matters because the trycloudflare tunnel domain is dynamic
+// and cannot be pre-registered as a Feishu H5 callback / OAuth domain.
+// Brute force is guarded by the IP rate limiter.
 //
-// Why identity BEFORE token: PRD §2.2.3 says "外网普通浏览器 / 工具 /
-// 爬虫 / Postman - 无飞书登录身份 → 直接403拦截". A plain browser has no
-// X-Feishu-Openid header at all, so we reject at the identity step (403)
-// before spending a token lookup on them. A bound Feishu admin whose
-// token has merely expired still sends their openid, so they reach the
-// token check (401 — re-authenticate). The rate limiter guards the token
-// check against attackers who happen to know the bound OpenID string.
+// The Feishu bound-admin identity (X-Feishu-Openid) is no longer checked at
+// the HTTP layer; it remains the gate for IM tunnel commands (see
+// core.Bridge.handleTunnelCommand).
 func (s *Service) ExternalAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if s.Debug != nil && s.Debug.BypassAll() {
@@ -48,28 +50,41 @@ func (s *Service) ExternalAuthMiddleware() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "ip blacklisted"})
 			return
 		}
-		// 1. Identity check — rejects curl/Postman/plain browsers (no openid)
-		openid := c.GetHeader("X-Feishu-Openid")
-		idOK := s.Bindings != nil && s.Bindings.Match(openid)
-		if !idOK {
-			s.audit(c, "biz.api.identity_fail", false, false, false)
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "identity mismatch"})
-			return
-		}
-		// 2. Token check — rejects expired/unknown tokens for legit bound admins
+		// Token check — the sole external credential. Rejects expired /
+		// unknown / missing tokens (401) and records a rate-limit failure.
 		tok := extractToken(c)
 		tokOK := s.Tokens != nil && s.Tokens.Validate(tok)
 		if !tokOK {
-			if s.Limiter != nil {
+			// 只对"明显乱猜的错误 token"计入暴力破解限流：空 token（没带）与
+			// 格式正确的过期/已失效 token（用户只是不知道过期了，重启/换隧道
+			// 后常见）都不拉黑，避免合法用户被误锁 10 分钟。
+			if s.Limiter != nil && tok != "" && !looksLikeToken(tok) {
 				s.Limiter.NoteFailure(ip)
 			}
-			s.audit(c, "biz.api.token_fail", false, true, false)
+			s.audit(c, "biz.api.token_fail", false, false, false)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
 			return
 		}
-		s.audit(c, "biz.api", true, true, false)
+		s.audit(c, "biz.api", true, false, false)
 		c.Next()
 	}
+}
+
+// looksLikeToken 判断 token 是否符合隧道 token 的格式（32 位小写 base32：
+// 字符集 a-z2-7，randomToken 的产物）。用于区分"曾有效的过期 token"
+// （不拉黑）与"乱猜的错误 token"（拉黑，防暴力破解）。32 位随机串恰好
+// 命中格式的概率可忽略，故格式匹配即可认为曾是合法签发的 token。
+func looksLikeToken(tok string) bool {
+	if len(tok) != 32 {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		c := tok[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '2' && c <= '7')) {
+			return false
+		}
+	}
+	return true
 }
 
 // TunnelOpGateMiddleware enforces PRD §5.2: tunnel start/stop/reset are

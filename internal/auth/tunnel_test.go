@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +161,59 @@ func TestTunnel_LarkDeepLinkFormat(t *testing.T) {
 	}
 	if !strings.Contains(res.LarkDeepLink, "token=") {
 		t.Fatal("lark link must embed the token")
+	}
+	_ = m.Stop(context.Background())
+}
+
+func TestTunnel_PIDFileLifecycle(t *testing.T) {
+	binary := fakeCloudflaredScript(t, "https://t-pid.trycloudflare.com")
+	pidFile := filepath.Join(t.TempDir(), "cf.pid")
+	m := NewTunnelManager(TunnelConfig{
+		BinaryPath: binary, LocalURL: "http://localhost:3000",
+		Tokens: NewTokenStore(), PIDFile: pidFile,
+	})
+	res, err := m.Start(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// Start 成功后 PID 文件写入当前子进程 PID
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read pid file after start: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("pid file content invalid: %q", data)
+	}
+	// Stop 后 PID 文件删除
+	if err := m.Stop(context.Background()); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("pid file should be removed after stop, err=%v", err)
+	}
+	_ = res
+}
+
+func TestTunnel_CleanupOrphansKillsStalePID(t *testing.T) {
+	binary := fakeCloudflaredScript(t, "https://t-orphan.trycloudflare.com")
+	pidFile := filepath.Join(t.TempDir(), "cf.pid")
+	// 预写"上次实例强杀残留"的 PID 记录
+	if err := os.WriteFile(pidFile, []byte("424242"), 0600); err != nil {
+		t.Fatalf("write stale pid: %v", err)
+	}
+	var killed []int
+	m := NewTunnelManager(TunnelConfig{
+		BinaryPath: binary, LocalURL: "http://localhost:3000",
+		Tokens: NewTokenStore(), PIDFile: pidFile,
+	})
+	m.killFunc = func(pid int) error { killed = append(killed, pid); return nil }
+	if _, err := m.Start(context.Background(), time.Minute); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// Start 前置的 cleanupOrphans 必须杀掉残留的 424242
+	if len(killed) != 1 || killed[0] != 424242 {
+		t.Fatalf("cleanupOrphans should kill stale pid 424242, got %v", killed)
 	}
 	_ = m.Stop(context.Background())
 }

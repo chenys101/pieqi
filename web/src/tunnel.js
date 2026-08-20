@@ -21,10 +21,10 @@ async function apiCall(method, path, body) {
 
 export async function mountTunnelPanel(root) {
   // Always render the status section; only render controls on Lark mobile.
+  // 组标题「外网隧道」由 settings.js 的设置区提供，这里不再自带 h3。
   const canControl = isLarkMobile();
   root.innerHTML = `
     <div class="tunnel-panel">
-      <h3>外网隧道</h3>
       <div id="tunnel-status" class="tunnel-status">查询中…</div>
       ${canControl ? `
         <div class="tunnel-controls">

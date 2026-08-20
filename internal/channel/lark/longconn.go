@@ -30,7 +30,8 @@ import (
 //     go b.handleMessage,无阻塞风险)
 //   - 集群模式不广播:多副本部署时同一事件只投递一个副本
 func (a *Adapter) startLongConnection(ctx context.Context, logger *zap.Logger) error {
-	if a.appID == "" || a.appSecret == "" {
+	appID, appSecret, _, _, _ := a.configSnapshot()
+	if appID == "" || appSecret == "" {
 		return fmt.Errorf("long-connection mode requires app_id + app_secret")
 	}
 
@@ -46,13 +47,13 @@ func (a *Adapter) startLongConnection(ctx context.Context, logger *zap.Logger) e
 		})
 
 	cli := larkws.NewClient(
-		a.appID, a.appSecret,
+		appID, appSecret,
 		larkws.WithEventHandler(dispatcher),
 		larkws.WithAutoReconnect(true),
 	)
 	if logger != nil {
 		cli = larkws.NewClient(
-			a.appID, a.appSecret,
+			appID, appSecret,
 			larkws.WithEventHandler(dispatcher),
 			larkws.WithAutoReconnect(true),
 			larkws.WithLogLevel(larkcore.LogLevelInfo),
@@ -60,7 +61,7 @@ func (a *Adapter) startLongConnection(ctx context.Context, logger *zap.Logger) e
 	}
 
 	if logger != nil {
-		logger.Info("lark long-connection starting", zap.String("app_id", a.appID))
+		logger.Info("lark long-connection starting", zap.String("app_id", appID))
 	}
 	// 阻塞调用,ctx 取消时返回。SDK 自带重连,通常不会退出。
 	if err := cli.Start(ctx); err != nil {

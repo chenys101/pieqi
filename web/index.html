@@ -23,13 +23,15 @@
       </div>
       <div id="projects" class="projects"></div>
       <div id="empty" class="empty hidden">暂无任务</div>
+      <div id="settings-mount" class="sidebar-foot"></div>
     </aside>
     <section id="detail" class="detail">
       <div id="detail-content"></div>
     </section>
-    <section id="tunnel-panel" class="tunnel-panel-slot"></section>
-    <div id="larkreg-mount"></div>
   </main>
+
+  <!-- 渠道配置模态框（settings.js 触发，larkreg.js 渲染） -->
+  <div id="config-overlay" class="config-overlay hidden" aria-hidden="true"></div>
 
   <!-- 干预抽屉 -->
   <div id="intervene-sheet" class="sheet hidden" aria-hidden="true">
@@ -62,6 +64,6 @@
   </div>
 
   <script type="module" src="/src/main.js"></script>
-  <script type="module" src="/src/larkreg.js"></script>
+  <script type="module" src="/src/settings.js"></script>
 </body>
 </html>

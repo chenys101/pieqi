@@ -24,9 +24,10 @@ type Server struct {
 
 	// Lark Device Flow (扫码一键创建飞书应用)。wired by SetLarkReg;
 	// nil-safe for tests that don't exercise larkreg routes.
-	larkRegRunner   larkRegRunner
-	larkRegState    *larkRegState
-	larkRegCredPath string
+	larkRegRunner    larkRegRunner
+	larkRegState     *larkRegState
+	larkRegCredPath  string
+	larkConfigApplier larkConfigApplier // wired by SetLarkConfigApplier; nil-safe
 }
 
 // NewServer 创建 API 服务。
@@ -123,6 +124,9 @@ func (s *Server) Register(r gin.IRouter) {
 			s.auth.BindOpGateMiddleware())
 		larkRegGrp.POST("/start", s.larkRegStart)
 		larkRegGrp.GET("/poll", s.larkRegPoll)
+		larkRegGrp.GET("/status", s.larkRegStatus)
+		larkRegGrp.GET("/config", s.larkRegConfig)
+		larkRegGrp.POST("/config", s.larkRegConfigUpdate)
 	}
 
 	// hook 子进程回连（仅本地，不走 auth）
