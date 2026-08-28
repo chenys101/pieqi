@@ -15,16 +15,20 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"pieqi/internal/agent"
+	"pieqi/internal/agent/claude"
 	"pieqi/internal/api"
-	"pieqi/internal/channel/lark"
+	"pieqi/internal/auth"
 	"pieqi/internal/channel/wechat"
 	"pieqi/internal/config"
 	"pieqi/internal/core"
+	"pieqi/internal/larkreg"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -47,6 +51,9 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	// 加载运行时渠道配置（扫码/手工落盘的凭据文件，若存在则覆盖 config 默认值）
+	loadLarkChannelConfig(cfg)
+
 	// --- 日志 ---
 	var logger *zap.Logger
 	if cfg.Server.Mode == "release" {
@@ -58,6 +65,11 @@ func main() {
 		log.Fatalf("init logger: %v", err)
 	}
 	defer logger.Sync()
+
+	// P5：pieqi.acp.* 旧字段迁移告警（仅显式配置时触发，旧语义仍生效）
+	for _, d := range cfg.Deprecations {
+		logger.Warn("config deprecated field", zap.String("hint", d))
+	}
 
 	// --- 数据目录（默认 ~/.pieqi，PIEQI_HOME 可覆盖；运行时数据不入仓库） ---
 	dataRoot := config.DefaultDataRoot()
@@ -102,9 +114,33 @@ func main() {
 		cfg.Pieqi.MaxConcurrentPerProject, cfg.Pieqi.BaseBranch,
 	)
 
-	// ACP 路径（Phase 2）：use_acp=true 时注入 AgentManager
-	if cfg.Pieqi.ACP.UseACP {
+	// ACP 路径（Phase 2）→ 已由多 Agent 默认驱动取代（#2）：
+	//   agents.claude.transport=sdk-bridge（默认）→ 任务经 agent.Open("claude") 驱动
+	//     （桥为主力，桥不可用自动回退 print）；transport=print 且 qoder 已配置 → "qoder"。
+	//   以上均不命中时回退旧 use_acp AgentManager（transport=print + use_acp=true）。
+	//   默认路径（use_acp=false + transport=print）保持 Phase 1 claude -p 不变。
+	var acpMgr *agent.AgentManager
+	sessionAgent := ""
+	if cfg.Agents.Claude.Transport == "sdk-bridge" {
+		sessionAgent = "claude"
+	} else if cfg.Agents.Qoder.Transport == "acp" && cfg.Agents.Qoder.ACPConfig().AgentType != "" {
+		sessionAgent = "qoder"
+	}
+	if sessionAgent != "" {
+		mgr := agent.NewAgentSessionManager(sessionAgent, agent.ManagerConfig{
+			MaxConcurrent: cfg.Pieqi.MaxConcurrentPerProject,
+			// 会话空闲回收阈值：复用旧 acp.idle_timeout（默认 15m），轮间保活上限
+			IdleTimeout: cfg.Pieqi.ACP.IdleTimeout,
+		}, logger)
+		acpMgr = mgr
+		runner.SetAgentManager(mgr, true, cfg.Pieqi.HookTimeout)
+		logger.Info("agent session manager enabled",
+			zap.String("agent", sessionAgent), zap.String("transport", cfg.Agents.Claude.Transport))
+		// 后台空闲回收：会话跨轮保活，超过 idle_timeout 无对话优雅关闭（避免孤儿进程累积）。
+		mgr.StartReaper(cfg.Pieqi.ACP.IdleTimeout / 3)
+	} else if cfg.Pieqi.ACP.UseACP {
 		mgr := agent.NewAgentManager(agent.ManagerConfigFromPieqi(cfg.Pieqi), logger)
+		acpMgr = mgr
 		// 透明回退时记录真实 primaryErr（此前只记通用文案"ACP 适配器不可用"，失败原因黑盒）。
 		// 回退本身不阻塞 Open（异步触发）；这里把触发回退的 primary 失败原因落到日志，便于定位。
 		mgr.SetFallbackHook(func(taskID string, primaryErr error) {
@@ -113,6 +149,9 @@ func main() {
 		})
 		runner.SetAgentManager(mgr, cfg.Pieqi.ACP.UseACP, cfg.Pieqi.HookTimeout)
 		logger.Info("acp agent manager enabled", zap.String("agent_type", cfg.Pieqi.ACP.AgentType))
+		// 后台空闲回收：ACP 会话跨轮保活，超过 idle_timeout 无对话优雅关闭（避免孤儿进程累积）。
+		// tick 取 idle_timeout 的 1/3，保证回收延迟上限；idle_timeout<=0 时 StartReaper 为 no-op。
+		mgr.StartReaper(cfg.Pieqi.ACP.IdleTimeout / 3)
 	}
 
 	// --- Bridge（IM 渠道编排） ---
@@ -122,21 +161,50 @@ func main() {
 	}
 	runner.SetNotifier(bridge.NotifyOrigin)
 
+	// --- 多 Agent（multi-agent.md §9 / 修订版 §9）：agents.* 配置接线 ---
+	// claude：sdk-bridge 时注册 bridge provider（探活失败可自动 spawn 常驻桥），
+	// 桥不可用由 openSession 回退 print；print 时直接注册 claude -p 回退。
+	var claudeProc *claude.Proc
+	{
+		cc := claude.ConfigFromAgents(cfg.Agents)
+		cc.Logger = logger
+		if cc.Transport == "sdk-bridge" && cfg.Agents.Claude.Bridge.AutoStart {
+			proc := claude.NewProc(claude.ProcConfig{
+				BaseURL: cfg.Agents.Claude.Bridge.BaseURL,
+				Token:   cfg.Agents.Claude.Bridge.Token,
+				Dir:     cfg.Agents.Claude.Bridge.Dir,
+				Logger:  logger,
+			})
+			if err := proc.EnsureRunning(context.Background()); err != nil {
+				logger.Warn("claude sdk-bridge auto-start failed; sessions will fall back to print",
+					zap.Error(err))
+			} else {
+				claudeProc = proc
+				logger.Info("claude sdk-bridge ensured",
+					zap.String("base_url", cfg.Agents.Claude.Bridge.BaseURL))
+			}
+		}
+		claude.Configure(cc)
+	}
+	// qoder：ACP 系 agent 工厂（transport=acp 时注册，业务 agent.Open("qoder") 即用）
+	if qc := agent.ACPProviderConfigFromAgents(cfg.Agents); qc.Qoder.AgentType != "" {
+		qc.Logger = logger
+		agent.ConfigureACPProviders(qc)
+		logger.Info("qoder agent provider configured",
+			zap.String("transport", cfg.Agents.Qoder.Transport))
+	}
+
 	// --- Gin ---
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.Default()
 
-	// 渠道
+	// 渠道：lark 走控制器（支持配置热应用）；wechat 保持原样
+	var larkController *larkChannelController
 	if cfg.Channels.Lark.Enabled {
-		larkAdapter := lark.New(
-			cfg.Channels.Lark.AppID, cfg.Channels.Lark.AppSecret,
-			cfg.Channels.Lark.VerifyToken, cfg.Channels.Lark.EncryptKey,
-		)
-		if err := larkAdapter.Init(r); err != nil {
+		larkController = newLarkChannelController(logger, bridge, r)
+		if err := larkController.Init(cfg.Channels.Lark); err != nil {
 			logger.Fatal("init lark", zap.Error(err))
 		}
-		bridge.RegisterReceiver(larkAdapter)
-		logger.Info("lark channel enabled")
 	}
 	if cfg.Channels.WeChat.Enabled {
 		wechatAdapter := wechat.New(logger, cfg.Channels.WeChat.BaseURL)
@@ -152,9 +220,41 @@ func main() {
 		logger.Info("wechat channel enabled")
 	}
 
+	// --- Auth (Feishu binding + Cloudflared tunnel) ---
+	authBindings, err := auth.NewBindingStore(cfg.Auth.FeishuBindingFile)
+	if err != nil {
+		logger.Fatal("init binding store", zap.Error(err))
+	}
+	authTokens := auth.NewTokenStore()
+	authSvc := &auth.Service{
+		Debug:    auth.NewDebugSwitch(cfg.Auth.DebugSkipAllAuth),
+		Bindings: authBindings,
+		Tokens:   authTokens,
+		Limiter:  auth.NewIPLimiter(cfg.Auth.RateLimit.MaxFailuresPerMin, cfg.Auth.RateLimit.BlacklistDuration),
+		Audit:    auth.NewAuditLogger(logger),
+	}
+	tunnelMgr := auth.NewTunnelManager(auth.TunnelConfig{
+		BinaryPath: cfg.Auth.Cloudflared.BinaryPath,
+		LocalURL:   fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
+		Tokens:     authTokens,
+		Logger:     logger,
+		// 跨重启清理孤儿 cloudflared：强杀服务时 defer Stop 不执行，PID 文件
+		// 让下次 Start 能杀掉残留进程（见 auth.TunnelManager.cleanupOrphans）。
+		PIDFile: filepath.Join(dataRoot, "cloudflared.pid"),
+	})
+	defer tunnelMgr.Stop(context.Background())
+	// IM 隧道命令（绑定管理员在飞书聊天里发「隧道」/「关隧道」驱动 cloudflared）
+	bridge.EnableTunnelOps(tunnelMgr, authBindings)
+
 	// API
 	if cfg.API.Enabled {
 		apiServer := api.NewServer(cfg, store, runner, hooks, bus, skills, commands)
+		apiServer.SetAuth(authSvc, tunnelMgr)
+		apiServer.SetLarkReg(larkreg.NewRegistration(), cfg.Channels.Lark.CredentialsFile)
+		// 配置保存后热应用（lark 渠道启用且已接线控制器时）
+		if larkController != nil {
+			apiServer.SetLarkConfigApplier(larkController.Apply)
+		}
 		apiServer.Register(r)
 		logger.Info("api enabled")
 	}
@@ -163,10 +263,59 @@ func main() {
 	registerStatic(r)
 
 	// --- 启动 ---
+	// 信号处理：SIGINT/SIGTERM → 优雅关闭所有 ACP 会话（CloseAll 走优雅 Close，
+	// adapter 自行 dispose 清 claude 子进程），避免关停时 adapter/claude 子树残留为孤儿。
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		if acpMgr != nil {
+			_ = acpMgr.CloseAll()
+		}
+		// 关停自动启动的桥（桥 SIGTERM 优雅关全部会话再退；Windows 直接 KILL）
+		if claudeProc != nil {
+			_ = claudeProc.Stop(context.Background())
+		}
+		os.Exit(0)
+	}()
+
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	logger.Info("pieqi starting", zap.String("addr", addr), zap.String("mode", cfg.Server.Mode))
 	if err := r.Run(addr); err != nil {
 		logger.Fatal("server", zap.Error(err))
+	}
+}
+
+// loadLarkChannelConfig 从凭据配置文件（~/.pieqi/lark_credentials.json）加载
+// 飞书渠道运行时配置（扫码一键创建或手工配置落盘），覆盖 config 里的默认值。
+// 文件不存在/损坏时静默跳过（降级到 config 里的值）。
+//
+// 该文件由 POST /api/larkreg/config 与 POST /api/larkreg/poll 写入，
+// 见 internal/larkreg 与 internal/api/larkreg.go。
+func loadLarkChannelConfig(cfg *config.Config) {
+	path := cfg.Channels.Lark.CredentialsFile
+	if path == "" {
+		return
+	}
+	fileCfg, ok := larkreg.LoadConfig(path)
+	if !ok {
+		return // 文件不存在/损坏 = 未接入过
+	}
+	lc := &cfg.Channels.Lark
+	if fileCfg.AppID != "" {
+		lc.AppID = fileCfg.AppID
+	}
+	if fileCfg.AppSecret != "" {
+		lc.AppSecret = fileCfg.AppSecret
+	}
+	if fileCfg.VerifyToken != "" {
+		lc.VerifyToken = fileCfg.VerifyToken
+	}
+	if fileCfg.EncryptKey != "" {
+		lc.EncryptKey = fileCfg.EncryptKey
+	}
+	if fileCfg.EventMode != "" {
+		lc.EventMode = fileCfg.EventMode
 	}
 }
 

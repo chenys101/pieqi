@@ -43,14 +43,23 @@ type PermissionWire struct {
 	mu      sync.Mutex
 	pending map[string]*permPending // reqID -> entry
 	closed  bool
+
+	// 并发审批排队（P5 修复）：task.CurrentDecision 是单槽位（前端单卡），并发到达的多个
+	// 审批请求若都往里写会互相覆盖 → 被覆盖的请求在 UI 不可见、任务假死到超时。这里让任一
+	// 时刻只有一个请求进 CurrentDecision（displayed），其余进 queue，当前卡被 Resolve/超时
+	// 处理后才逐个提升展示，保证每个挂起审批最终都被用户看到。
+	displayed string   // 当前已展示进 CurrentDecision 的 reqID；空 = 无展示
+	queue     []string // 等待展示的 reqID（FIFO）
 }
 
 // permPending 一个待审批请求的本地状态。
 type permPending struct {
-	reqID   string
-	options []agent.PermissionOption // 记录的 ACP 选项，供 Resolve 映射 approve/deny
-	timer   *time.Timer              // 超时定时器；到期调 adapter.Deny
-	done    bool                     // 已被 Resolve 或超时处理（先到先得，另一方放弃）
+	reqID     string
+	toolTitle string            // 工具名（展示卡标题），排队提升时复用
+	summary   string            // 决策摘要（buildPermSummary 结果），排队提升时复用
+	options   []agent.PermissionOption // 记录的 ACP 选项，供 Resolve 映射 approve/deny
+	timer     *time.Timer              // 超时定时器；到期调 adapter.Deny
+	done      bool                     // 已被 Resolve 或超时处理（先到先得，另一方放弃）
 }
 
 // WirePermission 把一个 AgentAdapter 的 OnPermissionRequest 回调接到任务状态机 + EventBus + IM 通知。
@@ -94,38 +103,61 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 		pw.mu.Unlock()
 		return
 	}
-	entry := &permPending{reqID: req.ReqID, options: req.Options}
+	entry := &permPending{
+		reqID:     req.ReqID,
+		toolTitle: req.ToolTitle,
+		summary:   buildPermSummary(req),
+		options:   req.Options,
+	}
 	pw.pending[req.ReqID] = entry
+
+	// 已有展示中的决策：本请求进队，等当前卡被 Resolve/超时处理后逐个提升（P5 修复，
+	// 避免并发审批互相覆盖 CurrentDecision 导致部分审批在 UI 不可见、任务假死到超时）。
+	if pw.displayed != "" {
+		pw.queue = append(pw.queue, req.ReqID)
+		pw.mu.Unlock()
+		return
+	}
+	pw.displayed = req.ReqID
 	pw.mu.Unlock()
 
-	summary := buildPermSummary(req)
-	updated, applied := pw.setWaitingApproval(req.ReqID, req.ToolTitle, summary)
-	if !applied {
+	if !pw.show(req.ReqID, entry.toolTitle, entry.summary) {
 		// task 不存在或已终态：清掉 pending 并 Deny，避免 agent 永久阻塞。
 		pw.mu.Lock()
 		delete(pw.pending, req.ReqID)
+		pw.displayed = ""
 		pw.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = pw.adapter.Deny(ctx, req.ReqID)
 		cancel()
-		return
 	}
+}
 
+// show 把 reqID 展示为当前决策：置 waiting_input(approval) + Publish + IM 通知 + 启动超时定时器。
+// 返回是否成功应用（task 不存在或已终态时为 false，调用方负责 Deny 并清理展示状态）。
+func (pw *PermissionWire) show(reqID, toolTitle, summary string) bool {
+	updated, applied := pw.setWaitingApproval(reqID, toolTitle, summary)
+	if !applied {
+		return false
+	}
 	// PWA 经 task_updated 自动显示审批卡片（前端 renderDetail 已支持 approve/deny 按钮）。
 	pw.bus.Publish(Event{Type: "task_updated", TaskID: pw.taskID, Task: updated})
 	// IM 原渠道推送「需要决策」。
 	pw.notifyApproval(updated)
 
-	// 启动超时定时器：到期 Deny + IM 通知超时 + task 回 running。
+	// 启动超时定时器：到期 Deny + IM 通知超时 + task 回 running/提升下一个。
 	pw.mu.Lock()
 	if pw.closed {
 		pw.mu.Unlock()
-		return
+		return true
 	}
-	entry.timer = time.AfterFunc(pw.timeout, func() {
-		pw.handleTimeout(req.ReqID)
-	})
+	if entry, ok := pw.pending[reqID]; ok && entry.timer == nil {
+		entry.timer = time.AfterFunc(pw.timeout, func() {
+			pw.handleTimeout(reqID)
+		})
+	}
 	pw.mu.Unlock()
+	return true
 }
 
 // setWaitingApproval 把 task 置 waiting_input(approval) 并建 CurrentDecision。
@@ -179,6 +211,16 @@ func (pw *PermissionWire) Resolve(decisionID, choice string) error {
 		entry.timer.Stop()
 	}
 	delete(pw.pending, decisionID)
+	// 若投递的是排队中（尚未展示）的请求：同样把它移出 queue，避免 advance 之后又把它
+	// 提升展示成一个已被处理过的空决策卡（stale client 防御）。
+	if pw.displayed != decisionID {
+		for i, r := range pw.queue {
+			if r == decisionID {
+				pw.queue = append(pw.queue[:i], pw.queue[i+1:]...)
+				break
+			}
+		}
+	}
 	options := entry.options
 	pw.mu.Unlock()
 
@@ -205,8 +247,8 @@ func (pw *PermissionWire) Resolve(decisionID, choice string) error {
 		return fmt.Errorf("adapter: %w", adapterErr)
 	}
 
-	// task 回 running（仅当仍卡在本决策上时才改，避免覆盖后续新决策）。
-	pw.backToRunning(decisionID)
+	// 推进：有排队审批则提升下一个继续展示（task 仍 waiting_input），否则 task 回 running。
+	pw.advance(decisionID)
 	return nil
 }
 
@@ -228,9 +270,64 @@ func (pw *PermissionWire) handleTimeout(reqID string) {
 		// best-effort：即便 Deny 失败也继续推进本地状态，避免 task 永久卡住。
 	}
 
-	updated, applied := pw.backToRunning(reqID)
+	// 推进：有排队审批则提升下一个继续展示，否则 task 回 running。
+	updated, applied := pw.advance(reqID)
 	if applied {
 		pw.notifyTimeout(updated)
+	}
+}
+
+// advance 在当前展示决策 reqID 被 Resolve 或超时处理完毕后推进：
+//   - 有排队请求：提升队首为当前决策继续展示（task 仍 waiting_input，PWA 弹下一张卡，
+//     新定时器），返回其 task 副本与 true；
+//   - 否则：清空展示并让 task 回 running（现有 backToRunning），返回其结果。
+//
+// 仅当 reqID 仍是当前展示决策时生效；展示已切换（异常防御）或已关闭时 no-op 返回 nil,false。
+// 提升失败（task 已终态等）：该请求无法展示，Deny 掉避免 agent 死等，并清空剩余队列。
+func (pw *PermissionWire) advance(reqID string) (*model.Task, bool) {
+	pw.mu.Lock()
+	if pw.closed || pw.displayed != reqID {
+		pw.mu.Unlock()
+		return nil, false
+	}
+	if len(pw.queue) == 0 {
+		pw.displayed = ""
+		pw.mu.Unlock()
+		return pw.backToRunning(reqID)
+	}
+	next := pw.queue[0]
+	pw.queue = pw.queue[1:]
+	pw.displayed = next
+	toolTitle, summary := "", ""
+	if e, ok := pw.pending[next]; ok {
+		toolTitle, summary = e.toolTitle, e.summary
+	}
+	pw.mu.Unlock()
+
+	if pw.show(next, toolTitle, summary) {
+		t, _ := pw.store.Get(pw.taskID)
+		return t, true
+	}
+	// 提升失败：task 已终态等，无法展示该请求。Deny 它并清空剩余队列（避免 agent 死等）。
+	pw.mu.Lock()
+	delete(pw.pending, next)
+	rest := pw.queue
+	pw.queue = nil
+	pw.displayed = ""
+	for _, r := range rest {
+		delete(pw.pending, r)
+	}
+	pw.mu.Unlock()
+	pw.denyRequests(append([]string{next}, rest...))
+	return nil, false
+}
+
+// denyRequests 对一组 reqID 调 adapter.Deny（带超时上下文），逐个尽力而为。
+func (pw *PermissionWire) denyRequests(reqIDs []string) {
+	for _, rid := range reqIDs {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = pw.adapter.Deny(ctx, rid)
+		cancel()
 	}
 }
 
@@ -268,6 +365,8 @@ func (pw *PermissionWire) Unwire() {
 	pw.closed = true
 	entries := pw.pending
 	pw.pending = make(map[string]*permPending)
+	pw.queue = nil
+	pw.displayed = ""
 	pw.mu.Unlock()
 
 	for _, e := range entries {

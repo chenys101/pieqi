@@ -158,6 +158,11 @@ type AgentAdapter interface {
 	// 映射为选中 reject 选项；若无 reject 选项则返回 Cancelled。
 	Deny(ctx context.Context, reqID string) error
 
+	// RespondPermission 对权限请求给出中性审批响应。
+	// allow=true 等价 Approve(reqID, optionID)；allow=false 等价 Deny(reqID)。
+	// 未找到 ReqID（已超时/取消/不存在）返回错误。
+	RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error
+
 	// InjectToolResult 注入工具结果。
 	// PrintAgent 路径：写 stream-json user 消息到 claude stdin（Phase 1 buildStreamUserMessage 语义）。
 	// ACP 路径：不支持（agent 自行执行工具并报 ToolCallUpdate），返回 ErrNotSupported。

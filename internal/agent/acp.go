@@ -424,6 +424,15 @@ func (a *ACPAgent) Deny(ctx context.Context, reqID string) error {
 	return nil
 }
 
+// RespondPermission 对权限请求给出中性审批响应：allow=true→Approve(reqID, optionID)，
+// allow=false→Deny(reqID)。与 Approve/Deny 语义一致。
+func (a *ACPAgent) RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error {
+	if allow {
+		return a.Approve(ctx, reqID, optionID)
+	}
+	return a.Deny(ctx, reqID)
+}
+
 // takePending 取出并删除一个 pending channel（投递完后不再保留）。
 func (a *ACPAgent) takePending(reqID string) (chan PermissionResponse, bool) {
 	a.permMu.Lock()
@@ -452,7 +461,17 @@ func (a *ACPAgent) Cancel(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// Close 关闭 adapter：best-effort 关会话 + 杀进程 + 标记结束。幂等。
+// closeGracefulWait 优雅关闭时等待 adapter 进程自行退出的上限；超时才强杀兜底。
+const closeGracefulWait = 5 * time.Second
+
+// Close 关闭 adapter：best-effort 关会话 + 优雅退出 + 强杀兜底。幂等。
+//
+// 孤儿防线：不能直接 Process.Kill——Windows 的 TerminateProcess 只杀 node adapter 自身，
+// 其子进程 claude.exe 会变孤儿残留。正确顺序是让 adapter 自己收尾：
+//  1. CloseSession RPC（best-effort，3s）让 agent 结束会话；
+//  2. 关 stdin（EOF）→ TS adapter 的 connection.closed → agent.dispose()，
+//     由它自行杀 claude 子进程并 exit(0)（见 adapter index.js 的 shutdown 路径）；
+//  3. 等进程退出（≤closeGracefulWait），未退才 Process.Kill 兜底（防 adapter 卡死）。
 func (a *ACPAgent) Close(ctx context.Context) error {
 	a.closeOnce.Do(func() {
 		// best-effort 关会话（agent 不支持 close 能力时会报错，忽略）
@@ -461,8 +480,20 @@ func (a *ACPAgent) Close(ctx context.Context) error {
 			_, _ = a.conn.CloseSession(closeCtx, acp.CloseSessionRequest{})
 			cancel()
 		}
+		// 关 stdin（EOF）触发 adapter 优雅 dispose（自己清 claude 子进程，零孤儿）
+		if a.stdin != nil {
+			_ = a.stdin.Close()
+		}
+		// 等进程自行退出；watchExit 的 cmd.Wait 退出时会 markDone 关 a.done
 		if a.cmd != nil && a.cmd.Process != nil {
-			_ = a.cmd.Process.Kill()
+			select {
+			case <-a.done:
+				// adapter 已优雅退出（dispose → exit 0），无需强杀
+			case <-time.After(closeGracefulWait):
+				// 5s 没退：adapter 卡死/不响应 EOF，强杀兜底（可能遗留 claude 子进程，
+				// 由空闲回收 + 关停 CloseAll 的系统性防护兜住）
+				_ = a.cmd.Process.Kill()
+			}
 		}
 		// 取消所有挂起的权限请求（让 RequestPermission 不再死等）
 		a.permMu.Lock()

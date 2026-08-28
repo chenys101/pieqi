@@ -19,6 +19,7 @@ import (
 	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 // Adapter 飞书渠道适配器，实现 MessageReceiver + MessageSender。
@@ -27,6 +28,8 @@ type Adapter struct {
 	appSecret   string
 	verifyToken string
 	encryptKey  string
+	eventMode   string // "webhook"（默认）| "longconn"
+	logger      *zap.Logger
 	onMessage   func(model.Message)
 	httpClient  *http.Client
 
@@ -34,30 +37,91 @@ type Adapter struct {
 	tokenMu     sync.RWMutex
 	accessToken string
 	tokenExpiry time.Time
+
+	// 凭据/接入方式并发读安全：webhook 请求处理与 SetConfig（热更新）
+	// 可能同时读写这些字段。
+	configMu sync.RWMutex
 }
 
-// New 创建飞书适配器
+// New 创建飞书适配器（默认 webhook 模式）。
 func New(appID, appSecret, verifyToken, encryptKey string) *Adapter {
 	return &Adapter{
 		appID:       appID,
 		appSecret:   appSecret,
 		verifyToken: verifyToken,
 		encryptKey:  encryptKey,
+		eventMode:   "webhook",
 		httpClient:  &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// NewLongConn 创建飞书适配器（长连接模式）。verifyToken/encryptKey
+// 在长连接模式下不需要（SDK 内置鉴权），传空字符串即可。
+func NewLongConn(appID, appSecret string) *Adapter {
+	return &Adapter{
+		appID:      appID,
+		appSecret:  appSecret,
+		eventMode:  "longconn",
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// WithLogger 注入 logger，用于长连接错误日志。nil = 静默。
+func (a *Adapter) WithLogger(l *zap.Logger) *Adapter {
+	a.logger = l
+	return a
+}
+
+// configSnapshot 在 configMu 读锁下取当前配置快照。
+// 避免 SetConfig（热更新）与 webhook 处理/取 token 并发竞态。
+func (a *Adapter) configSnapshot() (appID, appSecret, verifyToken, encryptKey, eventMode string) {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+	return a.appID, a.appSecret, a.verifyToken, a.encryptKey, a.eventMode
+}
+
+// SetConfig 热更新渠道凭据与接入方式（无需重建 adapter）。
+// 由 main.go 的渠道控制器在配置保存后调用：
+//   - webhook 模式：字段更新即生效（路由每次请求读最新字段）；
+//   - longconn 模式：字段更新后由控制器重启长连接 goroutine（client 用新凭据重建）。
+// 同时清空 tenant_access_token 缓存，强制用新 app_id/app_secret 刷新。
+func (a *Adapter) SetConfig(appID, appSecret, verifyToken, encryptKey, eventMode string) {
+	a.configMu.Lock()
+	a.appID = appID
+	a.appSecret = appSecret
+	a.verifyToken = verifyToken
+	a.encryptKey = encryptKey
+	a.eventMode = eventMode
+	a.configMu.Unlock()
+
+	a.tokenMu.Lock()
+	a.accessToken = ""
+	a.tokenExpiry = time.Time{}
+	a.tokenMu.Unlock()
 }
 
 // Name 返回渠道名
 func (a *Adapter) Name() string { return "lark" }
 
-// Init 注册飞书 Webhook 路由
+// Init 注册飞书 Webhook 路由（仅 webhook 模式）。
+// 长连接模式不需要公网路由，直接返回 nil。
 func (a *Adapter) Init(router gin.IRouter) error {
+	if a.eventMode == "longconn" {
+		return nil
+	}
 	router.POST("/webhook/lark", a.handleWebhook)
 	return nil
 }
 
-// Start 启动（webhook 模式无需额外启动）
-func (a *Adapter) Start(ctx context.Context) error { return nil }
+// Start 启动渠道。
+//   - webhook 模式：no-op（等飞书回调即可）
+//   - longconn 模式：启动飞书长连接事件订阅（阻塞直到 ctx 取消）
+func (a *Adapter) Start(ctx context.Context) error {
+	if a.eventMode != "longconn" {
+		return nil
+	}
+	return a.startLongConnection(ctx, a.logger)
+}
 
 // OnMessage 注册消息回调
 func (a *Adapter) OnMessage(cb func(model.Message)) {
@@ -78,8 +142,10 @@ func (a *Adapter) Send(ctx context.Context, target model.ReplyTarget, text strin
 	}
 
 	data, _ := json.Marshal(body)
+	// receive_id_type 是 URL query 参数（非 body 字段），缺失时报 99992402
+	// "receive_id_type is required"。消息事件里的 chat_id 即会话 ID。
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		"https://open.feishu.cn/open-apis/im/v1/messages", bytes.NewReader(data))
+		"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -149,14 +215,15 @@ func (a *Adapter) handleWebhook(c *gin.Context) {
 		return
 	}
 
-	// 2. 解密消息（如果配置了加密）
+	// 2. 解密消息（如果配置了加密）。configSnapshot 保证与 SetConfig 并发安全。
+	_, _, _, encryptKey, _ := a.configSnapshot()
 	plaintext := body
-	if a.encryptKey != "" {
+	if encryptKey != "" {
 		var encrypted struct {
 			Encrypt string `json:"encrypt"`
 		}
 		if json.Unmarshal(body, &encrypted) == nil && encrypted.Encrypt != "" {
-			decrypted, err := a.decrypt(encrypted.Encrypt)
+			decrypted, err := a.decrypt(encryptKey, encrypted.Encrypt)
 			if err != nil {
 				c.JSON(400, gin.H{"error": "decrypt failed"})
 				return
@@ -247,9 +314,10 @@ func (a *Adapter) refreshToken(ctx context.Context) (string, error) {
 		return a.accessToken, nil
 	}
 
+	appID, appSecret, _, _, _ := a.configSnapshot()
 	body := map[string]string{
-		"app_id":     a.appID,
-		"app_secret": a.appSecret,
+		"app_id":     appID,
+		"app_secret": appSecret,
 	}
 	data, _ := json.Marshal(body)
 
@@ -287,13 +355,13 @@ func (a *Adapter) refreshToken(ctx context.Context) (string, error) {
 
 // -- 消息加解密 --
 
-func (a *Adapter) decrypt(encrypted string) ([]byte, error) {
+func (a *Adapter) decrypt(encryptKey, encrypted string) ([]byte, error) {
 	data, err := base64.StdEncoding.DecodeString(encrypted)
 	if err != nil {
 		return nil, err
 	}
 
-	key := sha256.Sum256([]byte(a.encryptKey))
+	key := sha256.Sum256([]byte(encryptKey))
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return nil, err

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"pieqi/internal/config"
 
@@ -38,6 +39,7 @@ type ManagerConfig struct {
 	MaxConcurrent int              // 每项目并发上限；<=0 不限制
 	ACPConfig     config.ACPConfig // ACP 工厂参数（UseACP=true 时用）
 	PrintConfig   PrintConfig      // PrintAgent 工厂参数
+	IdleTimeout   time.Duration    // ACP 会话空闲回收阈值：轮间保活、超过该时长无对话优雅关闭（避免孤儿进程）；<=0 禁用
 }
 
 // adapterFactory 创建一个 AgentAdapter + 它的 Kind。可注入（测试用）。
@@ -53,9 +55,16 @@ type AgentManager struct {
 	fallback  adapterFactory // primary 失败时回退；UseACP=true 时为 Print 工厂，否则 nil
 	onFallback func(taskID string, primaryErr error) // 回退事件回调（可选，调用方注入记录回退事件）
 
+	// onSessionClosed 会话关闭回调（可选，调用方注入清理会话级资源，如 TaskRunner 的 wires）。
+	// 在 Close 的 closeOnce 内触发，恰好一次；reaper 空闲回收也会走 Close 触发。
+	onSessionClosed func(taskID string)
+
 	mu       sync.Mutex
 	sessions map[string]*managedSession // taskID -> session
 	projSems sync.Map                    // projectID -> *semaphore
+
+	reaperMu   sync.Mutex
+	reaperStop chan struct{} // StartReaper 的停止信号；nil=未启动
 }
 
 // managedSession 一个 task 的 agent 会话（不导出）。
@@ -70,6 +79,9 @@ type managedSession struct {
 	sessionID string
 	fellBack  bool
 	sem       *semaphore
+
+	// lastActivity 最近一次 Run（prompt turn）开始/结束的时间；空闲回收器据此判断会话是否闲置。
+	lastActivity time.Time
 
 	runMu     sync.Mutex
 	running   bool
@@ -111,6 +123,16 @@ func NewAgentManager(cfg ManagerConfig, logger *zap.Logger) *AgentManager {
 // primary 失败错误，供调用方记录回退事件/告警。
 func (m *AgentManager) SetFallbackHook(fn func(taskID string, primaryErr error)) {
 	m.onFallback = fn
+}
+
+// SetOnSessionClosed 注入会话关闭回调（可选）。会话被 Close（含 reaper 空闲回收、Cancel、
+// 服务器关停 CloseAll）关闭时触发，参数为 taskID。调用方用它清理会话级资源——
+// TaskRunner 借此 Unwire 三个 wire handle，避免 reaper 关会话后 wires 残留对已关 adapter 的引用。
+// 幂等：同一会话的 closeOnce 只触发一次。
+func (m *AgentManager) SetOnSessionClosed(fn func(taskID string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onSessionClosed = fn
 }
 
 // Open 为 task 创建 agent 会话：取项目并发槽 → 调 primary 工厂创建 adapter 并 NewSession
@@ -226,6 +248,7 @@ func (m *AgentManager) Run(ctx context.Context, taskID, prompt string) error {
 		sess.runMu.Unlock()
 		return fmt.Errorf("agent: prompt already running for task %s", taskID)
 	}
+	sess.lastActivity = time.Now() // 轮开始：重置空闲计时
 	runCtx, cancel := context.WithCancel(ctx)
 	sess.runCancel = cancel
 	sess.running = true
@@ -236,6 +259,7 @@ func (m *AgentManager) Run(ctx context.Context, taskID, prompt string) error {
 	sess.runMu.Lock()
 	sess.runCancel = nil
 	sess.running = false
+	sess.lastActivity = time.Now() // 轮结束：空闲计时重新起算
 	sess.runMu.Unlock()
 	cancel() // 释放 runCtx 资源（已 cancel 时为 no-op）
 	return err
@@ -262,7 +286,7 @@ func (m *AgentManager) Cancel(ctx context.Context, taskID string) error {
 }
 
 // Close 关闭 task 的会话：从登记表移除、中断 running turn、关 adapter、释放并发槽。幂等。
-// 无 session 时 no-op 返回 nil。
+// 无 session 时 no-op 返回 nil。会话关闭后触发 onSessionClosed 钩子（TaskRunner 清 wires）。
 func (m *AgentManager) Close(taskID string) error {
 	m.mu.Lock()
 	sess, ok := m.sessions[taskID]
@@ -283,6 +307,13 @@ func (m *AgentManager) Close(taskID string) error {
 		}
 		_ = sess.adapter.Close(context.Background())
 		sess.sem.release()
+		// 通知外部清理会话级资源（wires）；在 closeOnce 内触发，恰好一次
+		m.mu.Lock()
+		fn := m.onSessionClosed
+		m.mu.Unlock()
+		if fn != nil {
+			fn(taskID)
+		}
 	})
 	return nil
 }
@@ -299,6 +330,79 @@ func (m *AgentManager) CloseAll() error {
 		_ = m.Close(id)
 	}
 	return nil
+}
+
+// session 返回 taskID 对应的会话（无则 nil）。只读引用，调用方需自行同步（runMu/mu）。
+func (m *AgentManager) session(taskID string) *managedSession {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sessions[taskID]
+}
+
+// StartReaper 启动后台空闲回收 goroutine：每 interval 扫一次，关闭空闲超过 cfg.IdleTimeout
+// 的会话（ACP 保活会话的寿命上限，避免孤儿进程累积）。running 中的会话跳过。
+// cfg.IdleTimeout<=0 或 interval<=0 时 no-op。幂等：重复调用复用同一 goroutine。
+// 返回后调用方应配合 StopReaper（如服务器关停）停止回收。
+func (m *AgentManager) StartReaper(interval time.Duration) {
+	if m.cfg.IdleTimeout <= 0 || interval <= 0 {
+		return
+	}
+	m.reaperMu.Lock()
+	if m.reaperStop != nil {
+		m.reaperMu.Unlock()
+		return // 已在跑
+	}
+	stop := make(chan struct{})
+	m.reaperStop = stop
+	m.reaperMu.Unlock()
+
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case now := <-t.C:
+				m.CloseIdle(now)
+			}
+		}
+	}()
+}
+
+// StopReaper 停止空闲回收 goroutine（幂等）。
+func (m *AgentManager) StopReaper() {
+	m.reaperMu.Lock()
+	stop := m.reaperStop
+	m.reaperStop = nil
+	m.reaperMu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+}
+
+// CloseIdle 关闭所有空闲超过 cfg.IdleTimeout 的会话（now 为当前时间；running 中的跳过）。
+// 空闲判定：running==false 且 now-lastActivity >= IdleTimeout。
+func (m *AgentManager) CloseIdle(now time.Time) {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.sessions))
+	for id := range m.sessions {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+
+	for _, id := range ids {
+		sess := m.session(id)
+		if sess == nil {
+			continue // 已被并发 Close
+		}
+		sess.runMu.Lock()
+		idle := !sess.running && now.Sub(sess.lastActivity) >= m.cfg.IdleTimeout
+		sess.runMu.Unlock()
+		if idle {
+			_ = m.Close(id)
+		}
+	}
 }
 
 // Adapter 返回 task 的 adapter（无则 nil）。
@@ -391,6 +495,7 @@ func ManagerConfigFromPieqi(pieqi config.PieqiConfig) ManagerConfig {
 		UseACP:        pieqi.ACP.UseACP,
 		MaxConcurrent: pieqi.MaxConcurrentPerProject,
 		ACPConfig:     pieqi.ACP,
+		IdleTimeout:   pieqi.ACP.IdleTimeout, // ACP 会话空闲回收阈值（轮间保活上限；<=0 禁用）
 		PrintConfig: PrintConfig{
 			PermissionMode: pieqi.PermissionMode,
 		},

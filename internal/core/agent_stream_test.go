@@ -30,6 +30,9 @@ func (f *fakeDeltaAdapter) OnPermissionRequest(agent.PermissionRequestFunc)  {}
 func (f *fakeDeltaAdapter) OnToolCallUpdate(agent.ToolCallUpdateFunc)        {}
 func (f *fakeDeltaAdapter) Approve(context.Context, string, string) error    { return nil }
 func (f *fakeDeltaAdapter) Deny(context.Context, string) error               { return nil }
+func (f *fakeDeltaAdapter) RespondPermission(context.Context, string, bool, string) error {
+	return nil
+}
 func (f *fakeDeltaAdapter) InjectToolResult(context.Context, string, string, string, bool) error {
 	return nil
 }

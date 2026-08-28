@@ -288,11 +288,22 @@ func TestTaskRunner_TransitionTerminalIgnored(t *testing.T) {
 	task, _ := store.Create(&model.Task{ProjectID: "cb"})
 	_, _ = store.Update(task.ID, func(t *model.Task) bool { t.Status = model.TaskCompleted; return true })
 
-	// 已 completed，再 setRunning 应被忽略
-	tr.setRunning(task.ID)
+	// 已 completed，completeTask（终态→终态）应被忽略，不覆盖历史终态
+	tr.completeTask(task.ID, "ignored")
 	got, _ := store.Get(task.ID)
 	if got.Status != model.TaskCompleted {
 		t.Fatalf("status=%s, completed should be terminal", got.Status)
+	}
+	if got.Output != "" {
+		t.Fatalf("output=%q, completeTask on terminal must be ignored", got.Output)
+	}
+
+	// Resume 续问需要把终态任务重新置 running（清 FinishedAt、状态流转），故 终态→running 放行。
+	// 这也是续问失败能经 failTask 落库/推送的前提（此前终态守卫吞掉了续问失败，表现为"无反馈"）。
+	tr.setRunning(task.ID)
+	got, _ = store.Get(task.ID)
+	if got.Status != model.TaskRunning {
+		t.Fatalf("status=%s, resume should transition terminal->running", got.Status)
 	}
 }
 

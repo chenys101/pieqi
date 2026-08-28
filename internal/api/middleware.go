@@ -46,7 +46,7 @@ func corsMiddleware(allowAll bool, origins []string) gin.HandlerFunc {
 				return origin
 			}())
 			c.Header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
-			c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type")
+		c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Feishu-Openid")
 		}
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

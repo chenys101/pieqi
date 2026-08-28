@@ -54,6 +54,12 @@ func (f *fakePermAdapter) Deny(_ context.Context, reqID string) error {
 	f.mu.Unlock()
 	return nil
 }
+func (f *fakePermAdapter) RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error {
+	if allow {
+		return f.Approve(ctx, reqID, optionID)
+	}
+	return f.Deny(ctx, reqID)
+}
 func (f *fakePermAdapter) InjectToolResult(context.Context, string, string, string, bool) error {
 	return nil
 }
@@ -472,5 +478,154 @@ func TestWirePermission_BuildPermSummary(t *testing.T) {
 				t.Errorf("buildPermSummary=%q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// waitForDecision 轮询 store 直到 task 的 CurrentDecision.ID 变为 wantID 或超时。
+func waitForDecision(t *testing.T, store *TaskStore, taskID, wantID string, wait time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		if tt, ok := store.Get(taskID); ok && tt.CurrentDecision != nil && tt.CurrentDecision.ID == wantID {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	tt, _ := store.Get(taskID)
+	if tt.CurrentDecision != nil {
+		t.Fatalf("task decision=%q, want %q (timed out)", tt.CurrentDecision.ID, wantID)
+	}
+	t.Fatalf("task decision=nil, want %q (timed out)", wantID)
+}
+
+// TestWirePermission_ConcurrentQueuePromotes 并发两个审批请求：只展示第一个（CurrentDecision=req-A），
+// 第二个进队；Resolve A 后自动提升 B 继续展示（task 仍 waiting_input）；Resolve B 后 task 回 running。
+// 验证"无不可见悬置"——每个请求最终都会被依次展示并可批。
+func TestWirePermission_ConcurrentQueuePromotes(t *testing.T) {
+	fa, _, _, store, taskID, pw, notifyTexts := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-A", "Bash", "execute", standardOptions()))
+	fa.emitPerm(permReq("req-B", "Edit", "edit", standardOptions()))
+
+	waitForDecision(t, store, taskID, "req-A", time.Second)
+	tt, _ := store.Get(taskID)
+	if tt.Status != model.TaskWaitingInput {
+		t.Fatalf("status=%q, want waiting_input (req-A shown)", tt.Status)
+	}
+	if cd := tt.CurrentDecision; cd == nil || cd.ID != "req-A" || cd.ToolName != "Bash" {
+		t.Fatalf("CurrentDecision=%+v, want req-A/Bash", cd)
+	}
+
+	// Resolve A → 提升 B 继续展示，task 不应回到 running（避免不可见窗口）。
+	if err := pw.Resolve("req-A", "approve"); err != nil {
+		t.Fatalf("Resolve A: %v", err)
+	}
+	waitForDecision(t, store, taskID, "req-B", time.Second)
+	tt, _ = store.Get(taskID)
+	if tt.Status != model.TaskWaitingInput {
+		t.Fatalf("status after resolving A=%q, want waiting_input (req-B promoted)", tt.Status)
+	}
+	if cd := tt.CurrentDecision; cd == nil || cd.ID != "req-B" || cd.ToolName != "Edit" {
+		t.Fatalf("CurrentDecision=%+v, want req-B/Edit", cd)
+	}
+
+	// Resolve B → 队列空 → task 回 running，CurrentDecision 清空。
+	if err := pw.Resolve("req-B", "approve"); err != nil {
+		t.Fatalf("Resolve B: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+	tt, _ = store.Get(taskID)
+	if tt.CurrentDecision != nil {
+		t.Fatalf("CurrentDecision not cleared: %+v", tt.CurrentDecision)
+	}
+
+	// adapter.Approve 依次收到 A、B（各一次）。
+	if got := fa.approveCount(); got != 2 {
+		t.Fatalf("approve calls=%d, want 2", got)
+	}
+	if rid, _, ok := fa.lastApprove(); !ok || rid != "req-B" {
+		t.Fatalf("last approve reqID=%q, want req-B", rid)
+	}
+
+	// IM 通知应为每张卡一次（A 展示 + B 提升），即 2 条「需要决策」。
+	needDecisions := 0
+	for _, txt := range *notifyTexts {
+		if strings.Contains(txt, "需要决策") {
+			needDecisions++
+		}
+	}
+	if needDecisions != 2 {
+		t.Errorf("IM '需要决策' notify count=%d, want 2", needDecisions)
+	}
+}
+
+// TestWirePermission_QueueTimeoutPromotesNext 展示中的请求超时 → Deny 它并提升队首下一个继续展示；
+// 下一个仍可正常 Resolve。验证排队请求不会因前一个超时而丢失。
+func TestWirePermission_QueueTimeoutPromotesNext(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, 50*time.Millisecond)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-A", "Bash", "execute", standardOptions()))
+	fa.emitPerm(permReq("req-B", "Write", "edit", standardOptions()))
+	waitForDecision(t, store, taskID, "req-A", time.Second)
+
+	// 等 A 超时：A 被 Deny，B 被提升为当前卡（task 不回 running）。
+	waitForDecision(t, store, taskID, "req-B", time.Second)
+	if got := fa.denyCount(); got != 1 {
+		t.Fatalf("deny calls=%d after A timeout, want 1", got)
+	}
+	tt, _ := store.Get(taskID)
+	if tt.Status != model.TaskWaitingInput {
+		t.Fatalf("status=%q, want waiting_input (req-B promoted after A timeout)", tt.Status)
+	}
+
+	// B 仍可正常批准 → 回 running。
+	if err := pw.Resolve("req-B", "approve"); err != nil {
+		t.Fatalf("Resolve B: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+	if got := fa.approveCount(); got != 1 {
+		t.Fatalf("approve calls=%d, want 1 (B)", got)
+	}
+	if got := fa.denyCount(); got != 1 {
+		t.Fatalf("deny calls=%d, want 1 (only A timed out)", got)
+	}
+}
+
+// TestWirePermission_QueueDenyPromotesNext 拒绝展示中的请求 → 提升队首下一个；拒绝下一个后 task 回 running。
+// 无 reject 选项时走 adapter.Deny（→ Cancelled），验证 deny 路径在排队语义下同样正确推进。
+func TestWirePermission_QueueDenyPromotesNext(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	opts := []agent.PermissionOption{
+		{ID: "o1", Name: "Allow Once", Kind: agent.PermissionOptionAllowOnce},
+	} // 无 reject 选项 → deny 走 adapter.Deny
+	fa.emitPerm(permReq("req-A", "Bash", "execute", opts))
+	fa.emitPerm(permReq("req-B", "Edit", "edit", opts))
+	waitForDecision(t, store, taskID, "req-A", time.Second)
+
+	if err := pw.Resolve("req-A", "deny"); err != nil {
+		t.Fatalf("Resolve A deny: %v", err)
+	}
+	waitForDecision(t, store, taskID, "req-B", time.Second)
+	if got := fa.denyCount(); got != 1 {
+		t.Fatalf("deny calls=%d after denying A, want 1", got)
+	}
+	if got := fa.approveCount(); got != 0 {
+		t.Fatalf("approve calls=%d, want 0 (deny path)", got)
+	}
+
+	if err := pw.Resolve("req-B", "deny"); err != nil {
+		t.Fatalf("Resolve B deny: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+	tt, _ := store.Get(taskID)
+	if tt.CurrentDecision != nil {
+		t.Fatalf("CurrentDecision not cleared: %+v", tt.CurrentDecision)
+	}
+	if got := fa.denyCount(); got != 2 {
+		t.Fatalf("deny calls=%d, want 2 (A and B)", got)
 	}
 }

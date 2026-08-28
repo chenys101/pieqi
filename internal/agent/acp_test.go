@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -589,6 +590,50 @@ func TestClose_CancelsPendingPermission(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout: Close did not cancel pending permission")
+	}
+}
+
+// TestClose_GracefulStdinEOF 优雅 Close 的孤儿防线：Close 关 stdin（EOF）→ 子进程自行退出
+// （exit 0），而非 Process.Kill（TerminateProcess 只杀本进程、留 claude 子进程孤儿）。
+// 用真实 node 子进程验证"关 stdin 触发优雅退出"机制；node 不可用则 skip。
+func TestClose_GracefulStdinEOF(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available")
+	}
+	// stdin EOF → exit(0)（优雅路径）；5s 内没收到 EOF → exit(2)（区分"被 EOF 触发退出"与超时）
+	script := "process.stdin.resume(); process.stdin.on('end', () => process.exit(0)); setTimeout(() => process.exit(2), 5000)"
+	cmd := exec.Command("node", "-e", script)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	a := NewACPAgent(config.ACPConfig{AgentType: "claude-code"}, nil)
+	a.cmd = cmd
+	a.stdin = stdin
+	// 模拟 watchExit：进程退出时 markDone 关 a.done，Close 的等退出分支据此返回
+	waitErrCh := make(chan error, 1)
+	go func() {
+		waitErrCh <- cmd.Wait()
+		a.markDone()
+	}()
+
+	if err := a.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case waitErr := <-waitErrCh:
+		if waitErr != nil {
+			t.Fatalf("process wait err=%v, want nil (graceful exit 0, not killed)", waitErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("process did not exit within 3s after Close (stdin EOF should trigger graceful exit)")
+	}
+	if !cmd.ProcessState.Success() {
+		t.Fatalf("process exit=%v want success (graceful, not Process.Kill)", cmd.ProcessState)
 	}
 }
 

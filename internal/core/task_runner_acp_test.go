@@ -38,7 +38,9 @@ type fakeAgentRunner struct {
 	openErr    error
 	openCalls  []fakeOpenCall
 	closeN     int
+	runN       int // Run（prompt turn）调用次数，断言保活复用时用
 	sessSeq    int
+	onClosed   func(taskID string) // SetOnSessionClosed 注册；Close 时触发（镜像 AgentManager）
 }
 
 // fakeScript 描述每次 Open 新建 adapter 的 SendPrompt 行为（从 runner 复制到 adapter）。
@@ -101,6 +103,7 @@ func (f *fakeAgentRunner) SessionID(taskID string) string {
 func (f *fakeAgentRunner) Run(ctx context.Context, taskID, prompt string) error {
 	f.mu.Lock()
 	a := f.adapters[taskID]
+	f.runN++
 	f.mu.Unlock()
 	if a == nil {
 		return fmt.Errorf("agent: no session for task %s", taskID)
@@ -117,6 +120,12 @@ func (f *fakeAgentRunner) Run(ctx context.Context, taskID, prompt string) error 
 		cancel()
 	}()
 	return a.SendPrompt(runCtx, a.sessionID, prompt)
+}
+
+func (f *fakeAgentRunner) runCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runN
 }
 
 func (f *fakeAgentRunner) Cancel(ctx context.Context, taskID string) error {
@@ -139,11 +148,23 @@ func (f *fakeAgentRunner) Close(taskID string) error {
 	delete(f.adapters, taskID)
 	delete(f.runCancels, taskID)
 	f.closeN++
+	onClosed := f.onClosed
 	f.mu.Unlock()
 	if a == nil {
 		return nil
 	}
-	return a.Close(context.Background())
+	_ = a.Close(context.Background())
+	if onClosed != nil {
+		onClosed(taskID)
+	}
+	return nil
+}
+
+// SetOnSessionClosed 注册会话关闭回调（镜像 AgentManager；测试断言时可通过 onClosed 计数）。
+func (f *fakeAgentRunner) SetOnSessionClosed(fn func(taskID string)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onClosed = fn
 }
 
 func (f *fakeAgentRunner) Adapter(taskID string) agent.AgentAdapter {
@@ -319,6 +340,13 @@ func (f *fakeAgentAdapter) Deny(ctx context.Context, reqID string) error {
 	return nil
 }
 
+func (f *fakeAgentAdapter) RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error {
+	if allow {
+		return f.Approve(ctx, reqID, optionID)
+	}
+	return f.Deny(ctx, reqID)
+}
+
 func (f *fakeAgentAdapter) InjectToolResult(ctx context.Context, sessionID, toolCallID string, result string, isError bool) error {
 	return agent.ErrNotSupported
 }
@@ -424,19 +452,25 @@ func waitACPAdapter(t *testing.T, fake *fakeAgentRunner, taskID string) *fakeAge
 	return a
 }
 
-// waitRunACPDone 等 runACP 的 defer Close 跑完（closeCount 较进入时+1），此时 goroutine
+// waitRunACPDone 等 runACP 一轮跑完：task 落到终态（completed/failed/cancelled），goroutine
 // 已退出、无并发 store 写，可安全 store.Get 做终态断言。
 //
-// 用 closeCount 而非 Adapter==nil：快速完成的脚本 Open→Run→Close 可能在两次轮询间全部
-// 完成，adapter 已被摘除，"等 open 再等 close" 会因初始/结束时 adapter 都是 nil 而误判
-// （Cancel/Intervene 等慢脚本另用 waitACPAdapter 取运行期 adapter 引用）。
-// defer Close 是 runACP 中最后的 store 写（completeTask/failTask）之后的动作，其后只剩
-// context cancel，无 store 写，故 closeCount++ 即可安全读终态。
-func waitRunACPDone(t *testing.T, fake *fakeAgentRunner, taskID string) {
+// 保活语义下（ACP 路径）runACPTurn 轮末不再 Close 会话（跨轮保活复用），故不能用 closeCount
+// 同步；终态转换（completeTask/failTask，或 Cancel 置 cancelled）是 runACPTurn 中最后的 store
+// 写，其后只剩 context cancel 与 PrintAgent 的 Close（onSessionClosed 在 cleanupWorktrees=false
+// 时无 store 写），观察到终态即可安全读。
+func waitRunACPDone(t *testing.T, store *TaskStore, taskID string) {
 	t.Helper()
-	before := fake.closeCount()
-	waitFor(t, 2*time.Second, "runACP finish (agent closed)", func() bool {
-		return fake.closeCount() > before
+	waitFor(t, 2*time.Second, "runACP turn finish (terminal status)", func() bool {
+		tt, ok := store.Get(taskID)
+		if !ok || tt == nil {
+			return false
+		}
+		switch tt.Status {
+		case model.TaskCompleted, model.TaskFailed, model.TaskCancelled:
+			return true
+		}
+		return false
 	})
 }
 
@@ -453,13 +487,15 @@ func getTask(t *testing.T, store *TaskStore, taskID string) *model.Task {
 // --- 测试用例 ---
 
 // TestTaskRunner_ACP_SuccessWithOutput 成功+有输出：fake 触发一次 delta 后返回 nil。
-// 断言 task completed、Output 含 delta 文本、Open 收到正确 projectID/cwd、Close 被调一次、wires 已清。
+// 断言 task completed、Output 含 delta 文本、Open 收到正确 projectID/cwd。
+// 保活语义：ACP 会话轮末不关（Close==0、adapter 存活、wires 保留供续问复用），
+// 关闭会话（模拟空闲回收）后 onSessionClosed 钩子才清 wires。
 func TestTaskRunner_ACP_SuccessWithOutput(t *testing.T) {
 	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hello"}, false)
 	task := createACPTestTask(t, store)
 	tr.Start(context.Background(), task)
 
-	waitRunACPDone(t, fake, task.ID)
+	waitRunACPDone(t, store, task.ID)
 
 	got := getTask(t, store, task.ID)
 	if got.Status != model.TaskCompleted {
@@ -472,11 +508,22 @@ func TestTaskRunner_ACP_SuccessWithOutput(t *testing.T) {
 	if oc.projectID != "proj-acp" || oc.cwd != task.WorktreePath {
 		t.Fatalf("open call=%+v, want projectID=proj-acp cwd=%s", oc, task.WorktreePath)
 	}
-	if fake.closeCount() != 1 {
-		t.Fatalf("agent Close calls=%d want 1", fake.closeCount())
+	// 保活：会话跨轮存活、wires 保留（供续问复用），轮末不 Close
+	if fake.closeCount() != 0 {
+		t.Fatalf("agent Close calls=%d want 0 (ACP session kept alive after run)", fake.closeCount())
+	}
+	if fake.Adapter(task.ID) == nil {
+		t.Fatalf("ACP session should stay alive after completion")
+	}
+	if tr.permWire(task.ID) == nil {
+		t.Fatal("wires should stay registered while session is alive (kept for resume)")
+	}
+	// 会话关闭（模拟空闲回收器）→ onSessionClosed 钩子清 wires
+	if err := tr.agentMgr.Close(task.ID); err != nil {
+		t.Fatalf("close (simulate reap): %v", err)
 	}
 	if tr.permWire(task.ID) != nil {
-		t.Fatal("wires should be cleared after completion")
+		t.Fatal("wires should be cleared after session closed")
 	}
 }
 
@@ -487,7 +534,7 @@ func TestTaskRunner_ACP_RunError(t *testing.T) {
 	task := createACPTestTask(t, store)
 	tr.Start(context.Background(), task)
 
-	waitRunACPDone(t, fake, task.ID)
+	waitRunACPDone(t, store, task.ID)
 
 	got := getTask(t, store, task.ID)
 	if got.Status != model.TaskFailed {
@@ -496,19 +543,23 @@ func TestTaskRunner_ACP_RunError(t *testing.T) {
 	if !strings.Contains(got.Error, "agent run") {
 		t.Fatalf("error=%q, want contains 'agent run'", got.Error)
 	}
-	if fake.closeCount() != 1 {
-		t.Fatalf("agent Close calls=%d want 1", fake.closeCount())
+	// 保活语义：ACP 路径轮末不关会话（失败也可续问复用），会话仍登记
+	if fake.closeCount() != 0 {
+		t.Fatalf("agent Close calls=%d want 0 (ACP session kept alive after run)", fake.closeCount())
+	}
+	if fake.Adapter(task.ID) == nil {
+		t.Fatalf("ACP session should stay alive (kept for reuse)")
 	}
 }
 
 // TestTaskRunner_ACP_EmptyOutput 空输出：fake SendPrompt 直接返回 nil 不触发任何 delta。
 // 断言 task failed（"未产出任何内容"）。
 func TestTaskRunner_ACP_EmptyOutput(t *testing.T) {
-	tr, store, _, fake := newACPTestRunner(t, fakeScript{}, false)
+	tr, store, _, _ := newACPTestRunner(t, fakeScript{}, false)
 	task := createACPTestTask(t, store)
 	tr.Start(context.Background(), task)
 
-	waitRunACPDone(t, fake, task.ID)
+	waitRunACPDone(t, store, task.ID)
 
 	got := getTask(t, store, task.ID)
 	if got.Status != model.TaskFailed {
@@ -526,7 +577,7 @@ func TestTaskRunner_ACP_FallbackEvent(t *testing.T) {
 	task := createACPTestTask(t, store)
 	tr.Start(context.Background(), task)
 
-	waitRunACPDone(t, fake, task.ID)
+	waitRunACPDone(t, store, task.ID)
 
 	got := getTask(t, store, task.ID)
 	if got.Status != model.TaskCompleted {
@@ -542,6 +593,11 @@ func TestTaskRunner_ACP_FallbackEvent(t *testing.T) {
 	if !found {
 		t.Fatalf("events missing fallback status event: %+v", got.Events)
 	}
+	// PrintAgent 回退路径是"一次性"进程语义：轮末关会话（与 ACP 保活相反）。
+	// Close 在 completeTask 之后异步执行，须轮询等待。
+	waitFor(t, 2*time.Second, "print agent closed at turn end", func() bool {
+		return fake.closeCount() == 1
+	})
 }
 
 // TestTaskRunner_ACP_Cancel Cancel：fake SendPrompt 阻塞；调 tr.Cancel。
@@ -558,7 +614,7 @@ func TestTaskRunner_ACP_Cancel(t *testing.T) {
 	if err := tr.Cancel(task.ID); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
-	waitRunACPDone(t, fake, task.ID)
+	waitRunACPDone(t, store, task.ID)
 
 	got := getTask(t, store, task.ID)
 	if got.Status != model.TaskCancelled {
@@ -611,7 +667,7 @@ func TestTaskRunner_ACP_InterveneDecision(t *testing.T) {
 				t.Fatalf("Intervene %s: %v", tc.choice, err)
 			}
 			// Resolve 同步把 task 回 running（backToRunning），随后 Run 返回 nil，task completed。
-			waitRunACPDone(t, fake, task.ID)
+			waitRunACPDone(t, store, task.ID)
 
 			got = getTask(t, store, task.ID)
 			if got.Status != model.TaskCompleted {
@@ -646,7 +702,7 @@ func TestTaskRunner_ACP_InterveneAppendPromptNotSupported(t *testing.T) {
 	if err := tr.Cancel(task.ID); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
-	waitRunACPDone(t, fake, task.ID)
+	waitRunACPDone(t, store, task.ID)
 	got := getTask(t, store, task.ID)
 	if got.Status != model.TaskCancelled {
 		t.Fatalf("status=%s, want cancelled after cleanup", got.Status)
@@ -654,35 +710,42 @@ func TestTaskRunner_ACP_InterveneAppendPromptNotSupported(t *testing.T) {
 }
 
 // TestTaskRunner_ACP_Resume Resume on ACP：先把 task 跑到 completed，再 Resume 续问。
-// 断言 appendEvent(user) + 第二次 runACP（fake.Open 被调第二次）。
+// 保活语义：首轮结束后 ACP 会话跨轮保活，Resume 直接复用同一会话（SendPrompt），
+// 不重新 Open/LoadSession（openCount 保持 1），Run 被调第二次。
 func TestTaskRunner_ACP_Resume(t *testing.T) {
 	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hello"}, false)
 	task := createACPTestTask(t, store)
 	tr.Start(context.Background(), task)
 
-	// 第一轮完成 + Close 跑完（adapter 摘除）。
-	waitRunACPDone(t, fake, task.ID)
+	// 第一轮完成：会话保活（不 Close），openCount==1。
+	waitRunACPDone(t, store, task.ID)
 	if fake.openCount() != 1 {
 		t.Fatalf("open calls=%d want 1 after first run", fake.openCount())
+	}
+	if fake.closeCount() != 0 {
+		t.Fatalf("close calls=%d want 0 (ACP session kept alive after first run)", fake.closeCount())
 	}
 	if got := getTask(t, store, task.ID).Status; got != model.TaskCompleted {
 		t.Fatalf("status=%s, want completed after first run", got)
 	}
 
-	// Resume 续问：runACP 据 task.ACPSessionID 构造 SessionConfig.ResumeFrom 走 session/load/resume
-	// 复用上下文（fakeAgentAdapter.RealSessionID 回退返回句柄 sid，首跑已落 ACPSessionID）。
-	// 先记下 closeCount 基线：deltaText 脚本第二轮 Open→Run→Close 极快，可能在轮询间全部
-	// 完成，故不靠 openCount==2 同步（openCount 与 closeCount 之间有竞态），直接等
-	// closeCount 较基线+1 即第二轮 runACP 收尾。
-	closeBefore := fake.closeCount()
+	// Resume 续问：保活复用同一会话，不重新 Open（openCount 保持 1），Run 调第二次。
+	runBefore := fake.runCount()
 	if err := tr.Resume(task.ID, "more"); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
-	waitFor(t, 2*time.Second, "second runACP finish", func() bool {
-		return fake.closeCount() > closeBefore
+	waitFor(t, 2*time.Second, "second turn finish", func() bool {
+		tt, ok := store.Get(task.ID)
+		return ok && tt != nil && tt.Status == model.TaskCompleted && fake.runCount() > runBefore
 	})
-	if fake.openCount() != 2 {
-		t.Fatalf("open calls=%d want 2 after resume", fake.openCount())
+	if fake.openCount() != 1 {
+		t.Fatalf("open calls=%d want 1 after resume (session reused, no re-open)", fake.openCount())
+	}
+	if fake.runCount() != runBefore+1 {
+		t.Fatalf("run calls=%d want %d (resume reuses live session, one more turn)", fake.runCount(), runBefore+1)
+	}
+	if fake.Adapter(task.ID) == nil {
+		t.Fatalf("ACP session should stay alive after resume turn")
 	}
 
 	got := getTask(t, store, task.ID)
@@ -702,11 +765,11 @@ func TestTaskRunner_ACP_Resume(t *testing.T) {
 // （替代脆弱的 CLI 匹配）。ACPAgent 语义：sessionID 即真实协议资源 ID；fake 用 realSessionID
 // 显式模拟“真实 sid 与句柄 sid 不同”的情形，确认持久化的是 RealSessionID 而非句柄。
 func TestRunACP_PersistsRealSessionID(t *testing.T) {
-	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hi", realSessionID: "acp-real-sid"}, false)
+	tr, store, _, _ := newACPTestRunner(t, fakeScript{deltaText: "hi", realSessionID: "acp-real-sid"}, false)
 	task := createACPTestTask(t, store)
 	tr.Start(context.Background(), task)
 
-	waitRunACPDone(t, fake, task.ID)
+	waitRunACPDone(t, store, task.ID)
 
 	got := getTask(t, store, task.ID)
 	if got.Status != model.TaskCompleted {
@@ -717,15 +780,15 @@ func TestRunACP_PersistsRealSessionID(t *testing.T) {
 	}
 }
 
-// TestRunACP_Resume_PassesACPSessionID 续问经 session/load/resume 复用上下文：runACP 据
-// task.ACPSessionID 构造 SessionConfig.ResumeFrom 并透传给 Open（替代 M4 re-Open 新会话）。
-// 断言第二次 Open 收到 ResumeFrom=首跑持久化的真实 sid。
+// TestRunACP_Resume_PassesACPSessionID 保活会话被回收（reaper 关闭，Adapter==nil）后，
+// 续问走 open 路径：runACP 据 task.ACPSessionID 构造 SessionConfig.ResumeFrom 并透传给
+// Open（session/load/resume 复用上下文）。断言第二次 Open 收到 ResumeFrom=首跑持久化的真实 sid。
 func TestRunACP_Resume_PassesACPSessionID(t *testing.T) {
 	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hi", realSessionID: "acp-real-sid"}, false)
 	task := createACPTestTask(t, store)
 	tr.Start(context.Background(), task)
 
-	waitRunACPDone(t, fake, task.ID)
+	waitRunACPDone(t, store, task.ID)
 	if got := getTask(t, store, task.ID).ACPSessionID; got != "acp-real-sid" {
 		t.Fatalf("first run ACPSessionID=%q, want acp-real-sid", got)
 	}
@@ -737,12 +800,21 @@ func TestRunACP_Resume_PassesACPSessionID(t *testing.T) {
 		t.Fatalf("first open resumeFrom=%q, want empty (new session)", first.resumeFrom)
 	}
 
-	closeBefore := fake.closeCount()
+	// 模拟空闲回收器把保活会话关掉（reaper Close 会触发 onSessionClosed 钩子清 wires）。
+	if err := tr.agentMgr.Close(task.ID); err != nil {
+		t.Fatalf("close (simulate reap): %v", err)
+	}
+	if fake.Adapter(task.ID) != nil {
+		t.Fatalf("adapter should be gone after reap")
+	}
+
 	if err := tr.Resume(task.ID, "more"); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
-	waitFor(t, 2*time.Second, "second runACP finish", func() bool {
-		return fake.closeCount() > closeBefore
+	// 续问 re-open 走 open 路径：等第二次 Open 登记 + 轮次终态。
+	waitFor(t, 2*time.Second, "resume re-open finish", func() bool {
+		tt, ok := store.Get(task.ID)
+		return ok && tt != nil && tt.Status == model.TaskCompleted && fake.openCount() >= 2
 	})
 
 	// 第二次 Open 应带 ResumeFrom=acp-real-sid（session/load/resume 复用上下文）。
@@ -763,11 +835,15 @@ func TestRunACP_Resume_SessionLost(t *testing.T) {
 	task := createACPTestTask(t, store)
 	tr.Start(context.Background(), task)
 
-	waitRunACPDone(t, fake, task.ID)
+	waitRunACPDone(t, store, task.ID)
 	if got := getTask(t, store, task.ID).ACPSessionID; got != "acp-real-sid" {
 		t.Fatalf("first run ACPSessionID=%q, want acp-real-sid", got)
 	}
 
+	// 模拟空闲回收器把保活会话关掉：续问失去活会话，才会走 open 路径（ACP load/resume）。
+	if err := tr.agentMgr.Close(task.ID); err != nil {
+		t.Fatalf("close (simulate reap): %v", err)
+	}
 	// 续问时模拟原会话丢失：Open（load/resume）报错。
 	fake.setOpenErr(errors.New("acp: load session acp-real-sid: session not found"))
 	closeBefore := fake.closeCount()
@@ -781,7 +857,7 @@ func TestRunACP_Resume_SessionLost(t *testing.T) {
 	waitFor(t, 2*time.Second, "resume open attempt", func() bool {
 		return fake.openCount() > openBefore
 	})
-	// failTask 是 Open 失败路径最后的 store 写（其后仅 defer cancel，无 store 写），
+	// failTask 是 Open 失败路径最后的 store 写（其后仅 context cancel，无 store 写），
 	// 观察到 failed 即可安全 getTask（与文件内既有 getTask-after-wait 约定一致）。
 	waitFor(t, 2*time.Second, "task failed (session lost surfaced)", func() bool {
 		tt, ok := store.Get(task.ID)

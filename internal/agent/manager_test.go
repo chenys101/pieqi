@@ -108,6 +108,9 @@ func (f *fakeAdapter) OnToolCallUpdate(fn ToolCallUpdateFunc) { f.cbMu.Lock(); f
 
 func (f *fakeAdapter) Approve(ctx context.Context, reqID, optionID string) error { return nil }
 func (f *fakeAdapter) Deny(ctx context.Context, reqID string) error               { return nil }
+func (f *fakeAdapter) RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error {
+	return nil
+}
 func (f *fakeAdapter) InjectToolResult(ctx context.Context, sessionID, toolCallID string, result string, isError bool) error {
 	return nil
 }
@@ -655,6 +658,117 @@ func TestManagerCloseAll(t *testing.T) {
 	if m.Adapter("task-1") != nil || m.Adapter("task-2") != nil {
 		t.Fatal("adapters not nil after CloseAll")
 	}
+}
+
+// --- 空闲回收（reaper） ---
+
+// TestManagerReaper_ClosesIdleSession 空闲回收：会话 idle 超过 IdleTimeout 且未在 running，
+// CloseIdle 关闭它——adapter.Close 被调、onSessionClosed 钩子触发、并发槽释放。
+func TestManagerReaper_ClosesIdleSession(t *testing.T) {
+	m := NewAgentManager(ManagerConfig{IdleTimeout: time.Minute}, nil)
+	fa := newFakeAdapter("sess-1")
+	m.primary = fakeFactory(fa, AgentKindACP)
+	m.fallback = nil
+
+	if _, _, err := m.Open(context.Background(), "task-1", "proj-1", SessionConfig{Cwd: "/tmp"}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	closed := make(chan string, 1)
+	m.SetOnSessionClosed(func(taskID string) { closed <- taskID })
+
+	// 模拟会话已空闲超过阈值：把 lastActivity 拨回过去
+	sess := m.session("task-1")
+	if sess == nil {
+		t.Fatal("session nil after Open")
+	}
+	sess.runMu.Lock()
+	sess.lastActivity = time.Now().Add(-2 * time.Minute)
+	sess.runMu.Unlock()
+
+	m.CloseIdle(time.Now())
+
+	if m.Adapter("task-1") != nil {
+		t.Fatal("idle session should be closed by reaper")
+	}
+	if fa.closeN != 1 {
+		t.Fatalf("adapter Close calls=%d want 1", fa.closeN)
+	}
+	select {
+	case id := <-closed:
+		if id != "task-1" {
+			t.Fatalf("onSessionClosed got %q want task-1", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("onSessionClosed hook not fired")
+	}
+	// 并发槽已释放：closeN 后再 Open 同项目不应被占用的槽阻塞
+	if _, _, err := m.Open(context.Background(), "task-2", "proj-1", SessionConfig{Cwd: "/tmp"}); err != nil {
+		t.Fatalf("re-open after reap: %v", err)
+	}
+}
+
+// TestManagerReaper_SkipsRunningSession running 中的会话不被回收（不打断进行中的 turn）。
+func TestManagerReaper_SkipsRunningSession(t *testing.T) {
+	m := NewAgentManager(ManagerConfig{IdleTimeout: time.Minute}, nil)
+	fa := newFakeAdapter("sess-1")
+	fa.sendPromptBlock = true
+	fa.sendPromptStarted = make(chan struct{}, 1)
+	m.primary = fakeFactory(fa, AgentKindACP)
+	m.fallback = nil
+
+	if _, _, err := m.Open(context.Background(), "task-1", "proj-1", SessionConfig{Cwd: "/tmp"}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- m.Run(context.Background(), "task-1", "hi") }()
+	select {
+	case <-fa.sendPromptStarted:
+	case <-time.After(time.Second):
+		t.Fatal("SendPrompt not started")
+	}
+
+	// 即使 lastActivity 很旧，running 中的会话也不回收
+	sess := m.session("task-1")
+	sess.runMu.Lock()
+	sess.lastActivity = time.Now().Add(-2 * time.Minute)
+	sess.runMu.Unlock()
+	m.CloseIdle(time.Now())
+
+	if m.Adapter("task-1") == nil {
+		t.Fatal("running session should NOT be closed by reaper")
+	}
+
+	// 收尾：取消 Run 释放阻塞，关会话
+	_ = m.Cancel(context.Background(), "task-1")
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after Cancel")
+	}
+	_ = m.Close("task-1")
+}
+
+// TestManagerStartStopReaper StartReaper 周期性回收 + StopReaper 停止（幂等）。
+func TestManagerStartStopReaper(t *testing.T) {
+	m := NewAgentManager(ManagerConfig{IdleTimeout: 50 * time.Millisecond}, nil)
+	fa := newFakeAdapter("sess-1")
+	m.primary = fakeFactory(fa, AgentKindACP)
+	m.fallback = nil
+
+	if _, _, err := m.Open(context.Background(), "task-1", "proj-1", SessionConfig{Cwd: "/tmp"}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	m.StartReaper(20 * time.Millisecond)
+	// Open 后未跑 Run，lastActivity 为 zero time（远早于阈值）→ 首个 tick 即回收
+	deadline := time.Now().Add(2 * time.Second)
+	for m.Adapter("task-1") != nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if m.Adapter("task-1") != nil {
+		t.Fatal("reaper did not close idle session")
+	}
+	m.StopReaper()
+	m.StopReaper() // 幂等
 }
 
 // TestAgentManager_Open_ResumeFrom 校验 Open 把 SessionConfig.ResumeFrom 透传给 primary NewSession。
