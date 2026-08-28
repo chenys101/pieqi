@@ -1,4 +1,5 @@
 # Build output
+/bin/
 /pieqi.exe
 /pieqi
 build/
@@ -28,6 +29,7 @@ data/*.log
 data/*.err
 pieqi.err
 pieqi.out
+pieqi-run.log
 
 # 运行时数据(tasks/worktrees/sessions/mappings 由后端生成)
 data/tasks/
@@ -47,6 +49,15 @@ data/choice-verify-sysprompt.txt
 
 # Scratch：方向性 spike / 验证脚本（临时产物，不进 git）
 .scratch/
+
+# claude-sdk-bridge spike 存档（docs/spikes；可 npm install 再生 node_modules）
+docs/spikes/claude-sdk-bridge/node_modules/
+docs/spikes/claude-sdk-bridge/.spike-cwd/
+docs/spikes/claude-sdk-bridge/package-lock.json
+
+# claude-sdk-bridge 产品桥（Node 子项目；node_modules/package-lock 由 npm install 生成）
+services/claude-sdk-bridge/node_modules/
+services/claude-sdk-bridge/package-lock.json
 
 # OS
 .DS_Store

@@ -14,9 +14,10 @@ const state = {
   expanded: new Set(), // 展开的 project_path（默认全收起；running/waiting_input 自动展开）
   selectedId: null,   // 当前选中任务 id
   hoverProjectPath: null, // 鼠标悬停的项目路径，新建任务时预选
+  newTaskDefaultPath: null, // 进入新建态时预置的项目路径（默认取详情页当前任务的 project_path）
   ws: null,
   pendingScroll: null, // 发送补充后标记：收到下次任务更新强制滑到底
-  lastPrompt: {},      // taskId -> 本次发送的提示词（running 时 footer 展示）
+  thinking: {},       // taskId -> bool: 本次 run 尚未产出流式文本（展示「思考中...」徽章）
 };
 
 // 补全数据源：启动时拉取
@@ -273,9 +274,12 @@ function renderDetail() {
           <input id="nt-project-path" class="hidden" type="text" placeholder="输入绝对路径，如 G:\workspace\erp" />
         </div>
         <div class="iv-input-wrap">
-          <textarea id="nt-prompt" rows="2" placeholder="描述要做什么..."></textarea>
+          <textarea id="nt-prompt" rows="3" placeholder="描述要做什么... 输入 / 触发命令/skill"></textarea>
+          <button id="nt-send" class="send-btn" disabled title="创建任务 (Ctrl+Enter)" aria-label="创建任务">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+          </button>
+          <div id="nt-autocomplete" class="autocomplete hidden"></div>
         </div>
-        <button id="nt-submit" class="primary">创建</button>
       </div>`;
     populateProjectPicker();
     bindNewTaskFooter();
@@ -324,25 +328,20 @@ function renderDetail() {
     }
   }
 
-  // 底部操作区：按状态切换
-  // - running/waiting_input/pending：显示「终止任务」+ 本次提示词（若有）
-  // - completed/failed/cancelled：显示输入框 + 「发送」(有内容才可用，Ctrl+Enter)
-  let footer = '';
-  if (canCancel) {
-    const curPrompt = state.lastPrompt[t.id] || t.prompt || '';
-    footer = `<div class="detail-footer">
-      ${curPrompt ? `<div class="current-prompt"><span class="cp-label">本次提示</span><div class="cp-text">${escapeHtml(curPrompt)}</div></div>` : ''}
-      <button class="danger" data-action="cancel">✕ 终止任务</button>
-    </div>`;
-  } else if (isFinished) {
-    footer = `<div class="detail-footer">
-      <div class="iv-input-wrap">
-        <textarea id="supplement-input" rows="2" placeholder="发送补充… 输入 / 触发命令/skill，Ctrl+Enter 发送"></textarea>
-        <div id="supplement-autocomplete" class="autocomplete hidden"></div>
-      </div>
-      <button id="supplement-send" class="primary" disabled>发送</button>
-    </div>`;
-  }
+  // 底部操作区：始终显示输入框 + 右下角双态按钮
+  // - running/pending/waiting_input：按钮翻转为方形「中止」（■），点击终止生成
+  // - completed/failed/cancelled：按钮为「发送」（↑），有内容才可用（Ctrl+Enter）
+  let footer = `<div class="detail-footer">
+    <div class="iv-input-wrap">
+      <textarea id="supplement-input" rows="3" placeholder="发送补充… 输入 / 触发命令/skill，Ctrl+Enter 发送"${canCancel ? ' disabled' : ''}></textarea>
+      <button id="supplement-send" class="send-btn${canCancel ? ' stop' : ''}" ${canCancel ? '' : 'disabled'} title="${canCancel ? '中止生成' : '发送 (Ctrl+Enter)'}" aria-label="${canCancel ? '中止' : '发送'}">
+        ${canCancel
+          ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>'
+          : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>'}
+      </button>
+      <div id="supplement-autocomplete" class="autocomplete hidden"></div>
+    </div>
+  </div>`;
 
   wrap.innerHTML = `
     <div class="detail-content">
@@ -376,44 +375,52 @@ function renderDetail() {
   wrap.querySelectorAll('[data-action]').forEach(b => {
     b.addEventListener('click', () => onTaskAction(b.dataset.action, t.id, b.dataset.option));
   });
-  // 补充输入框：有内容才启用发送 + 斜杠补全
+  // 输入框 + 右下角双态按钮（中止 ■ / 发送 ↑）
   const supInput = document.getElementById('supplement-input');
   const supSend = document.getElementById('supplement-send');
   const supAc = document.getElementById('supplement-autocomplete');
   if (supInput && supSend) {
-    supInput.addEventListener('input', () => { supSend.disabled = !supInput.value.trim(); });
-    // Ctrl+Enter / Cmd+Enter 发送
-    supInput.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !supSend.disabled) {
-        e.preventDefault();
-        supSend.click();
-      }
-    });
-    supSend.addEventListener('click', async () => {
-      const text = supInput.value.trim();
-      if (!text) return;
-      try {
-        await apiPost(`/tasks/${t.id}/intervene`, { kind: 'append_prompt', text });
-        supInput.value = '';
-        supSend.disabled = true;
-        state.lastPrompt[t.id] = text; // running 期间 footer 展示本次提示词
-        state.pendingScroll = t.id; // 标记：收到下次更新后强制滑到底
-        // 乐观渲染：发送成功后本地立即在详情区插入右对齐用户气泡，不等 WS 推送。
-        // 后端 Resume 会持久化同一条 user 事件并经 task_updated 推回，届时 renderDetail
-        // 全量重绘会替换本临时节点，故这里不写 state.tasks.events，避免重复气泡。
-        if (state.selectedId === t.id) {
-          const eventsEl = document.getElementById('events');
-          if (eventsEl) {
-            eventsEl.insertAdjacentHTML('beforeend',
-              `<div class="ev ev-user"><div class="ev-bubble">${escapeHtml(text)}</div></div>`);
-            const scroller = document.querySelector('.detail-content');
-            if (scroller) scroller.scrollTop = scroller.scrollHeight;
-          }
+    if (canCancel) {
+      // 中止态：■ 方块，点击立即终止当前生成
+      supSend.disabled = false;
+      supSend.addEventListener('click', () => onTaskAction('cancel', t.id));
+    } else {
+      // 发送态：↑ 箭头，有内容才可用 + Ctrl+Enter
+      supInput.addEventListener('input', () => { supSend.disabled = !supInput.value.trim(); });
+      supInput.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !supSend.disabled) {
+          e.preventDefault();
+          supSend.click();
         }
-      } catch (err) { alert(err.message); }
-    });
-    // 斜杠补全（commands + skills 分组）
-    if (supAc) attachAutocomplete(supInput, supAc, acSources);
+      });
+      supSend.addEventListener('click', async () => {
+        const text = supInput.value.trim();
+        if (!text) return;
+        try {
+          await apiPost(`/tasks/${t.id}/intervene`, { kind: 'append_prompt', text });
+          supInput.value = '';
+          supInput.disabled = true; // 提交后清空并禁止输入，等待任务状态刷新重建 footer
+          supSend.disabled = true;
+          state.thinking[t.id] = true; // 进入「思考中...」占位态，首次流式文本后清除
+          state.pendingScroll = t.id; // 标记：收到下次更新后强制滑到底
+          // 乐观渲染：发送成功后本地立即在详情区插入右对齐用户气泡 + 「思考中...」徽章，
+          // 不等 WS 推送。后端 Resume 会持久化同一批事件并经 task_updated 推回，
+          // 届时 renderDetail 全量重绘会替换这些临时节点，故不写 state.tasks.events。
+          if (state.selectedId === t.id) {
+            const eventsEl = document.getElementById('events');
+            if (eventsEl) {
+              eventsEl.insertAdjacentHTML('beforeend',
+                `<div class="ev ev-user"><div class="ev-bubble">${escapeHtml(text)}</div></div>` +
+                thinkingBadgeHTML());
+              const scroller = document.querySelector('.detail-content');
+              if (scroller) scroller.scrollTop = scroller.scrollHeight;
+            }
+          }
+        } catch (err) { alert(err.message); }
+      });
+      // 斜杠补全（commands + skills 分组）
+      if (supAc) attachAutocomplete(supInput, supAc, acSources);
+    }
   }
 }
 
@@ -441,6 +448,39 @@ function renderEvents(t) {
       }
     });
   });
+  // 「思考中...」占位徽章：提交后等待首次流式输出的过渡提示（呼吸灯 + 点渐变）
+  if (showThinking(t)) {
+    el.insertAdjacentHTML('beforeend', thinkingBadgeHTML());
+  }
+}
+
+// thinkingBadgeHTML 「思考中...」占位徽章：呼吸灯 + 点渐变动效，缓解等待焦虑。
+// 首次流式文本输出时由 applyTaskDelta 移除，无缝切换为流式文本。
+function thinkingBadgeHTML() {
+  return `<div class="ev ev-thinking-badge">
+    <span class="tb-dot"></span>
+    <span class="tb-text">思考中</span>
+    <span class="tb-dots"><span></span><span></span><span></span></span>
+  </div>`;
+}
+
+// showThinking 是否需要展示「思考中...」徽章：
+// - 发送补充后置起 thinking 标记（首次流式文本清除）
+// - 兜底：running/pending 且尚无任何事件/输出（如新建任务冷启动）
+// - waiting_input（需决策）不展示：此时是请求用户决策而非思考，由决策横幅提示
+function showThinking(t) {
+  if (!t) return false;
+  const active = t.status === 'running' || t.status === 'pending';
+  if (!active) return false;
+  if (state.thinking[t.id]) return true;
+  return !(t.events || []).length && !t.output;
+}
+
+// removeThinkingBadge 移除详情区已渲染的「思考中...」徽章（首次流式文本到达时调用）。
+function removeThinkingBadge() {
+  const el = document.getElementById('events');
+  const badge = el && el.querySelector('.ev-thinking-badge');
+  if (badge) badge.remove();
 }
 
 function renderEvent(ev) {
@@ -606,6 +646,11 @@ function applyTaskDelta(ev) {
   }
   if (!isThought) {
     t.output = (t.output || '') + text;
+    // 首次流式文本输出：结束「思考中...」占位，无缝切换为流式文本
+    if (state.thinking[ev.task_id]) {
+      state.thinking[ev.task_id] = false;
+      removeThinkingBadge();
+    }
   }
 
   // 2. 仅对当前选中且正在查看的 task 做增量 DOM 追加；非选中任务只更新本地状态
@@ -688,6 +733,8 @@ function connectWS() {
       if (state.selectedId === ev.task_id) state.selectedId = null;
     } else if (ev.task) {
       upsertTask(ev.task);
+      // 任务进入终态或需决策：清除「思考中...」标记（决策由横幅提示，不再展示思考态）
+      if (['completed', 'failed', 'cancelled', 'waiting_input'].includes(ev.task.status)) delete state.thinking[ev.task.id];
     }
     render();
     // 选中任务有更新时，只重渲染详情（避免列表重绘打断）
@@ -707,7 +754,7 @@ function recentProjects() {
     const e = m.get(key);
     const tsv = new Date(t.updated_at || t.created_at).getTime() || 0;
     if (!e) m.set(key, { id: t.project_id || '', path: t.project_path, lastUsed: tsv });
-    else if (tsv > e.lastUsed) e.lastUsed = tsv;
+    else if (tsv > e.lastUsed) { e.lastUsed = tsv; e.path = t.project_path; e.id = t.project_id || e.id; }
   }
   return [...m.values()].sort((a, b) => b.lastUsed - a.lastUsed);
 }
@@ -715,6 +762,9 @@ function recentProjects() {
 // 新建任务：进入空白详情页（清除选中）并聚焦输入框。项目选择在表单内必填，
 // 创建成功后再切到新任务详情；补充会话（详情页底部输入框）不含项目选择。
 function openNewTask() {
+  // 从任务详情页进入新建态时，默认项目 = 当前详情任务的项目路径
+  const cur = state.tasks.find(t => t.id === state.selectedId);
+  state.newTaskDefaultPath = (cur && cur.project_path) || null;
   state.selectedId = null;
   render();
   renderDetail(); // 空白分支会 populate 项目下拉 + 显示表单
@@ -734,15 +784,14 @@ function populateProjectPicker() {
     return `<option value="path:${escapeHtml(h.path)}" data-path="${escapeHtml(h.path)}">${escapeHtml(label)}</option>`;
   }).join('');
 
-  // 默认项目优先级：当前选中任务的项目 > 鼠标悬停的项目组
-  let defaultPath = '';
-  if (state.selectedId) {
-    const cur = state.tasks.find(t => t.id === state.selectedId);
-    if (cur && cur.project_path) defaultPath = cur.project_path;
-  }
+  // 默认项目优先级：详情页当前任务的项目 > 鼠标悬停的项目组
+  let defaultPath = state.newTaskDefaultPath || '';
   if (!defaultPath && state.hoverProjectPath) defaultPath = state.hoverProjectPath;
   if (defaultPath) {
-    const hit = projects.find(h => h.path === defaultPath);
+    // 用归一化 key 匹配（groupKey 统一 / 与 \、去重复斜杠、忽略大小写），
+    // 避免同项目正/反斜杠写法不同导致精确匹配失败、默认落到错误项目。
+    const dk = groupKey(defaultPath);
+    const hit = projects.find(h => groupKey(h.path) === dk);
     if (hit) sel.value = `path:${hit.path}`;
   }
   // 默认回到「选项目」模式
@@ -778,15 +827,22 @@ function bindNewTaskFooter() {
   if (toggle) toggle.addEventListener('click', () => {
     setProjectMode(toggle.dataset.mode === 'path' ? 'select' : 'path');
   });
-  const submit = document.getElementById('nt-submit');
+  const send = document.getElementById('nt-send');
   const input = document.getElementById('nt-prompt');
-  if (submit) submit.addEventListener('click', submitNewTask);
-  if (input && submit) input.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-      e.preventDefault();
-      submit.click();
-    }
-  });
+  if (send && input) {
+    send.addEventListener('click', submitNewTask);
+    // 有内容才启用发送（icon 按钮），与追加输入框一致
+    input.addEventListener('input', () => { send.disabled = !input.value.trim(); });
+    input.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        send.click();
+      }
+    });
+  }
+  // 斜杠补全（commands + skills 分组），与追加输入框一致
+  const ntAc = document.getElementById('nt-autocomplete');
+  if (input && ntAc) attachAutocomplete(input, ntAc, acSources);
 }
 
 // 提交新建任务：项目必填（下拉选中或自定义路径），成功后切到新任务详情。
@@ -812,6 +868,7 @@ async function submitNewTask() {
     setProjectMode('select');
     // 创建成功：本地即刻加入列表并默认选中该任务详情（用 POST 返回值，不依赖 WS 推送，避免偶发不送达）
     upsertTask(task);
+    state.thinking[task.id] = true; // 新建即进入「思考中...」占位态，首次流式文本后清除
     selectTask(task.id);
   } catch (err) { alert(err.message); }
 }

@@ -405,6 +405,12 @@ func (a *PrintAgent) Deny(ctx context.Context, reqID string) error {
 	return ErrNotSupported
 }
 
+// RespondPermission PrintAgent 审批不经 adapter（走 HookService），不支持。
+// 与 Approve/Deny 一致返回 ErrNotSupported。
+func (a *PrintAgent) RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error {
+	return ErrNotSupported
+}
+
 // InjectToolResult PrintAgent 不支持：append_prompt 由 AgentManager 经 Resume 路由（4b 处理）。
 //
 // PrintAgent 是 one-shot 模式，每轮 SendPrompt 跑完进程即退出。

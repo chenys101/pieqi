@@ -39,19 +39,38 @@ pieqi:
   hook_tools: [Bash, Write, Edit, NotebookEdit]  # PreToolUse 拦截的工具；读类不拦
   max_concurrent_per_project: 4
   base_branch: master            # worktree 基准分支；本机 pieqi 主分支为 master
-  # ACP 协议（Phase 2）：use_acp=true 时 agent 驱动走 AgentAdapter（ACPAgent），
-  # false（默认）保持 Phase 1 的 claude -p + stream-json 路径不变。
-  # agent_type 选 claude-code（经官方 TS 适配器）/ qodercli / codex / 其他原生 ACP agent。
-  # acp_spawn_command 留空则代码自动解析 adapter 入口：先找项目本地 node_modules，
-  # 再找 %APPDATA%\npm 全局安装（npm i -g @agentclientprotocol/claude-agent-acp），
-  # 用 `node <入口>` 直接拉起（绕开 Windows 下 Go spawn npx 会永久挂死的问题），
-  # 都找不到才回退 npx。非空则整体覆盖。
+  # ACP 协议（Phase 2）—— 已弃用（P5）：将迁移到下方 agents.* 节。
+  # use_acp=true 时 agent 驱动走 AgentAdapter（ACPAgent）；false 保持 claude -p 路径。
+  # 显式配置本节的任何字段都会触发弃用告警（旧语义暂仍生效，直到 TaskRunner 接入 agents.*）。
   acp:
-    use_acp: true                   # 切 true 启用 ACP 路径（claude-code TS 适配器）
-    agent_type: claude-code         # claude-code | qodercli | codex | <其他>
-    acp_spawn_command: []           # 空 = 代码自动解析；如 ["qodercli","--acp","--port","1234"]
-    init_timeout: 30s               # initialize / newSession 握手超时
-    idle_timeout: 15m               # ACP 会话空闲回收：轮间保活，超过该时长无对话优雅关闭（避免孤儿进程）；<=0 禁用
+    use_acp: true                   # 弃用：迁移到 agents.claude.transport
+    agent_type: claude-code         # 弃用：claude-code → agents.claude；qodercli → agents.qoder.acp
+    acp_spawn_command: []           # 弃用：迁移到 agents.qoder.acp.spawn_command
+    init_timeout: 30s               # 弃用：迁移到 agents.qoder.acp.init_timeout
+    idle_timeout: 15m               # 弃用：迁移到 agents.qoder.acp.idle_timeout
+
+# 多 Agent（multi-agent.md §9）：与 pieqi.acp.* 旧字段并存，新增节不改旧语义。
+# 旧字段迁移（agents.claude/qoder 接管 acp.use_acp 等）在 P5 单独做。
+agents:
+  claude:
+    transport: sdk-bridge           # sdk-bridge(默认,官方 Agent SDK 常驻桥) | print(直连 claude -p)
+    bridge:
+      base_url: "http://127.0.0.1:18790"  # 桥监听地址；改端口需与 auto_start 同步
+      token: ""                     # 桥鉴权 token（空 = 不鉴权，仅本地私有端口）；建议设
+      auto_start: true              # 探活失败自动 spawn node src/index.js（桥源码随服务同装）
+      # dir: ""                     # 桥源码目录(含 src/index.js)；空 = 自动探测(exe/cwd 邻接 services/claude-sdk-bridge)
+    print:
+      command: claude               # bridge 不可用时的 print 回退
+      permission_mode: bypassPermissions
+      model: ""
+      sys_prompt: ""
+  qoder:
+    transport: acp                  # acp(默认, qodercli --acp)
+    acp:
+      agent_type: qodercli
+      spawn_command: []             # 空 = 按 agent_type 取默认；如 ["qodercli","--acp","--port","1234"]
+      init_timeout: 30s
+      idle_timeout: 15m
 
 # 飞书身份绑定 + Cloudflared 临时隧道安全系统（PRD §8）
 auth:

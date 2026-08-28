@@ -57,6 +57,9 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
   letter-spacing: -0.005em;
 }
+/* body 纵向 flex：顶栏(48px) + debug 横幅(有/无) + layout 自动占满剩余高度。
+   修复：layout 原用 height:calc(100vh - 48px)，横幅出现时把侧栏底部设置区顶出视口外。 */
+body { display: flex; flex-direction: column; }
 
 ::selection { background: var(--accent-soft); }
 
@@ -124,7 +127,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .hidden { display: none !important; }
 
 /* ============ 主布局 ============ */
-.layout { display: flex; height: calc(100vh - 48px); }
+.layout { display: flex; flex: 1; min-height: 0; }
 
 /* —— 左侧栏 —— */
 .sidebar {
@@ -347,21 +350,83 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .detail-footer textarea::placeholder { color: var(--text-4); }
 .detail-footer button { padding: 9px 18px; align-self: flex-end; }
 
-/* running 时展示的「本次提示词」 */
-.current-prompt {
-  display: flex; align-items: flex-start; gap: 8px;
-  padding: 8px 12px; margin-bottom: 8px;
-  background: var(--accent-soft); border: 1px solid rgba(124, 92, 255, 0.2);
-  border-radius: var(--radius-sm);
+/* ============ 赛博霓虹按钮（详情底部：发送 ↑ / 中止 ■） ============ */
+/* 发送按钮：悬浮在输入框右下角（不单独占行，输入框显得更大） */
+.detail-footer .iv-input-wrap textarea { padding-right: 46px; }
+.detail-footer .send-btn {
+  --neon: #00f5d4;
+  position: absolute; right: 8px; bottom: 8px;
+  width: 32px; height: 32px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(26, 26, 31, 0.6); /* 半透明深灰 */
+  border: 1px solid var(--neon); color: var(--neon);
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.25s ease;
 }
-.current-prompt .cp-label {
-  flex-shrink: 0; font-size: 11px; font-weight: 600;
-  color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px;
-  padding-top: 2px;
+.detail-footer .send-btn svg {
+  width: 18px; height: 18px;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+  transition: transform 0.2s ease;
 }
-.current-prompt .cp-text {
-  font-size: 13px; color: var(--text); white-space: pre-wrap; word-break: break-word;
-  max-height: 3em; overflow: hidden;
+/* 悬停：荧光绿填满按钮，向外晕染一层科技霓虹氛围灯效 */
+.detail-footer .send-btn:hover:not(:disabled) {
+  background: var(--neon); border-color: var(--neon); color: #04241f;
+  box-shadow:
+    0 0 8px rgba(0, 245, 212, 0.55),
+    0 0 24px rgba(0, 245, 212, 0.28),
+    0 0 64px rgba(0, 245, 212, 0.15);
+}
+.detail-footer .send-btn:hover:not(:disabled) svg { transform: translateY(-1px); }
+.detail-footer .send-btn:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; }
+/* running 态输入框禁用：半透明提示但不可输入 */
+.detail-footer textarea:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* 中止态（■ 方块）：默认半透明深灰 + 极细量子警示红描边 */
+.detail-footer .send-btn.stop {
+  --neon-red: #ff0055;
+  border-color: var(--neon-red); color: var(--neon-red);
+}
+/* 悬停：全红填充 + 警示发光 */
+.detail-footer .send-btn.stop:hover:not(:disabled) {
+  background: var(--neon-red); border-color: var(--neon-red); color: #fff;
+  box-shadow:
+    0 0 8px rgba(255, 0, 85, 0.6),
+    0 0 24px rgba(255, 0, 85, 0.32),
+    0 0 64px rgba(255, 0, 85, 0.18);
+}
+
+/* ============ 「思考中...」占位徽章（呼吸灯 + 点渐变） ============ */
+.ev-thinking-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  align-self: flex-start;
+  padding: 8px 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-3); font-size: 13px;
+  width: fit-content;
+}
+.ev-thinking-badge .tb-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+  animation: tb-breathe 1.6s ease-in-out infinite;
+}
+.ev-thinking-badge .tb-dots { display: inline-flex; gap: 3px; }
+.ev-thinking-badge .tb-dots span {
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--accent);
+  animation: tb-blink 1.2s ease-in-out infinite;
+}
+.ev-thinking-badge .tb-dots span:nth-child(2) { animation-delay: .2s; }
+.ev-thinking-badge .tb-dots span:nth-child(3) { animation-delay: .4s; }
+/* 呼吸灯：缩放 + 微光晕 */
+@keyframes tb-breathe {
+  0%, 100% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0 rgba(124, 92, 255, 0.35); }
+  50% { transform: scale(1.3); opacity: .85; box-shadow: 0 0 10px 2px rgba(124, 92, 255, 0.3); }
+}
+/* 点渐变：三个点依次明暗闪烁 */
+@keyframes tb-blink {
+  0%, 100% { opacity: .2; }
+  50% { opacity: 1; }
 }
 
 /* ============ 事件流 ============ */

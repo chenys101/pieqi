@@ -108,6 +108,9 @@ func (f *fakeAdapter) OnToolCallUpdate(fn ToolCallUpdateFunc) { f.cbMu.Lock(); f
 
 func (f *fakeAdapter) Approve(ctx context.Context, reqID, optionID string) error { return nil }
 func (f *fakeAdapter) Deny(ctx context.Context, reqID string) error               { return nil }
+func (f *fakeAdapter) RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error {
+	return nil
+}
 func (f *fakeAdapter) InjectToolResult(ctx context.Context, sessionID, toolCallID string, result string, isError bool) error {
 	return nil
 }

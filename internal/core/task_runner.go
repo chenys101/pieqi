@@ -24,14 +24,14 @@ import (
 // -> spawn claude（stream-json）-> 解析事件 -> 状态转换 -> Publish。
 // PreToolUse hook 经 HookService 阻塞等人类决策。
 type TaskRunner struct {
-	logger    *zap.Logger
-	store     *TaskStore
-	wm        *WorktreeManager
-	bus       *EventBus
-	hooks     *HookService
-	baseBranch string // worktree 基准分支，默认 "main"
-	sysPrompt string
-	permissionMode string
+	logger           *zap.Logger
+	store            *TaskStore
+	wm               *WorktreeManager
+	bus              *EventBus
+	hooks            *HookService
+	baseBranch       string // worktree 基准分支，默认 "main"
+	sysPrompt        string
+	permissionMode   string
 	cleanupWorktrees bool
 
 	// hook 注入：仅 permissionMode==bypassPermissions 时写 settings.json
@@ -61,11 +61,11 @@ type TaskRunner struct {
 }
 
 type liveProc struct {
-	taskID  string
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	cancel  context.CancelFunc
-	done    chan struct{} // claude 进程退出
+	taskID string
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	cancel context.CancelFunc
+	done   chan struct{} // claude 进程退出
 }
 
 // agentRunner 抽象 TaskRunner 所需的 AgentManager 能力。
@@ -545,6 +545,10 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 		return false // 复用活会话（wires 已注册），无回退
 	}
 	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom}
+	if resumeFrom != "" {
+		tr.logger.Debug("agent session open (resume)",
+			zap.String("task", task.ID), zap.String("resume_from", resumeFrom))
+	}
 	adapter, fellBack, err := tr.agentMgr.Open(ctx, task.ID, task.ProjectID, cfg)
 	if err != nil {
 		// 续问路径 Open 失败多为原会话丢失（ACP load/resume 报错，或 PrintAgent --resume
@@ -597,6 +601,32 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	return fellBack
 }
 
+// refreshResumeID 轮末刷新续问句柄：桥会话（sessionBackedAdapter）在 turn_end 后才带出
+// SDK resume id，Open 时 RealSessionID 拿不到，故每轮成功后回写 ACPSessionID。
+// 无 ResumeID() 的 adapter（qoder sessionAdapter / 旧 ACP 路径）为 no-op——
+// 它们的续问句柄在 ensureACPSession 打开时已持久化。
+func (tr *TaskRunner) refreshResumeID(taskID string) {
+	a := tr.agentMgr.Adapter(taskID)
+	if a == nil {
+		return
+	}
+	r, ok := a.(interface{ ResumeID() string })
+	if !ok {
+		return
+	}
+	id := r.ResumeID()
+	if id == "" {
+		return
+	}
+	_, _ = tr.store.Update(taskID, func(t *model.Task) bool {
+		if t.ACPSessionID != id {
+			t.ACPSessionID = id
+			return true
+		}
+		return false
+	})
+}
+
 // runACPTurn 跑一轮 prompt turn：setRunning → Run(SendPrompt) → 终态转换。
 //
 // keepAlive=true（ACP 路径）：轮末不关会话，跨轮保活复用（下一次 Resume 直接复用同一会话，
@@ -606,6 +636,12 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt string, keepAlive bool) {
 	tr.setRunning(task.ID)
 	runErr := tr.agentMgr.Run(ctx, task.ID, prompt)
+
+	// 桥路径：turn_end 后才带出 SDK resume id，轮末回写 ACPSessionID（续问用）。
+	// 若 adapter 是带 ResumeID() 的会话（sessionBackedAdapter），id 非空时覆盖旧值。
+	if runErr == nil {
+		tr.refreshResumeID(task.ID)
+	}
 
 	// Cancel 路径会先把 task 置 cancelled；此处若是 cancelled 就直接收尾（不 fail/complete），
 	// 并摘除会话（取消=停止，不保活）。worktree 清理由会话关闭回调统一处理。
@@ -746,7 +782,7 @@ func (tr *TaskRunner) injectHookSettings(task *model.Task) {
 // 供空输出诊断（claude 退出 0 却没产出时，用此区分"stdout 真空"还是"事件被丢"）。
 func (tr *TaskRunner) parseStream(taskID string, stdout io.Reader) (lines, bytes int) {
 	reader := bufio.NewReaderSize(stdout, 1024*1024) // 1MB 缓冲防长行截断
-	pendingToolUses := map[string]string{} // tool_use id -> tool name，供 tool_result 关联
+	pendingToolUses := map[string]string{}           // tool_use id -> tool name，供 tool_result 关联
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -941,7 +977,7 @@ func (tr *TaskRunner) Cancel(taskID string) error {
 func (tr *TaskRunner) setRunning(taskID string) {
 	tr.transition(taskID, model.TaskRunning, func(t *model.Task) {
 		t.CurrentDecision = nil
-		t.Error = "" // 续问时清掉之前的错误
+		t.Error = ""       // 续问时清掉之前的错误
 		t.FinishedAt = nil // 从终态恢复，重新进入运行
 		now := time.Now()
 		if t.StartedAt == nil {

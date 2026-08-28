@@ -91,8 +91,8 @@ pieqi/
 ### 开发运行
 
 ```bash
-# 构建二进制（cmd/pieqi 入口）
-go build -o pieqi ./cmd/pieqi
+# 构建二进制（cmd/pieqi 入口，产物在 bin/）
+mkdir -p bin && go build -o bin/pieqi ./cmd/pieqi
 
 # 或直接运行
 go run ./cmd/pieqi

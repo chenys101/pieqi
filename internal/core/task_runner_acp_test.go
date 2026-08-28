@@ -340,6 +340,13 @@ func (f *fakeAgentAdapter) Deny(ctx context.Context, reqID string) error {
 	return nil
 }
 
+func (f *fakeAgentAdapter) RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error {
+	if allow {
+		return f.Approve(ctx, reqID, optionID)
+	}
+	return f.Deny(ctx, reqID)
+}
+
 func (f *fakeAgentAdapter) InjectToolResult(ctx context.Context, sessionID, toolCallID string, result string, isError bool) error {
 	return agent.ErrNotSupported
 }

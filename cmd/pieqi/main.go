@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"pieqi/internal/agent"
+	"pieqi/internal/agent/claude"
 	"pieqi/internal/api"
 	"pieqi/internal/auth"
 	"pieqi/internal/channel/wechat"
@@ -64,6 +65,11 @@ func main() {
 		log.Fatalf("init logger: %v", err)
 	}
 	defer logger.Sync()
+
+	// P5：pieqi.acp.* 旧字段迁移告警（仅显式配置时触发，旧语义仍生效）
+	for _, d := range cfg.Deprecations {
+		logger.Warn("config deprecated field", zap.String("hint", d))
+	}
 
 	// --- 数据目录（默认 ~/.pieqi，PIEQI_HOME 可覆盖；运行时数据不入仓库） ---
 	dataRoot := config.DefaultDataRoot()
@@ -108,9 +114,31 @@ func main() {
 		cfg.Pieqi.MaxConcurrentPerProject, cfg.Pieqi.BaseBranch,
 	)
 
-	// ACP 路径（Phase 2）：use_acp=true 时注入 AgentManager
+	// ACP 路径（Phase 2）→ 已由多 Agent 默认驱动取代（#2）：
+	//   agents.claude.transport=sdk-bridge（默认）→ 任务经 agent.Open("claude") 驱动
+	//     （桥为主力，桥不可用自动回退 print）；transport=print 且 qoder 已配置 → "qoder"。
+	//   以上均不命中时回退旧 use_acp AgentManager（transport=print + use_acp=true）。
+	//   默认路径（use_acp=false + transport=print）保持 Phase 1 claude -p 不变。
 	var acpMgr *agent.AgentManager
-	if cfg.Pieqi.ACP.UseACP {
+	sessionAgent := ""
+	if cfg.Agents.Claude.Transport == "sdk-bridge" {
+		sessionAgent = "claude"
+	} else if cfg.Agents.Qoder.Transport == "acp" && cfg.Agents.Qoder.ACPConfig().AgentType != "" {
+		sessionAgent = "qoder"
+	}
+	if sessionAgent != "" {
+		mgr := agent.NewAgentSessionManager(sessionAgent, agent.ManagerConfig{
+			MaxConcurrent: cfg.Pieqi.MaxConcurrentPerProject,
+			// 会话空闲回收阈值：复用旧 acp.idle_timeout（默认 15m），轮间保活上限
+			IdleTimeout: cfg.Pieqi.ACP.IdleTimeout,
+		}, logger)
+		acpMgr = mgr
+		runner.SetAgentManager(mgr, true, cfg.Pieqi.HookTimeout)
+		logger.Info("agent session manager enabled",
+			zap.String("agent", sessionAgent), zap.String("transport", cfg.Agents.Claude.Transport))
+		// 后台空闲回收：会话跨轮保活，超过 idle_timeout 无对话优雅关闭（避免孤儿进程累积）。
+		mgr.StartReaper(cfg.Pieqi.ACP.IdleTimeout / 3)
+	} else if cfg.Pieqi.ACP.UseACP {
 		mgr := agent.NewAgentManager(agent.ManagerConfigFromPieqi(cfg.Pieqi), logger)
 		acpMgr = mgr
 		// 透明回退时记录真实 primaryErr（此前只记通用文案"ACP 适配器不可用"，失败原因黑盒）。
@@ -132,6 +160,39 @@ func main() {
 		bridge.EnablePieqi(store, runner, bus)
 	}
 	runner.SetNotifier(bridge.NotifyOrigin)
+
+	// --- 多 Agent（multi-agent.md §9 / 修订版 §9）：agents.* 配置接线 ---
+	// claude：sdk-bridge 时注册 bridge provider（探活失败可自动 spawn 常驻桥），
+	// 桥不可用由 openSession 回退 print；print 时直接注册 claude -p 回退。
+	var claudeProc *claude.Proc
+	{
+		cc := claude.ConfigFromAgents(cfg.Agents)
+		cc.Logger = logger
+		if cc.Transport == "sdk-bridge" && cfg.Agents.Claude.Bridge.AutoStart {
+			proc := claude.NewProc(claude.ProcConfig{
+				BaseURL: cfg.Agents.Claude.Bridge.BaseURL,
+				Token:   cfg.Agents.Claude.Bridge.Token,
+				Dir:     cfg.Agents.Claude.Bridge.Dir,
+				Logger:  logger,
+			})
+			if err := proc.EnsureRunning(context.Background()); err != nil {
+				logger.Warn("claude sdk-bridge auto-start failed; sessions will fall back to print",
+					zap.Error(err))
+			} else {
+				claudeProc = proc
+				logger.Info("claude sdk-bridge ensured",
+					zap.String("base_url", cfg.Agents.Claude.Bridge.BaseURL))
+			}
+		}
+		claude.Configure(cc)
+	}
+	// qoder：ACP 系 agent 工厂（transport=acp 时注册，业务 agent.Open("qoder") 即用）
+	if qc := agent.ACPProviderConfigFromAgents(cfg.Agents); qc.Qoder.AgentType != "" {
+		qc.Logger = logger
+		agent.ConfigureACPProviders(qc)
+		logger.Info("qoder agent provider configured",
+			zap.String("transport", cfg.Agents.Qoder.Transport))
+	}
 
 	// --- Gin ---
 	gin.SetMode(cfg.Server.Mode)
@@ -210,6 +271,10 @@ func main() {
 		<-sigCh
 		if acpMgr != nil {
 			_ = acpMgr.CloseAll()
+		}
+		// 关停自动启动的桥（桥 SIGTERM 优雅关全部会话再退；Windows 直接 KILL）
+		if claudeProc != nil {
+			_ = claudeProc.Stop(context.Background())
 		}
 		os.Exit(0)
 	}()

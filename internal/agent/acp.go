@@ -424,6 +424,15 @@ func (a *ACPAgent) Deny(ctx context.Context, reqID string) error {
 	return nil
 }
 
+// RespondPermission 对权限请求给出中性审批响应：allow=true→Approve(reqID, optionID)，
+// allow=false→Deny(reqID)。与 Approve/Deny 语义一致。
+func (a *ACPAgent) RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error {
+	if allow {
+		return a.Approve(ctx, reqID, optionID)
+	}
+	return a.Deny(ctx, reqID)
+}
+
 // takePending 取出并删除一个 pending channel（投递完后不再保留）。
 func (a *ACPAgent) takePending(reqID string) (chan PermissionResponse, bool) {
 	a.permMu.Lock()
