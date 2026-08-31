@@ -1,97 +1,119 @@
 # Pieqi
 
-多渠道（飞书 / 企业微信 / 微信）到 **Claude Code CLI** 的桥接服务，核心特性是**跨渠道会话共享**：同一用户从飞书发起的对话，切到微信能无缝继续。
-
-当前为 **Pieqi 后端**形态：通过 worktree 并行运行开发任务，并提供一个**移动端监控 PWA** 来新建/查看/干预任务。
+把 **Claude Code 等 coding agent** 接入 IM（飞书 / 企微 / 微信）与移动端 PWA 的桥接服务：在手机上发消息即可创建/续问/审批 agent 任务，实时看到逐字流式输出与工具调用。
 
 ```
-飞书 / 企微 / 微信 ──→ Pieqi ──→ AgentAdapter ──→ ACP (claude-code / qodercli / codex ...)
-                      │              └─ 回退：claude -p --session-id / --resume
-                      ├── 跨渠道统一会话
-                      ├── Pieqi 后端（worktree 并行任务）
-                      └── 移动端监控 PWA（:3000）
+飞书(长连接/webhook) ─┐
+企业微信 / 微信      ─┼─→ Pieqi(Go 单二进制) ─→ AgentManager ─→ 多种 agent 传输：
+移动端 PWA (:3000)  ─┘        │                  ├─ claude：sdk-bridge（官方 Agent SDK 常驻桥，默认）
+                               │                  ├─ claude：print 回退（claude -p stream-json）
+                               │                  └─ qoder 等：原生 ACP（--acp，JSON-RPC over stdio）
+                               ├── 任务调度：worktree 隔离 / 每项目并发上限 / 审批 / 续问
+                               └── 安全：飞书单账号绑定 + Cloudflared 隧道 + token / 限流 / 审计
 ```
 
----
+***
 
 ## 特性
 
-- **跨渠道会话共享**：身份映射（`data/users.json`）把各渠道用户 ID 归一为统一身份，会话按 `user:<identity>:<session>` 共享上下文。
-- **Pieqi 后端**：任务可在任意本地路径直接运行（也可建 worktree 隔离并行），每项目并发上限控制；`bypassPermissions` + PreToolUse hook 实现人类审批。
-- **多 Agent 支持（Phase 2）**：经 ACP（Agent Client Protocol）统一驱动 claude-code / qodercli / codex 等任意 ACP agent；真流式（内容增量逐字）、协议级权限审批（RequestPermission → IM/PWA 卡片 → Approve/Deny）；ACP 适配器不可用时透明回退 `claude -p`。
-- **移动端 PWA**：新建任务、查看事件流、补充续问、工具调用折叠、URL 会话路由（`/session/<id>` 深链接）。
-- **会话恢复健壮化**：自动捕获 claude 真实 session_id 供续问；会话丢失时回退新会话，保证消息必被提交。
-- **单二进制部署**：前端经 `//go:embed` 嵌入，`pieqi.exe` 单文件自包含。
+* **多 Agent 统一驱动**：`AgentManager` + `AgentSession` 统一接口，按 `agents.*` 配置选择传输：
 
----
+  * `claude` → `sdk-bridge`（默认）：常驻 Node 桥服务（`services/claude-sdk-bridge`，:18790）封装官方 Claude Agent SDK，探活失败自动拉起；桥不可用时透明回退 `print`（`claude -p --output-format stream-json`）。
 
-## Phase 2：ACP 多 Agent
+  * `qoder` 等 → 原生 ACP（`qodercli --acp`，`coder/acp-go-sdk`）。
 
-经 [Agent Client Protocol](https://agentclientprotocol.com/)（ACP）统一驱动任意 coding agent，突破 Phase 1 `claude -p` 的结构性限制（非真流式 / 审批靠 hook hack / 绑死单一 CLI / 会话续问脆弱）。
+* **真流式输出**：内容增量（含思考过程）→ EventBus → WebSocket → PWA 逐字追加渲染。
 
-- **真流式**：ACP `SessionUpdate` 内容增量 → EventBus → WS → 前端逐字追加（替换 Phase 1 整块 text）。
-- **协议级审批**：ACP `RequestPermission` → task `waiting_input(approval)` → IM/PWA 卡片 → Approve/Deny（替换 `bypassPermissions` + PreToolUse hook）。
-- **多 Agent**：`AgentAdapter` 接口抽象，`ACPAgent`（JSON-RPC over stdio）+ `PrintAgent`（claude -p 回退）双实现；`AgentManager` 统一调度多会话/并发/透明回退。
-- **会话持久化**：ACP `session/load` / `session/resume` 复用上下文（替换脆弱的 `--session-id` / `--resume` 匹配）；会话丢失由协议层 surface，不静默失败。
+* **协议级审批**：agent 请求敏感工具时任务进入 `waiting_input`，IM / PWA 弹出审批卡片，Approve / Deny（AllowOnce / AllowAlways）直达 agent。
 
-支持的 agent：
-| Agent | 接入方式 |
-|-------|---------|
-| claude-code | 经官方 TS 适配器 `npx -y @agentclientprotocol/claude-agent-acp@latest` |
-| qodercli | 原生 `qodercli --acp` |
-| codex | 原生 `codex --acp` |
-| 其他 | `<agent> --acp` 兜底 |
+* **任务并行**：任务可在任意本地路径运行，或建 git worktree 隔离并行（任务完成自动清理）；每项目并发上限控制。
 
-配置见 `config.yaml` 的 `pieqi.acp` 段。规划细节见 `docs/phase2-acp.md`。
+* **跨渠道会话共享**：身份映射把各渠道用户 ID 归一为统一身份，同一用户换渠道可续接上下文。
 
----
+* **飞书接入极简化**：
 
-## 技术栈
+  * 长连接模式（`event_mode: longconn`）WSS 订阅事件，**无需公网回调**；
 
-| 维度 | 说明 |
-|------|------|
-| 语言 | Go |
-| Web | gin |
-| 配置 | viper（YAML） |
-| 日志 | zap |
-| Agent 驱动 | Phase 2：ACP（`github.com/coder/acp-go-sdk`，JSON-RPC over stdio）驱动 claude-code（经官方 TS 适配器）/ qodercli / codex 等；回退 Phase 1 `claude -p --session-id` / `--resume` + `--output-format stream-json` 逐事件解析 |
-| 前端 | Vite 构建，嵌入二进制 |
-| 存储 | 文件系统 JSON（`data/`） |
+  * Device Flow 扫码**一键创建飞书自建应用**（`/api/larkreg`），凭据落盘并热生效。
 
----
+* **外网安全访问**：飞书单账号绑定（唯一管理员 OpenID）+ Cloudflared 临时隧道（trycloudflare URL + 内存 TTL token）+ IP 失败限流拉黑 + 审计日志。
+
+* **移动端 PWA**：任务列表（按项目分组）、事件流、干预抽屉（审批 / 追加续问 / Skill 胶囊 `/` 自动补全）、隧道控制面板、`/session/<id>` 深链接。
+
+* **单二进制部署**：前端 `//go:embed` 嵌入，前端源码与桥服务随发布包同装。
+
+***
+
+## 架构
+
+### Agent 驱动链路（三层）
+
+| 层    | 代码                                                                        | 职责                           |
+| ---- | ------------------------------------------------------------------------- | ---------------------------- |
+| 调度   | `internal/core/task_runner.go`                                            | 状态机、worktree、事件发布、IM 通知、标题生成 |
+| 会话管理 | `internal/agent/manager.go` + `session.go`                                | 按 taskID 管理会话、项目级并发槽、透明回退    |
+| 传输   | `internal/agent/claude/`（sdk-bridge / print）、`internal/agent/acp.go`（ACP） | 具体 agent 协议实现                |
+
+* **sdk-bridge**：`services/claude-sdk-bridge`（Node，私有 HTTP+SSE：`/v1/sessions` / `/prompt` / `/events`），封装 Claude Agent SDK 的多轮会话、权限回调、取消；Go 侧客户端见 `internal/agent/claude/bridge/client.go`，`auto_start: true` 时探活失败自动 spawn。
+
+* **print 回退**：`claude -p --session-id/--resume` + `stream-json` 逐事件解析（`internal/agent/print*.go`）。
+
+* **ACP**：`AgentClientProtocol` JSON-RPC over stdio，`RequestPermission` / `session/resume` 为协议级能力（`internal/agent/acp.go`）。
+
+> 旧配置 `pieqi.acp.*` 已弃用（P5 迁移），显式配置会触发告警；请使用 `agents.*` 节。详见 `docs/multi-agent.md`。
+
+### 任务生命周期
+
+`pending → running → waiting_input(approval) → running → completed / failed / cancelled`
+
+* 事件类型：文本增量 / 思考增量 / 工具调用 / 工具结果 / 错误 / 决策等，全量经 EventBus 推送 WS。
+
+* 已结束任务可 `intervene(append_prompt)` 续问，复用会话上下文。
+
+### 安全模型（`internal/auth`）
+
+* **内网**：直接放行（debug 模式全放行）。
+
+* **外网**：仅经 Cloudflared 隧道 + 有效 tunnel token 可访问；token 内存存储、不持久化（重启 / 换隧道即失效）。
+
+* **管理员绑定**：首个飞书用户经 `/api/auth/bind`（仅内网）绑定为唯一 admin，之后可在飞书移动端管理隧道。
+
+* **限流**：认证失败 5 次/分钟 → 拉黑 10 分钟；所有外部请求记审计日志。
+
+***
 
 ## 目录结构
 
 ```
 pieqi/
-├── cmd/pieqi/main.go        # 服务入口（HTTP + PWA + 渠道 + pre-tool-use hook 子命令）
-├── web/
-│   ├── src/                  # PWA 前端源码（main.js / styles.css）
-│   ├── public/sw.js          # service worker（vite 拷入 dist 正确下发）
-│   ├── index.html
-│   ├── embed.go              # //go:embed 嵌入 web/dist
-│   └── vite.config.js
+├── cmd/pieqi/                 # 入口：主服务 + pre-tool-use hook 子命令 + PWA 静态托管
 ├── internal/
-│   ├── agent/                # Phase 2：AgentAdapter 接口 + ACPAgent / PrintAgent / AgentManager
-│   ├── api/                  # 任务/技能/命令/WS/hook HTTP API
-│   ├── config/config.go      # 配置加载
-│   ├── model/                # 数据结构（Task / TaskEvent / Decision 等）
-│   ├── core/                 # 调度：TaskRunner / TaskStore / EventBus / HookService / Worktree / 流解析 / ACP wire 连接器
-│   └── channel/              # 渠道适配器（lark / wecom / wechat）
-├── data/                     # 运行时数据（tasks / worktrees / sessions / mappings / users.json）
-├── docs/phase2-acp.md        # Phase 2 ACP 迁移规划
-├── config.yaml
-└── README.md
+│   ├── agent/                 # AgentSession/Manager 抽象；acp.go / print*.go / provider.go
+│   │   └── claude/            # claude 专属：bridge/(sdk-bridge 客户端)、proc、session
+│   ├── api/                   # HTTP API：tasks / skills / ws / auth / tunnel / larkreg / hook
+│   ├── auth/                  # 绑定、tunnel token、Cloudflared 管理、限流、审计、中间件
+│   ├── channel/               # 渠道适配：lark（webhook + 长连接）/ wechat / receiver / sender
+│   ├── config/                # viper 配置加载 + 弃用迁移
+│   ├── core/                  # TaskRunner / TaskStore / EventBus / Hook / Worktree / 扫描器
+│   ├── larkreg/               # 飞书 Device Flow 一键注册自建应用
+│   └── model/                 # Task / TaskEvent / Message 等数据结构
+├── services/claude-sdk-bridge/ # Node 常驻桥：Claude Agent SDK HTTP+SSE 封装
+├── web/                       # PWA 前端（Vite），embed.go 嵌入二进制
+├── docs/                      # 设计文档与规划（见下文文档索引）
+├── build.sh                   # 构建 + 发布包脚本
+└── config.yaml
 ```
 
----
+运行时数据在 `~/.pieqi/`（可用环境变量 `PIEQI_HOME` 覆盖）：`tasks/`、`worktrees/`、`sessions/`、`feishu_binding.json`、`lark_credentials.json` 等，不入仓库。
+
+***
 
 ## 快速开始
 
-### 开发运行
+### 后端
 
 ```bash
-# 构建二进制（cmd/pieqi 入口，产物在 bin/）
+# 构建二进制（产物在 bin/）
 mkdir -p bin && go build -o bin/pieqi ./cmd/pieqi
 
 # 或直接运行
@@ -107,73 +129,132 @@ go test ./internal/...
 cd web
 npm install
 npm run build        # 产出 web/dist，由 go:embed 打进二进制
-npm run dev          # 开发服务器（:5174，代理到 :3000）
+npm run dev          # 开发服务器（:5174，/api、/internal 代理到 :3000）
 ```
 
-> 前端改动后需 `npm run build` 再重编译 Go，才会把新前端嵌入二进制。
+> 前端改动后需 `npm run build` 再重编译 Go，才会嵌入新前端。
 
-### 配置
+### 飞书接入（两种方式）
 
-`config.yaml`（viper 加载）：
+1. **一键注册（推荐）**：本机打开 PWA → 设置 → 添加渠道 → 扫码，自动创建飞书自建应用并写入凭据。
+2. **手动配置**：在[飞书开放平台](https://open.feishu.cn)创建自建应用，填 `config.yaml` 的 `channels.lark`（长连接只需 `app_id` + `app_secret`；webhook 模式还需 `verify_token` + `encrypt_key`）。
+
+### 关键配置（`config.yaml`）
 
 ```yaml
 server:
   port: 3000
+
+channels:
+  lark:
+    enabled: true
+    event_mode: longconn   # longconn(推荐,无需公网) | webhook(需公网回调)
+
+agents:
+  claude:
+    transport: sdk-bridge  # sdk-bridge(默认) | print
+    bridge:
+      base_url: "http://127.0.0.1:18790"
+      auto_start: true     # 探活失败自动 spawn 桥服务
+  qoder:
+    transport: acp         # qodercli --acp
+
 pieqi:
-  enabled: true
-  worktree_base: ./data/worktrees
-  permission_mode: bypassPermissions
-  hook_tools: [Bash, Write, Edit, NotebookEdit]
   max_concurrent_per_project: 4
   base_branch: master
+  hook_timeout: 30m        # 审批等待上限（print 回退路径）
+  hook_tools: [Bash, Write, Edit, NotebookEdit]
+
+auth:
+  cloudflared:
+    default_ttl: 15m       # 隧道 token 有效期：15m | 1h | 4h
+  ratelimit:
+    max_failures_per_min: 5
 ```
 
-> Agent 模型由 `claude` CLI 自身维护（`~/.claude` 配置），pieqi 不传 `--model`，让 agent 自决。
-
----
+***
 
 ## HTTP API
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/health` | 健康检查 |
-| GET | `/api/tasks` | 任务列表（按项目分组） |
-| POST | `/api/tasks` | 新建任务（`project_path` + `prompt`） |
-| GET | `/api/tasks/:id` | 任务详情 |
-| POST | `/api/tasks/:id/intervene` | 审批决策 / 追加续问（append_prompt） |
-| POST | `/api/tasks/:id/cancel` | 取消任务 |
-| DELETE | `/api/tasks/:id` | 删除任务 |
-| GET | `/api/skills` / `/api/commands` | 补全数据源 |
-| GET | `/api/ws` | WebSocket 事件推送（任务/事件实时） |
-| POST | `/internal/hook` | PreToolUse hook 回调（审批） |
+### 任务（需内网 / tunnel token）
 
----
+| 方法           | 路径                              | 说明                                         |
+| ------------ | ------------------------------- | ------------------------------------------ |
+| GET / POST   | `/api/tasks`                    | 任务列表（按项目分组）/ 新建（`project_path` + `prompt`） |
+| GET / DELETE | `/api/tasks/:id`                | 任务详情 / 删除                                  |
+| POST         | `/api/tasks/:id/intervene`      | 审批决策 / 追加续问（append\_prompt）                |
+| POST         | `/api/tasks/:id/cancel`         | 取消任务                                       |
+| GET          | `/api/skills` · `/api/commands` | Skill / 自定义命令补全数据源                         |
+| GET          | `/api/ws`                       | WebSocket 实时事件推送                           |
+
+### 认证与隧道
+
+| 方法            | 路径                                       | 访问策略          | 说明                           |
+| ------------- | ---------------------------------------- | ------------- | ---------------------------- |
+| POST / DELETE | `/api/auth/bind`                         | 仅内网           | 绑定 / 解绑管理员飞书身份               |
+| GET           | `/api/auth/status`                       | 公开            | 绑定状态（前端启动轮询）                 |
+| POST          | `/api/tunnel/start`                      | 飞书移动端 + 外网    | 启动 Cloudflared 隧道并签发首个 token |
+| POST          | `/api/tunnel/stop` · `/reset` · `/renew` | token + 飞书移动端 | 停止 / 重置 / 续期                 |
+| GET           | `/api/tunnel/status` · `/qrcode`         | 公开（token 脱敏）  | 隧道状态 / 二维码                   |
+
+### 飞书一键注册（仅内网）
+
+| 方法         | 路径                              | 说明                      |
+| ---------- | ------------------------------- | ----------------------- |
+| POST       | `/api/larkreg/start`            | 启动 Device Flow，返回扫码 URL |
+| GET        | `/api/larkreg/poll` · `/status` | 轮询注册进度 / 状态             |
+| GET / POST | `/api/larkreg/config`           | 读取 / 手动写入渠道配置           |
+
+### 其他
+
+| 方法   | 路径               | 说明                                      |
+| ---- | ---------------- | --------------------------------------- |
+| GET  | `/health`        | 健康检查                                    |
+| POST | `/internal/hook` | pre-tool-use hook 子进程回连（仅本地，print 路径审批） |
+
+***
 
 ## 发布 / 打包
 
 ```bash
-# Linux amd64
-GOOS=linux GOARCH=amd64 go build -o build/pieqi-linux-amd64 ./cmd/pieqi
+./build.sh    # 前端构建 → Go 编译 → 二进制 + config.yaml + README + 启动脚本 打 zip/tar.gz
 
-# Windows amd64
-go build -o build/pieqi-windows-amd64.exe ./cmd/pieqi
-
-# 发布包：pieqi + config.yaml + README + 启动脚本
-# （见构建脚本，产物打 zip）
+# 手动交叉编译
+GOOS=linux   GOARCH=amd64 go build -o build/pieqi-linux-amd64 ./cmd/pieqi
+GOOS=windows GOARCH=amd64 go build -o build/pieqi-windows-amd64.exe ./cmd/pieqi
 ```
 
-启动：Windows 双击 `start.bat` / 运行 `pieqi.exe`；Linux 用 systemd 托管。
+* Windows：双击 `start.bat`（`restart.bat` 重启）。
 
----
+* Linux：systemd 托管。
 
-## 已知限制（第一阶段）
+* 运行依赖：`claude` CLI（claude 登录态）、Node.js（桥服务 / TS 适配器）、`cloudflared`（需要外网访问时）。
 
-- **事件级流式而非逐字流式**：claude 把回答作为一个完整 text 块输出，界面上"思考过程可见 + 回答整段出现"。真逐字流式依赖代理吐出 partial delta，见 `stream_event.go` 的"形态二"预留。
-- **依赖 `claude -p` + 代理**：`-p` 模式对复杂多工具运行，部分代理（如本地 15721 中转）会吞掉中间事件，导致任务"无响应"。见 `docs` 中第二阶段规划（改 ACP 协议）。
+***
 
----
+## 文档索引
 
-## 文档
+* `docs/multi-agent.md` — 多 Agent 架构设计（`agents.*` 配置、P0–P5 演进）
 
-- `CONTEXT.md` — 领域词汇表（身份/会话/审批/桥接）
-- `docs/adr/` — 架构决策记录（如有）
+* `docs/phase2-acp.md` — Phase 2：`claude -p` → ACP 迁移规划
+
+* `docs/multi-agent-evaluation.md` / `docs/comm-arch-upgrade-evaluation.md` — 方案评估
+
+* `docs/superpowers/plans/` — 飞书 IM 绑定 + cloudflared 隧道 / 飞书长连接与 Device Flow 实施计划
+
+* `docs/spikes/claude-sdk-bridge/` — Claude Agent SDK 桥接技术验证
+
+* `.trae/specs/migrate-to-acp-protocol/` — ACP 迁移 spec / tasks / checklist
+
+***
+
+## 已知限制
+
+* **qoder 等 ACP agent** 需本机安装对应 CLI（`qodercli` / `codex` 等）并支持 `--acp`。
+
+* **tunnel token 不持久化**：服务重启 / 隧道重建后需重新扫码获取（设计使然，避免 token 落盘）。
+
+* **企微 / 微信渠道**为早期演示实现，默认关闭（`channels.wecom/wechat.enabled: false`），当前主推飞书。
+
+* **print 回退路径**为整块文本输出（非逐字增量），且审批依赖 PreToolUse hook 子进程回连。
+
