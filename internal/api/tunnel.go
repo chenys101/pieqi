@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -33,7 +34,11 @@ func (s *Server) tunnelStart(c *gin.Context) {
 	}
 	var req tunnelStartReq
 	_ = c.ShouldBindJSON(&req) // optional body
-	res, err := s.tunnel.Start(c.Request.Context(), ttlFromString(req.TTL))
+	// Start 会 spawn 常驻 cloudflared 子进程，生命周期独立于本次 HTTP 请求。
+	// 传 c.Request.Context() 会在 handler 返回时被 cancel，CommandContext 随即
+	// 杀掉 cloudflared（同 task_runner.go 注释：请求结束 ctx 被 cancel 会杀子进程）。
+	// 必须用 context.Background() 派生。
+	res, err := s.tunnel.Start(context.Background(), ttlFromString(req.TTL))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -72,6 +77,31 @@ func (s *Server) tunnelReset(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"token": tok})
+}
+
+// tunnelRenew handles POST /api/tunnel/renew (Lark-mobile-only).
+// Extends the current token's TTL without rotating it; returns the SAME
+// shape as /start (tunnel_url/lark_deep_link/token/expires_at) so the
+// front-end renders the identical link block — the token is unchanged, so
+// existing shared links keep working.
+func (s *Server) tunnelRenew(c *gin.Context) {
+	if s.tunnel == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "tunnel manager not configured"})
+		return
+	}
+	var req tunnelStartReq
+	_ = c.ShouldBindJSON(&req) // optional body
+	res, err := s.tunnel.RenewToken(c.Request.Context(), ttlFromString(req.TTL))
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"tunnel_url":     res.TunnelURL,
+		"lark_deep_link": res.LarkDeepLink,
+		"token":          res.Token,
+		"expires_at":     res.ExpiresAt,
+	})
 }
 
 // tunnelStatus handles GET /api/tunnel/status — public (read-only, no token leak).

@@ -379,6 +379,37 @@ func (m *TunnelManager) ResetToken(ctx context.Context) (string, error) {
 	return fresh, nil
 }
 
+// RenewToken extends the running tunnel's current token BY ttl WITHOUT
+// rotating it — existing shared links (with ?token= embedded) keep working.
+// Returns a TunnelResult shaped exactly like Start, so the front-end can
+// re-render the same link/QR/token/expiry block. Errors if no tunnel is
+// active or the current token is no longer valid (expired / rotated away).
+func (m *TunnelManager) RenewToken(ctx context.Context, ttl time.Duration) (TunnelResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cmd == nil {
+		return TunnelResult{}, fmt.Errorf("no active tunnel")
+	}
+	if m.token == "" {
+		return TunnelResult{}, fmt.Errorf("no current token")
+	}
+	ts := m.Tokens
+	if ts == nil {
+		return TunnelResult{}, fmt.Errorf("token store not configured")
+	}
+	if !ts.Renew(m.token, ttl) {
+		return TunnelResult{}, fmt.Errorf("current token expired or invalid; start a new tunnel")
+	}
+	expires := m.expires.Add(ttl)
+	m.expires = expires
+	return TunnelResult{
+		TunnelURL:    m.url,
+		LarkDeepLink: "lark://open?url=" + m.url,
+		Token:        m.token,
+		ExpiresAt:    expires,
+	}, nil
+}
+
 // IsActive reports whether a tunnel is currently running.
 func (m *TunnelManager) IsActive() bool {
 	m.mu.Lock()

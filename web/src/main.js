@@ -1,12 +1,26 @@
 import './styles.css';
 import { attachAutocomplete } from './autocomplete.js';
-import { authHeaders } from './auth.js';
+import { authHeaders, tunnelToken } from './auth.js';
 
 const API = '/api';
-let token = new URLSearchParams(location.search).get('token') || '';
+let token = tunnelToken(); // 持久化隧道 token：首次从 URL 捕获，刷新/桌面启动丢失 query 也能兜底
 function headers() {
   // Delegate to auth.js so X-Feishu-Openid is always sent.
   return authHeaders();
+}
+
+// --- 鉴权问题提示 ---
+// 外网请求被 401 拒绝（token 缺失/过期/被新隧道作废）时，给出明确的一次性提示，
+// 避免静默空页面。内网访问永远放行，不会误触发。
+let authIssueShown = false;
+function notifyAuthIssue() {
+  if (authIssueShown) return;
+  authIssueShown = true;
+  const banner = document.getElementById('debug-banner');
+  if (banner) {
+    banner.textContent = '⚠ 访问被拒绝：隧道 token 无效或已过期。请重新获取带 ?token= 的完整链接打开。';
+    banner.classList.remove('hidden');
+  }
 }
 
 const state = {
@@ -18,6 +32,9 @@ const state = {
   ws: null,
   pendingScroll: null, // 发送补充后标记：收到下次任务更新强制滑到底
   thinking: {},       // taskId -> bool: 本次 run 尚未产出流式文本（展示「思考中...」徽章）
+  // 防重复提交：
+  creatingTask: false,         // 新建会话在途：请求未返回前忽略再次点击/回车
+  submittingTasks: new Set(),  // 追加提示在途：taskId 集合，请求未返回前拦截重复提交
 };
 
 // 补全数据源：启动时拉取
@@ -26,11 +43,13 @@ const acSources = { commands: [], skills: [] };
 // --- API ---
 async function apiGet(path) {
   const r = await fetch(`${API}${path}`, { headers: headers() });
+  if (r.status === 401) notifyAuthIssue();
   if (!r.ok) throw new Error(`${path}: ${r.status}`);
   return r.json();
 }
 async function apiPost(path, body) {
   const r = await fetch(`${API}${path}`, { method: 'POST', headers: headers(), body: JSON.stringify(body) });
+  if (r.status === 401) notifyAuthIssue();
   const txt = await r.text();
   let j; try { j = JSON.parse(txt); } catch { j = { error: txt }; }
   if (!r.ok) throw new Error(j.error || `${path}: ${r.status}`);
@@ -38,6 +57,7 @@ async function apiPost(path, body) {
 }
 async function apiDelete(path) {
   const r = await fetch(`${API}${path}`, { method: 'DELETE', headers: headers() });
+  if (r.status === 401) notifyAuthIssue();
   if (!r.ok) {
     let msg = `${path}: ${r.status}`;
     try { const j = await r.json(); if (j.error) msg = j.error; } catch {}
@@ -394,8 +414,12 @@ function renderDetail() {
         }
       });
       supSend.addEventListener('click', async () => {
+        if (state.submittingTasks.has(t.id)) return; // 在途防重：请求未返回前忽略重复点击/回车
         const text = supInput.value.trim();
         if (!text) return;
+        // 立即置在途标记 + 禁用按钮，覆盖整个 await 窗口（此前连点会重复发 intervene）
+        state.submittingTasks.add(t.id);
+        supSend.disabled = true;
         try {
           await apiPost(`/tasks/${t.id}/intervene`, { kind: 'append_prompt', text });
           supInput.value = '';
@@ -416,7 +440,12 @@ function renderDetail() {
               if (scroller) scroller.scrollTop = scroller.scrollHeight;
             }
           }
-        } catch (err) { alert(err.message); }
+        } catch (err) {
+          supSend.disabled = false; // 失败恢复可提交，允许重试
+          alert(err.message);
+        } finally {
+          state.submittingTasks.delete(t.id);
+        }
       });
       // 斜杠补全（commands + skills 分组）
       if (supAc) attachAutocomplete(supInput, supAc, acSources);
@@ -847,6 +876,7 @@ function bindNewTaskFooter() {
 
 // 提交新建任务：项目必填（下拉选中或自定义路径），成功后切到新任务详情。
 async function submitNewTask() {
+  if (state.creatingTask) return; // 在途防重：请求未返回前忽略重复点击/回车
   const toggle = document.getElementById('nt-custom-toggle');
   const mode = toggle.dataset.mode || 'select';
   const body = { prompt: document.getElementById('nt-prompt').value };
@@ -862,6 +892,10 @@ async function submitNewTask() {
     const prefix = 'path:';
     body.project_path = val.startsWith(prefix) ? val.slice(prefix.length) : val;
   }
+  // 立即置在途标记 + 禁用按钮，覆盖整个 await 窗口（此前连点会重复建任务）
+  const send = document.getElementById('nt-send');
+  state.creatingTask = true;
+  if (send) send.disabled = true;
   try {
     const task = await apiPost('/tasks', body);
     document.getElementById('nt-prompt').value = '';
@@ -870,7 +904,12 @@ async function submitNewTask() {
     upsertTask(task);
     state.thinking[task.id] = true; // 新建即进入「思考中...」占位态，首次流式文本后清除
     selectTask(task.id);
-  } catch (err) { alert(err.message); }
+  } catch (err) {
+    if (send) send.disabled = false; // 失败恢复可提交，允许重试
+    alert(err.message);
+  } finally {
+    state.creatingTask = false;
+  }
 }
 
 document.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => document.getElementById(b.dataset.close).classList.add('hidden')));

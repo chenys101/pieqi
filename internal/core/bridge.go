@@ -18,6 +18,7 @@ import (
 type TunnelOps interface {
 	Start(ctx context.Context, ttl time.Duration) (auth.TunnelResult, error)
 	Stop(ctx context.Context) error
+	RenewToken(ctx context.Context, ttl time.Duration) (auth.TunnelResult, error)
 }
 
 // AdminBinding 判定消息发送者是否为绑定管理员（由 auth.BindingStore 实现）。
@@ -186,6 +187,8 @@ func splitText(text string, maxLen int) []string {
 // 隧道命令（绑定管理员）：
 //   - 「隧道」/「tunnel」/「/tunnel」→ 启动（默认 15m）
 //   - 「隧道 1h」「隧道 4h」→ 指定 TTL（15m/1h/4h）
+//   - 「续期」「延期」「续隧道」/「tunnel renew」→ 续期（默认 +15m，token 不变）
+//   - 「续期 1h」「续期 4h」→ 指定续期时长
 //   - 「关隧道」「停隧道」「tunnel stop」→ 停止
 //
 // 其他消息：项目不再预注册，IM 渠道无法用 #标签 解析目标项目，故回复固定
@@ -231,11 +234,21 @@ func (b *Bridge) handleTunnelCommand(msg model.Message, op string, ttl time.Dura
 			"🔓 隧道已开启（%s）\n🔗 飞书内打开: %s\n🌐 直接访问: %s\n⏰ 到期: %s",
 			formatTTL(ttl), res.LarkDeepLink, res.TunnelURL,
 			res.ExpiresAt.Format("15:04:05")))
+	case "renew":
+		res, err := b.tunnel.RenewToken(context.Background(), ttl)
+		if err != nil {
+			b.reply(msg, "❌ 续期失败: "+err.Error())
+			return
+		}
+		b.reply(msg, fmt.Sprintf(
+			"♻️ 隧道已续期 +%s（token 不变，原链接继续可用）\n🔗 飞书内打开: %s\n🌐 直接访问: %s\n⏰ 新到期: %s",
+			formatTTL(ttl), res.LarkDeepLink, res.TunnelURL,
+			res.ExpiresAt.Format("15:04:05")))
 	}
 }
 
 // parseTunnelCommand 解析 IM 消息是否命中隧道命令。
-// 返回 op（"start"/"stop"）+ 期望 TTL；非命令返回 op=""。
+// 返回 op（"start"/"stop"/"renew"）+ 期望 TTL；非命令返回 op=""。
 func parseTunnelCommand(content string) (op string, ttl time.Duration) {
 	c := strings.ToLower(strings.TrimSpace(content))
 	if c == "" {
@@ -245,6 +258,16 @@ func parseTunnelCommand(content string) (op string, ttl time.Duration) {
 	switch c {
 	case "关隧道", "停隧道", "关闭隧道", "tunnel stop", "/tunnel stop":
 		return "stop", 0
+	}
+	// 续期命令：前缀 + 可选 TTL。必须在启动前缀之前匹配（否则 "tunnel renew"
+	// 会被启动前缀 "tunnel " 截获并按默认 TTL 启动）。
+	for _, prefix := range []string{"续期", "延期", "续隧道", "tunnel renew", "/tunnel renew"} {
+		if c == prefix {
+			return "renew", 15 * time.Minute
+		}
+		if strings.HasPrefix(c, prefix+" ") {
+			return "renew", parseTTL(strings.TrimSpace(strings.TrimPrefix(c, prefix)))
+		}
 	}
 	// 启动命令：前缀 + 可选 TTL
 	for _, prefix := range []string{"隧道", "/tunnel", "tunnel"} {

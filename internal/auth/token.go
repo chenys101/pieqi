@@ -92,6 +92,31 @@ func (s *TokenStore) Validate(tok string) bool {
 	return true
 }
 
+// Renew extends the expiry of an existing still-valid token BY ttl (never
+// shrinks it). Keeps the same token VALUE — links that already embed the
+// token keep working, which is the point of 续期 vs reset (which rotates).
+// Returns false for unknown/expired tokens (caller should start a tunnel).
+func (s *TokenStore) Renew(tok string, ttl time.Duration) bool {
+	if tok == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expiry, ok := s.tokens[tok]
+	if !ok {
+		return false
+	}
+	if s.now().After(expiry) {
+		delete(s.tokens, tok)
+		if s.current == tok {
+			s.current = ""
+		}
+		return false
+	}
+	s.tokens[tok] = expiry.Add(ttl)
+	return true
+}
+
 // Invalidate marks tok as no-longer-valid. Idempotent.
 func (s *TokenStore) Invalidate(tok string) {
 	s.mu.Lock()

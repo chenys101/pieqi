@@ -165,6 +165,52 @@ func TestTunnel_LarkDeepLinkFormat(t *testing.T) {
 	_ = m.Stop(context.Background())
 }
 
+func TestTunnel_RenewToken_KeepsSameTokenAndExtends(t *testing.T) {
+	binary := fakeCloudflaredScript(t, "https://t-renew.trycloudflare.com")
+	m := NewTunnelManager(TunnelConfig{
+		BinaryPath: binary, LocalURL: "http://localhost:3000",
+		Tokens: NewTokenStore(),
+	})
+	orig, err := m.Start(context.Background(), 15*time.Minute)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	res, err := m.RenewToken(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	// token 值不变 → 已分发的链接继续可用（续期 vs 重置的核心区别）
+	if res.Token != orig.Token {
+		t.Fatalf("renew must keep the same token, got %q want %q", res.Token, orig.Token)
+	}
+	// 返回结构与 Start 一致：同一 TunnelURL（内嵌 token）、LarkDeepLink 前缀正确
+	if res.TunnelURL != orig.TunnelURL {
+		t.Fatalf("renew must keep the same tunnel url, got %q want %q", res.TunnelURL, orig.TunnelURL)
+	}
+	if !strings.HasPrefix(res.LarkDeepLink, "lark://open?url=") || !strings.Contains(res.LarkDeepLink, "token=") {
+		t.Fatalf("renew lark link malformed: %q", res.LarkDeepLink)
+	}
+	// 过期时间延长
+	if !res.ExpiresAt.After(orig.ExpiresAt) {
+		t.Fatalf("renew must extend expiry: orig %v renew %v", orig.ExpiresAt, res.ExpiresAt)
+	}
+	if !m.Tokens.Validate(res.Token) {
+		t.Fatal("token must remain valid after renew")
+	}
+	_ = m.Stop(context.Background())
+}
+
+func TestTunnel_RenewToken_NoActiveTunnel(t *testing.T) {
+	binary := fakeCloudflaredScript(t, "https://t-norenew.trycloudflare.com")
+	m := NewTunnelManager(TunnelConfig{
+		BinaryPath: binary, LocalURL: "http://localhost:3000",
+		Tokens: NewTokenStore(),
+	})
+	if _, err := m.RenewToken(context.Background(), time.Hour); err == nil {
+		t.Fatal("renew without active tunnel must error")
+	}
+}
+
 func TestTunnel_PIDFileLifecycle(t *testing.T) {
 	binary := fakeCloudflaredScript(t, "https://t-pid.trycloudflare.com")
 	pidFile := filepath.Join(t.TempDir(), "cf.pid")

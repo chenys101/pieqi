@@ -111,6 +111,7 @@ func (s *Server) Register(r gin.IRouter) {
 			s.auth.ExternalAuthMiddleware(), s.auth.TunnelOpGateMiddleware())
 		tunnelMutate.POST("/stop", s.tunnelStop)
 		tunnelMutate.POST("/reset", s.tunnelReset)
+		tunnelMutate.POST("/renew", s.tunnelRenew)
 
 		r.GET("/api/tunnel/status", corsMiddleware(corsAll, corsOrigins), s.tunnelStatus)
 		r.GET("/api/tunnel/qrcode", corsMiddleware(corsAll, corsOrigins), s.tunnelQRCode)

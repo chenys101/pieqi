@@ -28,9 +28,11 @@ func (f *fakeSender) Send(_ context.Context, target model.ReplyTarget, text stri
 type fakeTunnel struct {
 	startCalled bool
 	stopCalled  bool
+	renewCalled bool
 	result      auth.TunnelResult
 	startErr    error
 	stopErr     error
+	renewErr    error
 }
 
 func (f *fakeTunnel) Start(_ context.Context, ttl time.Duration) (auth.TunnelResult, error) {
@@ -49,6 +51,19 @@ func (f *fakeTunnel) Start(_ context.Context, ttl time.Duration) (auth.TunnelRes
 func (f *fakeTunnel) Stop(_ context.Context) error {
 	f.stopCalled = true
 	return f.stopErr
+}
+
+func (f *fakeTunnel) RenewToken(_ context.Context, ttl time.Duration) (auth.TunnelResult, error) {
+	f.renewCalled = true
+	if f.renewErr != nil {
+		return auth.TunnelResult{}, f.renewErr
+	}
+	return auth.TunnelResult{
+		TunnelURL:    "https://abc.trycloudflare.com?token=t1", // 续期不换 token/URL
+		LarkDeepLink: "lark://open?url=https%3A%2F%2Fabc.trycloudflare.com%3Ftoken%3Dt1",
+		Token:        "t1",
+		ExpiresAt:    time.Now().Add(ttl),
+	}, nil
 }
 
 type fakeAdmin struct{ openid string }
@@ -89,6 +104,13 @@ func TestParseTunnelCommand(t *testing.T) {
 		{"停隧道", "stop", 0},
 		{"tunnel stop", "stop", 0},
 		{"/tunnel stop", "stop", 0},
+		{"续期", "renew", 15 * time.Minute},
+		{"延期", "renew", 15 * time.Minute},
+		{"续隧道", "renew", 15 * time.Minute},
+		{"tunnel renew", "renew", 15 * time.Minute},
+		{"/tunnel renew", "renew", 15 * time.Minute},
+		{"续期 1h", "renew", time.Hour},
+		{"续期 4h", "renew", 4 * time.Hour},
 		{"你好", "", 0},
 		{"帮我开个隧道", "", 0}, // 前缀不含空格，不算命令
 		{"", "", 0},
@@ -171,6 +193,42 @@ func TestTunnelCommand_Stop(t *testing.T) {
 	}
 	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "已关闭") {
 		t.Errorf("stop reply wrong: %v", sender.sent)
+	}
+}
+
+func TestTunnelCommand_Renew(t *testing.T) {
+	tun := &fakeTunnel{}
+	b, sender := newTestBridge(t, tun, &fakeAdmin{openid: "ou_admin"})
+	b.handlePieqiMessage(larkMsg("ou_admin"), "续期 1h")
+
+	if !tun.renewCalled {
+		t.Fatal("RenewToken must be called")
+	}
+	if tun.startCalled {
+		t.Fatal("renew must NOT trigger start")
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("got %d replies, want 1: %v", len(sender.sent), sender.sent)
+	}
+	reply := sender.sent[0]
+	// 与启动同构：包含深链 + 隧道 URL + 到期时间
+	for _, want := range []string{"续期", "lark://open?url=", "trycloudflare.com", "新到期"} {
+		if !strings.Contains(reply, want) {
+			t.Errorf("renew reply missing %q: %s", want, reply)
+		}
+	}
+}
+
+func TestTunnelCommand_RenewErrorRepliesError(t *testing.T) {
+	tun := &fakeTunnel{renewErr: context.DeadlineExceeded}
+	b, sender := newTestBridge(t, tun, &fakeAdmin{openid: "ou_admin"})
+	b.handlePieqiMessage(larkMsg("ou_admin"), "续期")
+
+	if !tun.renewCalled {
+		t.Fatal("RenewToken must be called")
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "续期失败") {
+		t.Errorf("renew error reply wrong: %v", sender.sent)
 	}
 }
 

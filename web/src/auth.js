@@ -47,14 +47,35 @@ export function setOpenId(openid) {
   if (openid) sessionStorage.setItem('feishu_openid', openid);
 }
 
+// tunnelToken returns the current tunnel access token, or ''.
+// Priority: sessionStorage (persisted on first sight) > URL ?token=.
+//
+// The tunnel token is the ONLY external credential (see internal/auth). On
+// the tunnel link it lives in the URL query string, but reloads, PWA
+// home-screen launches (manifest start_url "/") and link forwards can strip
+// the query — leaving every API call 401. Persisting it in sessionStorage
+// (per-tab, cleared when the tab closes) keeps the session alive across
+// those. A rotated/expired token still 401s server-side; callers surface
+// that via their own 401 handling.
+const TOKEN_KEY = 'tunnel_token';
+export function tunnelToken() {
+  const cached = sessionStorage.getItem(TOKEN_KEY);
+  if (cached) return cached;
+  const url = new URLSearchParams(location.search).get('token');
+  if (url) {
+    sessionStorage.setItem(TOKEN_KEY, url);
+    return url;
+  }
+  return '';
+}
+
 // authHeaders returns the fetch headers every API call should include.
 // Always sends X-Feishu-Openid (empty if unknown — backend will 403).
 export function authHeaders(extra = {}) {
   const h = { 'Content-Type': 'application/json', ...extra };
   const openid = feishuOpenId();
   if (openid) h['X-Feishu-Openid'] = openid;
-  // Existing token mechanism (from URL ?token=) is preserved.
-  const tok = new URLSearchParams(location.search).get('token') || '';
+  const tok = tunnelToken();
   if (tok) h['Authorization'] = `Bearer ${tok}`;
   return h;
 }

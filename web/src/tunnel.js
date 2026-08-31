@@ -38,6 +38,7 @@ export async function mountTunnelPanel(root) {
           <button id="tunnel-start" class="primary">启动隧道</button>
           <button id="tunnel-stop" class="danger">关闭隧道</button>
           <button id="tunnel-reset">重置 Token</button>
+          <button id="tunnel-renew">续期</button>
         </div>
       ` : `
         <div class="tunnel-controls hidden"></div>
@@ -74,14 +75,9 @@ function bindControls(root) {
     out.textContent = '启动中…';
     try {
       const r = await apiCall('POST', '/tunnel/start', { ttl });
-      out.innerHTML = `
-        <div class="tunnel-link">
-          <label>隧道链接（点击在飞书中打开）</label>
-          <a href="${escapeAttr(r.lark_deep_link)}" target="_blank">${escapeHtml(r.lark_deep_link)}</a>
-        </div>
-        <div class="tunnel-qr" id="tunnel-qr"></div>
-        <div class="tunnel-token">Token: <code>${escapeHtml(r.token)}</code></div>`;
-      renderQR('tunnel-qr', r.lark_deep_link);
+      // 刚启动的 quick tunnel 需要约 30~60 秒完成 DNS 注册/传播，期间直接
+      // 访问会连接失败（cloudflared 自身提示 "may take some time to be reachable"）。
+      renderTunnelResult(out, r, '⚠ 隧道刚启动，DNS 生效约需 30~60 秒。立即打开可能失败，请稍等片刻再访问。');
       await refreshStatus(root);
     } catch (e) {
       out.textContent = `启动失败: ${e.message}`;
@@ -105,6 +101,33 @@ function bindControls(root) {
       alert(e.message);
     }
   });
+  // 续期：token 值不变、过期时间延长，返回结构与启动隧道一致（链接/QR/token/到期时间）
+  root.querySelector('#tunnel-renew')?.addEventListener('click', async () => {
+    const ttl = root.querySelector('#tunnel-ttl').value;
+    const out = root.querySelector('#tunnel-result');
+    out.textContent = '续期中…';
+    try {
+      const r = await apiCall('POST', '/tunnel/renew', { ttl });
+      renderTunnelResult(out, r, `已续期 +${ttl}，原链接与 Token 继续可用`);
+      await refreshStatus(root);
+    } catch (e) {
+      out.textContent = `续期失败: ${e.message}`;
+    }
+  });
+}
+
+// renderTunnelResult 以与 /start 返回同构的方式渲染隧道结果：
+// 可选 note 为顶部说明（续期专用），到期时间始终展示。
+function renderTunnelResult(out, r, note = '') {
+  out.innerHTML = `
+    ${note ? `<div class="tunnel-note">${escapeHtml(note)}</div>` : ''}
+    <div class="tunnel-link">
+      <label>隧道链接（点击在飞书中打开）</label>
+      <a href="${escapeAttr(r.lark_deep_link)}" target="_blank">${escapeHtml(r.lark_deep_link)}</a>
+    </div>
+    <div class="tunnel-qr" id="tunnel-qr"></div>
+    <div class="tunnel-token">Token: <code>${escapeHtml(r.token)}</code> · 到期 ${escapeHtml(new Date(r.expires_at).toLocaleString())}</div>`;
+  renderQR('tunnel-qr', r.lark_deep_link);
 }
 
 // renderQR uses the go-qrcode PNG endpoint exposed at /api/tunnel/qrcode?text=...
