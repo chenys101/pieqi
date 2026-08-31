@@ -108,7 +108,9 @@ function bindControls(root) {
     out.textContent = '续期中…';
     try {
       const r = await apiCall('POST', '/tunnel/renew', { ttl });
-      renderTunnelResult(out, r, `已续期 +${ttl}，原链接与 Token 继续可用`);
+      // token 若仍有效则不变（原链接可用）；若已过期则自动在同一隧道签发新 token。
+      // 一律以下方最新链接/Token 为准。
+      renderTunnelResult(out, r, `已续期 +${ttl}，以下方最新链接为准`);
       await refreshStatus(root);
     } catch (e) {
       out.textContent = `续期失败: ${e.message}`;

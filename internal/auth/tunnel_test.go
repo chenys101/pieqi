@@ -200,6 +200,49 @@ func TestTunnel_RenewToken_KeepsSameTokenAndExtends(t *testing.T) {
 	_ = m.Stop(context.Background())
 }
 
+func TestTunnel_RenewToken_ExpiredTokenReissuesOnSameTunnel(t *testing.T) {
+	// 可控时钟：隧道进程仍在但 token 已过期时，续期应在同一隧道上签发新 token，
+	// 而不是报错要求重启（旧 token 已死，轮换零损失，域名保留）。
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	binary := fakeCloudflaredScript(t, "https://t-renew-expired.trycloudflare.com")
+	ts := NewTokenStoreWithNow(func() time.Time { return now })
+	m := NewTunnelManager(TunnelConfig{
+		BinaryPath: binary, LocalURL: "http://localhost:3000",
+		Tokens: ts,
+	})
+	orig, err := m.Start(context.Background(), 15*time.Minute)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// 时钟越过 TTL → 旧 token 过期，但 cloudflared 进程仍被视作存活
+	now = now.Add(16 * time.Minute)
+	if ts.Validate(orig.Token) {
+		t.Fatal("precondition: old token must be expired")
+	}
+	res, err := m.RenewToken(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("renew on expired token must re-issue, got err: %v", err)
+	}
+	// 新 token 与旧不同、有效、带全新 TTL
+	if res.Token == orig.Token {
+		t.Fatal("expired-token renew must issue a fresh token")
+	}
+	if !ts.Validate(res.Token) {
+		t.Fatal("fresh token must be valid")
+	}
+	// 域名不变，仅 URL 里的 token 参数被替换；返回结构仍与 Start 一致
+	if !strings.Contains(res.TunnelURL, "t-renew-expired.trycloudflare.com") {
+		t.Fatalf("renew must keep the same tunnel hostname, got %q", res.TunnelURL)
+	}
+	if !strings.Contains(res.TunnelURL, "token="+res.Token) {
+		t.Fatalf("renew url must embed the fresh token, got %q", res.TunnelURL)
+	}
+	if !strings.HasPrefix(res.LarkDeepLink, "lark://open?url=") {
+		t.Fatalf("lark link malformed: %q", res.LarkDeepLink)
+	}
+	_ = m.Stop(context.Background())
+}
+
 func TestTunnel_RenewToken_NoActiveTunnel(t *testing.T) {
 	binary := fakeCloudflaredScript(t, "https://t-norenew.trycloudflare.com")
 	m := NewTunnelManager(TunnelConfig{

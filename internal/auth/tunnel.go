@@ -367,47 +367,65 @@ func (m *TunnelManager) ResetToken(ctx context.Context) (string, error) {
 	m.token = fresh
 	// Rebuild the cached URL with the new token (the trycloudflare hostname
 	// does not change on reset — only the query param rotates).
-	if i := strings.Index(m.url, "token="); i >= 0 {
-		base := m.url[:i]
-		if amp := strings.Index(m.url[i:], "&"); amp >= 0 {
-			base = base + m.url[i+amp:] // preserve any subsequent params
-		}
-		m.url = base + "token=" + fresh
-	} else {
-		m.url = m.url + "?token=" + fresh
-	}
+	m.url = rebuildURLWithToken(m.url, fresh)
 	return fresh, nil
 }
 
-// RenewToken extends the running tunnel's current token BY ttl WITHOUT
-// rotating it — existing shared links (with ?token= embedded) keep working.
-// Returns a TunnelResult shaped exactly like Start, so the front-end can
-// re-render the same link/QR/token/expiry block. Errors if no tunnel is
-// active or the current token is no longer valid (expired / rotated away).
+// RenewToken extends the running tunnel's current token TTL. Two cases:
+//   - token 仍有效 → 延长有效期（token 值不变，已分发链接继续可用）；
+//   - token 已过期/失效但 cloudflared 进程仍在 → 同一隧道上签发全新 token
+//     （域名不变，仅 URL 里的 token 参数轮换）。旧 token 已死，轮换零损失，
+//     免去"过期后必须重启隧道、丢掉现有域名"的折腾。
+//
+// 返回 TunnelResult（与 Start 同构），前端渲染同款链接/QR/token/到期块。
+// 仅当无活跃隧道时返回错误。
 func (m *TunnelManager) RenewToken(ctx context.Context, ttl time.Duration) (TunnelResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cmd == nil {
 		return TunnelResult{}, fmt.Errorf("no active tunnel")
 	}
-	if m.token == "" {
-		return TunnelResult{}, fmt.Errorf("no current token")
-	}
 	ts := m.Tokens
 	if ts == nil {
 		return TunnelResult{}, fmt.Errorf("token store not configured")
 	}
-	if !ts.Renew(m.token, ttl) {
-		return TunnelResult{}, fmt.Errorf("current token expired or invalid; start a new tunnel")
+	if m.token != "" && ts.Renew(m.token, ttl) {
+		expires := m.expires.Add(ttl)
+		m.expires = expires
+		return TunnelResult{
+			TunnelURL:    m.url,
+			LarkDeepLink: "lark://open?url=" + m.url,
+			Token:        m.token,
+			ExpiresAt:    expires,
+		}, nil
 	}
-	expires := m.expires.Add(ttl)
+	fresh, err := ts.IssueForNewTunnel(ttl)
+	if err != nil {
+		return TunnelResult{}, fmt.Errorf("issue token: %w", err)
+	}
+	m.token = fresh
+	m.url = rebuildURLWithToken(m.url, fresh)
+	expires := time.Now().Add(ttl)
 	m.expires = expires
 	return TunnelResult{
 		TunnelURL:    m.url,
 		LarkDeepLink: "lark://open?url=" + m.url,
-		Token:        m.token,
+		Token:        fresh,
 		ExpiresAt:    expires,
 	}, nil
+}
+
+// rebuildURLWithToken 把 URL 里的 token 查询参数替换为 fresh。隧道域名不变，
+// 仅 token 参数轮换；保留 token 之后的其余参数（如有）。
+func rebuildURLWithToken(url, fresh string) string {
+	if i := strings.Index(url, "token="); i >= 0 {
+		base := url[:i]
+		if amp := strings.Index(url[i:], "&"); amp >= 0 {
+			base = base + url[i+amp:] // preserve any subsequent params
+		}
+		return base + "token=" + fresh
+	}
+	return url + "?token=" + fresh
 }
 
 // IsActive reports whether a tunnel is currently running.

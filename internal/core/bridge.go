@@ -241,7 +241,7 @@ func (b *Bridge) handleTunnelCommand(msg model.Message, op string, ttl time.Dura
 			return
 		}
 		b.reply(msg, fmt.Sprintf(
-			"♻️ 隧道已续期 +%s（token 不变，原链接继续可用）\n🔗 飞书内打开: %s\n🌐 直接访问: %s\n⏰ 新到期: %s",
+			"♻️ 隧道已续期 +%s\n🔗 飞书内打开: %s\n🌐 直接访问: %s\n⏰ 新到期: %s",
 			formatTTL(ttl), res.LarkDeepLink, res.TunnelURL,
 			res.ExpiresAt.Format("15:04:05")))
 	}
