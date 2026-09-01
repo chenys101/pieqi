@@ -1,0 +1,34 @@
+/* 设计令牌（方案 §29）：所有颜色的唯一来源。
+   dark-first（Linear + GitHub Actions + AI Agent Console 风格）。 */
+
+:root {
+  /* 暗色（默认） */
+  --color-background: 10 10 12;       /* #0a0a0c */
+  --color-surface: 20 20 24;          /* #141418 */
+  --color-elevated: 30 30 36;         /* #1e1e24 */
+  --color-border: 48 48 56;           /* #303038 */
+  --color-text: 237 237 240;          /* #ededf0 */
+  --color-text-muted: 148 148 158;    /* #94949e */
+
+  --color-success: 63 185 80;         /* #3fb950 */
+  --color-warning: 187 128 9;         /* #bb8009 */
+  --color-error: 218 54 51;           /* #da3633 */
+  --color-info: 57 139 216;           /* #398bd8 */
+  --color-accent: 136 87 245;         /* #8857f5 */
+}
+
+/* 亮色主题（Settings 可切换，html.light） */
+html.light {
+  --color-background: 246 247 248;
+  --color-surface: 255 255 255;
+  --color-elevated: 241 243 245;
+  --color-border: 208 212 216;
+  --color-text: 23 26 29;
+  --color-text-muted: 106 112 118;
+
+  --color-success: 31 122 43;
+  --color-warning: 143 96 6;
+  --color-error: 178 34 30;
+  --color-info: 9 88 165;
+  --color-accent: 110 65 205;
+}
