@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Pieqi PWA icon：饼图派（maskable 安全区） -->
+  <rect width="512" height="512" rx="96" fill="#0a0a0c"/>
+  <circle cx="256" cy="256" r="180" fill="#4f46e5"/>
+  <path d="M256 256 L256 76 A180 180 0 0 1 436 256 Z" fill="#818cf8"/>
+  <path d="M256 256 L436 256 A180 180 0 0 1 256 436 Z" fill="#22d3ee"/>
+  <circle cx="256" cy="256" r="34" fill="#0a0a0c"/>
+</svg>

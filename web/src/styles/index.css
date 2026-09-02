@@ -1,0 +1,22 @@
+/* 样式入口：令牌 → 组件基础样式 → Tailwind */
+@import './tokens.css';
+@import './components.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 全局基座 */
+@layer base {
+  html {
+    height: 100%;
+  }
+  body {
+    @apply h-full bg-background text-text antialiased;
+    font-family: theme('fontFamily.sans');
+    overscroll-behavior-y: none;
+  }
+  #app {
+    @apply h-full;
+  }
+}

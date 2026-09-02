@@ -2,68 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#0a0a0c" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <title>Pieqi</title>
 </head>
 <body>
-  <header class="topbar">
-    <div class="topbar-left">
-      <button id="sidebar-toggle" class="sidebar-toggle" aria-label="任务列表" aria-expanded="false">☰</button>
-      <h1>Pieqi</h1>
-    </div>
-  </header>
-  <div id="debug-banner" class="debug-banner hidden">⚠ 免鉴权调试模式已开启 — 所有访问放行，仅限本地开发</div>
-  <main id="app" class="layout">
-    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
-    <aside id="sidebar" class="sidebar">
-      <div class="sidebar-head">
-        <button id="new-task-btn" class="primary">+ 新建任务</button>
-      </div>
-      <div id="projects" class="projects"></div>
-      <div id="empty" class="empty hidden">暂无任务</div>
-      <div id="settings-mount" class="sidebar-foot"></div>
-    </aside>
-    <section id="detail" class="detail">
-      <div id="detail-content"></div>
-    </section>
-  </main>
-
-  <!-- 渠道配置模态框（settings.js 触发，larkreg.js 渲染） -->
-  <div id="config-overlay" class="config-overlay hidden" aria-hidden="true"></div>
-
-  <!-- 干预抽屉 -->
-  <div id="intervene-sheet" class="sheet hidden" aria-hidden="true">
-    <div class="sheet-card">
-      <div class="sheet-head">
-        <h2>干预 <span id="iv-taskid" class="task-id"></span></h2>
-        <button class="close" data-close="intervene-sheet">×</button>
-      </div>
-      <div id="iv-decision" class="task-decision hidden"></div>
-      <div class="iv-capsules">
-        <div id="iv-skills" class="capsules"></div>
-      </div>
-      <label>补充 / 追加 prompt（输入 / 触发 skill 补全）
-        <div class="iv-input-wrap">
-          <textarea id="iv-text" rows="4" placeholder="/skill-name 你的补充..."></textarea>
-          <div id="iv-autocomplete" class="autocomplete hidden"></div>
-        </div>
-      </label>
-      <div class="iv-actions">
-        <button id="iv-approve" class="primary hidden">✓ 批准</button>
-        <button id="iv-deny" class="hidden">✗ 拒绝</button>
-        <button id="iv-send" class="primary">发送追加</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 任务更多操作菜单（浮动 popover） -->
-  <div id="task-menu" class="task-menu hidden" role="menu">
-    <button class="task-menu-item danger" data-action="delete" role="menuitem">删除</button>
-  </div>
-
-  <script type="module" src="/src/main.js"></script>
-  <script type="module" src="/src/settings.js"></script>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
