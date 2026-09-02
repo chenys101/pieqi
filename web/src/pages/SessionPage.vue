@@ -88,7 +88,7 @@ async function onRemove() {
       :title="probed ? '任务不存在或已删除' : '加载中…'"
       :hint="probed ? '任务可能已被删除，或链接失效' : ''"
     >
-      <RouterLink to="/tasks" class="text-xs text-accent hover:underline">← 返回任务列表</RouterLink>
+      <RouterLink to="/dashboard" class="text-xs text-accent hover:underline">← 返回仪表盘</RouterLink>
     </EmptyState>
   </div>
 </template>

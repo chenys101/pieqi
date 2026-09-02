@@ -6,13 +6,16 @@ import { useWebSocket } from '@/composables/useWebSocket'
 import { useSessionStore } from '@/stores/session'
 import { usePwa } from '@/composables/usePwa'
 import { useAppStore } from '@/stores/app'
+import { useAgentStore } from '@/stores/agent'
 import { TunnelPanel, LarkConfigModal } from '@/features/settings'
 import Button from '@/components/ui/Button.vue'
+import Badge from '@/components/ui/Badge.vue'
 
 const { connection, reconnect } = useWebSocket()
 const sessionStore = useSessionStore()
 const { canInstall, isStandalone, promptInstall } = usePwa()
 const appStore = useAppStore()
+const agentStore = useAgentStore()
 const larkOpen = ref(false)
 
 /** package.json version 由 Vite define 注入（构建期常量） */
@@ -36,6 +39,32 @@ const appVersion = __APP_VERSION__
         </div>
         <div v-if="appStore.auth" class="mt-2 text-xs text-muted">
           {{ appStore.auth.bound ? `已绑定：${appStore.auth.nickname || appStore.auth.openid || '飞书账号'}` : '未绑定飞书账号' }}
+        </div>
+      </section>
+
+      <!-- Agents 展示：目录 + 实时会话统计（从 Task Store 派生） -->
+      <section class="rounded-lg border border-border bg-surface p-4">
+        <h2 class="mb-2 text-sm font-medium">Agents</h2>
+        <div class="flex flex-col gap-2">
+          <div
+            v-for="info in agentStore.catalog"
+            :key="info.id"
+            class="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-background px-3 py-2"
+          >
+            <div class="min-w-0">
+              <div class="text-sm font-medium">{{ info.name }}</div>
+              <div class="truncate font-mono text-xs text-muted" :title="info.transport">{{ info.transport }}</div>
+            </div>
+            <div class="flex shrink-0 flex-col items-end gap-1">
+              <Badge :tone="agentStore.agents.find((s) => s.agentId === info.id)?.online ? 'success' : 'neutral'">
+                {{ agentStore.agents.find((s) => s.agentId === info.id)?.online ? '🟢 Online' : '离线' }}
+              </Badge>
+              <span class="text-xs text-muted">
+                活跃 {{ agentStore.agents.find((s) => s.agentId === info.id)?.activeSessions ?? 0 }} ·
+                总计 {{ agentStore.agents.find((s) => s.agentId === info.id)?.totalSessions ?? 0 }}
+              </span>
+            </div>
+          </div>
         </div>
       </section>
 

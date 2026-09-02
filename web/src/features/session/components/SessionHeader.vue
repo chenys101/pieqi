@@ -17,9 +17,9 @@ const router = useRouter()
     <div class="mx-auto flex max-w-3xl items-center gap-2">
       <button
         class="rounded-md px-1.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-text"
-        title="返回任务列表"
+        title="返回仪表盘"
         aria-label="返回"
-        @click="router.push('/tasks')"
+        @click="router.push('/dashboard')"
       >
         <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
           <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
