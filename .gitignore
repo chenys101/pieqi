@@ -5,6 +5,8 @@
 build/
 web/dist/
 web/node_modules/
+# TS 增量编译缓存
+*.tsbuildinfo
 
 # 测试产物
 internal/core/data/
