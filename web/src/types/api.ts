@@ -11,7 +11,14 @@ export type TaskStatusDto =
   | 'cancelled'
 
 /** 执行事件类型（后端 model.TaskEventType） */
-export type TaskEventTypeDto = 'text' | 'user' | 'thinking' | 'tool_use' | 'tool_result' | 'status'
+export type TaskEventTypeDto =
+  | 'text'
+  | 'user'
+  | 'thinking'
+  | 'tool_use'
+  | 'tool_result'
+  | 'status'
+  | 'rewind'
 
 /** 决策类型：approval=权限审批（进程存活）；choice=多选（已废弃，兜底保留） */
 export type DecisionKindDto = 'approval' | 'choice'
@@ -158,4 +165,107 @@ export interface CompletionItemDto {
   name: string
   description: string
   dir: string
+}
+
+// ---------- Feedback P0（p0-design.md §5，wire 与 Go JSON tag 一致） ----------
+
+/** FileChange 操作类型（后端 core.FileChange.Operation） */
+export type FileOperationDto = 'create' | 'modify' | 'delete' | 'rename'
+
+/** 派生的单文件变更（Agent 声明改了什么） */
+export interface FileChangeDto {
+  path: string
+  operation: FileOperationDto
+  turn: number
+  tool_use_ids?: string[]
+  status: 'pending' | 'success' | 'failed'
+  additions?: number
+  deletions?: number
+}
+
+/** 一个 Turn 的变更统计（规则生成） */
+export interface ChangeSummaryDto {
+  files: number
+  additions: number
+  deletions: number
+  creates?: number
+  deletes?: number
+  modifies?: number
+}
+
+/** Feedback 总览里的一个 Turn */
+export interface TurnInfoDto {
+  turn: number
+  start_event_seq: number
+  user_prompt?: string
+  summary: ChangeSummaryDto
+  changes?: FileChangeDto[]
+}
+
+/** Task 起始 baseline（git HEAD + dirty 快照记录） */
+export interface TaskBaselineDto {
+  head_sha?: string
+  captured_at?: string
+  dirty_paths?: string[]
+}
+
+/** Preview 生命周期状态 */
+export type PreviewStateDto =
+  | 'unavailable'
+  | 'available'
+  | 'starting'
+  | 'running'
+  | 'stopped'
+  | 'error'
+
+export interface FeedbackPreviewDto {
+  state: PreviewStateDto
+  framework?: string
+  port?: number
+  url?: string
+}
+
+/** GET /api/tasks/:id/feedback 响应 */
+export interface FeedbackBundleDto {
+  task_id: string
+  baseline?: TaskBaselineDto
+  turns: TurnInfoDto[]
+  cumulative: ChangeSummaryDto
+  checkpoints: number[]
+  preview?: FeedbackPreviewDto
+}
+
+/** GET /api/tasks/:id/feedback/diff 响应 */
+export interface FeedbackDiffDto {
+  path: string
+  turn?: number
+  operation: FileOperationDto
+  diff: string
+  additions: number
+  deletions: number
+  truncated: boolean
+  binary: boolean
+}
+
+/** POST /api/tasks/:id/rewind 请求 */
+export interface RewindRequestDto {
+  to_turn: number
+  scope?: 'code'
+}
+
+/** POST /api/tasks/:id/rewind 响应 */
+export interface RewindResponseDto {
+  ok: boolean
+  rewind_event_seq: number
+  to_turn: number
+  restored: string[]
+  preview_stopped: boolean
+}
+
+/** GET /api/tasks/:id/preview/status 响应 */
+export interface PreviewStatusDto {
+  state: PreviewStateDto
+  framework?: string
+  port?: number
+  error?: string
 }

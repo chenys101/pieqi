@@ -22,6 +22,11 @@ type Server struct {
 	auth     *auth.Service       // wired by SetAuth; nil-safe for legacy tests
 	tunnel   *auth.TunnelManager // wired by SetAuth; nil-safe for legacy tests
 
+	// Feedback（p0-design.md §5）：Checkpoint/Rewind 与 Preview；
+	// wired by SetFeedback; nil-safe（未接线时端点返回降级响应）。
+	feedback *core.FeedbackStore
+	preview  *core.PreviewManager
+
 	// Lark Device Flow (扫码一键创建飞书应用)。wired by SetLarkReg;
 	// nil-safe for tests that don't exercise larkreg routes.
 	larkRegRunner    larkRegRunner
@@ -49,6 +54,14 @@ func NewServer(cfg *config.Config, store *core.TaskStore, runner *core.TaskRunne
 func (s *Server) SetAuth(svc *auth.Service, tunnel *auth.TunnelManager) {
 	s.auth = svc
 	s.tunnel = tunnel
+}
+
+// SetFeedback wires the feedback store and preview manager (Feedback P0).
+// Called by main.go after NewServer; nil-safe for tests that don't exercise
+// feedback/preview routes.
+func (s *Server) SetFeedback(fs *core.FeedbackStore, pm *core.PreviewManager) {
+	s.feedback = fs
+	s.preview = pm
 }
 
 // Register 在 gin router 上挂 /api/* 与 /internal/* 路由。
@@ -80,6 +93,12 @@ func (s *Server) Register(r gin.IRouter) {
 		api.POST("/tasks/:id/intervene", s.intervene)
 		api.POST("/tasks/:id/cancel", s.cancelTask)
 		api.DELETE("/tasks/:id", s.deleteTask)
+		// Feedback P0（p0-design.md §5）：总览 / Diff / Rewind / Preview
+		api.GET("/tasks/:id/feedback", s.getFeedback)
+		api.GET("/tasks/:id/feedback/diff", s.getFeedbackDiff)
+		api.POST("/tasks/:id/rewind", s.postRewind)
+		// preview 控制端点与代理共用一条 wildcard 路由（见 previewRoute 分发说明）
+		api.Any("/tasks/:id/preview/*path", s.previewRoute)
 		api.GET("/skills", s.listSkills)   // Phase 6 实现，先占位
 		api.GET("/commands", s.listCommands)
 		api.GET("/ws", s.handleWS)         // Phase 5 实现

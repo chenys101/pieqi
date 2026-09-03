@@ -77,6 +77,7 @@ const (
 	EventToolUse    TaskEventType = "tool_use"    // claude 发起的工具调用
 	EventToolResult TaskEventType = "tool_result" // 工具执行结果
 	EventStatus     TaskEventType = "status"      // 状态变更(进入 waiting_input 等)
+	EventRewind     TaskEventType = "rewind"      // 用户回退代码（Feedback P0）：Input 载结构化载荷，Text 放人读摘要
 )
 
 // TaskEvent 执行流中的一个事件,按时间顺序追加到 Task.Events。
@@ -108,7 +109,10 @@ type Task struct {
 	Output          string      `json:"output,omitempty"` // 流式累积的最新文本
 	Events          []TaskEvent `json:"events,omitempty"` // 执行事件流(文本/工具调用/结果),供详情视图
 	CurrentDecision *Decision  `json:"current_decision,omitempty"`
-	Error           string     `json:"error,omitempty"`
+	Error           string      `json:"error,omitempty"`
+
+	// Baseline Task 创建时记录的工作区起始状态（Feedback P0）。nil = 旧任务未捕获。
+	Baseline *TaskBaseline `json:"baseline,omitempty"`
 
 	// IM 来源回执：waiting_input 时通过原渠道 push 通知，让用户在手机上也能收到
 	OriginChannel  string `json:"origin_channel,omitempty"`
@@ -119,6 +123,14 @@ type Task struct {
 	UpdatedAt  time.Time  `json:"updated_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+// TaskBaseline Task 创建时记录的工作区起始状态（ADR-0002：只读 Git，绝不写用户分支）。
+// 职责：作为「累计真实 Diff」的基准；与 Checkpoint（Rewind 恢复资产）分离。
+type TaskBaseline struct {
+	HeadSHA    string    `json:"head_sha"`           // git HEAD，只读参照；非 git 项目为空
+	CapturedAt time.Time `json:"captured_at"`         // 捕获时间
+	DirtyPaths []string  `json:"dirty_paths,omitempty"` // Task 起始与 HEAD 不一致的文件（含 untracked）
 }
 
 // Project 一个代码项目。每个项目对应一个 git repo，是 worktree 与 task 分组的基准。

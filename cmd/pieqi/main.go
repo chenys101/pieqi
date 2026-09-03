@@ -76,6 +76,7 @@ func main() {
 	for _, dir := range []string{
 		filepath.Join(dataRoot, "tasks"),
 		filepath.Join(dataRoot, "worktrees"),
+		filepath.Join(dataRoot, "checkpoints"), // Feedback P0：Turn 快照/baseline 落盘
 	} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			logger.Fatal("mkdir data dir", zap.String("dir", dir), zap.Error(err))
@@ -113,6 +114,14 @@ func main() {
 		execPath, cfg.Server.Port, cfg.Pieqi.HookTools, hookTimeoutSec,
 		cfg.Pieqi.MaxConcurrentPerProject, cfg.Pieqi.BaseBranch,
 	)
+
+	// Feedback P0（p0-design.md）：Checkpoint 存储 + Preview 管理器。
+	// runner 挂钩（baseline / Turn 快照捕获），API 侧经 SetFeedback 接线。
+	feedbackStore := core.NewFeedbackStore(logger, filepath.Join(dataRoot, "checkpoints"))
+	runner.SetFeedbackStore(feedbackStore)
+	previewMgr := core.NewPreviewManager(logger)
+	// Task 终态/删除时自动回收 preview 进程
+	previewMgr.WatchBus(bus)
 
 	// ACP 路径（Phase 2）→ 已由多 Agent 默认驱动取代（#2）：
 	//   agents.claude.transport=sdk-bridge（默认）→ 任务经 agent.Open("claude") 驱动
@@ -250,6 +259,7 @@ func main() {
 	if cfg.API.Enabled {
 		apiServer := api.NewServer(cfg, store, runner, hooks, bus, skills, commands)
 		apiServer.SetAuth(authSvc, tunnelMgr)
+		apiServer.SetFeedback(feedbackStore, previewMgr)
 		apiServer.SetLarkReg(larkreg.NewRegistration(), cfg.Channels.Lark.CredentialsFile)
 		// 配置保存后热应用（lark 渠道启用且已接线控制器时）
 		if larkController != nil {
@@ -276,6 +286,8 @@ func main() {
 		if claudeProc != nil {
 			_ = claudeProc.Stop(context.Background())
 		}
+		// Feedback P0：服务器关停回收全部 preview dev server 进程
+		previewMgr.CleanupAll()
 		os.Exit(0)
 	}()
 

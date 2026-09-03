@@ -8,7 +8,7 @@ import { timeAgo } from '@/utils/date'
 import { shortId } from '@/utils/format'
 
 defineProps<{ task: Task; canCancel: boolean }>()
-const emit = defineEmits<{ cancel: []; remove: [] }>()
+const emit = defineEmits<{ cancel: []; remove: []; feedback: [] }>()
 const router = useRouter()
 </script>
 
@@ -29,6 +29,8 @@ const router = useRouter()
         {{ task.title }}
       </h1>
       <StatusBadge :status="task.status" />
+      <!-- 变更反馈入口（Feedback P0）：总览 / Diff / 回退 / 预览 -->
+      <Button variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
       <Button v-if="canCancel" variant="ghost" size="sm" @click="emit('cancel')">中止</Button>
       <Button variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
     </div>

@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '@/stores/task'
 import { useSession } from '@/composables/useSession'
 import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '@/features/session'
+import { FeedbackPanel } from '@/features/feedback'
 import EmptyState from '@/components/ui/EmptyState.vue'
 
 const route = useRoute()
@@ -19,6 +20,10 @@ const decision = computed(() => (task.value?.status === 'waiting_input' ? task.v
 const approvalBusy = ref(false)
 /** 冷启动探测完成（详情已尝试拉取），仍无任务 → 视为不存在 */
 const probed = ref(false)
+
+/** 变更反馈面板（Feedback P0）：Agent 执行中禁止回退（静止边界） */
+const feedbackOpen = ref(false)
+const canRewind = computed(() => !!task.value && task.value.status !== 'running' && task.value.status !== 'pending')
 
 // 冷启动兜底：WS 快照未到时按 id 拉详情（含全量 events）
 watch(
@@ -66,7 +71,7 @@ async function onRemove() {
 
 <template>
   <div v-if="task" class="flex h-full flex-col">
-    <SessionHeader :task="task" :can-cancel="canCancel" @cancel="cancel" @remove="onRemove" />
+    <SessionHeader :task="task" :can-cancel="canCancel" @cancel="cancel" @remove="onRemove" @feedback="feedbackOpen = true" />
     <SessionTimeline :task-id="task.id" :consume-force-scroll="consumeForceScroll" />
 
     <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20） -->
@@ -80,6 +85,9 @@ async function onRemove() {
       @send="submitPrompt"
       @cancel="cancel"
     />
+
+    <!-- 变更反馈面板（Feedback P0）：总览 / Diff / 回退 / 预览 -->
+    <FeedbackPanel :task-id="task.id" :open="feedbackOpen" :can-rewind="canRewind" @close="feedbackOpen = false" />
   </div>
 
   <!-- 任务不存在（已删除 / 链接失效 / 探测中） -->
