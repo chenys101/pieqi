@@ -166,6 +166,7 @@ func (s *Server) getOutcome(c *gin.Context) {
 // --- Evidence（§7） ---
 
 // getEvidence GET /api/tasks/:id/evidence?scope=task|turn&turn=N：随取随派生。
+// P2 起挂视觉证据（最新截图 + console/network 摘要，visual 接线时）。
 func (s *Server) getEvidence(c *gin.Context) {
 	task, ok := s.requireTask(c)
 	if !ok {
@@ -185,18 +186,18 @@ func (s *Server) getEvidence(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "scope=turn requires turn"})
 		return
 	}
-	changes := s.deriveChangesBackfilled(task)
-	checks := s.taskChecks(task)
-	c.JSON(http.StatusOK, core.BuildEvidence(task, changes, checks, s.previewOf(task), scope, turn))
+	c.JSON(http.StatusOK, s.buildEvidenceWithVisual(task, scope, turn))
 }
 
 // --- Evidence → Continue（§8 ⭐ 控制闭环） ---
 
 type continueReq struct {
-	Instruction string `json:"instruction"`
+	Instruction string   `json:"instruction"`
+	Screenshots []string `json:"screenshots"` // P2 §6：指定携带的截图 id（省略 = 最新 N 张）
 }
 
 // postContinue POST /api/tasks/:id/continue：组装当前证据为续问 prompt，走既有 Resume。
+// P2：Evidence 挂视觉证据，prompt 含截图引用（Agent 是否看图由 provider 能力决定）。
 // 返回组装文本便于审计与前端回显；task running → 409。
 func (s *Server) postContinue(c *gin.Context) {
 	task, ok := s.requireTask(c)
@@ -213,9 +214,12 @@ func (s *Server) postContinue(c *gin.Context) {
 		return
 	}
 
-	changes := s.deriveChangesBackfilled(task)
 	checks := s.taskChecks(task)
-	evidence := core.BuildEvidence(task, changes, checks, s.previewOf(task), core.ScopeTask, 0)
+	evidence := s.buildEvidenceWithVisual(task, core.ScopeTask, 0)
+	// 显式指定截图（覆盖默认最新 N 张）；id 校验防引用不存在的截图
+	if urls := s.screenshotURLsFor(task.ID, req.Screenshots); len(urls) > 0 {
+		evidence.Screenshots = urls
+	}
 	prompt := core.EvidencePrompt(req.Instruction, evidence, checks)
 
 	if err := s.runner.Resume(task.ID, prompt); err != nil {

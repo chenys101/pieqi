@@ -5,7 +5,7 @@
 //      Evidence→Continue 续问闭环、Rewind→Verify 回退验证。
 // 数据流：打开/刷新时现场派生（后端不存第二份聚合，ADR-0001）。
 import { computed, ref, watch } from 'vue'
-import { getFeedback, rewindToTurn } from '@/services/api/feedback'
+import { getFeedback, rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
 import type { FileChangeDto, FeedbackBundleDto, RewindVerificationDto } from '@/types/api'
 import Modal from '@/components/ui/Modal.vue'
 import Spinner from '@/components/ui/Spinner.vue'
@@ -31,6 +31,8 @@ const notify = useNotificationStore()
 const bundle = ref<FeedbackBundleDto | null>(null)
 const loading = ref(false)
 const rewinding = ref<number | null>(null)
+/** P2：文件级回退中的路径（按钮态） */
+const rewindingFile = ref<string | null>(null)
 /** 双视角：event = 按 Turn 展开；baseline = 累计文件集（p1-design.md §3） */
 const view = ref<'event' | 'baseline'>('event')
 /** Baseline 视角下展开的文件路径 */
@@ -82,6 +84,24 @@ async function onRewind(turn: number) {
     notify.error(err instanceof Error ? err.message : '回退失败')
   } finally {
     rewinding.value = null
+  }
+}
+
+/**
+ * P2 文件级回退（p2-design.md §7）：只恢复单个文件到 Turn N 开始之前。
+ * 同样带 verify（回退后重跑目标轮 checks + 重启 preview）。
+ */
+async function onRewindFile(turn: number, path: string) {
+  rewindingFile.value = path
+  try {
+    const res = await rewindFileToTurn(props.taskId, turn, path, true)
+    verification.value = res.verification ?? null
+    notify.success(`已回退 ${path} 到 Turn #${turn} 之前`)
+    await refresh()
+  } catch (err) {
+    notify.error(err instanceof Error ? err.message : '文件回退失败')
+  } finally {
+    rewindingFile.value = null
   }
 }
 
@@ -157,8 +177,9 @@ watch(
           :task-id="taskId"
           :turn="t"
           :checkpointed="checkpointSet.has(t.turn)"
-          :can-rewind="canRewind && rewinding === null"
+          :can-rewind="canRewind && rewinding === null && rewindingFile === null"
           @rewind="onRewind"
+          @rewind-file="onRewindFile"
         />
         <div v-if="!turnsDesc.length" class="py-6 text-center text-xs text-muted">暂无 Turn 记录</div>
       </div>

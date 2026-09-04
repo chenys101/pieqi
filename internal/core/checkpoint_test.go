@@ -126,6 +126,56 @@ func TestFeedbackStore_BaselineAndRewind(t *testing.T) {
 	_ = res
 }
 
+// TestRewindFileToTurn 文件级回退（p2-design.md §7）：单文件恢复，不影响其他文件。
+func TestRewindFileToTurn(t *testing.T) {
+	repo := newGitRepo(t)
+	fs := NewFeedbackStore(nil, filepath.Join(t.TempDir(), "checkpoints"))
+
+	events := []model.TaskEvent{
+		{Type: model.EventUser, Text: "turn1", Seq: 1},
+		toolUseEvent("Write", "t1", "a.txt"),
+		{Type: model.EventToolResult, ToolUseID: "t1", ToolName: "Write"},
+		toolUseEvent("Write", "t2", "b.txt"),
+		{Type: model.EventToolResult, ToolUseID: "t2", ToolName: "Write"},
+		{Type: model.EventUser, Text: "turn2", Seq: 6},
+		toolUseEvent("Edit", "t3", "a.txt"),
+		{Type: model.EventToolResult, ToolUseID: "t3", ToolName: "Edit"},
+	}
+	task := fsTask(t, repo, "task-file", events, nil)
+	fs.CaptureBaseline(task)
+
+	// Turn 1：建 a.txt=v1、b.txt=v1；Turn 2：a.txt=v2
+	_ = os.WriteFile(filepath.Join(repo, "a.txt"), []byte("v1\n"), 0644)
+	_ = os.WriteFile(filepath.Join(repo, "b.txt"), []byte("v1\n"), 0644)
+	fs.CaptureTurnEnd(task, 1)
+	_ = os.WriteFile(filepath.Join(repo, "a.txt"), []byte("v2\n"), 0644)
+	fs.CaptureTurnEnd(task, 2)
+
+	// 文件级回退 a.txt → Turn 2 之前：a.txt=v1，b.txt 不受影响
+	res, err := fs.RewindFileToTurn(task, 2, "a.txt")
+	if err != nil {
+		t.Fatalf("rewind file: %v", err)
+	}
+	if len(res.Restored) != 1 || res.Restored[0] != "a.txt" {
+		t.Fatalf("restored = %v", res.Restored)
+	}
+	if b, _ := os.ReadFile(filepath.Join(repo, "a.txt")); string(b) != "v1\n" {
+		t.Errorf("a.txt = %q, want v1", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(repo, "b.txt")); string(b) != "v1\n" {
+		t.Errorf("b.txt must be untouched, got %q", b)
+	}
+
+	// 未在目标 Turn 触碰的文件 → 拒绝（b.txt 无 Turn>=2 改动）
+	if _, err := fs.RewindFileToTurn(task, 2, "b.txt"); err == nil {
+		t.Fatal("file not touched at/after turn must be rejected")
+	}
+	// Agent 从未触碰的文件 → 拒绝
+	if _, err := fs.RewindFileToTurn(task, 1, "tracked.txt"); err == nil {
+		t.Fatal("never-touched file must be rejected")
+	}
+}
+
 func TestFeedbackStore_CaptureTurnEndRecordsDeletion(t *testing.T) {
 	repo := newGitRepo(t)
 	root := filepath.Join(t.TempDir(), "checkpoints")

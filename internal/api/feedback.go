@@ -32,7 +32,8 @@ type rewindEventPayload struct {
 
 type rewindReq struct {
 	ToTurn int    `json:"to_turn"`
-	Scope  string `json:"scope"`  // P0 仅支持 "code"
+	Scope  string `json:"scope"`  // "" / "code" = 全量；"file" = 单文件（P2 §7）
+	Path   string `json:"path"`   // scope=file 时必填：回退的目标文件
 	Verify bool   `json:"verify"` // P1：Rewind → Verify（§9）：重跑目标 Turn checks + 需要时重启 preview
 }
 
@@ -245,7 +246,7 @@ func (s *Server) postRewind(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Scope != "" && req.Scope != "code" {
+	if req.Scope != "" && req.Scope != "code" && req.Scope != "file" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported scope: " + req.Scope})
 		return
 	}
@@ -258,7 +259,18 @@ func (s *Server) postRewind(c *gin.Context) {
 		return
 	}
 
-	res, err := s.feedback.RewindToTurn(task, req.ToTurn)
+	// scope 分派：file = 单文件回退（P2 §7）；空/code = 全量（P0）
+	var res *core.RewindResult
+	var err error
+	if req.Scope == "file" {
+		if req.Path == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "scope=file requires path"})
+			return
+		}
+		res, err = s.feedback.RewindFileToTurn(task, req.ToTurn, req.Path)
+	} else {
+		res, err = s.feedback.RewindToTurn(task, req.ToTurn)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

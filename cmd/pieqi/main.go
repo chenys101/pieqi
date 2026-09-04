@@ -126,6 +126,13 @@ func main() {
 	// Feedback P1（p1-design.md）：Checks 重跑 runner（事件流复用派生无需状态）。
 	checkRunner := core.NewCheckRunner(logger, filepath.Join(dataRoot, "checks"))
 
+	// Feedback P2（p2-design.md）：视觉采集（截图/console/network）+ Evidence Push。
+	// task 删除时回收截图与事件窗口；推送注册表订阅终态自动推 Outcome。
+	visualMgr := core.NewVisualCaptureManager(logger, filepath.Join(dataRoot, "previews"))
+	visualMgr.WatchBus(bus)
+	pushRegistry := core.NewPushRegistry(logger, store)
+	pushRegistry.WatchBus(bus)
+
 	// ACP 路径（Phase 2）→ 已由多 Agent 默认驱动取代（#2）：
 	//   agents.claude.transport=sdk-bridge（默认）→ 任务经 agent.Open("claude") 驱动
 	//     （桥为主力，桥不可用自动回退 print）；transport=print 且 qoder 已配置 → "qoder"。
@@ -232,6 +239,19 @@ func main() {
 		logger.Info("wechat channel enabled")
 	}
 
+	// P2 推送 provider 注册：已启用的 IM 渠道（lark/wechat）复用 Bridge sender；
+	// webhook 通用通道经 PIEQI_PUSH_WEBHOOK_URL 环境变量按需开启。
+	for _, name := range []string{"lark", "wechat"} {
+		if sender, ok := bridge.Sender(name); ok {
+			pushRegistry.Register(core.NewSenderProvider(name, sender))
+			logger.Info("push provider registered", zap.String("channel", name))
+		}
+	}
+	if webhookURL := os.Getenv("PIEQI_PUSH_WEBHOOK_URL"); webhookURL != "" {
+		pushRegistry.Register(core.NewWebhookProvider(webhookURL))
+		logger.Info("push provider registered", zap.String("channel", "webhook"))
+	}
+
 	// --- Auth (Feishu binding + Cloudflared tunnel) ---
 	authBindings, err := auth.NewBindingStore(cfg.Auth.FeishuBindingFile)
 	if err != nil {
@@ -264,6 +284,8 @@ func main() {
 		apiServer.SetAuth(authSvc, tunnelMgr)
 		apiServer.SetFeedback(feedbackStore, previewMgr)
 		apiServer.SetCheckRunner(checkRunner)
+		apiServer.SetVisualCapture(visualMgr)
+		apiServer.SetPushRegistry(pushRegistry)
 		apiServer.SetLarkReg(larkreg.NewRegistration(), cfg.Channels.Lark.CredentialsFile)
 		// 配置保存后热应用（lark 渠道启用且已接线控制器时）
 		if larkController != nil {
@@ -292,6 +314,8 @@ func main() {
 		}
 		// Feedback P0：服务器关停回收全部 preview dev server 进程
 		previewMgr.CleanupAll()
+		// Feedback P2：关停视觉采集服务（Playwright 子进程树）
+		_ = visualMgr.Stop(context.Background())
 		os.Exit(0)
 	}()
 

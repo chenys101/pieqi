@@ -14,6 +14,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -256,6 +257,53 @@ func (fs *FeedbackStore) RewindToTurn(task *model.Task, toTurn int) (*RewindResu
 // 返回 (内容, 是否存在)。
 func (fs *FeedbackStore) AssembleBefore(task *model.Task, turn int, path string) ([]byte, bool) {
 	return fs.assembledBefore(task, turn, path)
+}
+
+// RewindFileToTurn 文件级回退（p2-design.md §7）：只把单个文件恢复到「Turn N 开始之前」。
+// 不影响其他文件；返回实际恢复的路径列表（固定 0 或 1 个元素）。
+// 路径合法性：必须是 Agent 在 Turn >= N 实际触碰过的文件（防止任意路径恢复）。
+func (fs *FeedbackStore) RewindFileToTurn(task *model.Task, toTurn int, path string) (*RewindResult, error) {
+	if task == nil || task.WorktreePath == "" {
+		return nil, errInvalidTask
+	}
+	if toTurn < 1 {
+		return nil, fmt.Errorf("invalid to_turn: %d", toTurn)
+	}
+	path = strings.TrimPrefix(path, "./")
+	if path == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+
+	// 合法性：该文件必须在目标 Turn 及之后被 Agent 触碰过（否则无「Agent 改动」可回退）
+	changes := DeriveFileChanges(task.Events, nil)
+	touched := false
+	for _, fc := range changes {
+		if fc.Path == path && fc.Turn >= toTurn {
+			touched = true
+			break
+		}
+	}
+	if !touched {
+		return nil, fmt.Errorf("file not touched at or after turn %d: %s", toTurn, path)
+	}
+
+	content, exists := fs.assembledBefore(task, toTurn, path)
+	target := safeJoin(task.WorktreePath, path)
+	switch {
+	case exists:
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(target, content, 0644); err != nil {
+			return nil, err
+		}
+	default:
+		// Turn 开始前不存在 → 删除当前文件（若在）
+		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	return &RewindResult{ToTurn: toTurn, Restored: []string{path}}, nil
 }
 
 // TurnContent Turn N 结束态内容：turn 快照优先；快照缺失（进行中/捕获失败）回退当前工作文件。

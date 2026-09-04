@@ -30,6 +30,11 @@ type Server struct {
 	// P1 Checks 重跑 runner（p1-design.md §5）；nil-safe（未接线时仅事件流派生）。
 	checks *core.CheckRunner
 
+	// Feedback P2（p2-design.md）：视觉采集 + 推送注册表；
+	// wired by SetVisualCapture/SetPushRegistry; nil-safe（未接线时端点降级响应）。
+	visual *core.VisualCaptureManager
+	push   *core.PushRegistry
+
 	// Lark Device Flow (扫码一键创建飞书应用)。wired by SetLarkReg;
 	// nil-safe for tests that don't exercise larkreg routes.
 	larkRegRunner    larkRegRunner
@@ -72,6 +77,16 @@ func (s *Server) SetCheckRunner(cr *core.CheckRunner) {
 	s.checks = cr
 }
 
+// SetVisualCapture wires the visual capture manager (Feedback P2). nil-safe.
+func (s *Server) SetVisualCapture(vm *core.VisualCaptureManager) {
+	s.visual = vm
+}
+
+// SetPushRegistry wires the evidence push registry (Feedback P2). nil-safe.
+func (s *Server) SetPushRegistry(pr *core.PushRegistry) {
+	s.push = pr
+}
+
 // Register 在 gin router 上挂 /api/* 与 /internal/* 路由。
 func (s *Server) Register(r gin.IRouter) {
 	token := ""
@@ -112,6 +127,9 @@ func (s *Server) Register(r gin.IRouter) {
 		api.GET("/tasks/:id/outcome", s.getOutcome)
 		api.GET("/tasks/:id/evidence", s.getEvidence)
 		api.POST("/tasks/:id/continue", s.postContinue)
+		// Feedback P2（p2-design.md §9）：Evidence Push（截图/console/network 子路径
+		// 挂 preview wildcard，见 preview.go 分发）
+		api.POST("/tasks/:id/push", s.postPush)
 		// preview 控制端点与代理共用一条 wildcard 路由（见 previewRoute 分发说明）
 		api.Any("/tasks/:id/preview/*path", s.previewRoute)
 		api.GET("/skills", s.listSkills)   // Phase 6 实现，先占位

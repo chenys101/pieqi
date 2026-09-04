@@ -16,7 +16,11 @@ const props = defineProps<{
   canRewind: boolean
 }>()
 
-const emit = defineEmits<{ rewind: [turn: number] }>()
+const emit = defineEmits<{
+  rewind: [turn: number]
+  /** P2：文件级回退（仅恢复单个文件到本轮开始之前） */
+  rewindFile: [turn: number, path: string]
+}>()
 
 const expanded = ref(false)
 /** 展开的文件路径（null = 无） */
@@ -38,6 +42,13 @@ function onRewind() {
   const n = props.turn.turn
   if (!confirm(`回退到 Turn #${n} 开始之前？此后各轮的代码改动将被恢复/删除（时间线不受影响）。`)) return
   emit('rewind', n)
+}
+
+/** P2 文件级回退：只恢复该文件到本轮开始之前，其他文件不动（p2-design.md §7） */
+function onRewindFile(path: string) {
+  const n = props.turn.turn
+  if (!confirm(`仅回退此文件到 Turn #${n} 开始之前？其他文件不受影响。`)) return
+  emit('rewindFile', n, path)
 }
 </script>
 
@@ -79,6 +90,16 @@ function onRewind() {
         </button>
         <!-- 单文件 diff（懒加载：展开时才请求） -->
         <DiffView v-if="openPath === fc.path" :task-id="taskId" :path="fc.path" :turn="fc.turn" />
+        <!-- P2：文件级回退入口（展开审视单文件 diff 的时刻提供，不影响其他文件） -->
+        <div v-if="openPath === fc.path" class="flex justify-end px-3 pb-1.5">
+          <Button
+            variant="ghost"
+            size="sm"
+            :disabled="!canRewind"
+            :title="canRewind ? '仅回退此文件到本轮开始之前' : 'Agent 执行中，暂不可回退'"
+            @click="onRewindFile(fc.path)"
+          >↩ 仅回退此文件</Button>
+        </div>
       </div>
 
       <!-- 回退：恢复到本轮开始之前 -->

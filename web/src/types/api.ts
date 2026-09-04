@@ -359,7 +359,66 @@ export interface EvidenceDto {
   changes: ChangeSummaryDto
   /** 每文件一行摘要（如 "modify src/a.vue (+10 -2)"） */
   diff_brief: string[]
+  /** P2：视觉证据（截图 URL，最新 N 张） */
+  screenshots?: string[]
+  /** P2：页面 console 摘要 */
+  console?: ConsoleSummaryDto
+  /** P2：页面网络失败摘要 */
+  network?: NetworkSummaryDto
   created_at: string
+}
+
+// ---------- Feedback P2（p2-design.md §9，wire 与 Go JSON tag 一致） ----------
+
+/** 一次截图记录（POST /preview/screenshots 响应 / 列表项） */
+export interface ScreenshotDto {
+  id: string
+  task_id: string
+  /** preview 实例标识（taskID:port） */
+  preview_id: string
+  /** PNG 端点（/api/tasks/:id/preview/screenshots/<id>.png） */
+  url: string
+  created_at: string
+}
+
+/** GET /api/tasks/:id/preview/screenshots 响应 */
+export interface ScreenshotsResponseDto {
+  screenshots: ScreenshotDto[]
+}
+
+/** preview 页面 console 事件（只采 error/warn） */
+export interface ConsoleEntryDto {
+  level: 'error' | 'warn'
+  text: string
+  at: string
+}
+
+/** GET /api/tasks/:id/preview/console 响应 */
+export interface ConsoleSummaryDto {
+  errors: number
+  warnings: number
+  entries?: ConsoleEntryDto[]
+}
+
+/** preview 页面失败的网络请求（只采 4xx/5xx/failed；status=0 = failed） */
+export interface NetworkEntryDto {
+  url: string
+  method: string
+  status: number
+  at: string
+}
+
+/** GET /api/tasks/:id/preview/network 响应 */
+export interface NetworkSummaryDto {
+  failures: number
+  entries?: NetworkEntryDto[]
+}
+
+/** POST /api/tasks/:id/push 响应（Evidence Push） */
+export interface PushResponseDto {
+  ok: boolean
+  kind: 'outcome' | 'evidence' | 'error'
+  channel: string
 }
 
 /** GET /api/tasks/:id/approvals/:decisionId/diff 响应（前瞻性 Diff） */

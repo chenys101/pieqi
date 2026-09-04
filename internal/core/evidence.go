@@ -21,15 +21,31 @@ const (
 
 // Evidence 当前时刻的验证证据快照（派生）。
 type Evidence struct {
-	TaskID    string         `json:"task_id"`
-	Scope     string         `json:"scope"` // task | turn | outcome
-	Turn      int            `json:"turn,omitempty"`
-	Preview   *FeedbackPreview `json:"preview,omitempty"`
-	Checks    []CheckSummary `json:"checks"`
-	Errors    int            `json:"errors"` // 末轮 is_error tool_result 数
-	Changes   ChangeSummary  `json:"changes"`
-	DiffBrief []string       `json:"diff_brief"` // 每文件一行摘要
-	CreatedAt string         `json:"created_at"`
+	TaskID      string           `json:"task_id"`
+	Scope       string           `json:"scope"` // task | turn | outcome
+	Turn        int              `json:"turn,omitempty"`
+	Preview     *FeedbackPreview `json:"preview,omitempty"`
+	Checks      []CheckSummary   `json:"checks"`
+	Errors      int              `json:"errors"` // 末轮 is_error tool_result 数
+	Changes     ChangeSummary   `json:"changes"`
+	DiffBrief   []string         `json:"diff_brief"`   // 每文件一行摘要
+	Screenshots []string         `json:"screenshots"` // P2：视觉证据（截图 URL，§6）
+	Console     *ConsoleSummary  `json:"console,omitempty"`
+	Network     *NetworkSummary  `json:"network,omitempty"`
+	CreatedAt   string           `json:"created_at"`
+}
+
+// ConsoleSummary P2 Browser Console 摘要（§4：只采 error/warn）。
+type ConsoleSummary struct {
+	Errors   int            `json:"errors"`
+	Warnings int            `json:"warnings"`
+	Entries  []ConsoleEntry `json:"entries,omitempty"`
+}
+
+// NetworkSummary P2 Network Error 摘要（§5：只采 4xx/5xx/failed）。
+type NetworkSummary struct {
+	Failures int            `json:"failures"`
+	Entries  []NetworkEntry `json:"entries,omitempty"`
 }
 
 // BuildEvidence 聚合派生 Evidence。
@@ -138,6 +154,25 @@ func EvidencePrompt(instruction string, ev Evidence, failedChecks []Check) strin
 	// 末轮错误计数
 	if ev.Errors > 0 {
 		b.WriteString(fmt.Sprintf("\n- 末轮错误: %d 个工具调用失败", ev.Errors))
+	}
+
+	// P2 视觉证据（§6）：截图引用（Agent 是否看图由 provider 能力决定，这里只传引用）
+	for _, u := range ev.Screenshots {
+		b.WriteString("\n- 截图证据: " + u)
+	}
+	if ev.Console != nil && (ev.Console.Errors > 0 || ev.Console.Warnings > 0) {
+		b.WriteString(fmt.Sprintf("\n- 页面 Console: %d errors / %d warnings", ev.Console.Errors, ev.Console.Warnings))
+		for _, e := range ev.Console.Entries {
+			if e.Level == "error" {
+				b.WriteString("\n  - [error] " + firstLine(strings.TrimSpace(e.Text)))
+			}
+		}
+	}
+	if ev.Network != nil && ev.Network.Failures > 0 {
+		b.WriteString(fmt.Sprintf("\n- 页面网络失败: %d 个请求", ev.Network.Failures))
+		for _, e := range ev.Network.Entries {
+			b.WriteString(fmt.Sprintf("\n  - %s %s (status=%d)", e.Method, e.URL, e.Status))
+		}
 	}
 	return b.String()
 }

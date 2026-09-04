@@ -10,20 +10,29 @@
 //	GET  /api/tasks/:id/outcome           Task 结构化结果（P1）
 //	GET  /api/tasks/:id/evidence          验证证据快照（P1）
 //	POST /api/tasks/:id/continue          Evidence → Continue（P1）
+//	POST /api/tasks/:id/preview/screenshots  截图（P2；GET = 列表，GET :id.png = 文件）
+//	GET  /api/tasks/:id/preview/console|network  Console/网络失败窗口（P2）
+//	POST /api/tasks/:id/rewind（scope:file）  文件级回退（P2）
+//	POST /api/tasks/:id/push              Evidence Push（P2）
 
 import { request } from './client'
 import type {
   ApprovalDiffDto,
   CheckDto,
   ChecksResponseDto,
+  ConsoleSummaryDto,
   ContinueResponseDto,
   EvidenceDto,
   EvidenceScopeDto,
   FeedbackBundleDto,
   FeedbackDiffDto,
+  NetworkSummaryDto,
   PreviewAttachDto,
   PreviewStatusDto,
+  PushResponseDto,
   RewindResponseDto,
+  ScreenshotDto,
+  ScreenshotsResponseDto,
   TaskOutcomeDto,
 } from '@/types/api'
 
@@ -133,5 +142,68 @@ export async function continueWithEvidence(
   return request<ContinueResponseDto>(`/tasks/${encodeURIComponent(taskId)}/continue`, {
     method: 'POST',
     body: instruction ? { instruction } : {},
+  })
+}
+
+// ---------- Feedback P2（p2-design.md §9） ----------
+
+/** POST /api/tasks/:id/preview/screenshots：对运行中 preview 截图（preview 非 running → 409） */
+export async function captureScreenshot(taskId: string, fullPage = false): Promise<ScreenshotDto> {
+  return request<ScreenshotDto>(`/tasks/${encodeURIComponent(taskId)}/preview/screenshots`, {
+    method: 'POST',
+    body: { full_page: fullPage },
+  })
+}
+
+/** GET /api/tasks/:id/preview/screenshots：截图列表（时间倒序） */
+export async function listScreenshots(taskId: string): Promise<ScreenshotDto[]> {
+  const res = await request<ScreenshotsResponseDto>(
+    `/tasks/${encodeURIComponent(taskId)}/preview/screenshots`,
+  )
+  return res.screenshots ?? []
+}
+
+/** GET /api/tasks/:id/preview/console：console error/warn 窗口（since 增量游标可选） */
+export async function getConsoleSummary(taskId: string, since?: string): Promise<ConsoleSummaryDto> {
+  const qs = since ? `?since=${encodeURIComponent(since)}` : ''
+  return request<ConsoleSummaryDto>(`/tasks/${encodeURIComponent(taskId)}/preview/console${qs}`)
+}
+
+/** GET /api/tasks/:id/preview/network：失败请求窗口（4xx/5xx/failed） */
+export async function getNetworkSummary(taskId: string, since?: string): Promise<NetworkSummaryDto> {
+  const qs = since ? `?since=${encodeURIComponent(since)}` : ''
+  return request<NetworkSummaryDto>(`/tasks/${encodeURIComponent(taskId)}/preview/network${qs}`)
+}
+
+/**
+ * POST /api/tasks/:id/rewind（scope:file，P2 §7）：单文件回退到 Turn N 开始之前。
+ * 不影响其他文件；rewind 事件入 Timeline。
+ */
+export async function rewindFileToTurn(
+  taskId: string,
+  toTurn: number,
+  path: string,
+  verify = false,
+): Promise<RewindResponseDto> {
+  return request<RewindResponseDto>(`/tasks/${encodeURIComponent(taskId)}/rewind`, {
+    method: 'POST',
+    body: { to_turn: toTurn, scope: 'file', path, verify },
+  })
+}
+
+/**
+ * POST /api/tasks/:id/push：把 Outcome/Evidence 推送到来源渠道（手动补充入口；
+ * 终态自动推送由后端 WatchBus 完成）。
+ */
+export async function pushToChannel(
+  taskId: string,
+  kind: 'outcome' | 'evidence' = 'outcome',
+  instruction?: string,
+): Promise<PushResponseDto> {
+  const body: Record<string, unknown> = { kind }
+  if (instruction) body.instruction = instruction
+  return request<PushResponseDto>(`/tasks/${encodeURIComponent(taskId)}/push`, {
+    method: 'POST',
+    body,
   })
 }

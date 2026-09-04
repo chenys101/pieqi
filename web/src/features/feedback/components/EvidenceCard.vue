@@ -1,9 +1,9 @@
 <script setup lang="ts">
-// EvidenceCard：P1 Evidence（p1-design.md §7-8）—— 验证证据快照 + 「带证据继续」。
+// EvidenceCard：P1 Evidence（p1-design.md §7-8）+ P2 视觉证据（p2-design.md §4-6）。
 // Evidence → Continue 是 Feedback 从展示系统升级为 Agent Control System 的关键闭环：
-// 用户指令 + 当前证据（变更/checks/预览/错误）由后端组装为续问 prompt 走 Resume。
+// 用户指令 + 当前证据（变更/checks/预览/错误/截图/console/网络）由后端组装为续问 prompt 走 Resume。
 import { computed, ref, watch } from 'vue'
-import { continueWithEvidence, getEvidence } from '@/services/api/feedback'
+import { continueWithEvidence, getEvidence, pushToChannel } from '@/services/api/feedback'
 import type { CheckSummaryDto, EvidenceDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import Spinner from '@/components/ui/Spinner.vue'
@@ -22,6 +22,8 @@ const evidence = ref<EvidenceDto | null>(null)
 const loading = ref(false)
 const instruction = ref('')
 const continuing = ref(false)
+/** P2：手动推送到来源渠道的状态 */
+const pushing = ref(false)
 /** Continue 成功后回显后端组装出的 prompt（审计） */
 const appendedPrompt = ref<string | null>(null)
 
@@ -36,7 +38,22 @@ const checkIcon: Record<CheckSummaryDto['status'], string> = {
 const hasSignal = computed(() => {
   const ev = evidence.value
   if (!ev) return false
-  return ev.changes.files > 0 || ev.checks.length > 0 || ev.errors > 0
+  return (
+    ev.changes.files > 0 ||
+    ev.checks.length > 0 ||
+    ev.errors > 0 ||
+    (ev.screenshots?.length ?? 0) > 0 ||
+    (ev.console?.errors ?? 0) > 0 ||
+    (ev.console?.warnings ?? 0) > 0 ||
+    (ev.network?.failures ?? 0) > 0
+  )
+})
+
+/** 视觉信号行数（截图/console/网络），>0 时渲染视觉证据区 */
+const hasVisual = computed(() => {
+  const ev = evidence.value
+  if (!ev) return false
+  return (ev.screenshots?.length ?? 0) > 0 || (ev.console?.errors ?? 0) + (ev.console?.warnings ?? 0) > 0 || (ev.network?.failures ?? 0) > 0
 })
 
 async function refresh() {
@@ -47,6 +64,19 @@ async function refresh() {
     /* 静默：面板内已有错误提示通道 */
   } finally {
     loading.value = false
+  }
+}
+
+/** P2：手动推送 Outcome 摘要到来源渠道（终态自动推由后端 WatchBus 兜底） */
+async function onPush() {
+  pushing.value = true
+  try {
+    const res = await pushToChannel(props.taskId)
+    notify.success(`已推送到 ${res.channel}`)
+  } catch (err) {
+    notify.error(err instanceof Error ? err.message : '推送失败（可能未配置来源渠道）')
+  } finally {
+    pushing.value = false
   }
 }
 
@@ -80,7 +110,9 @@ watch(
     <div class="flex items-center gap-2 text-xs">
       <span class="font-semibold">证据</span>
       <span class="text-muted">当前时刻验证快照</span>
-      <Button variant="ghost" size="sm" class="ml-auto" title="刷新" @click="refresh">↻</Button>
+      <!-- P2：手动推送 Outcome 到来源渠道（终态时后端已自动推，此处为补发入口） -->
+      <Button variant="ghost" size="sm" class="ml-auto" :loading="pushing" title="推送结果摘要到来源渠道" @click="onPush">推送</Button>
+      <Button variant="ghost" size="sm" title="刷新" @click="refresh">↻</Button>
     </div>
 
     <div v-if="loading && !evidence" class="flex items-center gap-2 py-3 text-xs text-muted">
@@ -114,6 +146,48 @@ watch(
           <summary class="cursor-pointer select-none text-[11px]">文件清单（{{ evidence.diff_brief.length }}）</summary>
           <div v-for="(line, i) in evidence.diff_brief" :key="i" class="truncate font-mono text-[11px]">{{ line }}</div>
         </details>
+
+        <!-- P2 视觉证据（p2-design.md §6）：截图 + console + 网络失败 -->
+        <template v-if="hasVisual">
+          <!-- 截图缩略图（点击新标签查看原图，与 Continue 携带的引用一致） -->
+          <div v-if="evidence.screenshots?.length" class="flex flex-wrap gap-1.5 pt-0.5">
+            <a
+              v-for="u in evidence.screenshots"
+              :key="u"
+              :href="u"
+              target="_blank"
+              rel="noopener"
+              class="block overflow-hidden rounded border border-border hover:border-accent/60"
+              title="视觉证据（点击查看大图）"
+            >
+              <img :src="u" alt="截图证据" class="h-12 w-20 object-cover" loading="lazy" />
+            </a>
+          </div>
+          <!-- Console 摘要（errors/warnings 计数 + 可展开明细） -->
+          <details v-if="(evidence.console?.errors ?? 0) + (evidence.console?.warnings ?? 0) > 0" class="text-muted">
+            <summary class="cursor-pointer select-none">
+              Console：<span :class="evidence.console?.errors ? 'text-error' : ''">{{ evidence.console?.errors }} errors</span>
+              / {{ evidence.console?.warnings }} warnings
+            </summary>
+            <div
+              v-for="(e, i) in evidence.console?.entries ?? []"
+              :key="i"
+              class="truncate font-mono text-[11px]"
+              :class="e.level === 'error' ? 'text-error' : 'text-warning'"
+              :title="e.text"
+            >[{{ e.level }}] {{ e.text }}</div>
+          </details>
+          <!-- 网络失败摘要（4xx/5xx/failed；status=0 = 请求失败） -->
+          <details v-if="(evidence.network?.failures ?? 0) > 0" class="text-muted">
+            <summary class="cursor-pointer select-none text-error">网络失败：{{ evidence.network?.failures }} 个请求</summary>
+            <div
+              v-for="(e, i) in evidence.network?.entries ?? []"
+              :key="i"
+              class="truncate font-mono text-[11px]"
+              :title="`${e.method} ${e.url}`"
+            >{{ e.method }} {{ e.url }}（status={{ e.status }}）</div>
+          </details>
+        </template>
       </div>
     </template>
 

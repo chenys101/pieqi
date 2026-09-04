@@ -29,11 +29,18 @@ import (
 
 // previewRoute ANY /api/tasks/:id/preview/*path：preview 路由统一入口。
 // gin 的 catch-all 与同前缀静态路由冲突，无法同时注册 /preview/start 与 /preview/*path，
-// 故控制端点（start/stop/status）在 wildcard 路由内按「末段 + HTTP 方法」分发，
-// 其余路径走反向代理。
+// 故控制端点（start/stop/status）与 P2 视觉子路径（screenshots/console/network）
+// 在 wildcard 路由内按「路径 + HTTP 方法」分发，其余路径走反向代理。
 func (s *Server) previewRoute(c *gin.Context) {
 	// c.Param("path") 形如 "/start"（含前导斜杠）
-	switch strings.TrimPrefix(c.Param("path"), "/") {
+	path := strings.TrimPrefix(c.Param("path"), "/")
+
+	// P2 视觉采集（p2-design.md §3/§4/§5）：截图文件 PNG 由 Go 直出，不代理
+	if strings.HasPrefix(path, "screenshots/") && c.Request.Method == http.MethodGet {
+		s.getScreenshotPNG(c)
+		return
+	}
+	switch path {
 	case "start":
 		if c.Request.Method == http.MethodPost {
 			s.startPreview(c)
@@ -59,6 +66,29 @@ func (s *Server) previewRoute(c *gin.Context) {
 	case "status":
 		if c.Request.Method == http.MethodGet {
 			s.previewStatus(c)
+			return
+		}
+	case "screenshots":
+		// P2：POST = 截图采集；GET = 列表
+		switch c.Request.Method {
+		case http.MethodPost:
+			s.postScreenshot(c)
+		case http.MethodGet:
+			s.listScreenshots(c)
+		default:
+			c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
+		}
+		return
+	case "console":
+		// P2：console error/warn 窗口
+		if c.Request.Method == http.MethodGet {
+			s.getConsole(c)
+			return
+		}
+	case "network":
+		// P2：失败请求窗口
+		if c.Request.Method == http.MethodGet {
+			s.getNetwork(c)
 			return
 		}
 	default:
