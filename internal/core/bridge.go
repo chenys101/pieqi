@@ -86,6 +86,12 @@ func (b *Bridge) RegisterSender(name string, sender channel.MessageSender) {
 	b.senders[name] = sender
 }
 
+// Sender 按渠道名取已注册 sender（P2 PushRegistry 注册 IM provider 用）。
+func (b *Bridge) Sender(name string) (channel.MessageSender, bool) {
+	s, ok := b.senders[name]
+	return s, ok
+}
+
 // -- Message handling --
 
 func (b *Bridge) handleMessage(msg model.Message) {

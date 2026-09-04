@@ -22,6 +22,19 @@ type Server struct {
 	auth     *auth.Service       // wired by SetAuth; nil-safe for legacy tests
 	tunnel   *auth.TunnelManager // wired by SetAuth; nil-safe for legacy tests
 
+	// Feedback（p0-design.md §5）：Checkpoint/Rewind 与 Preview；
+	// wired by SetFeedback; nil-safe（未接线时端点返回降级响应）。
+	feedback *core.FeedbackStore
+	preview  *core.PreviewManager
+
+	// P1 Checks 重跑 runner（p1-design.md §5）；nil-safe（未接线时仅事件流派生）。
+	checks *core.CheckRunner
+
+	// Feedback P2（p2-design.md）：视觉采集 + 推送注册表；
+	// wired by SetVisualCapture/SetPushRegistry; nil-safe（未接线时端点降级响应）。
+	visual *core.VisualCaptureManager
+	push   *core.PushRegistry
+
 	// Lark Device Flow (扫码一键创建飞书应用)。wired by SetLarkReg;
 	// nil-safe for tests that don't exercise larkreg routes.
 	larkRegRunner    larkRegRunner
@@ -49,6 +62,29 @@ func NewServer(cfg *config.Config, store *core.TaskStore, runner *core.TaskRunne
 func (s *Server) SetAuth(svc *auth.Service, tunnel *auth.TunnelManager) {
 	s.auth = svc
 	s.tunnel = tunnel
+}
+
+// SetFeedback wires the feedback store and preview manager (Feedback P0).
+// Called by main.go after NewServer; nil-safe for tests that don't exercise
+// feedback/preview routes.
+func (s *Server) SetFeedback(fs *core.FeedbackStore, pm *core.PreviewManager) {
+	s.feedback = fs
+	s.preview = pm
+}
+
+// SetCheckRunner wires the check rerun runner (Feedback P1). nil-safe.
+func (s *Server) SetCheckRunner(cr *core.CheckRunner) {
+	s.checks = cr
+}
+
+// SetVisualCapture wires the visual capture manager (Feedback P2). nil-safe.
+func (s *Server) SetVisualCapture(vm *core.VisualCaptureManager) {
+	s.visual = vm
+}
+
+// SetPushRegistry wires the evidence push registry (Feedback P2). nil-safe.
+func (s *Server) SetPushRegistry(pr *core.PushRegistry) {
+	s.push = pr
 }
 
 // Register 在 gin router 上挂 /api/* 与 /internal/* 路由。
@@ -80,6 +116,22 @@ func (s *Server) Register(r gin.IRouter) {
 		api.POST("/tasks/:id/intervene", s.intervene)
 		api.POST("/tasks/:id/cancel", s.cancelTask)
 		api.DELETE("/tasks/:id", s.deleteTask)
+		// Feedback P0（p0-design.md §5）：总览 / Diff / Rewind / Preview
+		api.GET("/tasks/:id/feedback", s.getFeedback)
+		api.GET("/tasks/:id/feedback/diff", s.getFeedbackDiff)
+		api.POST("/tasks/:id/rewind", s.postRewind)
+		// Feedback P1（p1-design.md §11）：前瞻 Diff / Checks / Outcome / Evidence / Continue
+		api.GET("/tasks/:id/approvals/:decisionId/diff", s.getApprovalDiff)
+		api.GET("/tasks/:id/checks", s.listChecks)
+		api.POST("/tasks/:id/checks/:checkId/rerun", s.rerunCheck)
+		api.GET("/tasks/:id/outcome", s.getOutcome)
+		api.GET("/tasks/:id/evidence", s.getEvidence)
+		api.POST("/tasks/:id/continue", s.postContinue)
+		// Feedback P2（p2-design.md §9）：Evidence Push（截图/console/network 子路径
+		// 挂 preview wildcard，见 preview.go 分发）
+		api.POST("/tasks/:id/push", s.postPush)
+		// preview 控制端点与代理共用一条 wildcard 路由（见 previewRoute 分发说明）
+		api.Any("/tasks/:id/preview/*path", s.previewRoute)
 		api.GET("/skills", s.listSkills)   // Phase 6 实现，先占位
 		api.GET("/commands", s.listCommands)
 		api.GET("/ws", s.handleWS)         // Phase 5 实现

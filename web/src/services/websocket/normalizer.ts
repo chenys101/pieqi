@@ -6,7 +6,7 @@ import type {
   TaskDto,
   TaskEventDto,
 } from '@/types/api'
-import type { AgentEvent, AgentEventType, AgentDelta } from '@/types/event'
+import type { AgentEvent, AgentEventType, AgentDelta, RewindPayload } from '@/types/event'
 import type { Task } from '@/types/task'
 import { adaptTask } from '@/services/api/client'
 import { persistentEventId } from '@/utils/event'
@@ -54,6 +54,26 @@ const EVENT_TYPE_MAP: Record<TaskEventDto['type'], AgentEventType> = {
   tool_use: 'tool_call',
   tool_result: 'tool_result',
   status: 'status',
+  rewind: 'rewind',
+}
+
+/** rewind 事件的 input 载荷（后端 rewindEventPayload） */
+interface RewindInput {
+  to_turn?: number
+  restored?: string[]
+  preview_stopped?: boolean
+}
+
+/** 校验并提取 rewind input 载荷；不合法返回 undefined（降级为纯文本展示） */
+function adaptRewindInput(raw: unknown): RewindPayload | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const input = raw as RewindInput
+  if (typeof input.to_turn !== 'number') return undefined
+  return {
+    toTurn: input.to_turn,
+    restored: Array.isArray(input.restored) ? input.restored : [],
+    previewStopped: !!input.preview_stopped,
+  }
 }
 
 /**
@@ -81,6 +101,8 @@ export function normalizeEvents(taskId: string, events: TaskEventDto[] | undefin
         input: ev.input,
         result: ev.result,
         isError: ev.is_error,
+        // rewind 事件：结构化载荷（to_turn / restored / preview_stopped）
+        rewind: ev.type === 'rewind' ? adaptRewindInput(ev.input) : undefined,
       },
     }
   })

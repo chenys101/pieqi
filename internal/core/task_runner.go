@@ -48,6 +48,10 @@ type TaskRunner struct {
 	// task 进 waiting_input/完成/失败时，若有 OriginChannel 则往原渠道 push 通知。
 	notify func(task *model.Task, text string)
 
+	// feedback Checkpoint 捕获（Feedback P0，p0-design.md §3.4）；
+	// nil = 未接线（测试/旧部署），捕获钩子全部 no-op。
+	feedback *FeedbackStore
+
 	// ACP 路径（Task 4.4）：agentMgr 非空且 useACP=true 时 run 走 AgentManager 驱动；
 	// 否则保持 Phase 1 claude -p 路径。新增字段零值默认走旧路径，不破坏 Phase 1。
 	agentMgr    agentRunner // nil = Phase 1 claude -p 路径（默认）
@@ -137,6 +141,47 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 // task 进 waiting_input/完成/失败时回调被触发；notify 可为 nil（无 IM 渠道时）。
 func (tr *TaskRunner) SetNotifier(fn func(task *model.Task, text string)) {
 	tr.notify = fn
+}
+
+// SetFeedbackStore 注入 FeedbackStore（Feedback P0）。nil-safe：不调用即关闭 Checkpoint 捕获。
+func (tr *TaskRunner) SetFeedbackStore(fs *FeedbackStore) {
+	tr.feedback = fs
+}
+
+// captureBaseline Task 开始（Agent 尚未动工）时捕获 baseline 并持久化到 task.Baseline。
+// 幂等：pre/ 已存在或 task.Baseline 已填时跳过。
+func (tr *TaskRunner) captureBaseline(taskID string) {
+	if tr.feedback == nil {
+		return
+	}
+	t, ok := tr.store.Get(taskID)
+	if !ok || t == nil || t.WorktreePath == "" || t.Baseline != nil {
+		return
+	}
+	b := tr.feedback.CaptureBaseline(t)
+	if b == nil {
+		return // 已捕获或捕获失败
+	}
+	_, _ = tr.store.Update(taskID, func(x *model.Task) bool {
+		if x.Baseline == nil {
+			x.Baseline = b
+			return true
+		}
+		return false
+	})
+}
+
+// captureTurnEnd 在 Turn 结束边界（Task 终态 / 下一 EventUser 到达前）捕获 Turn 快照。
+// 幂等：turnN/ 已存在时 CaptureTurnEnd 内部跳过；纯对话 Turn 不留快照。
+func (tr *TaskRunner) captureTurnEnd(taskID string) {
+	if tr.feedback == nil {
+		return
+	}
+	t, ok := tr.store.Get(taskID)
+	if !ok || t == nil {
+		return
+	}
+	tr.feedback.CaptureTurnEnd(t, CurrentTurnCount(t.Events))
 }
 
 // SetAgentManager 注入 AgentManager 并启用 ACP 路径（Task 4.4）。
@@ -234,6 +279,8 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 		if tr.agentMgr.Adapter(taskID) == nil && t.ACPSessionID == "" && t.ClaudeSessionID == "" {
 			return fmt.Errorf("task missing session, cannot resume")
 		}
+		// Turn 边界：下一 EventUser 到达 = 上一 Turn 结束，先捕获快照（幂等）
+		tr.captureTurnEnd(taskID)
 		tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text})
 		go tr.runACP(context.Background(), t, text)
 		return nil
@@ -250,6 +297,8 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 	if alive {
 		return fmt.Errorf("task still has a live process, use intervene instead")
 	}
+	// Turn 边界：下一 EventUser 到达 = 上一 Turn 结束，先捕获快照（幂等）
+	tr.captureTurnEnd(taskID)
 	// 追加一条 user 事件，标记续问起点（前端渲染为右对齐气泡，与首次 prompt 一致）
 	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text})
 	go tr.run(context.Background(), t, text)
@@ -361,6 +410,9 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 		}
 		task = updated
 	}
+
+	// Feedback P0：Agent 动工前捕获 baseline（幂等；失败不影响主流程）
+	tr.captureBaseline(task.ID)
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
@@ -499,6 +551,9 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		}
 		task = updated
 	}
+
+	// Feedback P0：Agent 动工前捕获 baseline（幂等；失败不影响主流程）
+	tr.captureBaseline(task.ID)
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
@@ -1244,6 +1299,12 @@ func (tr *TaskRunner) transition(taskID string, target model.TaskStatus, mutator
 	})
 	if err != nil {
 		return nil
+	}
+	// Feedback P0：Task 进入终态 = 最后一个 Turn 的结束边界，捕获快照（幂等）。
+	// 此时 Agent 进程已退出（completeTask/failTask 均在流解析/Run 返回之后调用），
+	// 读盘无竞态。
+	if target == model.TaskCompleted || target == model.TaskFailed || target == model.TaskCancelled {
+		tr.captureTurnEnd(taskID)
 	}
 	evType := "task_updated"
 	if target == model.TaskCompleted {

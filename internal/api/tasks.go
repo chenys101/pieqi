@@ -220,6 +220,14 @@ func (s *Server) deleteTask(c *gin.Context) {
 	_ = s.runner.Cancel(id)
 	// 保活的 ACP 会话跨轮存活：删除任务时显式关闭，避免会话/子进程残留为孤儿
 	s.runner.CloseAgentSession(id)
+	// Feedback P0：任务删除时一并清掉 checkpoint 快照（preview 由 WatchBus 收）
+	if s.feedback != nil {
+		s.feedback.Cleanup(id)
+	}
+	// P1：清掉 checks 重跑记录
+	if s.checks != nil {
+		s.checks.Cleanup(id)
+	}
 	if err := s.store.Delete(id); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return

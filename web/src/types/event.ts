@@ -12,8 +12,16 @@ export type AgentEventType =
   | 'tool_call' // 工具调用卡片
   | 'tool_result' // 工具结果
   | 'status' // 状态变更
+  | 'rewind' // 用户回退代码（Feedback P0）
   | 'completed' // 会话完成
   | 'error' // 错误
+
+/** rewind 事件的结构化载荷（后端 input 字段归一化产物） */
+export interface RewindPayload {
+  toTurn: number
+  restored: string[]
+  previewStopped: boolean
+}
 
 export interface AgentEventPayload {
   text?: string
@@ -22,6 +30,8 @@ export interface AgentEventPayload {
   input?: unknown
   result?: string
   isError?: boolean
+  /** 仅 rewind 事件填充 */
+  rewind?: RewindPayload
 }
 
 export interface AgentEvent {

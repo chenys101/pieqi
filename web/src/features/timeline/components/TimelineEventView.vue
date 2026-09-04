@@ -7,6 +7,7 @@ import TextBubble from './TextBubble.vue'
 import ThinkingBlock from './ThinkingBlock.vue'
 import ToolCard from './ToolCard.vue'
 import ToolResultCard from './ToolResultCard.vue'
+import RewindCard from '@/features/feedback/components/RewindCard.vue'
 
 defineProps<{ event: AgentEvent }>()
 </script>
@@ -32,6 +33,8 @@ defineProps<{ event: AgentEvent }>()
   <div v-else-if="event.type === 'status'" class="event-enter px-1 text-xs text-muted">
     {{ event.payload.text }}
   </div>
+  <!-- 用户回退代码（Feedback P0）：黄色卡片，时间线留痕 -->
+  <RewindCard v-else-if="event.type === 'rewind'" :event="event" />
   <div
     v-else-if="event.type === 'error'"
     class="event-enter rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-sm text-error"

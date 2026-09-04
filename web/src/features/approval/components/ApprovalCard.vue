@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // 审批卡片（方案 §20）：集中审批（手机免进会话直接操作）
+// P1：可展开「前瞻性 Diff」——批准前看到将发生什么（p1-design.md §4）。
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Button from '@/components/ui/Button.vue'
+import { ApprovalDiffCard } from '@/features/feedback'
 import { useApprovalStore } from '@/stores/approval'
 import { useTaskStore } from '@/stores/task'
 import type { ApprovalRequest } from '@/types/approval'
@@ -15,6 +17,8 @@ const router = useRouter()
 
 const loading = ref<'approve' | 'deny' | null>(null)
 const task = computed(() => taskStore.byId(props.approval.taskId))
+/** 前瞻性 Diff 展开/收起（不展开不请求） */
+const showDiff = ref(false)
 
 async function act(kind: 'approve' | 'deny') {
   loading.value = kind
@@ -40,12 +44,19 @@ async function act(kind: 'approve' | 'deny') {
     <div class="mt-2 break-all rounded border border-border/60 bg-background px-2.5 py-2 font-mono text-xs">
       {{ approval.tool ? `${approval.tool}: ` : '' }}{{ approval.summary }}
     </div>
+
+    <!-- P1：展开前瞻性 Diff（决策前看将发生什么） -->
+    <ApprovalDiffCard v-if="showDiff" :task-id="approval.taskId" :decision-id="approval.id" />
+
     <div class="mt-3 flex gap-2">
       <Button variant="primary" size="sm" :loading="loading === 'approve'" :disabled="!!loading" @click="act('approve')">
         允许一次
       </Button>
       <Button variant="danger" size="sm" :loading="loading === 'deny'" :disabled="!!loading" @click="act('deny')">
         拒绝
+      </Button>
+      <Button variant="ghost" size="sm" :disabled="!!loading" @click="showDiff = !showDiff">
+        {{ showDiff ? '收起 Diff' : '查看 Diff' }}
       </Button>
       <Button
         variant="ghost"
