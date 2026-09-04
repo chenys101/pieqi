@@ -23,10 +23,10 @@ import (
 // feedback 总览 / outcome / evidence 共用（事实源 TaskEvent，每次现场派生）。
 func (s *Server) deriveChangesBackfilled(task *model.Task) []core.FileChange {
 	if s.feedback == nil {
-		return core.DeriveFileChanges(task.Events, nil)
+		return core.DeriveFileChanges(task.Events, task.WorktreePath, nil)
 	}
 	seen := func(path string) bool { return s.feedback.SeenBeforeTask(task, path) }
-	changes := core.DeriveFileChanges(task.Events, seen)
+	changes := core.DeriveFileChanges(task.Events, task.WorktreePath, seen)
 	for i := range changes {
 		fc := &changes[i]
 		before, bOK := s.feedback.AssembleBefore(task, fc.Turn, fc.Path)

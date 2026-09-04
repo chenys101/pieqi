@@ -32,6 +32,7 @@ data/*.err
 pieqi.err
 pieqi.out
 pieqi-run.log
+pieqi.log
 
 # 运行时数据(tasks/worktrees/sessions/mappings 由后端生成)
 data/tasks/

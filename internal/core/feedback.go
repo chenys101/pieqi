@@ -10,6 +10,7 @@ package core
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -139,9 +140,11 @@ func CurrentTurnCount(events []model.TaskEvent) int {
 }
 
 // DeriveFileChanges 从事件流纯函数派生 FileChange 列表（跨全部 Turn）。
+// worktree 用于把事件里的绝对路径规范成 repo 相对路径（快照/git/ReadWorktreeFile
+// 全部按相对路径工作，见 relativizeChanges）；传空串则原样保留。
 // seenBefore 用于 Write 的 create/modify 判定：路径既不在其中且之前未出现过 → 视为 create。
 // 传入 nil 表示无法判定（全部按 modify 处理，P0 可接受的降级）。
-func DeriveFileChanges(events []model.TaskEvent, seenBefore func(path string) bool) []FileChange {
+func DeriveFileChanges(events []model.TaskEvent, worktree string, seenBefore func(path string) bool) []FileChange {
 	type agg struct {
 		fc        FileChange
 		firstSeen int // 首次出现下标（同 Turn 内合并时保留最早）
@@ -218,7 +221,26 @@ func DeriveFileChanges(events []model.TaskEvent, seenBefore func(path string) bo
 			out = append(out, fc)
 		}
 	}
-	return out
+	return relativizeChanges(worktree, out)
+}
+
+// relativizeChanges 把 FileChange.Path 里以 worktree 为前缀的绝对路径裁剪成 repo 相对路径。
+// 事件里的 file_path 常为绝对路径（Windows 盘符 / 绝对目录）；而快照落盘、git cat-file/diff、
+// ReadWorktreeFile 全部按 repo 相对路径工作。不规范化时绝对路径拼到快照根/工作区下会成为
+// 非法路径 → AssembleBefore/TurnContent 都取空 → diff 恒 0、快照落盘错位。已在相对路径下的
+// 原样保留（前缀不匹配）。大小写不敏感（Windows 盘符 G: vs g:）。
+func relativizeChanges(worktree string, changes []FileChange) []FileChange {
+	if worktree == "" {
+		return changes
+	}
+	base := strings.TrimRight(normalizeRepoPath(filepath.Clean(worktree)), "/") + "/"
+	for i := range changes {
+		p := normalizeRepoPath(changes[i].Path)
+		if len(p) >= len(base) && strings.EqualFold(p[:len(base)], base) {
+			changes[i].Path = p[len(base):]
+		}
+	}
+	return changes
 }
 
 // classifyWrite Write 工具的 create/modify 判定（p0-design.md §4.1）：

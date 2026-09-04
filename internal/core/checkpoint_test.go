@@ -234,3 +234,49 @@ func TestSafeJoin_BlocksTraversal(t *testing.T) {
 		t.Errorf("normal join broken: %s", got)
 	}
 }
+
+// TestCaptureBaseline_NonGitWorktree 非 git 项目的基线兜底：git status 失败时
+// 全量快照文件树（跳过 node_modules/dist），保证 before 状态可知、diff 不被夸大成整文件。
+func TestCaptureBaseline_NonGitWorktree(t *testing.T) {
+	wt := t.TempDir() // 普通目录，非 git 仓库
+	for _, dir := range []string{"src", "node_modules", "dist"} {
+		if err := os.MkdirAll(filepath.Join(wt, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = os.WriteFile(filepath.Join(wt, "src", "App.vue"), []byte("v1 line\nv2 line\n"), 0644)
+	_ = os.WriteFile(filepath.Join(wt, "node_modules", "junk.js"), []byte("noise\n"), 0644)
+	_ = os.WriteFile(filepath.Join(wt, "dist", "bundle.js"), []byte("noise\n"), 0644)
+
+	fs := NewFeedbackStore(nil, filepath.Join(t.TempDir(), "checkpoints"))
+	events := []model.TaskEvent{
+		{Type: model.EventUser, Text: "turn1", Seq: 1},
+		toolUseEvent("Edit", "t1", "src/App.vue"),
+		{Type: model.EventToolResult, ToolUseID: "t1", ToolName: "Edit"},
+	}
+	task := fsTask(t, wt, "task-ng", events, nil)
+
+	baseline := fs.CaptureBaseline(task)
+	if baseline == nil {
+		t.Fatal("baseline not captured")
+	}
+	if baseline.HeadSHA != "" {
+		t.Errorf("non-git head should be empty, got %q", baseline.HeadSHA)
+	}
+	// 全量快照覆盖 src/App.vue，且跳过噪音目录
+	if len(baseline.DirtyPaths) != 1 || baseline.DirtyPaths[0] != "src/App.vue" {
+		t.Errorf("dirty paths = %v, want [src/App.vue]", baseline.DirtyPaths)
+	}
+
+	// Turn 1 修改文件后，before 状态应从 pre/ 取到 v1 → 差分可得真实改动
+	_ = os.WriteFile(filepath.Join(wt, "src", "App.vue"), []byte("v1 line\nCHANGED\n"), 0644)
+	fs.CaptureTurnEnd(task, 1)
+	before, ok := fs.AssembleBefore(task, 1, "src/App.vue")
+	if !ok || string(before) != "v1 line\nv2 line\n" {
+		t.Errorf("AssembleBefore = (%q,%v), want v1 state", before, ok)
+	}
+	_, add, del := UnifiedDiff("src/App.vue", string(before), "v1 line\nCHANGED\n", 3)
+	if add != 1 || del != 1 {
+		t.Errorf("diff = +%d/-%d, want +1/-1", add, del)
+	}
+}

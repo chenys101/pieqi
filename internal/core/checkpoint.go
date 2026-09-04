@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,6 +79,11 @@ func (fs *FeedbackStore) CaptureBaseline(task *model.Task) *model.TaskBaseline {
 
 	head := GitHeadSHA(task.WorktreePath)
 	dirty := GitStatusPorcelain(task.WorktreePath)
+	// 非 git 项目（git status 失败 → nil）：回退为全量快照文件树。
+	// 否则 pre/ 空、HEAD 空 → before 状态不可知 → diff 退化成「整文件当新增」（数据失真）。
+	if dirty == nil {
+		dirty = walkWorktreeFiles(task.WorktreePath)
+	}
 
 	if err := os.MkdirAll(preDir, 0755); err != nil {
 		fs.logger.Warn("feedback: mkdir pre", zap.String("task", task.ID), zap.Error(err))
@@ -90,6 +96,38 @@ func (fs *FeedbackStore) CaptureBaseline(task *model.Task) *model.TaskBaseline {
 		}
 	}
 	return &model.TaskBaseline{HeadSHA: head, CapturedAt: time.Now(), DirtyPaths: dirty}
+}
+
+// baselineNoiseDirs 全量基线快照时跳过的目录（非 git 项目兜底：不把依赖/产物拷进 pre/）。
+var baselineNoiseDirs = map[string]bool{
+	".git": true, "node_modules": true, "dist": true, "build": true,
+	"coverage": true, ".next": true, ".nuxt": true, ".cache": true,
+	"__pycache__": true, ".venv": true, "venv": true, "target": true,
+}
+
+// walkWorktreeFiles 递归列出 worktree 下全部文件（repo 相对路径、/ 分隔、字母序），
+// 跳过噪音目录。非 git 项目的 pre/ 基线快照用它枚举「Task 起始全量文件」。
+func walkWorktreeFiles(root string) []string {
+	var files []string
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() != "." && baselineNoiseDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	sort.Strings(files)
+	return files
 }
 
 // --- Turn 快照捕获 ---
@@ -105,7 +143,7 @@ func (fs *FeedbackStore) CaptureTurnEnd(task *model.Task, turn int) {
 		return // 已捕获
 	}
 
-	changes := DeriveFileChanges(task.Events, nil)
+	changes := DeriveFileChanges(task.Events, task.WorktreePath, nil)
 	var touched, deleted []string
 	for _, fc := range changes {
 		if fc.Turn != turn {
@@ -214,7 +252,7 @@ func (fs *FeedbackStore) RewindToTurn(task *model.Task, toTurn int) (*RewindResu
 	if task == nil || task.WorktreePath == "" {
 		return nil, errInvalidTask
 	}
-	changes := DeriveFileChanges(task.Events, nil)
+	changes := DeriveFileChanges(task.Events, task.WorktreePath, nil)
 
 	// 收集 Turn >= toTurn 的触碰路径（有序，保证结果稳定）
 	pathSet := map[string]bool{}
@@ -275,7 +313,7 @@ func (fs *FeedbackStore) RewindFileToTurn(task *model.Task, toTurn int, path str
 	}
 
 	// 合法性：该文件必须在目标 Turn 及之后被 Agent 触碰过（否则无「Agent 改动」可回退）
-	changes := DeriveFileChanges(task.Events, nil)
+	changes := DeriveFileChanges(task.Events, task.WorktreePath, nil)
 	touched := false
 	for _, fc := range changes {
 		if fc.Path == path && fc.Turn >= toTurn {

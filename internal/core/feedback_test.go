@@ -26,7 +26,7 @@ func TestDeriveFileChanges_TurnSplitAndMerge(t *testing.T) {
 		{Type: model.EventToolResult, ToolUseID: "t4", ToolName: "Edit"},
 	}
 
-	changes := DeriveFileChanges(events, nil)
+	changes := DeriveFileChanges(events, "", nil)
 
 	if len(changes) != 3 {
 		t.Fatalf("want 3 changes, got %d: %+v", len(changes), changes)
@@ -53,7 +53,7 @@ func TestDeriveFileChanges_CreateVsModify(t *testing.T) {
 		toolUseEvent("Edit", "t3", "src/b.ts"),
 	}
 	// seenBefore：a.ts 不存在（create），b.ts 存在（modify）
-	changes := DeriveFileChanges(events, func(p string) bool { return p == "src/b.ts" })
+	changes := DeriveFileChanges(events, "", func(p string) bool { return p == "src/b.ts" })
 	byPath := map[string]FileChange{}
 	for _, c := range changes {
 		byPath[c.Path] = c
@@ -72,8 +72,33 @@ func TestDeriveFileChanges_SkipsBashAndUnknownPaths(t *testing.T) {
 		{Type: model.EventToolUse, ToolName: "Bash", ToolUseID: "b1"},
 		toolUseEvent("Edit", "", ""), // 无路径
 	}
-	if changes := DeriveFileChanges(events, nil); len(changes) != 0 {
+	if changes := DeriveFileChanges(events, "", nil); len(changes) != 0 {
 		t.Fatalf("bash/no-path should not derive, got %+v", changes)
+	}
+}
+
+func TestDeriveFileChanges_RelativizesAbsolutePaths(t *testing.T) {
+	events := []model.TaskEvent{
+		{Type: model.EventUser, Text: "改", Seq: 1},
+		toolUseEvent("Edit", "t1", `G:\repo\src\App.vue`),
+		{Type: model.EventToolResult, ToolUseID: "t1", ToolName: "Edit"},
+		toolUseEvent("Write", "t2", `G:\repo\new.ts`),
+		{Type: model.EventToolResult, ToolUseID: "t2", ToolName: "Write"},
+		toolUseEvent("Edit", "t3", "src/rel.vue"), // 已相对 → 原样保留
+	}
+	changes := DeriveFileChanges(events, `G:\repo`, nil)
+	byPath := map[string]FileChange{}
+	for _, c := range changes {
+		byPath[c.Path] = c
+	}
+	if _, ok := byPath["src/App.vue"]; !ok {
+		t.Errorf("G:\\repo\\src\\App.vue 应裁剪为 src/App.vue, got %+v", changes)
+	}
+	if _, ok := byPath["new.ts"]; !ok {
+		t.Errorf("G:\\repo\\new.ts 应裁剪为 new.ts, got %+v", changes)
+	}
+	if _, ok := byPath["src/rel.vue"]; !ok {
+		t.Errorf("相对路径 src/rel.vue 应保留, got %+v", changes)
 	}
 }
 
@@ -84,7 +109,7 @@ func TestBuildTurnInfos(t *testing.T) {
 		{Type: model.EventUser, Text: "第二轮", Seq: 3},
 		toolUseEvent("Write", "t2", "b.ts"),
 	}
-	changes := DeriveFileChanges(events, nil)
+	changes := DeriveFileChanges(events, "", nil)
 	infos := BuildTurnInfos(events, changes)
 	if len(infos) != 2 {
 		t.Fatalf("want 2 turns, got %d", len(infos))
