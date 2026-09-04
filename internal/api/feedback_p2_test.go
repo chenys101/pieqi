@@ -93,14 +93,19 @@ func seedP2Task(t *testing.T, store *core.TaskStore, fs *core.FeedbackStore) *mo
 	_ = os.WriteFile(filepath.Join(wt, "a.txt"), []byte("v1\n"), 0644)
 	fs.CaptureTurnEnd(setEvents(turn1), 1)
 
-	// Turn2：改 a.txt = v2 → 快照
+	// Turn2：改 a.txt = v2，同时新建 b.txt = b2 → 快照
+	// b.txt 用于验证文件级回退「不影响其他文件」（p2-design.md §10-5）
 	turn2 := append(turn1,
 		model.TaskEvent{Seq: 4, Type: model.EventUser, Text: "turn2"},
 		model.TaskEvent{Seq: 5, Type: model.EventToolUse, ToolName: "Edit", ToolUseID: "e1",
 			Input: json.RawMessage(`{"file_path":"a.txt","new_string":"v2"}`)},
 		model.TaskEvent{Seq: 6, Type: model.EventToolResult, ToolUseID: "e1", Result: "ok"},
+		model.TaskEvent{Seq: 7, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "w2",
+			Input: json.RawMessage(`{"file_path":"b.txt","content":"b2\n"}`)},
+		model.TaskEvent{Seq: 8, Type: model.EventToolResult, ToolUseID: "w2", Result: "ok"},
 	)
 	_ = os.WriteFile(filepath.Join(wt, "a.txt"), []byte("v2\n"), 0644)
+	_ = os.WriteFile(filepath.Join(wt, "b.txt"), []byte("b2\n"), 0644)
 	fs.CaptureTurnEnd(setEvents(turn2), 2)
 
 	final, _ := store.Get(task.ID)
@@ -254,6 +259,10 @@ func TestAPI_P2_RewindFileScope(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(task.WorktreePath, "a.txt")); string(b) != "v1\n" {
 		t.Fatalf("a.txt should be v1, got %q", b)
+	}
+	// 不影响其他文件：b.txt 保持 Turn2 态（b2），不随 a.txt 回退
+	if b, _ := os.ReadFile(filepath.Join(task.WorktreePath, "b.txt")); string(b) != "b2\n" {
+		t.Fatalf("b.txt should stay b2 (untouched), got %q", b)
 	}
 
 	// rewind 事件入 Timeline
