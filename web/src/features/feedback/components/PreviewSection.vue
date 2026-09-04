@@ -1,9 +1,10 @@
 <script setup lang="ts">
-// PreviewSection：Preview 运行态控制（p0-design.md §7.3）。
+// PreviewSection：Preview 运行态控制（p0-design.md §7.3 + p1-design.md §10）。
 // start → 异步启动（starting → running，轮询感知）；stop → 停止；
+// restart → 停止后重启（P1：Rewind→Verify 后 / 非 HMR 框架改动后手动刷新）；
 // running 时提供子路径代理入口（新标签打开，鉴权经 cookie/header 同源）。
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { getPreviewStatus, startPreview, stopPreview } from '@/services/api/feedback'
+import { getPreviewStatus, restartPreview, startPreview, stopPreview } from '@/services/api/feedback'
 import type { PreviewStatusDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import Spinner from '@/components/ui/Spinner.vue'
@@ -85,6 +86,21 @@ async function onStop() {
   }
 }
 
+/** P1：停止后重启（stop + start；Rewind→Verify / 非 HMR 改动手动刷新） */
+async function onRestart() {
+  busy.value = true
+  try {
+    await restartPreview(props.taskId)
+    await refresh()
+    pollWhileStarting()
+  } catch (err) {
+    notify.error(err instanceof Error ? err.message : '重启失败')
+    await refresh()
+  } finally {
+    busy.value = false
+  }
+}
+
 // 打开时拉一次状态；taskId 变化时重新拉取
 watch(
   () => props.taskId,
@@ -112,6 +128,15 @@ onUnmounted(stopPoll)
         <a v-if="isRunning" :href="previewURL" target="_blank" rel="noopener"
            class="rounded-md border border-accent/40 px-2.5 py-1 text-xs text-accent hover:bg-accent/10"
         >打开</a>
+        <!-- P1：重启（停止后重启，代码改动非 HMR 时手动刷新） -->
+        <Button
+          v-if="!isStarting"
+          variant="ghost"
+          size="sm"
+          :loading="busy"
+          :title="'停止后重启（改动非热更新时刷新预览）'"
+          @click="onRestart"
+        >重启</Button>
         <Button v-if="!isRunning && !isStarting" variant="secondary" size="sm" :loading="busy" @click="onStart">启动</Button>
         <Button v-else variant="ghost" size="sm" :loading="busy" @click="onStop">停止</Button>
       </span>

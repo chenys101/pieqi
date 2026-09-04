@@ -224,6 +224,10 @@ func (s *Server) deleteTask(c *gin.Context) {
 	if s.feedback != nil {
 		s.feedback.Cleanup(id)
 	}
+	// P1：清掉 checks 重跑记录
+	if s.checks != nil {
+		s.checks.Cleanup(id)
+	}
 	if err := s.store.Delete(id); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return

@@ -32,7 +32,8 @@ type rewindEventPayload struct {
 
 type rewindReq struct {
 	ToTurn int    `json:"to_turn"`
-	Scope  string `json:"scope"` // P0 仅支持 "code"
+	Scope  string `json:"scope"`  // P0 仅支持 "code"
+	Verify bool   `json:"verify"` // P1：Rewind → Verify（§9）：重跑目标 Turn checks + 需要时重启 preview
 }
 
 // getFeedback GET /api/tasks/:id/feedback：总览（turns/changes/summary/cumulative/checkpoints/preview）。
@@ -46,21 +47,7 @@ func (s *Server) getFeedback(c *gin.Context) {
 		return
 	}
 
-	seen := func(path string) bool { return s.feedback.SeenBeforeTask(task, path) }
-	changes := core.DeriveFileChanges(task.Events, seen)
-
-	// 回填每个 Turn 的 +/- 行数（before=组装，after=turn 快照或当前文件）
-	for i := range changes {
-		fc := &changes[i]
-		before, bOK := s.feedback.AssembleBefore(task, fc.Turn, fc.Path)
-		after, aOK := s.feedback.TurnContent(task, fc.Turn, fc.Path)
-		if core.IsBinaryContent(before) || core.IsBinaryContent(after) {
-			continue // 二进制不计行数
-		}
-		_, add, del := core.UnifiedDiff(fc.Path, stringOrEmpty(bOK, before), stringOrEmpty(aOK, after), 3)
-		fc.Additions, fc.Deletions = add, del
-	}
-
+	changes := s.deriveChangesBackfilled(task)
 	turns := core.BuildTurnInfos(task.Events, changes)
 
 	// 累计统计：Agent-touched 路径集的 baseline diff（用户 dirty 隔离原则 §4.3）
@@ -284,6 +271,13 @@ func (s *Server) postRewind(c *gin.Context) {
 		previewStopped = true
 	}
 
+	// P1 Rewind → Verify（§9）：重跑目标 Turn 的 checks（异步）+ 停了的 preview 重启
+	var verification *verifyPayload
+	if req.Verify {
+		vp := s.verifyAfterRewind(task, req.ToTurn, len(res.Restored), previewStopped)
+		verification = &vp
+	}
+
 	// 追加 rewind TaskEvent（持久化 + task_updated 全量推送；Timeline 永不删除）
 	payload, _ := json.Marshal(rewindEventPayload{
 		ToTurn: req.ToTurn, Restored: res.Restored, PreviewStopped: previewStopped,
@@ -293,13 +287,17 @@ func (s *Server) postRewind(c *gin.Context) {
 		Type: model.EventRewind, Input: payload, Text: summary,
 	})
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"ok":               true,
 		"rewind_event_seq": rewindEventSeq(updated),
 		"to_turn":          req.ToTurn,
 		"restored":         res.Restored,
 		"preview_stopped":  previewStopped,
-	})
+	}
+	if verification != nil {
+		resp["verification"] = verification
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // rewindSummary rewind 事件的人读摘要。

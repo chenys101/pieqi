@@ -44,6 +44,12 @@ func (s *Server) previewRoute(c *gin.Context) {
 			s.stopPreview(c)
 			return
 		}
+	case "restart":
+		// P1 Preview Refresh（p1-design.md §10）：stop + start
+		if c.Request.Method == http.MethodPost {
+			s.restartPreview(c)
+			return
+		}
 	case "status":
 		if c.Request.Method == http.MethodGet {
 			s.previewStatus(c)
@@ -55,6 +61,23 @@ func (s *Server) previewRoute(c *gin.Context) {
 	}
 	// 控制端点存在但方法不匹配 → 405（避免误把控制路径代理给 dev server）
 	c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
+}
+
+// restartPreview POST /api/tasks/:id/preview/restart：停止后重启（Rewind→Verify / 非 HMR 改动后）。
+func (s *Server) restartPreview(c *gin.Context) {
+	if s.preview == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "preview not enabled"})
+		return
+	}
+	task, ok := s.requireTask(c)
+	if !ok {
+		return
+	}
+	if err := s.preview.Restart(task); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "state": core.PreviewStarting})
 }
 
 // startPreview POST /api/tasks/:id/preview/start。

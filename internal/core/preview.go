@@ -225,6 +225,13 @@ func (pm *PreviewManager) spawn(taskID, projectPath string, profile PreviewProfi
 	pm.markState(taskID, PreviewError, "preview port not ready within 90s")
 }
 
+// Restart 停止后重启 preview（p1-design.md §10 Preview Refresh：
+// Rewind→Verify 后 / 非 HMR 框架改动后手动刷新）。Stop 内部等待终态后再 Start。
+func (pm *PreviewManager) Restart(task *model.Task) error {
+	pm.Stop(task.ID)
+	return pm.Start(task)
+}
+
 // Stop 停止 task 的 preview（SIGTERM→KILL，幂等）。
 // 收尸与状态更新由 spawn 的 watcher goroutine（唯一 cmd.Wait）完成，这里只发信号等状态。
 func (pm *PreviewManager) Stop(taskID string) {

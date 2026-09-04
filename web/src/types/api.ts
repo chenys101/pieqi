@@ -251,6 +251,8 @@ export interface FeedbackDiffDto {
 export interface RewindRequestDto {
   to_turn: number
   scope?: 'code'
+  /** P1：回退后自动重跑 checks + 重启 preview（Rewind → Verify） */
+  verify?: boolean
 }
 
 /** POST /api/tasks/:id/rewind 响应 */
@@ -260,6 +262,8 @@ export interface RewindResponseDto {
   to_turn: number
   restored: string[]
   preview_stopped: boolean
+  /** P1：verify=true 时的验证摘要 */
+  verification?: RewindVerificationDto
 }
 
 /** GET /api/tasks/:id/preview/status 响应 */
@@ -268,4 +272,111 @@ export interface PreviewStatusDto {
   framework?: string
   port?: number
   error?: string
+}
+
+// ---------- Feedback P1（p1-design.md §11，wire 与 Go JSON tag 一致） ----------
+
+/** Check 状态机（后端 core.Check.Status） */
+export type CheckStatusDto = 'pending' | 'running' | 'success' | 'failed' | 'skipped'
+
+/** 一次可验证性检查（test/lint/build；agent 事件流复用或用户重跑） */
+export interface CheckDto {
+  id: string
+  task_id: string
+  /** Agent 自跑时归属的 Turn；重跑记录为 0 */
+  turn?: number
+  /** 人读命令名（如 "npm test"） */
+  name: string
+  /** 完整 shell 命令（sh -c 执行） */
+  command: string
+  /** agent = 事件流复用；rerun = 用户重跑 */
+  origin: 'agent' | 'rerun'
+  status: CheckStatusDto
+  duration_ms?: number
+  exit_code?: number
+  /** 截断输出（保留尾部错误段） */
+  output?: string
+  started_at: string
+  finished_at?: string
+}
+
+/** GET /api/tasks/:id/checks 响应 */
+export interface ChecksResponseDto {
+  checks: CheckDto[]
+}
+
+/** Outcome / Evidence 内嵌的 check 摘要 */
+export interface CheckSummaryDto {
+  id: string
+  name: string
+  status: CheckStatusDto
+  exit_code?: number
+}
+
+/** Task 完成度（规则派生：completed | partial | failed） */
+export type OutcomeStatusDto = 'completed' | 'partial' | 'failed'
+
+/** 本 Task 发生过的回退（审计） */
+export interface RewindInfoDto {
+  to_turn: number
+  restored: string[]
+  at: string
+}
+
+/** GET /api/tasks/:id/outcome 响应（手机端主验收面） */
+export interface TaskOutcomeDto {
+  task_id: string
+  status: OutcomeStatusDto
+  changes: ChangeSummaryDto
+  preview?: FeedbackPreviewDto
+  checks: CheckSummaryDto[]
+  /** failed checks + task.error + 末轮 is_error */
+  issues: string[]
+  rewinds: RewindInfoDto[]
+  generated_at: string
+}
+
+/** Evidence 挂载层级 */
+export type EvidenceScopeDto = 'task' | 'turn' | 'outcome'
+
+/** GET /api/tasks/:id/evidence 响应（验证证据快照，随取随派生） */
+export interface EvidenceDto {
+  task_id: string
+  scope: EvidenceScopeDto
+  turn?: number
+  preview?: FeedbackPreviewDto
+  checks: CheckSummaryDto[]
+  /** 末轮 is_error tool_result 数 */
+  errors: number
+  changes: ChangeSummaryDto
+  /** 每文件一行摘要（如 "modify src/a.vue (+10 -2)"） */
+  diff_brief: string[]
+  created_at: string
+}
+
+/** GET /api/tasks/:id/approvals/:decisionId/diff 响应（前瞻性 Diff） */
+export interface ApprovalDiffDto {
+  path: string
+  operation: FileOperationDto
+  diff: string
+  additions: number
+  deletions: number
+  truncated: boolean
+  binary: boolean
+  prospective: true
+}
+
+/** POST /api/tasks/:id/continue 响应（Evidence → Continue） */
+export interface ContinueResponseDto {
+  ok: boolean
+  /** 后端组装出的续问 prompt（审计/回显） */
+  appended_prompt: string
+  event_seq: number
+}
+
+/** Rewind → Verify 验证摘要 */
+export interface RewindVerificationDto {
+  restored_files: number
+  checks: CheckDto[]
+  preview: { state: PreviewStateDto; url?: string }
 }

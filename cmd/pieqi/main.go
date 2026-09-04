@@ -123,6 +123,9 @@ func main() {
 	// Task 终态/删除时自动回收 preview 进程
 	previewMgr.WatchBus(bus)
 
+	// Feedback P1（p1-design.md）：Checks 重跑 runner（事件流复用派生无需状态）。
+	checkRunner := core.NewCheckRunner(logger, filepath.Join(dataRoot, "checks"))
+
 	// ACP 路径（Phase 2）→ 已由多 Agent 默认驱动取代（#2）：
 	//   agents.claude.transport=sdk-bridge（默认）→ 任务经 agent.Open("claude") 驱动
 	//     （桥为主力，桥不可用自动回退 print）；transport=print 且 qoder 已配置 → "qoder"。
@@ -260,6 +263,7 @@ func main() {
 		apiServer := api.NewServer(cfg, store, runner, hooks, bus, skills, commands)
 		apiServer.SetAuth(authSvc, tunnelMgr)
 		apiServer.SetFeedback(feedbackStore, previewMgr)
+		apiServer.SetCheckRunner(checkRunner)
 		apiServer.SetLarkReg(larkreg.NewRegistration(), cfg.Channels.Lark.CredentialsFile)
 		// 配置保存后热应用（lark 渠道启用且已接线控制器时）
 		if larkController != nil {

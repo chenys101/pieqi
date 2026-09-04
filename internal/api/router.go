@@ -27,6 +27,9 @@ type Server struct {
 	feedback *core.FeedbackStore
 	preview  *core.PreviewManager
 
+	// P1 Checks 重跑 runner（p1-design.md §5）；nil-safe（未接线时仅事件流派生）。
+	checks *core.CheckRunner
+
 	// Lark Device Flow (扫码一键创建飞书应用)。wired by SetLarkReg;
 	// nil-safe for tests that don't exercise larkreg routes.
 	larkRegRunner    larkRegRunner
@@ -64,6 +67,11 @@ func (s *Server) SetFeedback(fs *core.FeedbackStore, pm *core.PreviewManager) {
 	s.preview = pm
 }
 
+// SetCheckRunner wires the check rerun runner (Feedback P1). nil-safe.
+func (s *Server) SetCheckRunner(cr *core.CheckRunner) {
+	s.checks = cr
+}
+
 // Register 在 gin router 上挂 /api/* 与 /internal/* 路由。
 func (s *Server) Register(r gin.IRouter) {
 	token := ""
@@ -97,6 +105,13 @@ func (s *Server) Register(r gin.IRouter) {
 		api.GET("/tasks/:id/feedback", s.getFeedback)
 		api.GET("/tasks/:id/feedback/diff", s.getFeedbackDiff)
 		api.POST("/tasks/:id/rewind", s.postRewind)
+		// Feedback P1（p1-design.md §11）：前瞻 Diff / Checks / Outcome / Evidence / Continue
+		api.GET("/tasks/:id/approvals/:decisionId/diff", s.getApprovalDiff)
+		api.GET("/tasks/:id/checks", s.listChecks)
+		api.POST("/tasks/:id/checks/:checkId/rerun", s.rerunCheck)
+		api.GET("/tasks/:id/outcome", s.getOutcome)
+		api.GET("/tasks/:id/evidence", s.getEvidence)
+		api.POST("/tasks/:id/continue", s.postContinue)
 		// preview 控制端点与代理共用一条 wildcard 路由（见 previewRoute 分发说明）
 		api.Any("/tasks/:id/preview/*path", s.previewRoute)
 		api.GET("/skills", s.listSkills)   // Phase 6 实现，先占位
