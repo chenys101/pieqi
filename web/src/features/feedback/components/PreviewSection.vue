@@ -2,10 +2,11 @@
 // PreviewSection：Preview 运行态控制（p0-design.md §7.3 + p1-design.md §10）。
 // start → 异步启动（starting → running，轮询感知）；stop → 停止；
 // restart → 停止后重启（P1：Rewind→Verify 后 / 非 HMR 框架改动后手动刷新）；
+// attach → 外链 + 二维码（P1：隧道可达时在外部浏览器打开）；
 // running 时提供子路径代理入口（新标签打开，鉴权经 cookie/header 同源）。
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { getPreviewStatus, restartPreview, startPreview, stopPreview } from '@/services/api/feedback'
-import type { PreviewStatusDto } from '@/types/api'
+import { getPreviewAttach, getPreviewStatus, restartPreview, startPreview, stopPreview } from '@/services/api/feedback'
+import type { PreviewAttachDto, PreviewStatusDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useNotificationStore } from '@/stores/notification'
@@ -17,6 +18,10 @@ const status = ref<PreviewStatusDto | null>(null)
 const busy = ref(false)
 const notify = useNotificationStore()
 let pollTimer: ReturnType<typeof setInterval> | null = null
+
+/** P1：Attach 结果（外链 + 二维码），null = 未拉取 */
+const attach = ref<PreviewAttachDto | null>(null)
+const attaching = ref(false)
 
 const stateLabel = computed(() => {
   const map: Record<string, string> = {
@@ -101,6 +106,22 @@ async function onRestart() {
   }
 }
 
+/**
+ * P1：拉取外链 + 二维码（隧道可达时在外部浏览器打开）。
+ * 409（preview 未跑 / 隧道未开）→ 提示前置条件，不弹错误。
+ */
+async function onAttach() {
+  attaching.value = true
+  try {
+    attach.value = await getPreviewAttach(props.taskId)
+  } catch (err) {
+    attach.value = null
+    notify.error(err instanceof Error ? err.message : '获取外链失败（需预览运行中且隧道已开启）')
+  } finally {
+    attaching.value = false
+  }
+}
+
 // 打开时拉一次状态；taskId 变化时重新拉取
 watch(
   () => props.taskId,
@@ -137,9 +158,21 @@ onUnmounted(stopPoll)
           :title="'停止后重启（改动非热更新时刷新预览）'"
           @click="onRestart"
         >重启</Button>
+        <!-- P1：外链 + 二维码（隧道可达时在外部浏览器打开） -->
+        <Button variant="ghost" size="sm" :loading="attaching" title="生成外链与二维码" @click="onAttach">外链</Button>
         <Button v-if="!isRunning && !isStarting" variant="secondary" size="sm" :loading="busy" @click="onStart">启动</Button>
         <Button v-else variant="ghost" size="sm" :loading="busy" @click="onStop">停止</Button>
       </span>
+    </div>
+
+    <!-- P1：Attach 结果（外链 + 二维码，供其他设备扫码访问） -->
+    <div v-if="attach" class="mt-2 flex items-start gap-3 rounded-md border border-border/60 bg-background/60 p-2.5">
+      <img :src="attach.qr" alt="预览外链二维码" class="h-28 w-28 shrink-0 rounded border border-border" />
+      <div class="flex min-w-0 flex-col gap-1">
+        <div class="text-[11px] text-muted">外部浏览器可打开（含 token，勿外传）：</div>
+        <a :href="attach.url" target="_blank" rel="noopener" class="break-all text-xs text-info hover:underline">{{ attach.url }}</a>
+        <button class="self-start text-[11px] text-muted hover:text-text" @click="attach = null">收起</button>
+      </div>
     </div>
   </div>
 </template>

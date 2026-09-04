@@ -455,6 +455,20 @@ func (m *TunnelManager) Status() TunnelStatus {
 	}
 }
 
+// FullURL returns the current tunnel URL with the RAW token embedded
+// (https://xxx.trycloudflare.com?token=yyy). Unlike Status(), nothing is
+// masked — so it must only ever feed already-authenticated callers
+// (e.g. the preview attach link builder in the API layer). Empty when no
+// tunnel is active.
+func (m *TunnelManager) FullURL() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cmd == nil {
+		return ""
+	}
+	return m.url
+}
+
 // wipeTokensOnDebugOff clears all tunnel tokens when the debug switch
 // transitions from ON to OFF. PRD §4.4 lists this as an invalidation
 // trigger. main.go is responsible for calling this at the toggle point

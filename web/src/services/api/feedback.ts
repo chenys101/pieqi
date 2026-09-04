@@ -3,7 +3,7 @@
 //	GET  /api/tasks/:id/feedback          反馈总览
 //	GET  /api/tasks/:id/feedback/diff     单文件 Diff（turn 省略 = Baseline 累计）
 //	POST /api/tasks/:id/rewind            代码回退（verify=true → 回退后验证）
-//	POST /api/tasks/:id/preview/start|stop|restart / GET status
+//	POST /api/tasks/:id/preview/start|stop|restart / GET status|attach
 //	GET  /api/tasks/:id/approvals/:decisionId/diff   前瞻性 Diff（P1）
 //	GET  /api/tasks/:id/checks            Check 列表（P1）
 //	POST /api/tasks/:id/checks/:checkId/rerun        Check 重跑（P1）
@@ -21,6 +21,7 @@ import type {
   EvidenceScopeDto,
   FeedbackBundleDto,
   FeedbackDiffDto,
+  PreviewAttachDto,
   PreviewStatusDto,
   RewindResponseDto,
   TaskOutcomeDto,
@@ -75,6 +76,14 @@ export async function restartPreview(taskId: string): Promise<void> {
 /** GET /api/tasks/:id/preview/status */
 export async function getPreviewStatus(taskId: string): Promise<PreviewStatusDto> {
   return request<PreviewStatusDto>(`/tasks/${encodeURIComponent(taskId)}/preview/status`)
+}
+
+/**
+ * GET /api/tasks/:id/preview/attach（P1）：外部浏览器可打开的预览外链 + 二维码。
+ * 前置：preview 运行中 + 隧道 active（不足 → 409，提示用户先启动）。
+ */
+export async function getPreviewAttach(taskId: string): Promise<PreviewAttachDto> {
+  return request<PreviewAttachDto>(`/tasks/${encodeURIComponent(taskId)}/preview/attach`)
 }
 
 // ---------- Feedback P1（p1-design.md §11） ----------

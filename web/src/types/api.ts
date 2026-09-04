@@ -274,6 +274,14 @@ export interface PreviewStatusDto {
   error?: string
 }
 
+/** GET /api/tasks/:id/preview/attach 响应（P1：外链 + 二维码） */
+export interface PreviewAttachDto {
+  /** 隧道可达的外部预览 URL（含 token，勿外传） */
+  url: string
+  /** 二维码 PNG 端点（公开只读，可直接作 <img src>） */
+  qr: string
+}
+
 // ---------- Feedback P1（p1-design.md §11，wire 与 Go JSON tag 一致） ----------
 
 /** Check 状态机（后端 core.Check.Status） */

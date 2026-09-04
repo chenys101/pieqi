@@ -50,6 +50,12 @@ func (s *Server) previewRoute(c *gin.Context) {
 			s.restartPreview(c)
 			return
 		}
+	case "attach":
+		// P1 Preview Attach（p1-design.md §10）：外链 + 二维码
+		if c.Request.Method == http.MethodGet {
+			s.previewAttach(c)
+			return
+		}
 	case "status":
 		if c.Request.Method == http.MethodGet {
 			s.previewStatus(c)
@@ -126,6 +132,69 @@ func (s *Server) previewStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, s.preview.Status(task))
+}
+
+// previewAttach GET /api/tasks/:id/preview/attach（P1，p1-design.md §10）：
+// 生成外部浏览器可打开的预览深链 + 二维码。
+// 前置条件：preview 运行中（否则外链打开也是 503）+ 隧道 active（否则仅内网可达）。
+// 返回 {url, qr}：url = <tunnel>/api/tasks/:id/preview/?token=<raw>；
+// qr = /api/tunnel/qrcode?text=<url>（公开只读端点，渲染 PNG）。
+// 调用方已过 ExternalAuth（或内网），暴露 raw token 无越权（本就能 ResetToken）。
+func (s *Server) previewAttach(c *gin.Context) {
+	task, ok := s.requireTask(c)
+	if !ok {
+		return
+	}
+	if s.preview == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "preview not enabled"})
+		return
+	}
+	if s.preview.RunningPort(task.ID) == 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "preview not running"})
+		return
+	}
+	if s.tunnel == nil || !s.tunnel.IsActive() {
+		c.JSON(http.StatusConflict, gin.H{"error": "tunnel not active"})
+		return
+	}
+	attach := attachPreviewURL(s.tunnel.FullURL(), task.ID)
+	if attach == "" {
+		c.JSON(http.StatusConflict, gin.H{"error": "tunnel not active"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"url": attach,
+		"qr":  "/api/tunnel/qrcode?text=" + url.QueryEscape(attach),
+	})
+}
+
+// attachPreviewURL 由隧道完整 URL（…?token=yyy）拼 preview 外链：
+// token 从 query 抽出追加到末尾，保证 preview 子路径干净。
+func attachPreviewURL(fullTunnelURL, taskID string) string {
+	base, token := splitTunnelToken(fullTunnelURL)
+	if base == "" {
+		return ""
+	}
+	u := strings.TrimRight(base, "/") + "/api/tasks/" + taskID + "/preview/"
+	if token != "" {
+		u += "?token=" + token
+	}
+	return u
+}
+
+// splitTunnelToken 分离隧道 URL 的 base 与 token query 值（无 token → token=""）。
+func splitTunnelToken(u string) (base, token string) {
+	i := strings.Index(u, "?")
+	if i < 0 {
+		return u, ""
+	}
+	base, query := u[:i], u[i+1:]
+	for _, kv := range strings.Split(query, "&") {
+		if v, found := strings.CutPrefix(kv, "token="); found {
+			token = v
+		}
+	}
+	return base, token
 }
 
 // previewProxy ANY /api/tasks/:id/preview/*path：反向代理到该 task 绑定的 127.0.0.1 端口。
