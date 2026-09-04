@@ -241,18 +241,23 @@ func (s *Server) previewProxy(c *gin.Context) {
 	}
 
 	// 剥掉 /api/tasks/:id/preview 前缀，余下路径原样转发（默认 "/" → dev server 根）
+	// vite 例外：spawn 时以 --base 感知子路径，代理须转发完整路径（剥前缀会让 vite 对 "/" 302 到 base → 重定向循环）
 	prefix := "/api/tasks/" + taskID + "/preview"
+	fw := s.preview.RunningFramework(taskID)
+	stripPrefix := fw != "vite"
 	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", itoa(port))}
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
-			// 相对路径重建：c.Request.URL.Path 此时是完整路径
-			rest := strings.TrimPrefix(req.URL.Path, prefix)
-			if rest == "" || !strings.HasPrefix(rest, "/") {
-				rest = "/" + rest
+			if stripPrefix {
+				// 相对路径重建：c.Request.URL.Path 此时是完整路径
+				rest := strings.TrimPrefix(req.URL.Path, prefix)
+				if rest == "" || !strings.HasPrefix(rest, "/") {
+					rest = "/" + rest
+				}
+				req.URL.Path = rest
 			}
-			req.URL.Path = rest
 			req.Host = "localhost" // dev server 常按 Host 判断，避免 127.0.0.1 导致重定向异常
 		},
 		ModifyResponse: rewritePreviewHTML(prefix),
@@ -261,7 +266,9 @@ func (s *Server) previewProxy(c *gin.Context) {
 }
 
 // absoluteRootAssetRe 匹配 HTML 里根绝对资源引用（src/href="/@vite/client" 等）。
-var absoluteRootAssetRe = regexp.MustCompile(`((?:src|href)=["'])/((?:@|assets|node_modules|\.|_next|_nuxt|__next)[^"']*)["']`)
+// 白名单覆盖各框架常见资源段：vite(@/node_modules)、构建产物(assets)、源码入口(src)、
+// next/nuxt(_next/_nuxt)。vite 另有 --base 前缀化兜底（见 core/preview.go spawn），此处为非 vite 框架兜底。
+var absoluteRootAssetRe = regexp.MustCompile(`((?:src|href)=["'])/((?:@|assets|node_modules|src|\.|_next|_nuxt|__next)[^"']*)["']`)
 
 // rewritePreviewHTML HTML 重写中间件（p0-design.md §7.3）：
 // 注入 <base href="/api/tasks/:id/preview/">，并把根绝对 src/href 改写成子路径前缀。

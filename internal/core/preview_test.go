@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -83,6 +84,28 @@ func TestDiscoverPreview_OverrideFile(t *testing.T) {
 	}
 	if p.Command[0] != "bun" || p.Port != 9999 {
 		t.Errorf("override not respected: %+v", p)
+	}
+}
+
+func TestAppendScriptArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"npm run dev", []string{"npm", "run", "dev"}, []string{"npm", "run", "dev", "--", "--port", "4000"}},
+		{"pnpm run dev", []string{"pnpm", "run", "dev"}, []string{"pnpm", "run", "dev", "--", "--port", "4000"}},
+		{"yarn run dev", []string{"yarn", "run", "dev"}, []string{"yarn", "run", "dev", "--", "--port", "4000"}},
+		{"override custom runner", []string{"bun", "run", "dev"}, []string{"bun", "run", "dev", "--", "--port", "4000"}},
+		{"already has separator", []string{"npm", "run", "dev", "--", "--host", "0.0.0.0"}, []string{"npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "4000"}},
+		{"non-run command", []string{"bun", "dev"}, []string{"bun", "dev", "--port", "4000"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := appendScriptArgs(c.args, "--port", "4000"); !reflect.DeepEqual(got, c.want) {
+				t.Errorf("appendScriptArgs(%v) = %v, want %v", c.args, got, c.want)
+			}
+		})
 	}
 }
 

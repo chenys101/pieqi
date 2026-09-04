@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -119,6 +120,68 @@ func TestPermissionMatrix(t *testing.T) {
 				t.Fatalf("%s: got %d, want %d (body=%s)", tc.name, w.Code, tc.wantStatus, w.Body.String())
 			}
 		})
+	}
+}
+
+// TestExternalAuth_CookiePropagation verifies the preview外链 fix: an
+// external document request authenticated via ?token= must set a same-origin
+// cookie, and subsequent preview sub-resource requests (which cannot attach
+// header/query) must authenticate via that cookie alone.
+func TestExternalAuth_CookiePropagation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	bindings, _ := NewBindingStore(filepath.Join(t.TempDir(), "b.json"))
+	tokens := NewTokenStore()
+	svc := &Service{
+		Debug:    NewDebugSwitch(false),
+		Bindings: bindings,
+		Tokens:   tokens,
+		Limiter:  NewIPLimiter(5, 10*time.Minute),
+	}
+	g := gin.New()
+	g.Use(svc.ExternalAuthMiddleware())
+	g.GET("/api/tasks/t1/preview/*path", func(c *gin.Context) { c.String(200, "ok") })
+
+	tok, _ := tokens.Issue(time.Hour)
+
+	// 1) 文档请求带 ?token= → 200 且响应 Set-Cookie
+	req1 := httptest.NewRequest("GET", "/api/tasks/t1/preview/?token="+tok, nil)
+	req1.RemoteAddr = "4.4.4.4:1234"
+	w1 := httptest.NewRecorder()
+	g.ServeHTTP(w1, req1)
+	if w1.Code != 200 {
+		t.Fatalf("document with token: got %d", w1.Code)
+	}
+	setCookies := w1.Result().Cookies()
+	var got *http.Cookie
+	for _, ck := range setCookies {
+		if ck.Name == tunnelTokenCookie {
+			got = ck
+		}
+	}
+	if got == nil {
+		t.Fatal("expected Set-Cookie " + tunnelTokenCookie)
+	}
+	if got.Value != tok {
+		t.Fatalf("cookie value = %q, want %q", got.Value, tok)
+	}
+
+	// 2) 子资源仅凭 cookie（无 header/query）→ 200
+	req2 := httptest.NewRequest("GET", "/api/tasks/t1/preview/@vite/client", nil)
+	req2.RemoteAddr = "4.4.4.4:1234"
+	req2.AddCookie(&http.Cookie{Name: tunnelTokenCookie, Value: tok})
+	w2 := httptest.NewRecorder()
+	g.ServeHTTP(w2, req2)
+	if w2.Code != 200 {
+		t.Fatalf("subresource with cookie: got %d, want 200", w2.Code)
+	}
+
+	// 3) 无 token 且无 cookie → 401
+	req3 := httptest.NewRequest("GET", "/api/tasks/t1/preview/@vite/client", nil)
+	req3.RemoteAddr = "4.4.4.4:1234"
+	w3 := httptest.NewRecorder()
+	g.ServeHTTP(w3, req3)
+	if w3.Code != 401 {
+		t.Fatalf("no credentials: got %d, want 401", w3.Code)
 	}
 }
 

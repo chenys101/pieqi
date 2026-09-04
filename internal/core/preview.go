@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,11 +121,18 @@ func (pm *PreviewManager) spawn(taskID, projectPath string, profile PreviewProfi
 	var env []string
 	switch profile.Framework {
 	case "vite":
-		args = append(args, "--port", strconv.Itoa(port), "--strictPort")
+		// npm/pnpm/yarn `run dev` 需 '--' 才把参数透传给 script（缺 '--' 时 npm 当作自身配置吞掉）；
+		// --host 127.0.0.1 只绑 loopback，避免 Windows 上 vite 落到 ::1 导致 IPv4 探测/代理连不上；
+		// --base 让 vite 感知子路径：HTML 与 JS 内部 import 全部前缀化，否则 /src/main.js、/node_modules/...
+		// 这类根绝对 URL 会落到 pieqi 源根（返回 pieqi 自己的 index.html 当 JS 执行 → 空白页）
+		args = appendScriptArgs(args,
+			"--port", strconv.Itoa(port), "--strictPort",
+			"--host", "127.0.0.1",
+			"--base="+"/api/tasks/"+taskID+"/preview/")
 	case "next":
-		args = append(args, "-p", strconv.Itoa(port))
+		args = appendScriptArgs(args, "-p", strconv.Itoa(port), "-H", "127.0.0.1")
 	case "nuxt":
-		args = append(args, "--port", strconv.Itoa(port))
+		args = appendScriptArgs(args, "--port", strconv.Itoa(port), "--host", "127.0.0.1")
 	default:
 		env = append(env, fmt.Sprintf("PORT=%d", port))
 	}
@@ -244,6 +252,11 @@ func (pm *PreviewManager) Stop(taskID string) {
 	if !ok || inst.cmd == nil || inst.cmd.Process == nil {
 		return
 	}
+	if runtime.GOOS == "windows" {
+		// Windows 无 SIGTERM 且 Kill 只杀直系进程；用 taskkill /T 连 npm→vite 孙进程一起收掉，防端口泄漏
+		_ = exec.Command("taskkill", "/PID", strconv.Itoa(inst.cmd.Process.Pid), "/T", "/F").Run()
+		return
+	}
 	_ = inst.cmd.Process.Signal(syscall.SIGTERM)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -285,6 +298,17 @@ func (pm *PreviewManager) RunningPort(taskID string) int {
 		return 0
 	}
 	return inst.port
+}
+
+// RunningFramework 代理用：返回 task 运行实例的框架（vite 走完整路径转发，其余剥前缀）。
+func (pm *PreviewManager) RunningFramework(taskID string) string {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	inst, ok := pm.instances[taskID]
+	if !ok || inst.state != PreviewRunning {
+		return ""
+	}
+	return inst.framework
 }
 
 // CleanupAll 停止全部 preview（服务器关停时）。
@@ -472,6 +496,25 @@ func jsonUnmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
 func fileExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && !fi.IsDir()
+}
+
+// appendScriptArgs 给 `<runner> run <script>` 命令追加透传参数。
+// npm/pnpm 只在 '--' 之后才把参数透传给 script（yarn 亦兼容）；缺 '--' 时参数被 npm 当作自身配置吞掉。
+func appendScriptArgs(args []string, extra ...string) []string {
+	out := append([]string{}, args...)
+	if len(out) >= 3 && out[1] == "run" {
+		hasSep := false
+		for _, a := range out {
+			if a == "--" {
+				hasSep = true
+				break
+			}
+		}
+		if !hasSep {
+			out = append(out, "--")
+		}
+	}
+	return append(out, extra...)
 }
 
 // freeLocalPort 探测一个空闲的本地端口（listen :0 后立刻释放，存在被抢的小窗口）。

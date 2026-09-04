@@ -65,6 +65,10 @@ func (s *Service) ExternalAuthMiddleware() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired token"})
 			return
 		}
+		// 种下同源 cookie：预览外链文档请求带 ?token= 通过后，让后续无法携带
+		// header/query 的 preview 子资源请求凭 cookie 鉴权（否则外链空白页）。
+		// Secure+HttpOnly；token 在进程内，cookie 随隧道 token 失效而失效。
+		c.SetCookie(tunnelTokenCookie, tok, 0, "/", "", true, true)
 		s.audit(c, "biz.api", true, false, false)
 		c.Next()
 	}
@@ -154,14 +158,26 @@ func isLarkMobileUA(ua string) bool {
 	return true
 }
 
-// extractToken pulls the tunnel token from Authorization header or ?token=
-// query param. The query form is essential for the lark:// deep link to
-// work directly without the front-end re-attaching headers.
+// tunnelTokenCookie 子资源鉴权 cookie（同名同源）。
+// 外部打开预览外链时，文档请求凭 ?token= 通过鉴权，中间件随即种下该 cookie；
+// 此后 preview 子资源（<script src>/@vite/client/依赖/HMR WebSocket）无法携带
+// header 或 query，靠同源 cookie 通过 ExternalAuth。token 轮换/过期后 cookie 一并失效。
+const tunnelTokenCookie = "pieqi_token"
+
+// extractToken pulls the tunnel token from Authorization header, ?token=
+// query, or the same-origin cookie (for preview sub-resource requests that
+// cannot attach headers/query).
 func extractToken(c *gin.Context) string {
 	if auth := c.GetHeader("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimPrefix(auth, "Bearer ")
 	}
-	return c.Query("token")
+	if tok := c.Query("token"); tok != "" {
+		return tok
+	}
+	if tok, err := c.Cookie(tunnelTokenCookie); err == nil && tok != "" {
+		return tok
+	}
+	return ""
 }
 
 // audit is a nil-safe wrapper so middlewares can call it even when Audit

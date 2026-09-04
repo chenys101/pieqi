@@ -227,7 +227,7 @@ func TestFeedbackStore_CaptureTurnEndRecordsDeletion(t *testing.T) {
 }
 
 func TestSafeJoin_BlocksTraversal(t *testing.T) {
-	if got := safeJoin("/root", "../etc/passwd"); filepath.Dir(got) != "/root" {
+	if got := safeJoin("/root", "../etc/passwd"); got != filepath.Join("/root", "invalid") {
 		t.Errorf("traversal not blocked: %s", got)
 	}
 	if got := safeJoin("/root", "a/b.txt"); got != filepath.Join("/root", "a", "b.txt") {
