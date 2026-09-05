@@ -23,6 +23,8 @@ import (
 
 	"pieqi/internal/agent"
 	"pieqi/internal/model"
+
+	"go.uber.org/zap"
 )
 
 // 默认审批超时上限（与 HookService 默认 30min 对齐）。WirePermission 传 timeout<=0 时用之。
@@ -37,6 +39,11 @@ type PermissionWire struct {
 	taskID  string
 	notify  func(*model.Task, string)
 	timeout time.Duration
+	logger  *zap.Logger
+
+	// autoApprove 免审名单：ToolKind 命中即自动放行（选首个 allow 选项调 adapter.Approve），
+	// 不置 waiting_input、不弹卡、不推 IM、不启动超时定时器。空 = 关闭（全部走人工审批）。
+	autoApprove map[string]struct{}
 
 	// mu 守护 pending 与 closed。每个 pending entry 自带 done 标志，
 	// 保证 Resolve 与超时定时器之间只有一个能真正驱动 adapter（先到先得）。
@@ -55,8 +62,8 @@ type PermissionWire struct {
 // permPending 一个待审批请求的本地状态。
 type permPending struct {
 	reqID     string
-	toolTitle string            // 工具名（展示卡标题），排队提升时复用
-	summary   string            // 决策摘要（buildPermSummary 结果），排队提升时复用
+	toolTitle string                   // 工具名（展示卡标题），排队提升时复用
+	summary   string                   // 决策摘要（buildPermSummary 结果），排队提升时复用
 	options   []agent.PermissionOption // 记录的 ACP 选项，供 Resolve 映射 approve/deny
 	timer     *time.Timer              // 超时定时器；到期调 adapter.Deny
 	done      bool                     // 已被 Resolve 或超时处理（先到先得，另一方放弃）
@@ -73,11 +80,16 @@ type permPending struct {
 //
 // notify 为 nil 表示无 IM 渠道（HTTP/CLI 来源），跳过 IM 推送。
 // timeout<=0 时取 defaultPermissionTimeout（30min）。
+// autoApprove 为免审名单（按 ACP ToolKind 匹配）：命中的权限请求直接自动放行，不中断等人工审批。
+// logger 为 nil 时用 zap.NewNop()（静默）。
 //
 // 返回 *PermissionWire，调用方经 Resolve 投递用户决策，结束时 Unwire 拆卸。
-func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore, taskID string, notify func(*model.Task, string), timeout time.Duration) *PermissionWire {
+func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore, taskID string, notify func(*model.Task, string), timeout time.Duration, autoApprove []string, logger *zap.Logger) *PermissionWire {
 	if timeout <= 0 {
 		timeout = defaultPermissionTimeout
+	}
+	if logger == nil {
+		logger = zap.NewNop()
 	}
 	pw := &PermissionWire{
 		adapter: adapter,
@@ -86,10 +98,25 @@ func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore,
 		taskID:  taskID,
 		notify:  notify,
 		timeout: timeout,
+		logger:  logger,
 		pending: make(map[string]*permPending),
 	}
+	pw.setAutoApprove(autoApprove)
 	adapter.OnPermissionRequest(pw.onPermissionRequest)
 	return pw
+}
+
+// setAutoApprove 把免审名单转成 map 供 O(1) 命中判定；空/nil = 关闭免审。
+func (pw *PermissionWire) setAutoApprove(tools []string) {
+	if len(tools) == 0 {
+		pw.autoApprove = nil
+		return
+	}
+	set := make(map[string]struct{}, len(tools))
+	for _, t := range tools {
+		set[t] = struct{}{}
+	}
+	pw.autoApprove = set
 }
 
 // onPermissionRequest OnPermissionRequest 回调实现：置 waiting_input + 推送 + 启动超时。
@@ -97,6 +124,11 @@ func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore,
 // 注意：本回调由 adapter 在 RequestPermission 中调用，实现应快速返回（adapter 内部阻塞等 Approve/Deny），
 // 不要在此阻塞等待用户决策——用户决策经 Resolve 投递。参考 adapter.PermissionRequestFunc 注释。
 func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
+	// 免审名单命中（如 edit/delete/move 等文件改动类）：直接自动放行——
+	// 不置 waiting_input、不弹卡、不推 IM、不启动超时，任务全程不中断。
+	if pw.tryAutoApprove(req) {
+		return
+	}
 	pw.mu.Lock()
 	if pw.closed {
 		// wire 已拆卸：不再处理，adapter 回调应已被置 nil，这里兜底直接拒。
@@ -131,6 +163,43 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 		_ = pw.adapter.Deny(ctx, req.ReqID)
 		cancel()
 	}
+}
+
+// tryAutoApprove 免审名单命中判定与放行：ToolKind 在 autoApprove 中且请求带 allow 选项时，
+// 选首个 allow 选项（allow_once 优先，次 allow_always）直接调 adapter.Approve 放行。
+//
+// 返回 true 表示已处理（不再走人工审批）；以下情况返回 false，调用方回退到正常人工审批：
+//   - 免审名单为空 / ToolKind 未命中；
+//   - 请求只有 reject 选项（无 allow 选项可放行）；
+//   - adapter.Approve 失败（如请求已被另一路径解决）——回退走人工审批，由 30min 超时兜底，
+//     不会永久卡死。
+func (pw *PermissionWire) tryAutoApprove(req agent.PermissionRequest) bool {
+	if len(pw.autoApprove) == 0 {
+		return false
+	}
+	if _, ok := pw.autoApprove[req.ToolKind]; !ok {
+		return false
+	}
+	optionID, ok := pickAllowOption(req.Options)
+	if !ok {
+		// 无 allow 选项无法自动放行：退回人工审批，让用户在卡上看到 reject 选项。
+		pw.logger.Debug("auto-approve skipped: no allow option",
+			zap.String("task", pw.taskID), zap.String("req", req.ReqID), zap.String("tool_kind", req.ToolKind))
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err := pw.adapter.Approve(ctx, req.ReqID, optionID)
+	cancel()
+	if err != nil {
+		pw.logger.Warn("auto-approve failed, fall back to manual approval",
+			zap.String("task", pw.taskID), zap.String("req", req.ReqID),
+			zap.String("tool_kind", req.ToolKind), zap.Error(err))
+		return false
+	}
+	pw.logger.Debug("auto-approved permission (no review)",
+		zap.String("task", pw.taskID), zap.String("req", req.ReqID),
+		zap.String("tool_kind", req.ToolKind), zap.String("option", optionID))
+	return true
 }
 
 // show 把 reqID 展示为当前决策：置 waiting_input(approval) + Publish + IM 通知 + 启动超时定时器。

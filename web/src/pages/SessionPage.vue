@@ -70,23 +70,26 @@ async function onRemove() {
 </script>
 
 <template>
-  <div v-if="task" class="flex h-full flex-col">
-    <SessionHeader :task="task" :can-cancel="canCancel" @cancel="cancel" @remove="onRemove" @feedback="feedbackOpen = true" />
-    <SessionTimeline :task-id="task.id" :consume-force-scroll="consumeForceScroll" />
+  <!-- 两栏排布：会话主列 flex-1 + 变更反馈侧栏 dock 右侧（PC）；移动端 Drawer 覆盖式，主列独占 -->
+  <div v-if="task" class="flex h-full">
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+      <SessionHeader :task="task" :can-cancel="canCancel" @cancel="cancel" @remove="onRemove" @feedback="feedbackOpen = true" />
+      <SessionTimeline :task-id="task.id" :consume-force-scroll="consumeForceScroll" />
 
-    <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20） -->
-    <div v-if="decision" class="mx-auto w-full max-w-3xl px-3 pb-2 md:px-4">
-      <ApprovalBanner :decision="decision" :loading="approvalBusy" @approve="onApprove" @deny="onDeny" />
+      <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20） -->
+      <div v-if="decision" class="mx-auto w-full max-w-3xl px-3 pb-2 md:px-4">
+        <ApprovalBanner :decision="decision" :loading="approvalBusy" @approve="onApprove" @deny="onDeny" />
+      </div>
+
+      <InterveneInput
+        :can-cancel="canCancel"
+        :can-send="canSendPrompt || !!decision"
+        @send="submitPrompt"
+        @cancel="cancel"
+      />
     </div>
 
-    <InterveneInput
-      :can-cancel="canCancel"
-      :can-send="canSendPrompt || !!decision"
-      @send="submitPrompt"
-      @cancel="cancel"
-    />
-
-    <!-- 变更反馈面板（Feedback P0）：总览 / Diff / 回退 / 预览 -->
+    <!-- 变更反馈侧栏（Feedback P0）：总览 / Diff / 回退 / 预览 -->
     <FeedbackPanel :task-id="task.id" :open="feedbackOpen" :can-rewind="canRewind" @close="feedbackOpen = false" />
   </div>
 

@@ -57,6 +57,7 @@ type TaskRunner struct {
 	agentMgr    agentRunner // nil = Phase 1 claude -p 路径（默认）
 	useACP      bool
 	permTimeout time.Duration // ACP 路径 WirePermission 超时；<=0 用默认（30min）
+	autoApprove []string      // ACP 路径免审名单：ToolKind 命中即自动放行（不中断等人工审批）
 	wireMu      sync.Mutex
 	wires       map[string]*acpWires // taskID -> ACP 路径的 wire 句柄
 
@@ -196,6 +197,13 @@ func (tr *TaskRunner) SetAgentManager(mgr agentRunner, useACP bool, permTimeout 
 	if mgr != nil {
 		mgr.SetOnSessionClosed(tr.onAgentSessionClosed)
 	}
+}
+
+// SetAutoApproveTools 配置 ACP 路径免审名单（按 ToolKind 匹配，如 edit/delete/move）。
+// 命中的权限请求直接自动放行，不中断等人工审批。nil/空 = 关闭免审（全部走人工审批）。
+// 需在任务开始（ensureACPSession 注册 wire）前调用；main 构造 runner 后立即设置。
+func (tr *TaskRunner) SetAutoApproveTools(tools []string) {
+	tr.autoApprove = tools
 }
 
 // semaphore 轻量计数信号量，用于每项目并发上限。
@@ -627,7 +635,7 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 
 	// 注册 wires（跨轮保活：轮末不 unwire，由会话关闭回调 onAgentSessionClosed 统一清理）。
 	dh := WireContentDelta(adapter, tr.bus, tr.store, task.ID)
-	ph := WirePermission(adapter, tr.bus, tr.store, task.ID, tr.notify, tr.permTimeout)
+	ph := WirePermission(adapter, tr.bus, tr.store, task.ID, tr.notify, tr.permTimeout, tr.autoApprove, tr.logger)
 	th := WireToolCall(adapter, tr.bus, tr.store, task.ID)
 	tr.setWires(task.ID, dh, ph, th)
 

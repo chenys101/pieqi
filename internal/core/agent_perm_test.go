@@ -102,8 +102,14 @@ func (f *fakePermAdapter) lastApprove() (string, string, bool) {
 }
 
 // setupPermWire 构造一套 wired 环境：fake adapter + bus + 订阅 + store + 一个 running task。
-// task 带 IM 来源渠道，便于验证 notify 回调。
+// task 带 IM 来源渠道，便于验证 notify 回调。免审名单默认关闭（nil）。
 func setupPermWire(t *testing.T, timeout time.Duration) (*fakePermAdapter, *EventBus, *Subscription, *TaskStore, string, *PermissionWire, *[]string) {
+	t.Helper()
+	return setupPermWireAuto(t, timeout, nil)
+}
+
+// setupPermWireAuto 同 setupPermWire，但按 autoApprove 名单配置免审。
+func setupPermWireAuto(t *testing.T, timeout time.Duration, autoApprove []string) (*fakePermAdapter, *EventBus, *Subscription, *TaskStore, string, *PermissionWire, *[]string) {
 	t.Helper()
 	bus := NewEventBus()
 	sub := bus.Subscribe(64)
@@ -130,7 +136,7 @@ func setupPermWire(t *testing.T, timeout time.Duration) (*fakePermAdapter, *Even
 		notifyTexts = append(notifyTexts, text)
 		notifyMu.Unlock()
 	}
-	pw := WirePermission(fa, bus, store, tt.ID, notify, timeout)
+	pw := WirePermission(fa, bus, store, tt.ID, notify, timeout, autoApprove, nil)
 	return fa, bus, sub, store, tt.ID, pw, &notifyTexts
 }
 
@@ -442,7 +448,7 @@ func TestWirePermission_NotifySkippedForNoChannel(t *testing.T) {
 	var notifyTexts []string
 	pw := WirePermission(fa, bus, store, tt.ID, func(_ *model.Task, text string) {
 		notifyTexts = append(notifyTexts, text)
-	}, time.Minute)
+	}, time.Minute, nil, nil)
 	defer pw.Unwire()
 
 	fa.emitPerm(permReq("req-NC", "Bash", "execute", standardOptions()))
@@ -454,6 +460,153 @@ func TestWirePermission_NotifySkippedForNoChannel(t *testing.T) {
 	got, _ := store.Get(tt.ID)
 	if got.Status != model.TaskWaitingInput {
 		t.Errorf("status=%q, want waiting_input (PWA path still works)", got.Status)
+	}
+}
+
+// TestWirePermission_AutoApproveHit 免审名单命中（ToolKind=edit）→ 直接自动放行：
+// adapter.Approve 被调（选中 allow_once）+ task 保持 running（不置 waiting_input、不建
+// CurrentDecision）+ 无 waiting_input 的 task_updated + 无 IM 通知。
+func TestWirePermission_AutoApproveHit(t *testing.T) {
+	fa, _, sub, store, taskID, pw, notifyTexts := setupPermWireAuto(t, time.Minute, []string{"edit"})
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-AA", "Edit", "edit", standardOptions()))
+
+	// adapter.Approve 应被调一次，选中 allow_once（o1）。
+	if got := fa.approveCount(); got != 1 {
+		t.Fatalf("approve calls=%d, want 1 (auto-approve)", got)
+	}
+	if _, opt, ok := fa.lastApprove(); !ok || opt != "o1" {
+		t.Fatalf("approve optionID=%q, want o1 (allow_once)", opt)
+	}
+	if got := fa.denyCount(); got != 0 {
+		t.Errorf("deny calls=%d, want 0", got)
+	}
+
+	// task 全程不被置 waiting_input（wire 不拥有状态迁移：harness 里任务初始为 pending，
+	// 关键断言是自动放行不把它打断成 waiting_input）、不建 CurrentDecision。
+	tt, ok := store.Get(taskID)
+	if !ok || tt.Status == model.TaskWaitingInput {
+		t.Fatalf("status=%q, want not waiting_input (auto-approve must not pause)", tt.Status)
+	}
+	if tt.CurrentDecision != nil {
+		t.Errorf("CurrentDecision set: %+v (should not pause)", tt.CurrentDecision)
+	}
+
+	// 无 waiting_input 的 task_updated 事件。
+	for _, ev := range drainEvents(sub, 80*time.Millisecond) {
+		if ev.Type == "task_updated" && ev.Task != nil && ev.Task.Status == model.TaskWaitingInput {
+			t.Errorf("unexpected task_updated(waiting_input): %+v", ev)
+		}
+	}
+
+	// 无 IM 通知（自动放行不打扰用户）。
+	if len(*notifyTexts) != 0 {
+		t.Errorf("notify called %d times, want 0 (auto-approved)", len(*notifyTexts))
+	}
+}
+
+// TestWirePermission_AutoApprovePicksAllowAlways 无 allow_once 时自动放行选 allow_always。
+func TestWirePermission_AutoApprovePicksAllowAlways(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWireAuto(t, time.Minute, []string{"edit"})
+	defer pw.Unwire()
+
+	opts := []agent.PermissionOption{
+		{ID: "oA", Name: "Allow Always", Kind: agent.PermissionOptionAllowAlways},
+		{ID: "oR", Name: "Reject Once", Kind: agent.PermissionOptionRejectOnce},
+	}
+	fa.emitPerm(permReq("req-AB", "Edit", "edit", opts))
+
+	if _, opt, ok := fa.lastApprove(); !ok || opt != "oA" {
+		t.Fatalf("approve optionID=%q, want oA (allow_always)", opt)
+	}
+	tt, _ := store.Get(taskID)
+	if tt.Status == model.TaskWaitingInput {
+		t.Errorf("status=%q, want not waiting_input (auto-approve must not pause)", tt.Status)
+	}
+	if tt.CurrentDecision != nil {
+		t.Errorf("CurrentDecision set: %+v", tt.CurrentDecision)
+	}
+}
+
+// TestWirePermission_AutoApproveMiss 名单未命中（execute）→ 走正常人工审批（waiting_input + IM 通知）。
+func TestWirePermission_AutoApproveMiss(t *testing.T) {
+	fa, _, _, store, taskID, pw, notifyTexts := setupPermWireAuto(t, time.Minute, []string{"edit"})
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-M", "Bash", "execute", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+
+	if got := fa.approveCount(); got != 0 {
+		t.Errorf("approve calls=%d, want 0 (not auto-approved)", got)
+	}
+	if len(*notifyTexts) == 0 {
+		t.Error("IM notify not called (should go through manual review)")
+	}
+}
+
+// TestWirePermission_AutoApproveNoAllowOption 名单命中但只有 reject 选项 → 无法自动放行，
+// 回退人工审批（卡上可看到 reject 选项）。
+func TestWirePermission_AutoApproveNoAllowOption(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWireAuto(t, time.Minute, []string{"edit"})
+	defer pw.Unwire()
+
+	opts := []agent.PermissionOption{
+		{ID: "r1", Name: "Reject Once", Kind: agent.PermissionOptionRejectOnce},
+	}
+	fa.emitPerm(permReq("req-NA", "Edit", "edit", opts))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+
+	if got := fa.approveCount(); got != 0 {
+		t.Errorf("approve calls=%d, want 0 (no allow option)", got)
+	}
+	tt, _ := store.Get(taskID)
+	if tt.CurrentDecision == nil || tt.CurrentDecision.ID != "req-NA" {
+		t.Errorf("CurrentDecision=%+v, want req-NA", tt.CurrentDecision)
+	}
+}
+
+// TestWirePermission_AutoApproveEmptyList 免审名单为空 → 编辑类也走人工审批（向后兼容）。
+func TestWirePermission_AutoApproveEmptyList(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute) // autoApprove=nil
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-E", "Edit", "edit", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+
+	if got := fa.approveCount(); got != 0 {
+		t.Errorf("approve calls=%d, want 0 (empty allowlist)", got)
+	}
+}
+
+// TestWirePermission_AutoApproveKeepsQueueClean 自动放行的请求不进 pending/queue：
+// 其后的非免审请求仍正常成为当前决策展示，拒绝后任务正常回 running，无残留。
+func TestWirePermission_AutoApproveKeepsQueueClean(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWireAuto(t, time.Minute, []string{"edit"})
+	defer pw.Unwire()
+
+	// 先自动放行一个 edit 请求（early return，不应污染 displayed/queue）。
+	fa.emitPerm(permReq("req-A1", "Edit", "edit", standardOptions()))
+	if got := fa.approveCount(); got != 1 {
+		t.Fatalf("approve calls=%d, want 1", got)
+	}
+
+	// 再发一个 execute 请求：应正常成为当前决策。
+	fa.emitPerm(permReq("req-A2", "Bash", "execute", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	tt, _ := store.Get(taskID)
+	if tt.CurrentDecision == nil || tt.CurrentDecision.ID != "req-A2" {
+		t.Fatalf("CurrentDecision=%+v, want req-A2", tt.CurrentDecision)
+	}
+
+	// 拒绝 req-A2 后 task 回 running，无残留决策。
+	if err := pw.Resolve("req-A2", "deny"); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+	tt, _ = store.Get(taskID)
+	if tt.CurrentDecision != nil {
+		t.Errorf("CurrentDecision not cleared: %+v", tt.CurrentDecision)
 	}
 }
 

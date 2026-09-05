@@ -9,6 +9,8 @@ const routes: RouteRecordRaw[] = [
   { path: '/session/:id', redirect: (to) => `/sessions/${to.params.id}` },
   { path: '/dashboard', component: () => import('@/pages/DashboardPage.vue') },
   { path: '/tasks', component: () => import('@/pages/TasksPage.vue') },
+  // 新建任务页：复用详情页骨架，仅多项目选择（放 /tasks/:id 前避免被吞）
+  { path: '/tasks/new', component: () => import('@/pages/NewTaskPage.vue') },
   // Task 详情与 Session 是同一页面（Task 即会话的载体）
   { path: '/tasks/:id', redirect: (to) => `/sessions/${to.params.id}` },
   { path: '/sessions/:id', component: () => import('@/pages/SessionPage.vue') },

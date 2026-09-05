@@ -5,10 +5,9 @@
 //   中部：按项目分组的任务列表（默认收起，查看会话详情时自动展开所在分组）
 //   底部：设置 / 连接指示
 import { computed, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useSessionStore } from '@/stores/session'
-import { useAppStore } from '@/stores/app'
 import { useApprovalStore } from '@/stores/approval'
 import { useTaskStore } from '@/stores/task'
 import { useNotificationStore } from '@/stores/notification'
@@ -17,9 +16,9 @@ import type { TaskGroup, TaskStatus } from '@/types/task'
 const emit = defineEmits<{ navigate: [] }>()
 
 const route = useRoute()
+const router = useRouter()
 const { connection, reconnect } = useWebSocket()
 const sessionStore = useSessionStore()
-const appStore = useAppStore()
 const approvalStore = useApprovalStore()
 const taskStore = useTaskStore()
 const notify = useNotificationStore()
@@ -94,7 +93,7 @@ async function onDelete(id: string) {
       </nav>
       <button
         class="mt-2 w-full rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
-        @click="emit('navigate'); appStore.newTaskOpen = true"
+        @click="emit('navigate'); router.push('/tasks/new')"
       >
         ＋ 新建任务
       </button>

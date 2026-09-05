@@ -12,8 +12,8 @@ const { connection, reconnect } = useWebSocket()
 const sessionStore = useSessionStore()
 const appStore = useAppStore()
 
-/** 会话页隐藏 TopBar，全屏时间线（返回靠 SessionHeader） */
-const isSession = () => route.path.startsWith('/sessions/')
+/** 会话页 / 新建任务页隐藏 TopBar，返回靠页内 Header（与详情页一致） */
+const isSession = () => route.path.startsWith('/sessions/') || route.path === '/tasks/new'
 </script>
 
 <template>

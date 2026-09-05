@@ -7,7 +7,7 @@
 import { computed, ref, watch } from 'vue'
 import { getFeedback, rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
 import type { FileChangeDto, FeedbackBundleDto, RewindVerificationDto } from '@/types/api'
-import Modal from '@/components/ui/Modal.vue'
+import Drawer from '@/components/ui/Drawer.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import Button from '@/components/ui/Button.vue'
 import TurnCard from './TurnCard.vue'
@@ -127,7 +127,7 @@ watch(
 </script>
 
 <template>
-  <Modal :open="open" title="变更反馈" max-width="max-w-2xl" @close="emit('close')">
+  <Drawer :open="open" title="变更反馈" @close="emit('close')">
     <div v-if="loading && !bundle" class="flex items-center justify-center gap-2 py-10 text-sm text-muted">
       <Spinner class="h-4 w-4" /> 加载中…
     </div>
@@ -214,5 +214,5 @@ watch(
     </template>
 
     <div v-else class="py-10 text-center text-xs text-muted">暂无数据</div>
-  </Modal>
+  </Drawer>
 </template>

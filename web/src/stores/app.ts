@@ -22,8 +22,6 @@ export const useAppStore = defineStore('app', {
     completions: { commands: [], skills: [] } as CompletionSources,
     /** 移动端侧栏抽屉 */
     mobileNavOpen: false,
-    /** 全局新建任务弹窗 */
-    newTaskOpen: false,
   }),
 
   actions: {

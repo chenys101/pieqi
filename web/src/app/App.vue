@@ -1,9 +1,8 @@
 <script setup lang="ts">
-// 应用根组件：一次性 providers 接线 + 全局横幅 / Toast / 新建任务弹窗。
+// 应用根组件：一次性 providers 接线 + 全局横幅 / Toast。
 import { setupProviders } from './providers'
 import AppLayout from '@/layouts/AppLayout.vue'
 import ToastHost from '@/components/ui/ToastHost.vue'
-import { NewTaskDialog } from '@/features/task'
 import { useAppStore } from '@/stores/app'
 
 setupProviders()
@@ -30,6 +29,5 @@ const bannerClass = {
     <RouterView />
   </AppLayout>
 
-  <NewTaskDialog :open="appStore.newTaskOpen" @close="appStore.newTaskOpen = false" />
   <ToastHost />
 </template>
