@@ -35,6 +35,12 @@ func TestConfig_AuthDefaults(t *testing.T) {
 	if cfg.Auth.Cloudflared.DefaultTTL != 15*time.Minute {
 		t.Fatalf("default ttl = %v, want 15m", cfg.Auth.Cloudflared.DefaultTTL)
 	}
+	if cfg.Auth.Cloudflared.HealthCheckInterval != 5*time.Minute {
+		t.Fatalf("health_check_interval default = %v, want 5m", cfg.Auth.Cloudflared.HealthCheckInterval)
+	}
+	if cfg.Auth.Cloudflared.HealthCheckFailures != 3 {
+		t.Fatalf("health_check_failures default = %d, want 3", cfg.Auth.Cloudflared.HealthCheckFailures)
+	}
 	if cfg.Auth.RateLimit.MaxFailuresPerMin != 5 || cfg.Auth.RateLimit.BlacklistDuration != 10*time.Minute {
 		t.Fatalf("ratelimit defaults wrong: %+v", cfg.Auth.RateLimit)
 	}
@@ -48,6 +54,8 @@ auth:
   cloudflared:
     binary_path: /usr/local/bin/cloudflared
     default_ttl: 1h
+    health_check_interval: 30s
+    health_check_failures: 5
   ratelimit:
     max_failures_per_min: 3
     blacklist_duration: 5m
@@ -61,6 +69,12 @@ auth:
 	}
 	if cfg.Auth.Cloudflared.DefaultTTL != time.Hour {
 		t.Fatalf("ttl = %v, want 1h", cfg.Auth.Cloudflared.DefaultTTL)
+	}
+	if cfg.Auth.Cloudflared.HealthCheckInterval != 30*time.Second {
+		t.Fatalf("health_check_interval = %v, want 30s", cfg.Auth.Cloudflared.HealthCheckInterval)
+	}
+	if cfg.Auth.Cloudflared.HealthCheckFailures != 5 {
+		t.Fatalf("health_check_failures = %d, want 5", cfg.Auth.Cloudflared.HealthCheckFailures)
 	}
 }
 
@@ -160,6 +174,44 @@ func TestConfig_AgentsDefaults(t *testing.T) {
 	}
 	if cfg.Agents.Qoder.ACP.AgentType != "qodercli" {
 		t.Fatalf("agents.qoder.acp.agent_type default = %q, want qodercli", cfg.Agents.Qoder.ACP.AgentType)
+	}
+}
+
+func TestConfig_AutoApproveTools(t *testing.T) {
+	// 默认：文件改动类 ACP ToolKind 免审（edit/delete/move）。
+	p := writeTestConfig(t, "server:\n  port: 3000\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := []string{"edit", "delete", "move"}
+	if len(cfg.Pieqi.AutoApproveTools) != len(want) {
+		t.Fatalf("auto_approve_tools default = %v, want %v", cfg.Pieqi.AutoApproveTools, want)
+	}
+	for i, w := range want {
+		if cfg.Pieqi.AutoApproveTools[i] != w {
+			t.Fatalf("auto_approve_tools default = %v, want %v", cfg.Pieqi.AutoApproveTools, want)
+		}
+	}
+
+	// 覆盖：显式配置全量替换默认（如只留 edit，或清空关闭免审）。
+	p2 := writeTestConfig(t, "pieqi:\n  auto_approve_tools: [\"edit\"]\n")
+	cfg2, err := Load(p2)
+	if err != nil {
+		t.Fatalf("load override: %v", err)
+	}
+	if len(cfg2.Pieqi.AutoApproveTools) != 1 || cfg2.Pieqi.AutoApproveTools[0] != "edit" {
+		t.Fatalf("auto_approve_tools override = %v, want [edit]", cfg2.Pieqi.AutoApproveTools)
+	}
+
+	// 空名单 = 显式关闭免审（所有权限请求都走人工审批）。
+	p3 := writeTestConfig(t, "pieqi:\n  auto_approve_tools: []\n")
+	cfg3, err := Load(p3)
+	if err != nil {
+		t.Fatalf("load empty: %v", err)
+	}
+	if len(cfg3.Pieqi.AutoApproveTools) != 0 {
+		t.Fatalf("auto_approve_tools empty = %v, want []", cfg3.Pieqi.AutoApproveTools)
 	}
 }
 

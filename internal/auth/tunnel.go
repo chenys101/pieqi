@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -29,6 +30,16 @@ type TunnelConfig struct {
 	// 下次 Start 时按此文件杀掉上一次的残留，避免多份隧道堆积。
 	// 空 = 不启用 PID 文件清理。
 	PIDFile string
+
+	// OnHeal 在自动健康检查发现 trycloudflare 域名被 Cloudflare 回收、
+	// 并成功重启隧道（换全新域名 + 新 token）后回调。参数为新隧道结果
+	// （含新 URL / lark 深链 / token / 到期时间）。nil = 静默。
+	// TunnelManager 保持飞书无关 —— 接线方（main.go）负责把新链接推给用户。
+	OnHeal func(TunnelResult)
+
+	// OnHealErr 在自动自愈失败（旧隧道已死、新 cloudflared 起不来）时回调，
+	// 此时隧道已完全下线，需告知用户手动重启。nil = 静默。
+	OnHealErr func(error)
 }
 
 // TunnelResult is returned from Start/Reset — sent to the front-end as-is.
@@ -80,6 +91,16 @@ type TunnelManager struct {
 
 	// killFunc 杀掉一个 pid。默认实现真杀；测试注入 fake 记录调用。
 	killFunc func(pid int) error
+
+	// --- 自动自愈（域名回收检测）---
+	// healthLoop 是进程生命周期的单例 goroutine（StartHealthCheck 幂等启动），
+	// 每 tick 探测当前活跃隧道的 hostname；连续失败达到阈值后自动重启换新域名。
+	healthStop chan struct{}            // 关闭即停止巡检（StopHealthCheck）
+	healthDone chan struct{}            // 巡检 goroutine 退出信号（测试收尾用）
+	healthOnce sync.Once                // 保证只启动一个巡检 goroutine
+	stopOnce   sync.Once                // 保证 healthStop 只 close 一次
+	healthCheck func(rawURL string) bool // 注入式探测；nil = 默认 HTTP 探测 hostAlive
+	ttl        time.Duration            // 最近一次 Start 的 TTL，自愈重启时沿用（用户设定的 15m/1h/4h 意图）
 }
 
 // NewTunnelManager constructs a manager. Does NOT start anything.
@@ -264,6 +285,7 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 	m.url = full
 	m.token = tok
 	m.expires = expires
+	m.ttl = ttl // 自愈重启沿用本次 TTL（仅 Start 设置；RenewToken 的 ttl 是增量，不覆盖）
 	m.mu.Unlock()
 	m.writePIDFile(cmd.Process.Pid)
 
@@ -467,6 +489,154 @@ func (m *TunnelManager) FullURL() string {
 		return ""
 	}
 	return m.url
+}
+
+// StartHealthCheck 启动后台巡检 goroutine（幂等：整个进程生命周期只启一个）。
+// interval <= 0 或 failures < 1 时不启动。巡检逻辑见 healthLoop。
+func (m *TunnelManager) StartHealthCheck(interval time.Duration, failures int) {
+	if interval <= 0 || failures < 1 {
+		return
+	}
+	m.healthOnce.Do(func() {
+		m.healthStop = make(chan struct{})
+		m.healthDone = make(chan struct{})
+		go m.healthLoop(interval, failures)
+	})
+}
+
+// StopHealthCheck 停止巡检 goroutine。幂等；仅在测试收尾调用（进程退出由
+// os.Exit 直接终止，无需优雅停止，故不接到 main.go 的 SIGINT handler）。
+func (m *TunnelManager) StopHealthCheck() {
+	if m.healthStop == nil {
+		return
+	}
+	m.stopOnce.Do(func() {
+		close(m.healthStop)
+		<-m.healthDone
+	})
+}
+
+// healthLoop 周期性探测当前活跃隧道 hostname 的存活。Cloudflare 会周期性
+// 回收 trycloudflare 快速隧道域名（公网 DNS 变 NXDOMAIN），即使 cloudflared
+// 进程仍连着、状态仍报告 active —— 已分发的链接彻底失效。此时自动重启
+// 隧道拿全新域名 + 新 token，并回调 OnHeal / OnHealErr 让接线方推送新链接。
+//
+// 判定纪律：连续 failures 次探测失败才确认死亡，避免 ISP/DNS 瞬时抖动误杀。
+// "无活跃隧道"（含崩溃后 watch 已清空状态）一律跳过并归零 —— 本特性只覆盖
+// 域名回收，不复活管理员主动关闭的隧道。
+func (m *TunnelManager) healthLoop(interval time.Duration, failures int) {
+	defer close(m.healthDone)
+	check := m.healthCheck
+	if check == nil {
+		check = hostAlive
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	streak := 0
+	for {
+		select {
+		case <-m.healthStop:
+			return
+		case <-t.C:
+			// 快照当前状态（锁内取值，锁外探测 + 重启）。
+			m.mu.Lock()
+			if m.cmd == nil || m.url == "" {
+				m.mu.Unlock()
+				streak = 0
+				continue
+			}
+			rawURL := m.url
+			ttl := m.ttl
+			m.mu.Unlock()
+
+			if check(rawURL) {
+				streak = 0
+				continue
+			}
+			streak++
+			if streak < failures {
+				continue
+			}
+			streak = 0 // 已触发一轮自愈，不再累计
+
+			if host := logHostnameOnly(rawURL); host != "" && m.cfg.Logger != nil {
+				m.cfg.Logger.Info("tunnel hostname unreachable; auto-healing", zap.String("host", host))
+			}
+			if ttl <= 0 {
+				ttl = 15 * time.Minute
+			}
+			// 锁已释放：Start 内部自取锁（含 stopLocked），无重入风险；
+			// 旧 watch goroutine 醒来会因 m.cmd != oldCmd 直接返回，不碰 token。
+			res, err := m.Start(context.Background(), ttl)
+			if err != nil {
+				if m.cfg.Logger != nil {
+					m.cfg.Logger.Warn("tunnel auto-heal restart failed; tunnel is down", zap.Error(err))
+				}
+				if m.cfg.OnHealErr != nil {
+					m.cfg.OnHealErr(err)
+				}
+				continue
+			}
+			// 竞态缓解：若自愈重启期间管理员刚好「关隧道」，Start 里 stopLocked
+			// 已把 cmd 置 nil，但新 spawn 仍会 stash 进去导致隧道"复活"；这里复查
+			// IsActive，为假则跳过"已自愈"通知，避免误导管理员。
+			if !m.IsActive() {
+				continue
+			}
+			if m.cfg.Logger != nil {
+				m.cfg.Logger.Info("tunnel auto-healed; new hostname issued", zap.String("tunnel_url_no_token", logHostnameOnly(res.TunnelURL)))
+			}
+			if m.cfg.OnHeal != nil {
+				m.cfg.OnHeal(res)
+			}
+		}
+	}
+}
+
+// logHostnameOnly 从带 token 的完整 URL 里取出纯 hostname，供日志使用
+// （延续"token 绝不落日志"的纪律，见 TunnelResult.Token 注释）。
+func logHostnameOnly(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// hostAlive 默认探测：GET https://<host>/ 能否拿到任何 HTTP 响应。
+// 关键：**任何状态码（含 401/403/302/502）都证明 hostname 在公网存活**
+// —— 请求能到达 Cloudflare 边缘并被隧道转发回来；只有 DNS 解析失败 /
+// 连接失败 / 超时算"死亡"。因此 token 过期导致的 401 不会误触发换域名，
+// 域名存活检测与 token 存活检测（RenewToken 的职责）被正确解耦。
+// 每次探测新建 Client + Transport{Proxy:nil}：忽略 HTTP(S)_PROXY 环境变量，
+// 保证 NXDOMAIN 对本机 DNS 真实可观测，且不命中 keep-alive 的旧连接。
+func hostAlive(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	probe := u.Scheme + "://" + u.Host + "/"
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probe, nil)
+	if err != nil {
+		return false
+	}
+	client := &http.Client{
+		Timeout: 8 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse // 不跟随重定向，首响应即存活证据
+		},
+		Transport: &http.Transport{Proxy: nil},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	_, _ = io.Copy(io.Discard, resp.Body) // 排干 body，避免 keep-alive 钉住陈旧连接
+	_ = resp.Body.Close()
+	return true
 }
 
 // wipeTokensOnDebugOff clears all tunnel tokens when the debug switch

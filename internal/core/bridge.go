@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"pieqi/internal/auth"
@@ -44,6 +45,14 @@ type Bridge struct {
 	// 隧道命令（main.go 注入；nil = 隧道未启用）
 	tunnel       TunnelOps
 	adminBinding AdminBinding
+
+	// 隧道自动自愈通知：最近一次由管理员在 IM 操作隧道的飞书会话 chat_id。
+	// TunnelManager 的自愈回调（OnHeal / OnHealErr）经 NotifyTunnelHeal /
+	// NotifyTunnelHealErr 往这里推送新链接。只记最近一个操作者：若 A 开启后
+	// B 又操作过，B 会收到自愈通知（可接受，见 NotifyTunnelHeal 注释）。
+	// 若隧道仅由 API（非 IM）启动则此字段为空，推送安全降级为 no-op。
+	notifyMu         sync.Mutex
+	lastTunnelChatID string
 }
 
 // pieqiMode Pieqi 模式的依赖集合。
@@ -167,6 +176,48 @@ func (b *Bridge) NotifyOrigin(task *model.Task, text string) {
 	}
 }
 
+// NotifyTunnelHeal 在隧道被自动健康检查换新域名后，向最近一次在 IM 操作隧道的
+// 飞书会话推送新链接（由 TunnelManager 的 OnHeal 回调触发，见 main.go 接线）。
+// 旧链接已被 Cloudflare 回收，必须让管理员拿到新链接重新分发。
+func (b *Bridge) NotifyTunnelHeal(res auth.TunnelResult) {
+	b.notifyMu.Lock()
+	chatID := b.lastTunnelChatID
+	b.notifyMu.Unlock()
+	if chatID == "" {
+		// 隧道可能由 API（非 IM）启动：没有可推送的会话，静默降级。
+		b.logger.Debug("tunnel healed but no admin chat recorded; skip push")
+		return
+	}
+	s, ok := b.senders[string(model.ChannelLark)]
+	if !ok {
+		b.logger.Debug("tunnel healed but lark sender not registered; skip push")
+		return
+	}
+	text := fmt.Sprintf(
+		"⚠️ 隧道域名已被 Cloudflare 回收，旧链接已失效。\n🛠 已自动重启并换用新域名：\n🔗 飞书内打开: %s\n🌐 直接访问: %s\n⏰ 到期: %s",
+		res.LarkDeepLink, res.TunnelURL, res.ExpiresAt.Format("15:04:05"))
+	b.sendChunk(s, chatID, text)
+}
+
+// NotifyTunnelHealErr 在自动自愈失败（旧隧道已死、新 cloudflared 起不来）时，
+// 通知管理员隧道已完全下线，需手动重启。
+func (b *Bridge) NotifyTunnelHealErr(_ error) {
+	b.notifyMu.Lock()
+	chatID := b.lastTunnelChatID
+	b.notifyMu.Unlock()
+	if chatID == "" {
+		b.logger.Debug("tunnel heal failed but no admin chat recorded; skip push")
+		return
+	}
+	s, ok := b.senders[string(model.ChannelLark)]
+	if !ok {
+		b.logger.Debug("tunnel heal failed but lark sender not registered; skip push")
+		return
+	}
+	text := "🚨 隧道自动恢复失败，当前已无可用隧道。\n请在聊天里发送「隧道」手动重启。"
+	b.sendChunk(s, chatID, text)
+}
+
 // -- Helpers --
 
 func splitText(text string, maxLen int) []string {
@@ -222,6 +273,11 @@ func (b *Bridge) handleTunnelCommand(msg model.Message, op string, ttl time.Dura
 		b.reply(msg, "⛔ 仅绑定的飞书管理员可操作隧道。")
 		return
 	}
+
+	// 记录最近操作隧道的飞书会话，供自动自愈（NotifyTunnelHeal/Err）推送新链接。
+	b.notifyMu.Lock()
+	b.lastTunnelChatID = msg.ChatID
+	b.notifyMu.Unlock()
 
 	switch op {
 	case "stop":

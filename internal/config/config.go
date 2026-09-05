@@ -82,9 +82,10 @@ type APIConfig struct {
 // PieqiConfig Pieqi 后端总开关与行为参数
 type PieqiConfig struct {
 	Enabled                 bool          `mapstructure:"enabled"`
-	WorktreeBase            string        `mapstructure:"worktree_base"`   // worktree 根目录
-	SkillsDirs              []string      `mapstructure:"skills_dirs"`     // 空 = 默认 ~/.claude/skills
-	PermissionMode          string        `mapstructure:"permission_mode"` // 默认 "bypassPermissions"，hook 真正拦截
+	WorktreeBase            string        `mapstructure:"worktree_base"`      // worktree 根目录
+	SkillsDirs              []string      `mapstructure:"skills_dirs"`        // 空 = 默认 ~/.claude/skills
+	PermissionMode          string        `mapstructure:"permission_mode"`    // 默认 "bypassPermissions"，hook 真正拦截
+	AutoApproveTools        []string      `mapstructure:"auto_approve_tools"` // 免审名单：ACP ToolKind 命中即自动放行（不中断等人工审批）；默认 edit/delete/move
 	CleanupWorktrees        bool          `mapstructure:"cleanup_worktrees"`
 	HookTimeout             time.Duration `mapstructure:"hook_timeout"`               // hook 等决策上限，Phase 0 验证后定
 	HookTools               []string      `mapstructure:"hook_tools"`                 // PreToolUse 拦截的工具名，默认 Bash/Write/Edit/NotebookEdit
@@ -174,6 +175,13 @@ type AuthConfig struct {
 type CloudflaredConfig struct {
 	BinaryPath string        `mapstructure:"binary_path"` // cloudflared 可执行路径；默认 "cloudflared"（PATH 查找）
 	DefaultTTL time.Duration `mapstructure:"default_ttl"` // 默认 15m；可选 15m/1h/4h
+
+	// 自动自愈（域名回收检测）：Cloudflare 会周期性回收 trycloudflare 快速
+	// 隧道域名（公网 DNS 变 NXDOMAIN），即使 cloudflared 进程仍存活。TunnelManager
+	// 按 HealthCheckInterval 周期探测 hostname，连续 HealthCheckFailures 次失败
+	// 即判定死亡，自动重启隧道换新域名并推送新链接。
+	HealthCheckInterval time.Duration `mapstructure:"health_check_interval"` // 默认 5m；<=0 关闭巡检
+	HealthCheckFailures int           `mapstructure:"health_check_failures"` // 默认 3；连续失败阈值
 }
 
 // RateLimitConfig 外网 Token 暴力破解限流。
@@ -199,6 +207,9 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("api.enabled", true)
 	v.SetDefault("pieqi.enabled", false)
 	v.SetDefault("pieqi.permission_mode", "bypassPermissions")
+	// 免审名单：Claude Code 适配器把 Edit/Write/MultiEdit/NotebookEdit 都映射到 ACP ToolKind
+	// "edit"，Delete→"delete"，Rename/Move→"move"（ACP 协议标准 ToolKind，见 acp-go-sdk types_gen.go）。
+	v.SetDefault("pieqi.auto_approve_tools", []string{"edit", "delete", "move"})
 	v.SetDefault("pieqi.cleanup_worktrees", true)
 	v.SetDefault("pieqi.hook_timeout", "30m")
 	v.SetDefault("pieqi.hook_tools", []string{"Bash", "Write", "Edit", "NotebookEdit"})
@@ -220,6 +231,8 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("auth.feishu_binding_file", filepath.Join(DefaultDataRoot(), "feishu_binding.json"))
 	v.SetDefault("auth.cloudflared.binary_path", "cloudflared")
 	v.SetDefault("auth.cloudflared.default_ttl", "15m")
+	v.SetDefault("auth.cloudflared.health_check_interval", "5m")
+	v.SetDefault("auth.cloudflared.health_check_failures", 3)
 	v.SetDefault("auth.ratelimit.max_failures_per_min", 5)
 	v.SetDefault("auth.ratelimit.blacklist_duration", "10m")
 	v.SetDefault("channels.lark.event_mode", "webhook")

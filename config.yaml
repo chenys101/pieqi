@@ -34,6 +34,10 @@ pieqi:
   worktree_base: ""              # worktree 根目录；留空默认 ~/.pieqi/worktrees
   skills_dirs: []                # 空 = 默认 ~/.claude/skills + CLAUDE_CONFIG_DIR/.claude/skills
   permission_mode: bypassPermissions  # claude 自身不拦，由 PreToolUse hook 拦截
+  # ACP 审批免审名单（按 ToolKind 匹配）：命中直接自动放行，不中断等人工审核。
+  # 默认 edit/delete/move（Edit/Write/MultiEdit/NotebookEdit→edit，Delete→delete，Rename→move）。
+  # 清空 [] 关闭免审（全部走人工审批）；可加 execute/read 等其它 kind 或移除不想要的。
+  auto_approve_tools: [edit, delete, move]
   cleanup_worktrees: true        # 任务完成即清 worktree
   hook_timeout: 30m              # hook 等人类决策的上限
   hook_tools: [Bash, Write, Edit, NotebookEdit]  # PreToolUse 拦截的工具；读类不拦
@@ -79,6 +83,10 @@ auth:
   cloudflared:
     binary_path: cloudflared           # PATH 中查找；或绝对路径 /usr/local/bin/cloudflared
     default_ttl: 15m                   # 15m | 1h | 4h
+    # 自动自愈：Cloudflare 会周期性回收 trycloudflare 域名（链接失效）。按间隔
+    # 探测 hostname 存活，连续失败达阈值即自动重启隧道换新域名并推送飞书。
+    health_check_interval: 5m          # <=0 关闭巡检
+    health_check_failures: 3           # 连续失败次数阈值
   ratelimit:
     max_failures_per_min: 5            # 5 次/分钟 → 拉黑
     blacklist_duration: 10m            # 拉黑 10 分钟

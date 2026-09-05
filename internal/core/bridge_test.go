@@ -258,3 +258,71 @@ func TestHandlePieqiMessage_NonCommandGuide(t *testing.T) {
 		t.Errorf("non-command message should get PWA guide: %v", sender.sent)
 	}
 }
+
+// --- NotifyTunnelHeal / NotifyTunnelHealErr（自动自愈推送）---
+
+func TestTunnelHeal_NotifiesLastTunnelChat(t *testing.T) {
+	b, sender := newTestBridge(t, &fakeTunnel{}, &fakeAdmin{openid: "ou_admin"})
+	// 管理员先发起隧道命令 → 记录其飞书会话
+	b.handlePieqiMessage(larkMsg("ou_admin"), "隧道")
+
+	b.NotifyTunnelHeal(auth.TunnelResult{
+		TunnelURL:    "https://new-xyz.trycloudflare.com?token=tk2",
+		LarkDeepLink: "lark://open?url=https%3A%2F%2Fnew-xyz.trycloudflare.com%3Ftoken%3Dtk2",
+		Token:        "tk2",
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+	})
+
+	if len(sender.sent) == 0 {
+		t.Fatal("heal must push a message")
+	}
+	msg := sender.sent[len(sender.sent)-1]
+	if !strings.Contains(msg, "new-xyz.trycloudflare.com") {
+		t.Errorf("heal push should contain the new tunnel url: %s", msg)
+	}
+	if !strings.Contains(msg, "lark://open?url=") {
+		t.Errorf("heal push should contain the lark deep link: %s", msg)
+	}
+	// 推送到最近一次操作隧道的会话（而非所有会话）
+	if sender.chatIDs[len(sender.chatIDs)-1] != "oc_test" {
+		t.Errorf("heal push target = %q, want oc_test", sender.chatIDs[len(sender.chatIDs)-1])
+	}
+}
+
+func TestTunnelHeal_NoChatRecorded_Noop(t *testing.T) {
+	// 隧道从未通过 IM 操作（lastTunnelChatID 为空）→ 推送安全降级为 no-op
+	b, sender := newTestBridge(t, &fakeTunnel{}, &fakeAdmin{openid: "ou_admin"})
+	b.NotifyTunnelHeal(auth.TunnelResult{TunnelURL: "https://x.trycloudflare.com?token=t", ExpiresAt: time.Now()})
+	if len(sender.sent) != 0 {
+		t.Fatalf("heal must not push when no admin chat recorded, got: %v", sender.sent)
+	}
+}
+
+func TestTunnelHeal_NoLarkSender_Noop(t *testing.T) {
+	// 有记录会话，但 lark sender 未注册（仅 wechat）→ 不发送
+	b := NewBridge(zap.NewNop())
+	wxSender := &fakeSender{}
+	b.RegisterSender("wechat", wxSender)
+	b.EnableTunnelOps(&fakeTunnel{}, &fakeAdmin{openid: "ou_admin"})
+	b.notifyMu.Lock()
+	b.lastTunnelChatID = "oc_x" // 直接注入（等价于管理员曾操作隧道）
+	b.notifyMu.Unlock()
+
+	b.NotifyTunnelHeal(auth.TunnelResult{TunnelURL: "https://x.trycloudflare.com?token=t", ExpiresAt: time.Now()})
+	if len(wxSender.sent) != 0 {
+		t.Fatalf("heal must push only via lark sender, wechat got: %v", wxSender.sent)
+	}
+}
+
+func TestTunnelHealErr_NotifiesLastTunnelChat(t *testing.T) {
+	b, sender := newTestBridge(t, &fakeTunnel{}, &fakeAdmin{openid: "ou_admin"})
+	b.handlePieqiMessage(larkMsg("ou_admin"), "隧道")
+
+	b.NotifyTunnelHealErr(context.DeadlineExceeded)
+	if len(sender.sent) == 0 {
+		t.Fatal("heal-err must push a message")
+	}
+	if !strings.Contains(sender.sent[len(sender.sent)-1], "手动重启") {
+		t.Errorf("heal-err push should tell admin to restart manually: %v", sender.sent[len(sender.sent)-1])
+	}
+}

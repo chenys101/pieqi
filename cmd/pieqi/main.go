@@ -114,6 +114,8 @@ func main() {
 		execPath, cfg.Server.Port, cfg.Pieqi.HookTools, hookTimeoutSec,
 		cfg.Pieqi.MaxConcurrentPerProject, cfg.Pieqi.BaseBranch,
 	)
+	// ACP 审批免审名单：edit/delete/move 等文件改动类权限自动放行，不中断等人工审批。
+	runner.SetAutoApproveTools(cfg.Pieqi.AutoApproveTools)
 
 	// Feedback P0（p0-design.md）：Checkpoint 存储 + Preview 管理器。
 	// runner 挂钩（baseline / Turn 快照捕获），API 侧经 SetFeedback 接线。
@@ -273,10 +275,16 @@ func main() {
 		// 跨重启清理孤儿 cloudflared：强杀服务时 defer Stop 不执行，PID 文件
 		// 让下次 Start 能杀掉残留进程（见 auth.TunnelManager.cleanupOrphans）。
 		PIDFile: filepath.Join(dataRoot, "cloudflared.pid"),
+		// 自动自愈：域名被 Cloudflare 回收后重启换新域名，并推送新链接到飞书管理员。
+		OnHeal:    bridge.NotifyTunnelHeal,
+		OnHealErr: bridge.NotifyTunnelHealErr,
 	})
 	defer tunnelMgr.Stop(context.Background())
 	// IM 隧道命令（绑定管理员在飞书聊天里发「隧道」/「关隧道」驱动 cloudflared）
 	bridge.EnableTunnelOps(tunnelMgr, authBindings)
+	// 启动域名存活巡检（Cloudflare 会周期性回收 trycloudflare 域名；连续失败
+	// 达阈值自动重启隧道换新域名并推送）。进程生命周期运行，随 os.Exit 终止。
+	tunnelMgr.StartHealthCheck(cfg.Auth.Cloudflared.HealthCheckInterval, cfg.Auth.Cloudflared.HealthCheckFailures)
 
 	// API
 	if cfg.API.Enabled {
