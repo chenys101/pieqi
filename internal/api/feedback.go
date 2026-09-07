@@ -78,6 +78,8 @@ func (s *Server) getFeedback(c *gin.Context) {
 
 // cumulativeSummary 累计统计：tracked 走 git numstat（HEAD 对比），
 // untracked（Task 期间新建）按当前文件全增；deleted 由 numstat 给出 -N。
+// 非 git 项目（无 HEAD 参照）用 pre/ 基线快照 diff（CaptureBaseline 已全量捕获），
+// 避免 numstat 全空 → 全部落入 untracked → 整文件当新增（数据失真）。
 func (s *Server) cumulativeSummary(task *model.Task, changes []core.FileChange) core.ChangeSummary {
 	if len(changes) == 0 {
 		return core.ChangeSummary{}
@@ -85,6 +87,20 @@ func (s *Server) cumulativeSummary(task *model.Task, changes []core.FileChange) 
 	paths := make([]string, 0, len(changes))
 	for _, fc := range changes {
 		paths = append(paths, fc.Path)
+	}
+	if task.Baseline == nil || task.Baseline.HeadSHA == "" {
+		sum := core.ChangeSummary{Files: len(paths)}
+		for _, fc := range changes {
+			before, bOK := s.feedback.AssembleBefore(task, 1, fc.Path) // Turn 1 之前 = Task 起始
+			after, aOK := core.ReadWorktreeFile(task.WorktreePath, fc.Path)
+			if core.IsBinaryContent(before) || core.IsBinaryContent(after) {
+				continue // 二进制不计行数
+			}
+			_, add, del := core.UnifiedDiff(fc.Path, stringOrEmpty(bOK, before), stringOrEmpty(aOK, after), 3)
+			sum.Additions += add
+			sum.Deletions += del
+		}
+		return sum
 	}
 	head := "HEAD"
 	if task.Baseline != nil && task.Baseline.HeadSHA != "" {
@@ -176,7 +192,11 @@ func (s *Server) turnDiff(task *model.Task, turn int, path string) (op, diff str
 }
 
 // baselineDiff 单文件 · Baseline 累计：tracked 走 git diff（真实），untracked 全增。
+// 非 git 项目（无 HEAD 参照）用 pre/ 基线快照作为 before（CaptureBaseline 已全量捕获）。
 func (s *Server) baselineDiff(task *model.Task, path string) (op, diff string, add, del int, binary bool) {
+	if task.Baseline == nil || task.Baseline.HeadSHA == "" {
+		return s.baselineDiffNonGit(task, path)
+	}
 	head := "HEAD"
 	if task.Baseline != nil && task.Baseline.HeadSHA != "" {
 		head = task.Baseline.HeadSHA
@@ -207,6 +227,24 @@ func (s *Server) baselineDiff(task *model.Task, path string) (op, diff string, a
 	}
 	diff, add, del = core.UnifiedDiff(path, "", stringOrEmpty(aOK, after), 3)
 	return "create", diff, add, del, false
+}
+
+// baselineDiffNonGit 非 git 项目的 Baseline 累计 diff：无 HEAD 参照，
+// before = pre/ 基线快照（Task 起始，CaptureBaseline 已全量捕获），after = 当前工作区。
+func (s *Server) baselineDiffNonGit(task *model.Task, path string) (op, diff string, add, del int, binary bool) {
+	before, bOK := s.feedback.AssembleBefore(task, 1, path)
+	after, aOK := core.ReadWorktreeFile(task.WorktreePath, path)
+	if core.IsBinaryContent(before) || core.IsBinaryContent(after) {
+		return "modify", "", 0, 0, true
+	}
+	op = "modify"
+	if !bOK {
+		op = "create"
+	} else if !aOK {
+		op = "delete"
+	}
+	diff, add, del = core.UnifiedDiff(path, stringOrEmpty(bOK, before), stringOrEmpty(aOK, after), 3)
+	return op, diff, add, del, false
 }
 
 // countDiffLines 从 unified diff 文本统计 + / - 行数（排除 +++/--- 头）。
