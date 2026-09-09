@@ -29,13 +29,13 @@ func TestAttachPreviewURL(t *testing.T) {
 			name: "带 token",
 			full: "https://abc.trycloudflare.com?token=seCret123",
 			taskID: "t1",
-			want: "https://abc.trycloudflare.com/api/tasks/t1/preview/?token=seCret123",
+			want: "https://abc.trycloudflare.com/preview/t1/?token=seCret123",
 		},
 		{
 			name: "无 token",
 			full: "https://abc.trycloudflare.com",
 			taskID: "t2",
-			want: "https://abc.trycloudflare.com/api/tasks/t2/preview/",
+			want: "https://abc.trycloudflare.com/preview/t2/",
 		},
 		{
 			name: "空 URL",
@@ -152,7 +152,7 @@ func TestAPI_P1_PreviewAttach(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &resp)
 
-	wantPrefix := "https://api-test.trycloudflare.com/api/tasks/" + task.ID + "/preview/?token="
+	wantPrefix := "https://api-test.trycloudflare.com/preview/" + task.ID + "/?token="
 	if len(resp.URL) <= len(wantPrefix) || resp.URL[:len(wantPrefix)] != wantPrefix {
 		t.Fatalf("url = %q, want prefix %q", resp.URL, wantPrefix)
 	}

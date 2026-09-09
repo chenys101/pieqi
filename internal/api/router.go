@@ -137,6 +137,17 @@ func (s *Server) Register(r gin.IRouter) {
 		api.GET("/ws", s.handleWS)         // Phase 5 实现
 	}
 
+	// Preview 代理挂载点：刻意独立于 /api（见 core.PreviewMountPrefix 说明），
+	// 使请求不进入被预览项目自身的 /api 代理规则，避免回环 431。
+	// 中间件与 /api 组完全一致（CORS + 外网鉴权），保证安全能力不回退。
+	previewGrp := r.Group(core.PreviewMountPrefix, corsMiddleware(corsAll, corsOrigins))
+	if s.auth != nil {
+		previewGrp.Use(s.auth.ExternalAuthMiddleware())
+	} else {
+		previewGrp.Use(authMiddleware(token))
+	}
+	previewGrp.Any("/:id/*path", s.previewRoute)
+
 	// Auth (binding) 路由：bind/unbind 仅内网（BindOpGateMiddleware）；
 	// status 公开（前端 boot 轮询，无 gate）。
 	if s.auth != nil {

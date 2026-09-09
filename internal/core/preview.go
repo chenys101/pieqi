@@ -41,6 +41,23 @@ const (
 	PreviewError       = "error"
 )
 
+// --- Preview 挂载点 ---
+//
+// 刻意不挂在 /api 下：被预览项目普遍把 /api 代理到自己的后端（本项目自身即是），
+// 若预览路径同样以 /api 开头，请求抵达 dev server 后会被其 /api 规则再次代理回
+// Pieqi，形成「Pieqi → dev server → Pieqi → …」的回环，请求头逐圈累积最终
+// 431（Header overflow）。独立前缀可让请求不进入被预览项目的 /api 命名空间。
+
+// PreviewMountPrefix 预览代理的挂载前缀（不含 taskID）。
+const PreviewMountPrefix = "/preview"
+
+// PreviewBasePath 返回某 task 的预览挂载路径（以 / 结尾），如 /preview/<taskID>/。
+// vite 的 --base、代理注入的 <base href>、外链生成必须共用此值，否则会
+// 出现 base 不匹配导致的重定向循环或资源 404。
+func PreviewBasePath(taskID string) string {
+	return PreviewMountPrefix + "/" + taskID + "/"
+}
+
 // PreviewProfile Discovery 结果：如何启动这个项目的 dev server。
 type PreviewProfile struct {
 	Framework string   `json:"framework"` // vite | next | nuxt | node
@@ -128,7 +145,7 @@ func (pm *PreviewManager) spawn(taskID, projectPath string, profile PreviewProfi
 		args = appendScriptArgs(args,
 			"--port", strconv.Itoa(port), "--strictPort",
 			"--host", "127.0.0.1",
-			"--base="+"/api/tasks/"+taskID+"/preview/")
+			"--base="+PreviewBasePath(taskID))
 	case "next":
 		args = appendScriptArgs(args, "-p", strconv.Itoa(port), "-H", "127.0.0.1")
 	case "nuxt":

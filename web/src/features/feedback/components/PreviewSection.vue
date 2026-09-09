@@ -52,7 +52,7 @@ const isRunning = computed(() => status.value?.state === 'running')
 const isStarting = computed(() => status.value?.state === 'starting')
 
 /** 代理入口（相对路径，同源携带鉴权） */
-const previewURL = computed(() => `/api/tasks/${encodeURIComponent(props.taskId)}/preview/`)
+const previewURL = computed(() => `/preview/${encodeURIComponent(props.taskId)}/`)
 
 async function refresh() {
   try {

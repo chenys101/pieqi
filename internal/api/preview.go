@@ -92,6 +92,17 @@ func (s *Server) previewRoute(c *gin.Context) {
 			return
 		}
 	default:
+		// 代理能力只保留在 /preview/:id/*（见 core.PreviewMountPrefix 说明）。
+		// 旧路径 /api/tasks/:id/preview/* 一律 302 到新挂载点并带上 query（token），
+		// 避免请求落进被预览项目自身的 /api 代理规则而形成回环。
+		if strings.HasPrefix(c.FullPath(), "/api/") {
+			target := core.PreviewBasePath(c.Param("id")) + path
+			if q := c.Request.URL.RawQuery; q != "" {
+				target += "?" + q
+			}
+			c.Redirect(http.StatusFound, target)
+			return
+		}
 		s.previewProxy(c)
 		return
 	}
@@ -205,7 +216,7 @@ func attachPreviewURL(fullTunnelURL, taskID string) string {
 	if base == "" {
 		return ""
 	}
-	u := strings.TrimRight(base, "/") + "/api/tasks/" + taskID + "/preview/"
+	u := strings.TrimRight(base, "/") + core.PreviewBasePath(taskID)
 	if token != "" {
 		u += "?token=" + token
 	}
@@ -242,7 +253,7 @@ func (s *Server) previewProxy(c *gin.Context) {
 
 	// 剥掉 /api/tasks/:id/preview 前缀，余下路径原样转发（默认 "/" → dev server 根）
 	// vite 例外：spawn 时以 --base 感知子路径，代理须转发完整路径（剥前缀会让 vite 对 "/" 302 到 base → 重定向循环）
-	prefix := "/api/tasks/" + taskID + "/preview"
+	prefix := strings.TrimSuffix(core.PreviewBasePath(taskID), "/")
 	fw := s.preview.RunningFramework(taskID)
 	stripPrefix := fw != "vite"
 	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", itoa(port))}

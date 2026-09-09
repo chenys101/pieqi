@@ -70,7 +70,7 @@ func (s *Server) getFeedback(c *gin.Context) {
 			State:     st.State,
 			Framework: st.Framework,
 			Port:      st.Port,
-			URL:       "/api/tasks/" + task.ID + "/preview/",
+			URL:       core.PreviewBasePath(task.ID),
 		}
 	}
 	c.JSON(http.StatusOK, bundle)

@@ -62,7 +62,7 @@ func (s *Server) previewOf(task *model.Task) *core.FeedbackPreview {
 		State:     st.State,
 		Framework: st.Framework,
 		Port:      st.Port,
-		URL:       "/api/tasks/" + task.ID + "/preview/",
+		URL:       core.PreviewBasePath(task.ID),
 	}
 }
 
@@ -288,7 +288,7 @@ func (s *Server) verifyAfterRewind(task *model.Task, toTurn, restored int, previ
 		if err := s.preview.Restart(task); err == nil {
 			vp.Preview = map[string]interface{}{
 				"state": core.PreviewStarting,
-				"url":   "/api/tasks/" + task.ID + "/preview/",
+				"url":   core.PreviewBasePath(task.ID),
 			}
 		}
 	}
