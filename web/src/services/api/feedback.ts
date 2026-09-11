@@ -130,9 +130,22 @@ export async function rerunCheck(taskId: string, checkId: string): Promise<Check
   })
 }
 
+/**
+ * 后端 Go 的 **nil 切片会序列化成 `null`**，而这里的语义是"空列表"。
+ *
+ * 在适配层归一，而不是让每个消费方各防一次：类型声明的是数组，
+ * 那适配层就有责任让它**真的是**数组 —— 否则 `outcome.checks.length`
+ * 这种在 TS 里完全合法的写法会在运行期直接抛渲染错误。
+ * （`getChecks` 早就在用同一个套路，这里补齐另外两处。）
+ */
+function arr<T>(v: T[] | null | undefined): T[] {
+  return Array.isArray(v) ? v : []
+}
+
 /** GET /api/tasks/:id/outcome：Task 结构化结果（完成度规则派生，手机端主验收面） */
 export async function getOutcome(taskId: string): Promise<TaskOutcomeDto> {
-  return request<TaskOutcomeDto>(`/tasks/${encodeURIComponent(taskId)}/outcome`)
+  const dto = await request<TaskOutcomeDto>(`/tasks/${encodeURIComponent(taskId)}/outcome`)
+  return { ...dto, checks: arr(dto.checks), issues: arr(dto.issues), rewinds: arr(dto.rewinds) }
 }
 
 /** GET /api/tasks/:id/evidence?scope=task|turn：验证证据快照（随取随派生） */
@@ -143,7 +156,13 @@ export async function getEvidence(
 ): Promise<EvidenceDto> {
   const qs = new URLSearchParams({ scope })
   if (turn && turn > 0) qs.set('turn', String(turn))
-  return request<EvidenceDto>(`/tasks/${encodeURIComponent(taskId)}/evidence?${qs}`)
+  const dto = await request<EvidenceDto>(`/tasks/${encodeURIComponent(taskId)}/evidence?${qs}`)
+  return {
+    ...dto,
+    checks: arr(dto.checks),
+    screenshots: arr(dto.screenshots),
+    diff_brief: arr(dto.diff_brief),
+  }
 }
 
 /** POST /api/tasks/:id/continue：带当前证据续问（后端组装 prompt 走既有 Resume 路径） */

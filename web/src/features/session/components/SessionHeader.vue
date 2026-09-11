@@ -7,7 +7,19 @@ import type { Task } from '@/types/task'
 import { timeAgo } from '@/utils/date'
 import { shortId } from '@/utils/format'
 
-defineProps<{ task: Task; canCancel: boolean }>()
+withDefaults(
+  defineProps<{
+    task: Task
+    canCancel: boolean
+    /**
+     * 是否显示「反馈」按钮。**只有平板档需要** ——
+     * 宽屏有常驻贴边条、移动端有顶部分段，那两档再挂一个按钮
+     * 就是同一件事给两个入口，而且位置还不是它真正生效的地方。
+     */
+    showFeedback?: boolean
+  }>(),
+  { showFeedback: true },
+)
 const emit = defineEmits<{ cancel: []; remove: []; feedback: [] }>()
 const router = useRouter()
 </script>
@@ -29,8 +41,8 @@ const router = useRouter()
         {{ task.title }}
       </h1>
       <StatusBadge :status="task.status" />
-      <!-- 变更反馈入口（Feedback P0）：总览 / Diff / 回退 / 预览 -->
-      <Button variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
+      <!-- 变更反馈入口（仅平板档，见 showFeedback 注释） -->
+      <Button v-if="showFeedback" variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
       <Button v-if="canCancel" variant="ghost" size="sm" @click="emit('cancel')">中止</Button>
       <Button variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
     </div>

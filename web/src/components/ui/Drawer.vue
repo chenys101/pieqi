@@ -13,8 +13,14 @@ const props = withDefaults(
     dismissable?: boolean
     /** PC 固定宽度 */
     width?: string
+    /**
+     * 内容自带内边距与滚动（如变更反馈面板：它有自己的头部与滚动区）。
+     * 不开时 Drawer 负责 `p-4` + 整体滚动 —— 那个内边距会顶开面板的贴边头部，
+     * 而且两层滚动容器会互相抢。
+     */
+    flush?: boolean
   }>(),
-  { dismissable: true, width: '480px' },
+  { dismissable: true, width: '480px', flush: false },
 )
 
 const emit = defineEmits<{ close: [] }>()
@@ -54,7 +60,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
           ×
         </button>
       </header>
-      <div class="min-h-0 flex-1 overflow-y-auto p-4">
+      <div class="min-h-0 flex-1" :class="flush ? '' : 'overflow-y-auto p-4'">
         <slot />
       </div>
     </aside>
@@ -89,7 +95,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
               ×
             </button>
           </div>
-          <div class="min-h-0 flex-1 overflow-y-auto p-4">
+          <div class="min-h-0 flex-1" :class="flush ? '' : 'overflow-y-auto p-4'">
             <slot />
           </div>
         </div>

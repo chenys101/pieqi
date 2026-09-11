@@ -1,15 +1,20 @@
 <script setup lang="ts">
-// FeedbackPanel：反馈总览面板（p0-design.md §5.1 + p1-design.md §2-9）。
-// P0：累计统计 + Preview 控制 + Turn 卡片列表（最新在前，展开看文件 diff）。
-// P1：双视角 tab（本轮 Event / 累计 Baseline）、Outcome 结构化结果、Checks、
-//      Evidence→Continue 续问闭环、Rewind→Verify 回退验证。
+// FeedbackPanel：变更反馈（p0/p1/p2-design 的内容 + SPEC §5.2 / §5.2.1 的形态）。
+//
+// 一个组件三种形态，由 `mode` 决定 —— 形态差异全部来自 SPEC §6.4 的三档断点：
+//   dock    宽屏（≥1280）常驻右栏：收起是 46px 贴边条，展开是 420px 面板
+//   drawer  平板（768–1279）420px 侧栏，靠头部按钮开合（没有"收起"这个概念）
+//   full    移动端整屏：由顶部分段切换进入，没有贴边条也没有收起按钮
+//
+// 「移动端不套用收起态」不是省事，是必需：手机上没有"收起"的目标物，
+// 留着贴边条与收起按钮就是**点了没反应的死控件**。
+//
 // 数据流：打开/刷新时现场派生（后端不存第二份聚合，ADR-0001）。
 import { computed, ref, watch } from 'vue'
 import { getFeedback, rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
 import type { FileChangeDto, FeedbackBundleDto, RewindVerificationDto } from '@/types/api'
-import Drawer from '@/components/ui/Drawer.vue'
+import SegmentedControl from '@/components/ui/SegmentedControl.vue'
 import Spinner from '@/components/ui/Spinner.vue'
-import Button from '@/components/ui/Button.vue'
 import TurnCard from './TurnCard.vue'
 import PreviewSection from './PreviewSection.vue'
 import ChecksPanel from './ChecksPanel.vue'
@@ -19,24 +24,54 @@ import DiffView from './DiffView.vue'
 import FilePreview from './FilePreview.vue'
 import { previewKind } from '../filePreview'
 import { useNotificationStore } from '@/stores/notification'
+import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
 
-const props = defineProps<{
-  taskId: string
-  open: boolean
-  /** Agent 执行中禁止回退/续问（静止边界原则）；面板仍可查看 */
-  canRewind: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    taskId: string
+    /** Agent 执行中禁止回退/续问（静止边界原则）；面板仍可查看 */
+    canRewind: boolean
+    /** 形态，见文件头 */
+    mode?: 'dock' | 'drawer' | 'full'
+    /**
+     * 面板当前是否真的可见（移动端只有切到「变更反馈」分段时为 true）。
+     * 用来**闸住数据请求**：不可见时不拉，切走时不因为保持挂载而白拉。
+     */
+    active?: boolean
+  }>(),
+  { mode: 'full', active: true },
+)
 
 const emit = defineEmits<{ close: [] }>()
 
 const notify = useNotificationStore()
+const fb = useFeedbackPanelStore()
+
+/** 四个视图：SPEC §5.2 的「概览 · 变更 · 检查 · 预览」 */
+const TABS = [
+  { value: 'overview', label: '概览' },
+  { value: 'changes', label: '变更' },
+  { value: 'checks', label: '检查' },
+  { value: 'preview', label: '预览' },
+]
+const tab = ref('overview')
+
+/**
+ * 双视角（本轮 / 累计）**降级为「变更」Tab 内的二段切换**。
+ * 它本来就是同一份数据的两个切法，升到顶层会与 Tab 语义打架 ——
+ * 顶层 Tab 之间是"看哪一类东西"，它俩是"看同一类东西的哪种口径"。
+ */
+const VIEWS = [
+  { value: 'event', label: '本轮变化' },
+  { value: 'baseline', label: '累计变化' },
+]
+const view = ref('event')
+
 const bundle = ref<FeedbackBundleDto | null>(null)
 const loading = ref(false)
 const rewinding = ref<number | null>(null)
 /** P2：文件级回退中的路径（按钮态） */
 const rewindingFile = ref<string | null>(null)
-/** 双视角：event = 按 Turn 展开；baseline = 累计文件集（p1-design.md §3） */
-const view = ref<'event' | 'baseline'>('event')
 /** Baseline 视角下展开的文件路径 */
 const openBaselinePath = ref<string | null>(null)
 /** Baseline 视角下展开预览的文件路径 */
@@ -58,8 +93,39 @@ const baselineFiles = computed<FileChangeDto[]>(() => {
   return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path))
 })
 
+/**
+ * 贴边条上的变更文件数 —— **收起态自带的"要不要展开"判据**。
+ *
+ * 取后端 `cumulative.files`（走 `git diff --numstat` 与基线对比），
+ * 而不是自己数 `turns[].changes` 里的去重路径：后者只覆盖**有快照的 Turn**，
+ * 老任务 / 未落快照的轮次会数出 0，贴边条就会在明明有改动时显示"没有值得看的"。
+ *
+ * 0 时**不显示徽章而不是显示 0**：徽章要说的是"有东西值得看"，
+ * 一个恒亮的 `0` 会把"没有变更"和"还没加载完"混成同一种长相，
+ * 而这两种情况用户要做的事完全不同（一个是没事，一个是等一下）。
+ * 不显示 = 没有值得看的，这个编码本身没有歧义。
+ */
+const fileCount = computed(() => bundle.value?.cumulative?.files ?? 0)
+
 /** Continue 后 Agent 已在跑：与回退同用静止边界判断（面板仅查看） */
 const canContinue = computed(() => props.canRewind)
+
+/** 收起态（仅 dock 形态有 46px 贴边条这一说） */
+const railOnly = computed(() => props.mode === 'dock' && fb.collapsed)
+/**
+ * 是否需要/允许拉数据。
+ * dock 形态**无论收没收起都要拉** —— 贴边条上的文件数就来自这份数据，
+ * 「不展开也知道有没有值得看的东西」是 SPEC 对收起态提的硬要求，
+ * 不是可以省掉的一次请求。其余形态只在可见时才拉。
+ */
+const shouldLoad = computed(() => props.mode === 'dock' || props.active)
+/** 面板主体是否渲染（贴边条态下整个主体让位给那条 46px） */
+const bodyOn = computed(() => (props.mode === 'dock' ? !fb.collapsed : props.active))
+
+const baselineLine = computed(() => {
+  const sha = bundle.value?.baseline?.head_sha
+  return sha ? `baseline ${sha.slice(0, 7)}` : ''
+})
 
 async function refresh() {
   if (!props.taskId) return
@@ -120,113 +186,181 @@ function verifyLine(v: RewindVerificationDto): string {
   return parts.join(' · ')
 }
 
-// 打开时拉取；taskId 变化时重拉
+// 可见（或需要贴边条计数）时拉取；taskId 变化时重拉
 watch(
-  () => [props.open, props.taskId],
-  ([open]) => {
-    if (open) refresh()
+  () => [shouldLoad.value, props.taskId] as const,
+  ([on]) => {
+    if (on) refresh()
   },
   { immediate: true },
 )
 </script>
 
 <template>
-  <Drawer :open="open" title="变更反馈" @close="emit('close')">
-    <div v-if="loading && !bundle" class="flex items-center justify-center gap-2 py-10 text-sm text-muted">
-      <Spinner class="h-4 w-4" /> 加载中…
-    </div>
+  <div
+    class="flex h-full min-h-0 flex-col bg-surface-subtle"
+    :class="mode === 'drawer' ? 'w-[420px] shrink-0' : 'w-full'"
+    data-testid="feedback-panel"
+  >
+    <!-- 收起态：46px 竖向贴边条。
+         它本身就是展开入口，且带着变更文件数 —— 用户不展开也知道
+         「有没有值得看的东西」。这就是判断一个结构能否默认收起的标准：
+         **收起态必须自己携带"要不要展开"的判据**，否则等于纯隐藏。 -->
+    <button
+      v-if="railOnly"
+      type="button"
+      class="flex w-full flex-1 cursor-pointer flex-col items-center gap-2.5 border-0 bg-transparent py-3 transition-colors hover:bg-surface-muted"
+      aria-expanded="false"
+      aria-controls="fbPanel"
+      title="展开变更反馈"
+      data-testid="feedback-rail"
+      @click="fb.expand()"
+    >
+      <!-- 面板从右边缘**向左**拉出，箭头就指向左。
+           写成 › 会被读成"再往右推"，与点击后的实际动效相反。 -->
+      <svg
+        class="h-4 w-4 shrink-0 text-text-tertiary"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        aria-hidden="true"
+      >
+        <path d="M15 18l-6-6 6-6" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+      <span class="text-[12px] font-semibold tracking-[.14em] text-text-secondary [writing-mode:vertical-rl]">
+        变更反馈
+      </span>
+      <span
+        v-if="fileCount"
+        class="inline-flex h-5 min-w-[20px] shrink-0 items-center justify-center rounded-full bg-accent/10 px-1.5 text-[11px] font-bold tabular-nums text-accent"
+        :title="`${fileCount} 个文件有变更`"
+      >{{ fileCount }}</span>
+    </button>
 
-    <template v-else-if="bundle">
-      <!-- P1：Task 结构化结果（完成度 / checks / issues，手机端主验收面） -->
-      <OutcomeCard :task-id="taskId" class="mb-3" />
-
-      <!-- P1：Rewind → Verify 验证摘要（回退后自动重跑 checks + 重启 preview） -->
-      <div v-if="verification" class="mb-3 rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 text-xs">
-        <span class="font-semibold text-accent">回退验证</span>
-        <span class="ml-1.5 text-muted">{{ verifyLine(verification) }}</span>
-      </div>
-
-      <!-- 双视角 tab：本轮变化（Event）/ 累计变化（Baseline），p1-design.md §3 -->
-      <div class="mb-3 flex items-center gap-1 rounded-lg border border-border/60 bg-surface/60 p-1 text-xs">
-        <button
-          class="flex-1 rounded-md px-2 py-1 transition-colors"
-          :class="view === 'event' ? 'bg-elevated font-semibold' : 'text-muted hover:text-text'"
-          @click="view = 'event'"
-        >本轮变化</button>
-        <button
-          class="flex-1 rounded-md px-2 py-1 transition-colors"
-          :class="view === 'baseline' ? 'bg-elevated font-semibold' : 'text-muted hover:text-text'"
-          @click="view = 'baseline'"
-        >累计变化</button>
-        <span class="ml-auto pr-2 font-mono text-[11px] text-muted">
+    <template v-else-if="bodyOn">
+      <header class="flex shrink-0 items-center gap-1 border-b border-border bg-surface px-3.5 py-2.5">
+        <h2 class="flex-1 truncate text-[13.5px] font-semibold text-text">变更反馈</h2>
+        <span v-if="bundle" class="mr-0.5 shrink-0 font-mono text-[11px]">
           <span class="text-success">+{{ bundle.cumulative.additions }}</span>
           <span class="ml-1 text-error">-{{ bundle.cumulative.deletions }}</span>
         </span>
+        <button
+          type="button"
+          class="shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-[13px] leading-none text-text-tertiary transition-colors hover:bg-surface-muted hover:text-text"
+          title="刷新"
+          @click="refresh"
+        >↻</button>
+        <!-- 「收起」只在 dock 形态出现：另外两档没有可收起的目标物，
+             留着就是一个点了没反应的死控件（SPEC §5.2.1）。 -->
+        <button
+          v-if="mode === 'dock'"
+          type="button"
+          class="shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-[13px] leading-none text-text-tertiary transition-colors hover:bg-surface-muted hover:text-text"
+          title="收起变更反馈"
+          aria-expanded="true"
+          aria-controls="fbPanel"
+          @click="fb.collapse()"
+        >›</button>
+        <button
+          v-else-if="mode === 'drawer'"
+          type="button"
+          class="shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-base leading-none text-text-tertiary transition-colors hover:bg-surface-muted hover:text-text"
+          title="关闭"
+          @click="emit('close')"
+        >×</button>
+      </header>
+
+      <div class="shrink-0 px-3.5 pt-2.5">
+        <SegmentedControl v-model="tab" :options="TABS" fill aria-label="变更反馈视图" />
       </div>
 
-      <!-- Preview 运行态（P1 起含「重启」入口） -->
-      <PreviewSection :task-id="taskId" class="mb-3" />
-
-      <!-- P1：Checks（agent 复用 + 重跑） -->
-      <ChecksPanel :task-id="taskId" class="mb-3" />
-
-      <!-- P1：Evidence Card + 带证据继续（控制闭环） -->
-      <EvidenceCard :task-id="taskId" :can-continue="canContinue" class="mb-3" />
-
-      <!-- Event 视角：Turn 列表（最新在前） -->
-      <div v-if="view === 'event'" class="flex flex-col gap-2">
-        <TurnCard
-          v-for="t in turnsDesc"
-          :key="t.turn"
-          :task-id="taskId"
-          :turn="t"
-          :checkpointed="checkpointSet.has(t.turn)"
-          :can-rewind="canRewind && rewinding === null && rewindingFile === null"
-          @rewind="onRewind"
-          @rewind-file="onRewindFile"
-        />
-        <div v-if="!turnsDesc.length" class="py-6 text-center text-xs text-muted">暂无 Turn 记录</div>
+      <!-- 验证摘要放在 Tab **之上**：回退动作发生在「变更」Tab，
+           摘要只挂在「概览」里的话，用户会在原地看不到刚做完那件事的结果。 -->
+      <div
+        v-if="verification"
+        class="mx-3.5 mt-2.5 shrink-0 rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 text-[11.5px]"
+      >
+        <span class="font-semibold text-accent">回退验证</span>
+        <span class="ml-1.5 text-text-secondary">{{ verifyLine(verification) }}</span>
       </div>
 
-      <!-- Baseline 视角：累计文件集（点击展开 Baseline 累计 diff） -->
-      <div v-else class="rounded-lg border border-border/60 bg-surface/60">
-        <div v-if="!baselineFiles.length" class="px-3 py-2 text-xs text-muted">暂无累计变更</div>
-        <div v-for="fc in baselineFiles" :key="fc.path" class="border-b border-border/30 last:border-b-0">
-          <div class="flex items-center gap-2">
-            <button
-              class="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-elevated"
-              @click="openBaselinePath = openBaselinePath === fc.path ? null : fc.path"
-            >
-              <span class="min-w-0 flex-1 truncate font-mono text-muted" :title="fc.path">{{ fc.path }}</span>
-              <span class="shrink-0 font-mono">
-                <span v-if="fc.additions || fc.deletions" class="text-success">+{{ fc.additions ?? 0 }}</span>
-                <span v-if="fc.additions || fc.deletions" class="ml-1 text-error">-{{ fc.deletions ?? 0 }}</span>
-              </span>
-              <span class="shrink-0 text-muted transition-transform" :class="openBaselinePath === fc.path ? '' : '-rotate-90'">▾</span>
-            </button>
-            <button
-              v-if="previewKind(fc.path)"
-              class="shrink-0 px-2.5 py-1 text-xs"
-              :class="previewBaselinePath === fc.path ? 'text-accent' : 'text-muted hover:text-text'"
-              @click="previewBaselinePath = previewBaselinePath === fc.path ? null : fc.path"
-            >预览</button>
-          </div>
-          <!-- turn 省略 = Baseline 累计 diff -->
-          <DiffView v-if="openBaselinePath === fc.path" :task-id="taskId" :path="fc.path" />
-          <!-- 文件预览（markdown/pdf） -->
-          <FilePreview v-if="previewBaselinePath === fc.path" :task-id="taskId" :path="fc.path" />
+      <div id="fbPanel" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3.5 py-3">
+        <div v-if="loading && !bundle" class="flex items-center justify-center gap-2 py-10 text-xs text-text-tertiary">
+          <Spinner class="h-4 w-4" /> 加载中…
         </div>
-      </div>
 
-      <!-- 刷新入口（底部） -->
-      <div class="mt-3 flex justify-end">
-        <span v-if="bundle.baseline?.head_sha" class="mr-2 self-center font-mono text-[11px] text-muted" :title="bundle.baseline.head_sha">
-          baseline {{ bundle.baseline.head_sha.slice(0, 7) }}
-        </span>
-        <Button variant="ghost" size="sm" title="刷新" @click="refresh">↻ 刷新</Button>
+        <template v-else-if="bundle">
+          <!-- 概览：任务结果 + 基线信息 + 证据（带证据继续） -->
+          <template v-if="tab === 'overview'">
+            <OutcomeCard :task-id="taskId" />
+            <div
+              v-if="baselineLine"
+              class="flex items-center gap-1.5 rounded-lg border border-border/60 bg-surface/60 px-3 py-2 text-[11.5px] text-text-tertiary"
+            >
+              <span class="font-mono">{{ baselineLine }}</span>
+              <span class="ml-auto">{{ turnsDesc.length }} 个 Turn</span>
+            </div>
+            <EvidenceCard :task-id="taskId" :can-continue="canContinue" />
+          </template>
+
+          <!-- 变更：本轮 / 累计两个视角 + Turn 列表 / 累计文件集 -->
+          <template v-else-if="tab === 'changes'">
+            <SegmentedControl v-model="view" :options="VIEWS" fill aria-label="变更视角" />
+            <div v-if="view === 'event'" class="flex flex-col gap-2">
+              <TurnCard
+                v-for="t in turnsDesc"
+                :key="t.turn"
+                :task-id="taskId"
+                :turn="t"
+                :checkpointed="checkpointSet.has(t.turn)"
+                :can-rewind="canRewind && rewinding === null && rewindingFile === null"
+                @rewind="onRewind"
+                @rewind-file="onRewindFile"
+              />
+              <div v-if="!turnsDesc.length" class="py-6 text-center text-xs text-text-tertiary">暂无 Turn 记录</div>
+            </div>
+            <div v-else class="rounded-lg border border-border/60 bg-surface/60">
+              <div v-if="!baselineFiles.length" class="px-3 py-2 text-xs text-text-tertiary">暂无累计变更</div>
+              <div v-for="fc in baselineFiles" :key="fc.path" class="border-b border-border/30 last:border-b-0">
+                <div class="flex items-center gap-2">
+                  <button
+                    type="button"
+                    class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-surface-muted"
+                    @click="openBaselinePath = openBaselinePath === fc.path ? null : fc.path"
+                  >
+                    <span class="min-w-0 flex-1 truncate font-mono text-text-secondary" :title="fc.path">{{ fc.path }}</span>
+                    <span class="shrink-0 font-mono">
+                      <span v-if="fc.additions || fc.deletions" class="text-success">+{{ fc.additions ?? 0 }}</span>
+                      <span v-if="fc.additions || fc.deletions" class="ml-1 text-error">-{{ fc.deletions ?? 0 }}</span>
+                    </span>
+                    <span class="shrink-0 text-text-tertiary transition-transform" :class="openBaselinePath === fc.path ? '' : '-rotate-90'">▾</span>
+                  </button>
+                  <button
+                    v-if="previewKind(fc.path)"
+                    type="button"
+                    class="shrink-0 cursor-pointer px-2.5 py-1 text-xs"
+                    :class="previewBaselinePath === fc.path ? 'text-accent' : 'text-text-tertiary hover:text-text'"
+                    @click="previewBaselinePath = previewBaselinePath === fc.path ? null : fc.path"
+                  >预览</button>
+                </div>
+                <!-- turn 省略 = Baseline 累计 diff -->
+                <DiffView v-if="openBaselinePath === fc.path" :task-id="taskId" :path="fc.path" />
+                <!-- 文件预览（markdown/pdf） -->
+                <FilePreview v-if="previewBaselinePath === fc.path" :task-id="taskId" :path="fc.path" />
+              </div>
+            </div>
+          </template>
+
+          <!-- 检查 -->
+          <ChecksPanel v-else-if="tab === 'checks'" :task-id="taskId" />
+
+          <!-- 预览 -->
+          <PreviewSection v-else :task-id="taskId" />
+        </template>
+
+        <div v-else class="py-10 text-center text-xs text-text-tertiary">暂无数据</div>
       </div>
     </template>
-
-    <div v-else class="py-10 text-center text-xs text-muted">暂无数据</div>
-  </Drawer>
+  </div>
 </template>

@@ -14,12 +14,21 @@ export interface SegmentedOption {
   label: string
 }
 
-defineProps<{
-  modelValue: string
-  options: SegmentedOption[]
-  /** 无障碍名：这一组在选什么（如「主题」） */
-  ariaLabel?: string
-}>()
+withDefaults(
+  defineProps<{
+    modelValue: string
+    options: SegmentedOption[]
+    /** 无障碍名：这一组在选什么（如「主题」） */
+    ariaLabel?: string
+    /**
+     * 等分撑满容器宽度（每个选项 `flex-1`）。
+     * 用于窄栏里的视图切换（如反馈面板 4 个 Tab）：那里没有多余横向空间，
+     * 按内容宽度排会让 4 个选项挤在左边、右边空一截。
+     */
+    fill?: boolean
+  }>(),
+  { fill: false },
+)
 
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 </script>
@@ -35,6 +44,7 @@ const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
       :key="opt.value"
       type="button"
       class="cursor-pointer rounded px-[11px] py-[5px] text-[12.5px] font-medium whitespace-nowrap text-text-secondary transition-colors hover:text-text aria-pressed:bg-surface aria-pressed:font-semibold aria-pressed:text-text aria-pressed:shadow-xs"
+      :class="fill ? 'flex-1' : ''"
       :aria-pressed="modelValue === opt.value"
       @click="emit('update:modelValue', opt.value)"
     >

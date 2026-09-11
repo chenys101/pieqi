@@ -161,15 +161,18 @@ async function refreshShots() {
   }
 }
 
-// 打开时拉一次状态 + 截图列表；taskId 变化时重新拉取
-watch(
-  () => props.taskId,
-  () => {
-    refresh()
-    refreshShots()
-  },
-  { immediate: true },
-)
+// 打开时拉一次状态 + 截图列表；taskId 变化时重新拉取。
+//
+// **若上来就是 starting，必须把轮询接回去** ——「预览」现在是反馈面板里的一个 Tab，
+// 用户点完「启动」切去别的 Tab 再切回来会重新挂载；只刷新不续轮询的话，
+// 状态会一直停在"启动中"直到下次切回来，看起来像卡死了。
+async function init() {
+  await refresh()
+  if (isStarting.value) pollWhileStarting()
+  refreshShots()
+}
+
+watch(() => props.taskId, init, { immediate: true })
 
 onUnmounted(stopPoll)
 </script>
