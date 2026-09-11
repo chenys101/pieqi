@@ -63,6 +63,7 @@ type PermissionWire struct {
 type permPending struct {
 	reqID     string
 	toolTitle string                   // 工具名（展示卡标题），排队提升时复用
+	toolKind  string                   // ACP ToolKind，排队提升时复用（决定 risk，见 RiskOfKind）
 	summary   string                   // 决策摘要（buildPermSummary 结果），排队提升时复用
 	options   []agent.PermissionOption // 记录的 ACP 选项，供 Resolve 映射 approve/deny
 	timer     *time.Timer              // 超时定时器；到期调 adapter.Deny
@@ -138,6 +139,7 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 	entry := &permPending{
 		reqID:     req.ReqID,
 		toolTitle: req.ToolTitle,
+		toolKind:  req.ToolKind,
 		summary:   buildPermSummary(req),
 		options:   req.Options,
 	}
@@ -153,7 +155,7 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 	pw.displayed = req.ReqID
 	pw.mu.Unlock()
 
-	if !pw.show(req.ReqID, entry.toolTitle, entry.summary) {
+	if !pw.show(req.ReqID, entry.toolTitle, entry.toolKind, entry.summary) {
 		// task 不存在或已终态：清掉 pending 并 Deny，避免 agent 永久阻塞。
 		pw.mu.Lock()
 		delete(pw.pending, req.ReqID)
@@ -204,8 +206,8 @@ func (pw *PermissionWire) tryAutoApprove(req agent.PermissionRequest) bool {
 
 // show 把 reqID 展示为当前决策：置 waiting_input(approval) + Publish + IM 通知 + 启动超时定时器。
 // 返回是否成功应用（task 不存在或已终态时为 false，调用方负责 Deny 并清理展示状态）。
-func (pw *PermissionWire) show(reqID, toolTitle, summary string) bool {
-	updated, applied := pw.setWaitingApproval(reqID, toolTitle, summary)
+func (pw *PermissionWire) show(reqID, toolTitle, toolKind, summary string) bool {
+	updated, applied := pw.setWaitingApproval(reqID, toolTitle, toolKind, summary)
 	if !applied {
 		return false
 	}
@@ -231,7 +233,7 @@ func (pw *PermissionWire) show(reqID, toolTitle, summary string) bool {
 
 // setWaitingApproval 把 task 置 waiting_input(approval) 并建 CurrentDecision。
 // 返回更新后的 task 副本与是否应用（task 不存在或已终态时 applied=false）。
-func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, summary string) (*model.Task, bool) {
+func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary string) (*model.Task, bool) {
 	applied := false
 	updated, err := pw.store.Update(pw.taskID, func(t *model.Task) bool {
 		// 终态任务不再暂停（与 TaskRunner.transition 语义一致）。
@@ -243,6 +245,10 @@ func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, summary string) (
 			ID:        reqID,
 			Kind:      model.DecisionKindApproval,
 			ToolName:  toolTitle,
+			// 风险分级在这里落定：**和自动放行判据共用同一张表**（riskLevelKinds）。
+			// 两者必须是同一个真相 —— 若卡片按一张表显示"L3 破坏性"、
+			// 而放行逻辑按另一张表认为它可以自动通过，用户看到的强度就是谎言。
+			Risk:      RiskOfKind(toolKind),
 			Summary:   summary,
 			Options:   []string{"approve", "deny"},
 			CreatedAt: time.Now(),
@@ -367,13 +373,13 @@ func (pw *PermissionWire) advance(reqID string) (*model.Task, bool) {
 	next := pw.queue[0]
 	pw.queue = pw.queue[1:]
 	pw.displayed = next
-	toolTitle, summary := "", ""
+	toolTitle, toolKind, summary := "", "", ""
 	if e, ok := pw.pending[next]; ok {
-		toolTitle, summary = e.toolTitle, e.summary
+		toolTitle, toolKind, summary = e.toolTitle, e.toolKind, e.summary
 	}
 	pw.mu.Unlock()
 
-	if pw.show(next, toolTitle, summary) {
+	if pw.show(next, toolTitle, toolKind, summary) {
 		t, _ := pw.store.Get(pw.taskID)
 		return t, true
 	}
