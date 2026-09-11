@@ -209,7 +209,12 @@ func (s *Server) postPush(c *gin.Context) {
 // buildEvidenceWithVisual 派生 Evidence 并挂视觉证据：
 // 最新 N 张截图 URL + console/network 窗口摘要（visual 未接线时无视觉字段）。
 func (s *Server) buildEvidenceWithVisual(task *model.Task, scope string, turn int) core.Evidence {
-	evidence := core.BuildEvidence(task, s.deriveChangesBackfilled(task), s.taskChecks(task), s.previewOf(task), scope, turn)
+	changes := s.deriveChangesBackfilled(task)
+	evidence := core.BuildEvidence(task, changes, s.taskChecks(task), s.previewOf(task), scope, turn)
+	if turn == 0 {
+		// 任务级同上，换成唯一累计口径；Turn 级保留该 Turn 自身的数字（那本来就是单轮）。
+		evidence.Changes = s.cumulativeSummary(task, changes).ChangeSummary
+	}
 	if s.visual != nil {
 		s.visual.AttachVisual(&evidence, visualEvidenceLimit)
 	}

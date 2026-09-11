@@ -160,7 +160,12 @@ func (s *Server) getOutcome(c *gin.Context) {
 	}
 	changes := s.deriveChangesBackfilled(task)
 	checks := s.taskChecks(task)
-	c.JSON(http.StatusOK, core.DeriveOutcome(task, changes, checks, s.previewOf(task)))
+	outcome := core.DeriveOutcome(task, changes, checks, s.previewOf(task))
+	// 任务级变更统计换成唯一累计口径（与「变更」Tab 表头同源）。
+	// SummarizeAll 只能把事件流里声明过的各轮改动相加 —— 既够不着 git/快照，
+	// 也没按路径折叠，留着它就会出现「概览说 2 个文件、变更 Tab 说 1 个」。
+	outcome.Changes = s.cumulativeSummary(task, changes).ChangeSummary
+	c.JSON(http.StatusOK, outcome)
 }
 
 // --- Evidence（§7） ---

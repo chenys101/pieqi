@@ -227,6 +227,24 @@ export interface ChangeSummaryDto {
   modifies?: number
 }
 
+/** 单文件的累计增删（口径：baseline → 当前） */
+export interface FileStatDto {
+  path: string
+  additions: number
+  deletions: number
+}
+
+/**
+ * 累计统计：合计 + 每路径明细。
+ *
+ * 明细与合计**出自同一次计算**，两者必须能对上 —— 「累计变化」列表里的行数
+ * 如果另取一份（比如某单个 Turn 的回填值），就会出现「列表说 +1 -4、
+ * 点开后那份 diff 是 +1 -3」这种同一面板给出两个结论的情况。
+ */
+export interface CumulativeSummaryDto extends ChangeSummaryDto {
+  entries?: FileStatDto[]
+}
+
 /** Feedback 总览里的一个 Turn */
 export interface TurnInfoDto {
   turn: number
@@ -264,7 +282,7 @@ export interface FeedbackBundleDto {
   task_id: string
   baseline?: TaskBaselineDto
   turns: TurnInfoDto[]
-  cumulative: ChangeSummaryDto
+  cumulative: CumulativeSummaryDto
   checkpoints: number[]
   preview?: FeedbackPreviewDto
 }

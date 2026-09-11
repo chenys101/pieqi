@@ -12,7 +12,7 @@
 // 数据流：打开/刷新时现场派生（后端不存第二份聚合，ADR-0001）。
 import { computed, ref, watch } from 'vue'
 import { getFeedback, rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
-import type { FileChangeDto, FeedbackBundleDto, RewindVerificationDto } from '@/types/api'
+import type { FeedbackBundleDto, FileStatDto, RewindVerificationDto } from '@/types/api'
 import SegmentedControl from '@/components/ui/SegmentedControl.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import TurnCard from './TurnCard.vue'
@@ -84,14 +84,15 @@ const checkpointSet = computed(() => new Set(bundle.value?.checkpoints ?? []))
 /** Turn 列表倒序：最新一轮排最前（反馈场景先看最近改动） */
 const turnsDesc = computed(() => [...(bundle.value?.turns ?? [])].reverse())
 
-/** Baseline 视角：聚合各 Turn 的文件变更（后 Turn 覆盖同路径，最新态为准） */
-const baselineFiles = computed<FileChangeDto[]>(() => {
-  const byPath = new Map<string, FileChangeDto>()
-  for (const t of bundle.value?.turns ?? []) {
-    for (const fc of t.changes ?? []) byPath.set(fc.path, fc)
-  }
-  return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path))
-})
+/**
+ * 「累计变化」列表：直接取 `cumulative.entries`（每路径一条，与表头合计同源）。
+ *
+ * 以前这里是「把各 Turn 的 changes 按路径去重、后轮覆盖前轮」——
+ * 于是列表里的 +/- 是**某一个 Turn**的数字，而点开看到的是 baseline→当前
+ * 的累计 diff：同一个文件、同一个面板，两套数。
+ * 数据没有第二个来源，就不该有第二个算法。
+ */
+const cumulativeFiles = computed<FileStatDto[]>(() => bundle.value?.cumulative?.entries ?? [])
 
 /**
  * 贴边条上的变更文件数 —— **收起态自带的"要不要展开"判据**。
@@ -321,8 +322,8 @@ watch(
               <div v-if="!turnsDesc.length" class="py-6 text-center text-xs text-text-tertiary">暂无 Turn 记录</div>
             </div>
             <div v-else class="rounded-lg border border-border/60 bg-surface/60">
-              <div v-if="!baselineFiles.length" class="px-3 py-2 text-xs text-text-tertiary">暂无累计变更</div>
-              <div v-for="fc in baselineFiles" :key="fc.path" class="border-b border-border/30 last:border-b-0">
+              <div v-if="!cumulativeFiles.length" class="px-3 py-2 text-xs text-text-tertiary">暂无累计变更</div>
+              <div v-for="fc in cumulativeFiles" :key="fc.path" class="border-b border-border/30 last:border-b-0">
                 <div class="flex items-center gap-2">
                   <button
                     type="button"
@@ -331,8 +332,8 @@ watch(
                   >
                     <span class="min-w-0 flex-1 truncate font-mono text-text-secondary" :title="fc.path">{{ fc.path }}</span>
                     <span class="shrink-0 font-mono">
-                      <span v-if="fc.additions || fc.deletions" class="text-success">+{{ fc.additions ?? 0 }}</span>
-                      <span v-if="fc.additions || fc.deletions" class="ml-1 text-error">-{{ fc.deletions ?? 0 }}</span>
+                      <span v-if="fc.additions || fc.deletions" class="text-success">+{{ fc.additions }}</span>
+                      <span v-if="fc.additions || fc.deletions" class="ml-1 text-error">-{{ fc.deletions }}</span>
                     </span>
                     <span class="shrink-0 text-text-tertiary transition-transform" :class="openBaselinePath === fc.path ? '' : '-rotate-90'">▾</span>
                   </button>

@@ -93,6 +93,71 @@ func TestAPI_GetFeedbackBundle(t *testing.T) {
 	}
 }
 
+// 同一文件被多轮改动时，累计统计只能算一次。
+// 派生结果是「每轮一条 FileChange」，曾经直接按条目累加 → 「1 个文件改 2 轮」
+// 变成 2 个文件、同一份 diff 再加一遍（实测线上：真值 +1 -3 / 1 文件，
+// 接口返回 +2 -6 / 2 文件）。
+func TestAPI_CumulativeCountsRepeatedPathOnce(t *testing.T) {
+	_, store, r := setupFeedbackTest(t)
+
+	wt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt, "a.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(&model.Task{
+		ProjectID: "fb", ProjectPath: wt, WorktreePath: wt,
+		Prompt: "两轮改同一个文件", Status: model.TaskCompleted,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Update(task.ID, func(tk *model.Task) bool {
+		tk.Events = []model.TaskEvent{
+			{Seq: 1, Type: model.EventUser, Text: "第一轮"},
+			{Seq: 2, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "tu1",
+				Input: json.RawMessage(`{"file_path":"a.txt","content":"hello"}`)},
+			{Seq: 3, Type: model.EventToolResult, ToolUseID: "tu1", Result: "ok"},
+			{Seq: 4, Type: model.EventUser, Text: "第二轮"},
+			{Seq: 5, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "tu2",
+				Input: json.RawMessage(`{"file_path":"a.txt","content":"hello"}`)},
+			{Seq: 6, Type: model.EventToolResult, ToolUseID: "tu2", Result: "ok"},
+		}
+		return true
+	})
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/tasks/"+task.ID+"/feedback", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var bundle core.FeedbackBundle
+	json.Unmarshal(w.Body.Bytes(), &bundle)
+
+	if len(bundle.Turns) != 2 {
+		t.Fatalf("前置：应有 2 个 Turn, got %d", len(bundle.Turns))
+	}
+	if len(bundle.Turns[0].Changes) != 1 || len(bundle.Turns[1].Changes) != 1 {
+		t.Fatalf("前置：每轮各一条变更, got %+v | %+v",
+			bundle.Turns[0].Changes, bundle.Turns[1].Changes)
+	}
+
+	cum := bundle.Cumulative
+	if cum.Files != 1 {
+		t.Errorf("files = %d, want 1（不按改动轮次重复计）", cum.Files)
+	}
+	if cum.Additions != 1 {
+		t.Errorf("additions = %d, want 1（同一份 diff 只加一次）", cum.Additions)
+	}
+	if len(cum.Entries) != 1 || cum.Entries[0].Path != "a.txt" {
+		t.Fatalf("entries = %+v", cum.Entries)
+	}
+	// 明细与合计同源：列表里看到的数字必须等于表头合计
+	if cum.Entries[0].Additions != cum.Additions || cum.Entries[0].Deletions != cum.Deletions {
+		t.Errorf("明细与合计不同源: entry=%+v sum=%+v", cum.Entries[0], cum.ChangeSummary)
+	}
+}
+
 func TestAPI_GetFeedbackDiff(t *testing.T) {
 	_, store, r := setupFeedbackTest(t)
 	task := seedFeedbackTask(t, store)

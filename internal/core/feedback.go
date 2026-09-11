@@ -38,6 +38,23 @@ type ChangeSummary struct {
 	Modifies   int `json:"modifies,omitempty"`
 }
 
+// FileStat 单文件的累计增删（口径：baseline → 当前）。
+type FileStat struct {
+	Path      string `json:"path"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+}
+
+// CumulativeSummary 累计统计：合计 + 每路径明细。
+//
+// 明细与合计**出自同一次计算**，这是要点不是装饰：此前「累计变化」列表里
+// 每个文件的行数取自「该文件最后一个 Turn 的回填值」，而点开看到的是
+// baseline → 当前 的累计 diff —— 同一个文件、同一个面板，两个数字各说各话。
+type CumulativeSummary struct {
+	ChangeSummary
+	Entries []FileStat `json:"entries,omitempty"`
+}
+
 // TurnInfo Feedback 总览里的一个 Turn（含派生变更与起始事件 seq）。
 type TurnInfo struct {
 	Turn          int           `json:"turn"`
@@ -60,7 +77,7 @@ type FeedbackBundle struct {
 	TaskID      string              `json:"task_id"`
 	Baseline    *model.TaskBaseline `json:"baseline,omitempty"`
 	Turns       []TurnInfo          `json:"turns"`
-	Cumulative  ChangeSummary       `json:"cumulative"`
+	Cumulative  CumulativeSummary   `json:"cumulative"`
 	Checkpoints []int               `json:"checkpoints"`
 	Preview     *FeedbackPreview    `json:"preview,omitempty"`
 }
@@ -280,10 +297,33 @@ func BuildTurnInfos(events []model.TaskEvent, changes []FileChange) []TurnInfo {
 	return infos
 }
 
-// summarize 汇总一组 FileChange 的统计。增删行数来自回填后的 Additions/Deletions。
-func summarize(changes []FileChange) ChangeSummary {
-	s := ChangeSummary{Files: len(changes)}
+// UniqueByPath 把「(Turn, Path) 展开」的变更列表折叠成每路径一条，保留最后一次出现
+// （列表按 Turn 升序，所以留下的是该路径的最终态）。
+//
+// 任务级统计**必须**先过它。同一文件改了三轮就是三条 FileChange（每条一个 Turn），
+// 直接数条目会把「1 个文件」说成 3 个、行数再加 3 遍。
+func UniqueByPath(changes []FileChange) []FileChange {
+	idx := make(map[string]int, len(changes))
+	out := make([]FileChange, 0, len(changes))
 	for _, fc := range changes {
+		if i, ok := idx[fc.Path]; ok {
+			out[i] = fc
+			continue
+		}
+		idx[fc.Path] = len(out)
+		out = append(out, fc)
+	}
+	return out
+}
+
+// summarize 汇总一组 FileChange 的统计。增删行数来自回填后的 Additions/Deletions。
+//
+// 先按路径折叠再统计：入参可能是全任务的展开列表（同一路径每轮一条）。
+// 单 Turn 汇总时本就每路径一条，折叠是幂等的 —— 也就是说这一层对两种入参都安全。
+func summarize(changes []FileChange) ChangeSummary {
+	uniq := UniqueByPath(changes)
+	s := ChangeSummary{Files: len(uniq)}
+	for _, fc := range uniq {
 		s.Additions += fc.Additions
 		s.Deletions += fc.Deletions
 		switch fc.Operation {

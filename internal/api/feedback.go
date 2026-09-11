@@ -10,6 +10,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -76,51 +77,67 @@ func (s *Server) getFeedback(c *gin.Context) {
 	c.JSON(http.StatusOK, bundle)
 }
 
-// cumulativeSummary 累计统计：tracked 走 git numstat（HEAD 对比），
+// cumulativeSummary 累计统计：tracked 走 git numstat（对比 Baseline.HeadSHA），
 // untracked（Task 期间新建）按当前文件全增；deleted 由 numstat 给出 -N。
 // 非 git 项目（无 HEAD 参照）用 pre/ 基线快照 diff（CaptureBaseline 已全量捕获），
 // 避免 numstat 全空 → 全部落入 untracked → 整文件当新增（数据失真）。
-func (s *Server) cumulativeSummary(task *model.Task, changes []core.FileChange) core.ChangeSummary {
-	if len(changes) == 0 {
-		return core.ChangeSummary{}
+//
+// ⚠️ 入参是「(Turn, Path) 展开」的列表，同一路径每轮一条 —— **先按路径折叠再算**。
+// 不折叠的话「1 个文件改了 2 轮」会变成 2 个文件、同一份 diff 再加一遍：
+// 实测某任务真值 +1 -3 / 1 文件，接口返回 +2 -6 / 2 文件，正好翻倍。
+//
+// 返回的 Entries 与合计**同源**，供「累计变化」列表直接用 —— 列表里的数字
+// 必须等于点开后那份 diff 的数字，否则同一个面板会给出两个结论。
+func (s *Server) cumulativeSummary(task *model.Task, changes []core.FileChange) core.CumulativeSummary {
+	uniq := core.UniqueByPath(changes)
+	if len(uniq) == 0 {
+		return core.CumulativeSummary{}
 	}
-	paths := make([]string, 0, len(changes))
-	for _, fc := range changes {
-		paths = append(paths, fc.Path)
+	sort.Slice(uniq, func(i, j int) bool { return uniq[i].Path < uniq[j].Path })
+
+	// Files 取折叠后的路径数（"改动过的文件"），与 Entries 一一对应：
+	// 二进制 / 取不到内容也保留一条 0/0 明细，不然列表会比计数少几行。
+	sum := core.ChangeSummary{Files: len(uniq)}
+	entries := make([]core.FileStat, 0, len(uniq))
+	add := func(path string, a, d int) {
+		sum.Additions += a
+		sum.Deletions += d
+		entries = append(entries, core.FileStat{Path: path, Additions: a, Deletions: d})
 	}
+
 	if task.Baseline == nil || task.Baseline.HeadSHA == "" {
-		sum := core.ChangeSummary{Files: len(paths)}
-		for _, fc := range changes {
+		for _, fc := range uniq {
 			before, bOK := s.feedback.AssembleBefore(task, 1, fc.Path) // Turn 1 之前 = Task 起始
 			after, aOK := core.ReadWorktreeFile(task.WorktreePath, fc.Path)
 			if core.IsBinaryContent(before) || core.IsBinaryContent(after) {
-				continue // 二进制不计行数
+				add(fc.Path, 0, 0) // 二进制不计行数
+				continue
 			}
-			_, add, del := core.UnifiedDiff(fc.Path, stringOrEmpty(bOK, before), stringOrEmpty(aOK, after), 3)
-			sum.Additions += add
-			sum.Deletions += del
+			_, a, d := core.UnifiedDiff(fc.Path, stringOrEmpty(bOK, before), stringOrEmpty(aOK, after), 3)
+			add(fc.Path, a, d)
 		}
-		return sum
+		return core.CumulativeSummary{ChangeSummary: sum, Entries: entries}
 	}
-	head := "HEAD"
-	if task.Baseline != nil && task.Baseline.HeadSHA != "" {
-		head = task.Baseline.HeadSHA
-	}
-	numstat := core.GitNumstatFiltered(task.WorktreePath, head, paths)
 
-	sum := core.ChangeSummary{Files: len(paths)}
-	for _, fc := range changes {
+	paths := make([]string, 0, len(uniq))
+	for _, fc := range uniq {
+		paths = append(paths, fc.Path)
+	}
+	numstat := core.GitNumstatFiltered(task.WorktreePath, task.Baseline.HeadSHA, paths)
+
+	for _, fc := range uniq {
 		if e, ok := numstat[fc.Path]; ok {
-			sum.Additions += e.Additions
-			sum.Deletions += e.Deletions
+			add(fc.Path, e.Additions, e.Deletions)
 			continue
 		}
 		// untracked（Task 期间新建）：当前文件全增；已不存在则 0（异常态）
 		if content, exists := core.ReadWorktreeFile(task.WorktreePath, fc.Path); exists {
-			sum.Additions += core.CountLines(content)
+			add(fc.Path, core.CountLines(content), 0)
+			continue
 		}
+		add(fc.Path, 0, 0)
 	}
-	return sum
+	return core.CumulativeSummary{ChangeSummary: sum, Entries: entries}
 }
 
 // diffResponse GET /feedback/diff 响应体。
