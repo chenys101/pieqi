@@ -72,7 +72,7 @@ export class ApiError extends Error {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'DELETE' | 'PUT'
+  method?: 'GET' | 'POST' | 'DELETE' | 'PUT' | 'PATCH'
   body?: unknown
   /** 401 时是否触发全局提示（auth/status 自身轮询不再重复提示） */
   quiet401?: boolean
@@ -114,6 +114,50 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   return json as T
 }
 
+/** 原始文本请求（markdown 等非 JSON 内容：不走 JSON 解析，直接返回文本）。 */
+export async function requestText(path: string): Promise<string> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() })
+  } catch {
+    throw new ApiError(`网络错误: ${path}`, 0)
+  }
+  if (res.status === 401) unauthorizedHandler?.()
+  const text = await res.text()
+  if (!res.ok) throw new ApiError(`请求失败: ${path}`, res.status)
+  return text
+}
+
+/**
+ * 二进制请求（导出诊断包等）。
+ *
+ * 单独一个入口而不是让调用方直接 fetch：导出接口同样要带鉴权头，
+ * 而 `<a href>` 下载**不会**带上 Authorization —— 那样只会拿到 401，
+ * 却表现为"下载了一个空文件"。这里统一取回 Blob 再由调用方落地。
+ */
+export async function requestBlob(path: string): Promise<{ blob: Blob; filename: string }> {
+  let res: Response
+  try {
+    res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() })
+  } catch {
+    throw new ApiError(`网络错误: ${path}`, 0)
+  }
+  if (res.status === 401) unauthorizedHandler?.()
+  if (!res.ok) {
+    let msg = `${path}: ${res.status}`
+    try {
+      const j = (await res.json()) as { error?: string }
+      if (j?.error) msg = j.error
+    } catch {
+      // 非 JSON 错误体：保留状态码文案
+    }
+    throw new ApiError(msg, res.status)
+  }
+  const cd = res.headers.get('Content-Disposition') ?? ''
+  const m = /filename="?([^";]+)"?/.exec(cd)
+  return { blob: await res.blob(), filename: m?.[1] ?? 'download' }
+}
+
 // ---------- Task DTO → 前端模型 Adapter（方案 §55） ----------
 
 const DEFAULT_AGENT = 'claude-code'
@@ -135,6 +179,7 @@ export function adaptTask(dto: TaskDto): Task {
           taskId: dto.id,
           kind: dto.current_decision.kind || 'approval',
           tool: dto.current_decision.tool_name,
+          risk: dto.current_decision.risk,
           summary: dto.current_decision.summary,
           options: dto.current_decision.options ?? [],
           createdAt: dto.current_decision.created_at,
@@ -146,5 +191,13 @@ export function adaptTask(dto: TaskDto): Task {
     updatedAt: dto.updated_at,
     startedAt: dto.started_at,
     finishedAt: dto.finished_at,
+    diffStat: dto.diff_stat
+      ? {
+          files: dto.diff_stat.files,
+          additions: dto.diff_stat.additions,
+          deletions: dto.diff_stat.deletions,
+          capturedAt: dto.diff_stat.captured_at,
+        }
+      : undefined,
   }
 }

@@ -20,8 +20,8 @@ export const useAppStore = defineStore('app', {
     banner: null as AppBanner | null,
     /** 斜杠补全数据源（commands + skills） */
     completions: { commands: [], skills: [] } as CompletionSources,
-    /** 移动端侧栏抽屉 */
-    mobileNavOpen: false,
+    // ⚠️ 曾有 `mobileNavOpen`（移动端抽屉开关）：D5 定案后抽屉被底栏**替代**（不是补充），
+    // 移动端不再渲染侧栏，这个状态随之失效。留着只会让"抽屉去哪了"变成悬案。
   }),
 
   actions: {

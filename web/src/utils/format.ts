@@ -51,6 +51,20 @@ export const STATUS_TONES: Record<TaskStatus, 'success' | 'warning' | 'error' | 
   cancelled: 'neutral',
 }
 
+/**
+ * 状态 → 小圆点类名。
+ * 侧栏任务树与移动端任务浏览器页都渲染同一个"状态点"，放在这里共用 ——
+ * 两处各写一份色值，改一处漏一处就会出现"同一状态两个颜色"。
+ */
+export const STATUS_DOT: Record<TaskStatus, string> = {
+  running: 'bg-success status-breathe',
+  completed: 'bg-transparent border border-border/70',
+  failed: 'bg-error',
+  waiting_input: 'bg-warning',
+  pending: 'bg-info',
+  cancelled: 'bg-muted/60',
+}
+
 /** 短 id：#前 8 位 */
 export function shortId(id: string): string {
   return (id ?? '').slice(0, 8)

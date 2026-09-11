@@ -47,6 +47,22 @@ export interface Task {
   updatedAt: string
   startedAt?: string
   finishedAt?: string
+  /**
+   * 终态时的累计代码改动快照。
+   *
+   * **只有 completed 任务才有**（后端刻意不给 failed/cancelled 做快照 ——
+   * 它们的改动不是有效产出，计入会把概览变成一根被失败任务撑起来的柱子）。
+   * 老任务没有这个字段（在本 feature 上线前就已完成），渲染时要能容忍缺失。
+   */
+  diffStat?: DiffStat
+}
+
+/** 终态时的累计代码改动 */
+export interface DiffStat {
+  files: number
+  additions: number
+  deletions: number
+  capturedAt: string
 }
 
 /** 项目分组（侧栏 / Projects 页） */

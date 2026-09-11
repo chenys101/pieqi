@@ -23,6 +23,9 @@ export type TaskEventTypeDto =
 /** 决策类型：approval=权限审批（进程存活）；choice=多选（已废弃，兜底保留） */
 export type DecisionKindDto = 'approval' | 'choice'
 
+/** 审批风险分级（SPEC §5.4 组① / §6.2）。与后端 `model.RiskLevel` 同名同义。 */
+export type RiskLevelDto = 'L0' | 'L1' | 'L2' | 'L3'
+
 export interface TaskEventDto {
   seq: number
   type: TaskEventTypeDto
@@ -39,6 +42,8 @@ export interface DecisionDto {
   id: string
   kind?: DecisionKindDto
   tool_name?: string
+  /** 风险分级 L0–L3；**缺省 = 未知**（旧任务 / choice 类决策），前端按 L2 兜底 */
+  risk?: RiskLevelDto
   summary: string
   options: string[]
   created_at: string
@@ -67,6 +72,15 @@ export interface TaskDto {
   updated_at: string
   started_at?: string
   finished_at?: string
+  /** 终态时的累计代码改动快照（见 core.SnapshotDiffStat：这是随时间丢失的数据，必须当场固存） */
+  diff_stat?: DiffStatDto
+}
+
+export interface DiffStatDto {
+  files: number
+  additions: number
+  deletions: number
+  captured_at: string
 }
 
 /** GET /api/tasks 分组响应 */
@@ -135,6 +149,26 @@ export interface TunnelOpResultDto {
   lark_deep_link: string
   token: string
   expires_at: string
+}
+
+/** 机器人角色：admin 受理管理员特权命令（隧道 / API），member 一律回「无权操作」 */
+export type BotRoleDto = 'admin' | 'member'
+
+/** 机器人绑定记录（model.Bot）。**不含 app_secret** —— 它在服务端的 per-bot 凭据文件里。 */
+export interface BotDto {
+  id: string
+  channel: 'lark' | 'wecom' | 'wechat'
+  name: string
+  role: BotRoleDto
+  sys_prompt?: string
+  app_id?: string
+  created_at: string
+}
+
+/** GET /api/bots 响应 */
+export interface BotsResponseDto {
+  bots: BotDto[]
+  admin_bot_id?: string
 }
 
 /** GET /api/larkreg/status 响应 */
