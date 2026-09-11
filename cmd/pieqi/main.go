@@ -29,6 +29,7 @@ import (
 	"pieqi/internal/config"
 	"pieqi/internal/core"
 	"pieqi/internal/larkreg"
+	"pieqi/internal/logging"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -54,25 +55,25 @@ func main() {
 	// 加载运行时渠道配置（扫码/手工落盘的凭据文件，若存在则覆盖 config 默认值）
 	loadLarkChannelConfig(cfg)
 
+	// --- 数据目录（默认 ~/.pieqi，PIEQI_HOME 可覆盖；运行时数据不入仓库） ---
+	dataRoot := config.DefaultDataRoot()
+
 	// --- 日志 ---
-	var logger *zap.Logger
-	if cfg.Server.Mode == "release" {
-		logger, err = zap.NewProduction()
-	} else {
-		logger, err = zap.NewDevelopment()
-	}
+	// 同时写控制台与 <dataRoot>/logs/pieqi-YYYY-MM-DD.log。
+	// 落盘不是为了"多一份备份"，而是设置页那个「导出诊断日志」按钮必须
+	// **真的有文件可导** —— 控制台日志在终端滚动后就没了，而排查发生在事后。
+	logDir := filepath.Join(dataRoot, "logs")
+	logger, closeLog, err := logging.NewLogger(cfg.Server.Mode, logDir)
 	if err != nil {
 		log.Fatalf("init logger: %v", err)
 	}
-	defer logger.Sync()
+	defer closeLog()
 
 	// P5：pieqi.acp.* 旧字段迁移告警（仅显式配置时触发，旧语义仍生效）
 	for _, d := range cfg.Deprecations {
 		logger.Warn("config deprecated field", zap.String("hint", d))
 	}
 
-	// --- 数据目录（默认 ~/.pieqi，PIEQI_HOME 可覆盖；运行时数据不入仓库） ---
-	dataRoot := config.DefaultDataRoot()
 	for _, dir := range []string{
 		filepath.Join(dataRoot, "tasks"),
 		filepath.Join(dataRoot, "worktrees"),
@@ -108,14 +109,40 @@ func main() {
 
 	hookTimeoutSec := int(cfg.Pieqi.HookTimeout / time.Second)
 
+	// 全局偏好（跨任务 / 跨项目 / 跨 agent）：审批自动放行 / 免打扰 / 事件保留上限。
+	//
+	// 它是这些偏好的**唯一**事实来源。config.yaml 的 pieqi.auto_approve_tools 是旧的
+	// "裸 ToolKind 白名单"，默认值 {edit,delete,move} 里 delete 恰恰是风险模型中的
+	// **L3（破坏性操作，不可自动放行）**。把一个与新模型直接冲突的旧值继承下来，
+	// 只会得到"界面上说不可配置、实际却在放行"的静默矛盾 —— 所以不从它推导，
+	// 从设计默认值（L0/L1 放行）开始，由用户在设置页按需调整。
+	settingsStore, err := core.NewSettingsStore(filepath.Join(dataRoot, "settings.json"))
+	if err != nil {
+		logger.Fatal("init settings store", zap.Error(err))
+	}
+
 	runner := core.NewTaskRunner(
 		logger, store, wm, bus, hooks,
 		"", cfg.Pieqi.PermissionMode, cfg.Pieqi.CleanupWorktrees,
 		execPath, cfg.Server.Port, cfg.Pieqi.HookTools, hookTimeoutSec,
 		cfg.Pieqi.MaxConcurrentPerProject, cfg.Pieqi.BaseBranch,
 	)
-	// ACP 审批免审名单：edit/delete/move 等文件改动类权限自动放行，不中断等人工审批。
-	runner.SetAutoApproveTools(cfg.Pieqi.AutoApproveTools)
+	// 免审名单由全局偏好推导（L0/L1 可配、L2/L3 永不放行）；
+	// 设置页改动后经 OnChange 即刻推给 runner（只影响之后创建的会话）。
+	runner.SetAutoApproveTools(settingsStore.Get().AutoApproveTools())
+	runner.SetDNDChecker(func() bool { return settingsStore.Get().InDND(time.Now()) })
+	// 事件保留上限（切片 5）：超出后从最旧的开始丢弃，避免长任务把内存吃掉。
+	// 与免审名单同源（settings.json），改动同样即时生效。
+	store.SetEventRetention(settingsStore.Get().EventRetention)
+	settingsStore.OnChange(func(s core.Settings) {
+		runner.SetAutoApproveTools(s.AutoApproveTools())
+		store.SetEventRetention(s.EventRetention)
+		logger.Info("settings changed",
+			zap.Bool("auto_approve_l0", s.AutoApproveL0),
+			zap.Bool("auto_approve_l1", s.AutoApproveL1),
+			zap.Bool("dnd", s.DNDEnabled),
+			zap.Int("event_retention", s.EventRetention))
+	})
 
 	// Feedback P0（p0-design.md）：Checkpoint 存储 + Preview 管理器。
 	// runner 挂钩（baseline / Turn 快照捕获），API 侧经 SetFeedback 接线。
@@ -127,6 +154,13 @@ func main() {
 
 	// Feedback P1（p1-design.md）：Checks 重跑 runner（事件流复用派生无需状态）。
 	checkRunner := core.NewCheckRunner(logger, filepath.Join(dataRoot, "checks"))
+
+	// IM 机器人绑定记录（复数，D1/D2 定案）：~/.pieqi/bots/。
+	// 元数据 index.json 可下发前端；per-bot 凭据文件含 secret，不进 API 响应。
+	botStore, err := core.NewBotStore(cfg.Pieqi.BotsDir)
+	if err != nil {
+		logger.Fatal("init bot store", zap.Error(err))
+	}
 
 	// Feedback P2（p2-design.md）：视觉采集（截图/console/network）+ Evidence Push。
 	// task 删除时回收截图与事件窗口；推送注册表订阅终态自动推 Outcome。
@@ -219,10 +253,10 @@ func main() {
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.Default()
 
-	// 渠道：lark 走控制器（支持配置热应用）；wechat 保持原样
+	// 渠道：lark 走控制器（多机器人 + 配置热应用）；wechat 保持原样
 	var larkController *larkChannelController
 	if cfg.Channels.Lark.Enabled {
-		larkController = newLarkChannelController(logger, bridge, r)
+		larkController = newLarkChannelController(logger, bridge, r, botStore)
 		if err := larkController.Init(cfg.Channels.Lark); err != nil {
 			logger.Fatal("init lark", zap.Error(err))
 		}
@@ -282,6 +316,10 @@ func main() {
 	defer tunnelMgr.Stop(context.Background())
 	// IM 隧道命令（绑定管理员在飞书聊天里发「隧道」/「关隧道」驱动 cloudflared）
 	bridge.EnableTunnelOps(tunnelMgr, authBindings)
+	// 多机器人：特权只由管理员机器人承载（Q2）。实例现在会标注 BotID
+	// （见 channel/lark 的 convertMessage / 长连接回调），故这条判定**已生效**；
+	// 渠道级单实例（BotID 为空）仍按"未标注来源"处理，保持单机器人行为不变。
+	bridge.EnableBotRouting(botStore)
 	// 启动域名存活巡检（Cloudflare 会周期性回收 trycloudflare 域名；连续失败
 	// 达阈值自动重启隧道换新域名并推送）。进程生命周期运行，随 os.Exit 终止。
 	tunnelMgr.StartHealthCheck(cfg.Auth.Cloudflared.HealthCheckInterval, cfg.Auth.Cloudflared.HealthCheckFailures)
@@ -295,6 +333,19 @@ func main() {
 		apiServer.SetVisualCapture(visualMgr)
 		apiServer.SetPushRegistry(pushRegistry)
 		apiServer.SetLarkReg(larkreg.NewRegistration(), cfg.Channels.Lark.CredentialsFile)
+		apiServer.SetBotStore(botStore)
+		apiServer.SetSettingsStore(settingsStore)
+		apiServer.SetLogDir(logDir)
+		// 机器人记录增删后重建运行中的实例（删除一台必须真的让它停止收发）。
+		// 钩子是 func()（HTTP 处理流程不宜携带渠道内部错误）；重建失败只记日志，
+		// 不阻塞 bots 接口返回 —— 记录已经落盘，下次重建会再试。
+		if larkController != nil {
+			apiServer.SetBotChangeHook(func() {
+				if err := larkController.Rebuild(); err != nil {
+					logger.Error("rebuild lark instances after bot change", zap.Error(err))
+				}
+			})
+		}
 		// 配置保存后热应用（lark 渠道启用且已接线控制器时）
 		if larkController != nil {
 			apiServer.SetLarkConfigApplier(larkController.Apply)

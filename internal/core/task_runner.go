@@ -57,9 +57,21 @@ type TaskRunner struct {
 	agentMgr    agentRunner // nil = Phase 1 claude -p 路径（默认）
 	useACP      bool
 	permTimeout time.Duration // ACP 路径 WirePermission 超时；<=0 用默认（30min）
-	autoApprove []string      // ACP 路径免审名单：ToolKind 命中即自动放行（不中断等人工审批）
-	wireMu      sync.Mutex
-	wires       map[string]*acpWires // taskID -> ACP 路径的 wire 句柄
+
+	// ACP 路径免审名单：ToolKind 命中即自动放行（不中断等人工审批）。
+	// 由全局偏好（core.SettingsStore）推导，**运行期可改** —— 所以必须加锁：
+	// 设置页 PATCH 与"某个任务刚好在建会话"是并发事件。
+	// 语义：改动只影响**之后**创建的会话；已开始的会话沿用建会话时的判定
+	// （中途换白名单会让同一个任务前后两轮适用不同规则，比"晚一轮生效"更难解释）。
+	autoApproveMu sync.RWMutex
+	autoApprove   []string
+
+	// dnd 免打扰判定（main.go 传 settings.InDND）。nil = 不启用。
+	// 命中时审批**只排队、不推送** —— 决定本身照常产生，只是不打断你。
+	dnd func() bool
+
+	wireMu sync.Mutex
+	wires  map[string]*acpWires // taskID -> ACP 路径的 wire 句柄
 
 	mu      sync.Mutex
 	running map[string]*liveProc // taskID -> 活跃进程
@@ -174,15 +186,43 @@ func (tr *TaskRunner) captureBaseline(taskID string) {
 
 // captureTurnEnd 在 Turn 结束边界（Task 终态 / 下一 EventUser 到达前）捕获 Turn 快照。
 // 幂等：turnN/ 已存在时 CaptureTurnEnd 内部跳过；纯对话 Turn 不留快照。
+//
+// 这里同时挂了 DiffStat 固化 —— 两者都处在"任务刚写完盘"这个唯一能取到数据的时刻，
+// 但**互不依赖**：feedback 为 nil 时 DiffStat 仍要固化，故对 t 的取值提到前面。
 func (tr *TaskRunner) captureTurnEnd(taskID string) {
-	if tr.feedback == nil {
-		return
-	}
 	t, ok := tr.store.Get(taskID)
 	if !ok || t == nil {
 		return
 	}
+	tr.snapshotDiffStat(t)
+	if tr.feedback == nil {
+		return
+	}
 	tr.feedback.CaptureTurnEnd(t, CurrentTurnCount(t.Events))
+}
+
+// snapshotDiffStat 固化 completed 任务的累计代码改动并写回 store。
+//
+// 只对 completed 生效（理由见 SnapshotDiffStat 注释）：失败/取消的改动不是有效产出，
+// 计入会把概览变成一根被失败任务撑起来的柱子。
+//
+// 续问（终态→running→completed）会走到这里第二次：Baseline 没变，重算天然包含历史改动，
+// 所以是**覆盖而不是跳过跳过**；但仍然只在统计成功（非 nil）时写，避免一次 git 抖动
+// 把已有的好数据冲成空。
+func (tr *TaskRunner) snapshotDiffStat(t *model.Task) {
+	if t.Status != model.TaskCompleted {
+		return
+	}
+	stat := SnapshotDiffStat(t)
+	if stat == nil {
+		return
+	}
+	if _, err := tr.store.Update(t.ID, func(it *model.Task) bool {
+		it.DiffStat = stat
+		return true
+	}); err != nil {
+		tr.logger.Warn("persist diff stat", zap.String("task", t.ID), zap.Error(err))
+	}
 }
 
 // SetAgentManager 注入 AgentManager 并启用 ACP 路径（Task 4.4）。
@@ -199,11 +239,32 @@ func (tr *TaskRunner) SetAgentManager(mgr agentRunner, useACP bool, permTimeout 
 	}
 }
 
-// SetAutoApproveTools 配置 ACP 路径免审名单（按 ToolKind 匹配，如 edit/delete/move）。
+// SetAutoApproveTools 配置 ACP 路径免审名单（按 ToolKind 匹配，如 edit/move）。
 // 命中的权限请求直接自动放行，不中断等人工审批。nil/空 = 关闭免审（全部走人工审批）。
-// 需在任务开始（ensureACPSession 注册 wire）前调用；main 构造 runner 后立即设置。
+//
+// 由全局偏好（core.SettingsStore.AutoApproveTools）推导，**运行期可调用**：
+// 设置页改动后经 OnChange 回调推到这里。只影响之后创建的会话。
 func (tr *TaskRunner) SetAutoApproveTools(tools []string) {
-	tr.autoApprove = tools
+	tr.autoApproveMu.Lock()
+	tr.autoApprove = append([]string(nil), tools...)
+	tr.autoApproveMu.Unlock()
+}
+
+// autoApproveList 读免审名单的副本（建会话时调用）。
+func (tr *TaskRunner) autoApproveList() []string {
+	tr.autoApproveMu.RLock()
+	defer tr.autoApproveMu.RUnlock()
+	return tr.autoApprove
+}
+
+// SetDNDChecker 注入免打扰判定（main.go 传 SettingsStore.InDND 的闭包）。
+// nil-safe：未注入时视为从不免打扰。
+func (tr *TaskRunner) SetDNDChecker(fn func() bool) {
+	tr.dnd = fn
+}
+
+func (tr *TaskRunner) inDND() bool {
+	return tr.dnd != nil && tr.dnd()
 }
 
 // semaphore 轻量计数信号量，用于每项目并发上限。
@@ -635,7 +696,7 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 
 	// 注册 wires（跨轮保活：轮末不 unwire，由会话关闭回调 onAgentSessionClosed 统一清理）。
 	dh := WireContentDelta(adapter, tr.bus, tr.store, task.ID)
-	ph := WirePermission(adapter, tr.bus, tr.store, task.ID, tr.notify, tr.permTimeout, tr.autoApprove, tr.logger)
+	ph := WirePermission(adapter, tr.bus, tr.store, task.ID, tr.notify, tr.permTimeout, tr.autoApproveList(), tr.logger)
 	th := WireToolCall(adapter, tr.bus, tr.store, task.ID)
 	tr.setWires(task.ID, dh, ph, th)
 
@@ -1139,8 +1200,19 @@ func (tr *TaskRunner) maybePauseForChoiceDisabled(taskID, fallbackOutput string)
 // notifyWaitingInput 往 IM 原渠道推送「需决策/选择」通知，让手机端也能收到。
 // 无 OriginChannel（HTTP/CLI 来源）或未注入 notify 时静默跳过。
 // 按 Decision.Kind 分文案：choice 列出候选选项，approval 提示 approve/deny。
+//
+// 免打扰时段内**只排队、不推送**：决定本身照常产生（它已经在 CurrentDecision /
+// 审批列表里），只是不打断你 —— 打开界面时集中呈现。所以这里跳过的是
+// 推送这一步，不是审批本身。注意**只有审批走这条门**：任务完成 / 失败回执
+// 不在免打扰范围内（它们不要求你此刻做任何事，延后告知反而会让"任务怎么样了"
+// 变成一个新的不确定性）。
 func (tr *TaskRunner) notifyWaitingInput(t *model.Task) {
 	if tr.notify == nil || t.OriginChannel == "" || t.OriginChatID == "" || t.CurrentDecision == nil {
+		return
+	}
+	if tr.inDND() {
+		tr.logger.Debug("approval push suppressed by do-not-disturb window",
+			zap.String("task", t.ID))
 		return
 	}
 	id := t.ID
@@ -1175,7 +1247,7 @@ func (tr *TaskRunner) appendOutput(taskID, text string) {
 
 // appendEvent 往 task.Events 追加一个执行事件并推送。
 // text 类型做 200ms 合并(最后一个 event 是 text 且在 200ms 内则拼接,减少事件数与写盘);
-// tool_use/tool_result 直接新增。seq = 在数组中的序号(1-based)。
+// tool_use/tool_result 直接新增。seq 由 store.AppendEvent 统一分配（单调 + 按上限裁剪）。
 func (tr *TaskRunner) appendEvent(taskID string, ev model.TaskEvent) {
 	now := time.Now()
 	ev.At = now
@@ -1189,8 +1261,7 @@ func (tr *TaskRunner) appendEvent(taskID string, ev model.TaskEvent) {
 				return
 			}
 		}
-		ev.Seq = len(t.Events) + 1
-		t.Events = append(t.Events, ev)
+		tr.store.AppendEvent(t, ev)
 	})
 }
 

@@ -74,8 +74,7 @@ func (w *toolCallWire) onUpdate(info agent.ToolCallUpdateInfo) {
 				ev.ToolName = name
 			}
 		}
-		ev.Seq = len(t.Events) + 1
-		t.Events = append(t.Events, ev)
+		w.store.AppendEvent(t, ev)
 		return true
 	})
 	if err != nil || updated == nil {

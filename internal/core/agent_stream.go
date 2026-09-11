@@ -96,8 +96,8 @@ func (w *contentDeltaWire) appendTextDelta(taskID, text string, isThought bool) 
 			last.At = now
 		} else {
 			// 最后一个 event 类型不同（或空）：新建一个同类型 event
-			t.Events = append(t.Events, model.TaskEvent{
-				Seq:  len(t.Events) + 1,
+			// （Seq 分配与保留上限裁剪统一由 AppendEvent 负责）
+			w.store.AppendEvent(t, model.TaskEvent{
 				Type: targetType,
 				Text: text,
 				At:   now,

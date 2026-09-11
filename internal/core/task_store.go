@@ -23,6 +23,9 @@ type TaskStore struct {
 	mu       sync.RWMutex
 	tasksDir string
 	tasks    map[string]*model.Task
+	// eventRetention 单任务事件保留上限（0 = 全部保留，见 AppendEvent）。
+	// 与 tasks 共用 mu：它在 Update 的 mutator 内被读取。
+	eventRetention int
 }
 
 // NewTaskStore 创建并从磁盘恢复任务索引。
@@ -114,6 +117,69 @@ func (s *TaskStore) Update(id string, mutator func(*model.Task) bool) (*model.Ta
 		return nil, err
 	}
 	return &cp, nil
+}
+
+// SetEventRetention 设置单任务事件保留上限（0 = 全部保留）。
+// 由全局偏好（Settings.EventRetention）驱动；运行期可改，只影响之后产生的事件。
+func (s *TaskStore) SetEventRetention(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.mu.Lock()
+	s.eventRetention = n
+	s.mu.Unlock()
+}
+
+// EventRetention 返回当前上限。
+func (s *TaskStore) EventRetention() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.eventRetention
+}
+
+// AppendEvent 追加一条任务事件：统一分配**单调** Seq，并按上限裁剪最旧的事件。
+//
+// ⚠️ 调用方**必须**已经持有 s.mu —— 它只为 `TaskStore.Update` 的 mutator 设计
+// （mutator 在锁内运行，所以这里读 s.eventRetention 是安全的）。
+// 单独调用而不持锁会与外部的 Update 竞争。
+//
+// 为什么裁剪放在这里而不是各自 append 后再收拾：这是**唯一**的追加入口，
+// 保留上限才不会在某个新写的路径上被漏掉（漏掉的表现是内存缓慢上涨，
+// 而长任务是这个产品里最正常的用法）。
+func (s *TaskStore) AppendEvent(t *model.Task, ev model.TaskEvent) {
+	if t.NextEventSeq <= 0 {
+		// 旧任务（本次改动前落盘）没有计数器：用最后一个事件的 Seq 推起点。
+		// 不能用 len(Events)+1 —— 若该任务此前已被裁过，len 会偏小，
+		// 于是整条序列从中间开始重复。lastEventSeq 取的是**实际序号**。
+		t.NextEventSeq = lastEventSeq(t.Events) + 1
+		if t.NextEventSeq <= 0 {
+			t.NextEventSeq = 1
+		}
+	}
+	ev.Seq = t.NextEventSeq
+	t.NextEventSeq++
+	t.Events = append(t.Events, ev)
+
+	if s.eventRetention > 0 && len(t.Events) > s.eventRetention {
+		drop := len(t.Events) - s.eventRetention
+		kept := make([]model.TaskEvent, s.eventRetention)
+		copy(kept, t.Events[drop:])
+		// 换成新底层数组，而不是 t.Events[drop:] —— 后者会让被裁掉的部分
+		// 一直挂在同一个数组上（append 只是移动切片的起点，容量不释放），
+		// 那正是这个开关要解决的问题。
+		t.Events = kept
+	}
+}
+
+// lastEventSeq 返回事件流里最大的 Seq（空则 0）。
+func lastEventSeq(events []model.TaskEvent) int {
+	last := 0
+	for _, e := range events {
+		if e.Seq > last {
+			last = e.Seq
+		}
+	}
+	return last
 }
 
 // Delete 删除任务记录与磁盘文件。

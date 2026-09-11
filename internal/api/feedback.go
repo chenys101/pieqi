@@ -372,8 +372,7 @@ func (s *Server) requireTask(c *gin.Context) (*model.Task, bool) {
 func (s *Server) appendTaskEvent(taskID string, ev model.TaskEvent) *model.Task {
 	ev.At = time.Now()
 	updated, err := s.store.Update(taskID, func(t *model.Task) bool {
-		ev.Seq = len(t.Events) + 1
-		t.Events = append(t.Events, ev)
+		s.store.AppendEvent(t, ev)
 		return true
 	})
 	if err != nil || updated == nil {

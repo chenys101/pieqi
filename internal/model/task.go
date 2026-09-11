@@ -42,12 +42,42 @@ const (
 	DecisionKindChoice   DecisionKind = "choice"   // 路径 B：多选一
 )
 
+// RiskLevel 审批风险分级（SPEC §5.4 组① / §6.2 待审批组）。
+//
+// 它**不是新造的一套并行语义**，而是给已有的「免审名单」一个可以说出口的名字：
+// 底层仍然是 ACP ToolKind 白名单，分级只是把「哪些 ToolKind 归为一档」写清楚，
+// 让用户不必知道 ToolKind 是什么。
+//
+// 定义在 model 而不是 core，是因为 Decision 要带它 —— model 是最底层，不能反向依赖 core。
+type RiskLevel string
+
+const (
+	RiskL0 RiskLevel = "L0" // 只读探测
+	RiskL1 RiskLevel = "L1" // 写入
+	RiskL2 RiskLevel = "L2" // 执行命令
+	RiskL3 RiskLevel = "L3" // 破坏性操作
+)
+
+// AutoApprovable 一档风险是否**允许**自动放行。
+//
+// L2 / L3 是**硬边界**：它们不是"默认关着的开关"，而是**根本不存在开关**。
+// 能把自己配进坑里的选项，不要做成选项 —— 影响会溢出到工作区之外的操作
+// （装依赖、跑脚本）与不可逆操作（删除、覆盖、强制推送）必须由人确认。
+func (l RiskLevel) AutoApprovable() bool { return l == RiskL0 || l == RiskL1 }
+
 // Decision 任务卡在 hook 时的一次权限/决策中断。
 // 路径 A（approval）：Claude 原生 permission 经 PreToolUse hook 上报，options 固定 ["approve","deny"]。
 // 路径 B（choice）：Claude 输出 [CHOICE] 格式提问，options 为候选选项列表。
 type Decision struct {
 	ID        string       `json:"id"`                   // 关联 stream-json 的 tool_use id（路径 A）或新生成 uuid（路径 B）
 	Kind      DecisionKind `json:"kind,omitempty"`       // approval | choice；空串兼容旧持久化
+	// Risk 本次决策的风险分级（L0–L3）。
+	//
+	// 只给**路径 A（工具审批）**打标 —— 风险是"这个操作会干什么"的属性，
+	// 而路径 B（Claude 文本提问）没有工具语义，硬套一个等级只会给出假信息。
+	// 空串 = 未知（旧持久化任务 / choice 类决策），前端按 L2 的视觉强度兜底：
+	// 未定级不等于低风险，"不知道"必须往保守那侧倒。
+	Risk      RiskLevel    `json:"risk,omitempty"`
 	ToolName  string       `json:"tool_name,omitempty"`  // 路径 A: Bash/Edit/...；路径 B: 空
 	Summary   string       `json:"summary"`              // 路径 A: 工具摘要；路径 B: 问题文本
 	Options   []string     `json:"options"`              // approval: ["approve","deny"]；choice: 候选项
@@ -94,6 +124,18 @@ type TaskEvent struct {
 	At        time.Time       `json:"at"`
 }
 
+// DiffStat 任务在**进入终态那一刻**对累计代码改动的快照。
+//
+// 为什么要在终态固化、而不是按需重算：这是**随时间丢失的数据**。
+// worktree 清理后就再也取不到当时的 git diff，而这个快照要在「本周概览」
+// 这类回顾性视图里长期可用。回头重算是拿不回来的，只能当场固存。
+type DiffStat struct {
+	Files      int       `json:"files"`
+	Additions  int       `json:"additions"`
+	Deletions  int       `json:"deletions"`
+	CapturedAt time.Time `json:"captured_at"`
+}
+
 // Task 一次在 Git Worktree 中运行的编码任务。
 type Task struct {
 	ID              string     `json:"id"` // uuid
@@ -108,8 +150,19 @@ type Task struct {
 	Title           string     `json:"title,omitempty"` // 一句话标题（异步大模型摘要生成；缺失时前端用 prompt 智能截断兜底）
 	Output          string      `json:"output,omitempty"` // 流式累积的最新文本
 	Events          []TaskEvent `json:"events,omitempty"` // 执行事件流(文本/工具调用/结果),供详情视图
+	// NextEventSeq 是**下一个**事件序号（单调递增，不从 0 开始计数）。
+	//
+	// 为什么不能继续用 len(Events)+1 推：事件保留上限会把最旧的裁掉，
+	// 一旦裁过，len 就不再能推出"下一个序号"——重复的 Seq 会让所有按 seq
+	// 定位的逻辑（Checkpoint 快照点、Evidence、rewindEventSeq）静默取到错的事件，
+	// 而错误表现是"少了/多了几条"，不是报错。
+	NextEventSeq   int         `json:"next_event_seq,omitempty"`
 	CurrentDecision *Decision  `json:"current_decision,omitempty"`
 	Error           string      `json:"error,omitempty"`
+
+	// DiffStat 终态时的累计改动快照。**只有 completed 任务才有**（见 SnapshotDiffStat 的理由），
+	// failed/cancelled 为 nil —— 它们的改动不是有效产出，计入会污染概览。
+	DiffStat *DiffStat `json:"diff_stat,omitempty"`
 
 	// Baseline Task 创建时记录的工作区起始状态（Feedback P0）。nil = 旧任务未捕获。
 	Baseline *TaskBaseline `json:"baseline,omitempty"`
