@@ -23,7 +23,16 @@ import (
 )
 
 // Adapter 飞书渠道适配器，实现 MessageReceiver + MessageSender。
+//
+// 多机器人（D1）：一个 Adapter 实例 = 一台飞书机器人（一个 app_id）。
+// 多台机器人 = 多个 Adapter，各自独立长连接 / 各自独立凭据；
+// botID 为空表示渠道级实例（单机器人 / 未接入多机器人）。
 type Adapter struct {
+	// botID 标识本实例代表哪台机器人（model.Bot.ID）。
+	// 不可变：实例集合变化时重建 Adapter，不做原地改写 —— 否则与
+	// 已经发出的消息归属会产生歧义。
+	botID string
+
 	appID       string
 	appSecret   string
 	verifyToken string
@@ -72,6 +81,23 @@ func (a *Adapter) WithLogger(l *zap.Logger) *Adapter {
 	return a
 }
 
+// WithBotID 声明本实例代表哪台机器人（model.Bot.ID）。
+// 链式调用，便于 main 侧一行构造；空串 = 渠道级实例。
+func (a *Adapter) WithBotID(id string) *Adapter {
+	a.botID = id
+	return a
+}
+
+// BotID 实现 channel.BotIdentity：投递的消息据此标注来源机器人。
+func (a *Adapter) BotID() string { return a.botID }
+
+// Mode 返回当前接入方式（"webhook" | "longconn"），读锁下取。
+// WebhookMux 用它判定实例是否受理 HTTP 回调 —— 长连接实例不应受理。
+func (a *Adapter) Mode() string {
+	_, _, _, _, mode := a.configSnapshot()
+	return mode
+}
+
 // configSnapshot 在 configMu 读锁下取当前配置快照。
 // 避免 SetConfig（热更新）与 webhook 处理/取 token 并发竞态。
 func (a *Adapter) configSnapshot() (appID, appSecret, verifyToken, encryptKey, eventMode string) {
@@ -103,15 +129,13 @@ func (a *Adapter) SetConfig(appID, appSecret, verifyToken, encryptKey, eventMode
 // Name 返回渠道名
 func (a *Adapter) Name() string { return "lark" }
 
-// Init 注册飞书 Webhook 路由（仅 webhook 模式）。
-// 长连接模式不需要公网路由，直接返回 nil。
-func (a *Adapter) Init(router gin.IRouter) error {
-	if a.eventMode == "longconn" {
-		return nil
-	}
-	router.POST("/webhook/lark", a.handleWebhook)
-	return nil
-}
+// Init 不注册路由 —— 飞书是「同一渠道多实例」的渠道（多台机器人同属
+// ChannelLark），HTTP 入口必须由 WebhookMux 独占：gin 不允许同一路由
+// pattern 被注册多次，而多台机器人天然共享 /webhook/lark 这个前缀。
+//
+// 保留本方法以满足 channel.MessageReceiver 契约（见该接口的 Init 注释）。
+// 路由见 webhook_mux.go，它由渠道控制器在启动时注册一次。
+func (a *Adapter) Init(_ gin.IRouter) error { return nil }
 
 // Start 启动渠道。
 //   - webhook 模式：no-op（等飞书回调即可）
@@ -216,7 +240,7 @@ func (a *Adapter) handleWebhook(c *gin.Context) {
 	}
 
 	// 2. 解密消息（如果配置了加密）。configSnapshot 保证与 SetConfig 并发安全。
-	_, _, _, encryptKey, _ := a.configSnapshot()
+	_, _, verifyToken, encryptKey, _ := a.configSnapshot()
 	plaintext := body
 	if encryptKey != "" {
 		var encrypted struct {
@@ -236,6 +260,15 @@ func (a *Adapter) handleWebhook(c *gin.Context) {
 	var event larkEvent
 	if err := json.Unmarshal(plaintext, &event); err != nil {
 		c.JSON(200, gin.H{"status": "ok"}) // 飞书要求 200
+		return
+	}
+
+	// 3b. 校验 verify_token：配置了才校验（未配置保持向后兼容）。
+	// 路由现在是常驻的（多机器人需单路由分发，见 webhook_mux.go），
+	// 长连接部署也不会少掉这条入口，故必须验来源 —— 否则任何人 POST
+	// 一个伪造事件就能驱使机器人往任意会话发消息。
+	if verifyToken != "" && event.Header.Token != verifyToken {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid verify token"})
 		return
 	}
 
@@ -283,6 +316,7 @@ func (a *Adapter) convertMessage(e *larkEvent) model.Message {
 
 	return model.Message{
 		Channel:    model.ChannelLark,
+		BotID:      a.botID,
 		ChatID:     e.Event.Message.ChatID,
 		UserID:     userID,
 		Content:    text,
@@ -407,4 +441,5 @@ func escapeJSON(s string) string {
 var (
 	_ channel.MessageReceiver = (*Adapter)(nil)
 	_ channel.MessageSender   = (*Adapter)(nil)
+	_ channel.BotIdentity     = (*Adapter)(nil)
 )

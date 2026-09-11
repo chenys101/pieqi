@@ -27,6 +27,13 @@ type AdminBinding interface {
 	Match(openid string) bool
 }
 
+// AdminBotResolver 给出当前管理员机器人的 id（由 core.BotStore 实现）。
+// 特权归属于**绑定的飞书账号（人）**，机器人只是承载与转达者：
+// 只有 admin 机器人受理特权命令（见 IMPLEMENTATION-PLAN §4.2 / Q2）。
+type AdminBotResolver interface {
+	AdminBotID() string
+}
+
 // Bridge IM 渠道编排器。
 //
 // Pieqi 模式下 IM 渠道承担两件事：
@@ -37,7 +44,17 @@ type AdminBinding interface {
 type Bridge struct {
 	logger    *zap.Logger
 	receivers []channel.MessageReceiver
-	senders   map[string]channel.MessageSender
+
+	// 发送路由表。两张表各有分工，都在 sendersMu 下读写（多机器人实例
+	// 会在运行期增删，不能让回执读到半成品状态）：
+	//   senders    —— 渠道名 -> sender（渠道级实例，如未接入多机器人的 wechat）
+	//   botSenders —— bot id  -> sender（每台机器人一个实例，多机器人下唯一）
+	// 回执解析顺序见 senderFor。
+	sendersMu  sync.RWMutex
+	senders    map[string]channel.MessageSender
+	botSenders map[string]channel.MessageSender
+	botChannel map[string]string // bot id -> 渠道名（按渠道回退时用）
+	botOrder   []string          // 注册顺序，保证回退**确定**（不依赖 map 遍历顺序）
 
 	// Pieqi 模式（pieqi.enabled 时注入）
 	pieqi *pieqiMode
@@ -45,6 +62,8 @@ type Bridge struct {
 	// 隧道命令（main.go 注入；nil = 隧道未启用）
 	tunnel       TunnelOps
 	adminBinding AdminBinding
+	// 管理员机器人解析器（main.go 注入；nil = 未启用按机器人区分特权）
+	adminBot AdminBotResolver
 
 	// 隧道自动自愈通知：最近一次由管理员在 IM 操作隧道的飞书会话 chat_id。
 	// TunnelManager 的自愈回调（OnHeal / OnHealErr）经 NotifyTunnelHeal /
@@ -74,31 +93,123 @@ func (b *Bridge) EnableTunnelOps(t TunnelOps, admin AdminBinding) {
 	b.adminBinding = admin
 }
 
+// EnableBotRouting 注入管理员机器人解析器，开启「按机器人区分特权」（Q2）。
+// 由 main.go 在 BotStore 创建后调用；nil 安全 —— 未注入时保持单机器人行为。
+func (b *Bridge) EnableBotRouting(resolver AdminBotResolver) {
+	b.adminBot = resolver
+}
+
 func NewBridge(logger *zap.Logger) *Bridge {
 	return &Bridge{
-		logger:  logger,
-		senders: make(map[string]channel.MessageSender),
+		logger:     logger,
+		senders:    make(map[string]channel.MessageSender),
+		botSenders: make(map[string]channel.MessageSender),
+		botChannel: make(map[string]string),
 	}
 }
 
+// RegisterReceiver 注册**渠道级** receiver：既是消息来源，也是该渠道
+// 无 bot 维度回执的默认落点。多机器人实例不从这里注册（它们按 bot id
+// 归档，见 SyncBotSenders / BindReceiver）。
 func (b *Bridge) RegisterReceiver(receiver channel.MessageReceiver) {
-	b.receivers = append(b.receivers, receiver)
+	b.sendersMu.Lock()
 	if sender, ok := receiver.(channel.MessageSender); ok {
 		b.senders[receiver.Name()] = sender
 	}
+	b.sendersMu.Unlock()
+
+	b.BindReceiver(receiver)
+	b.receivers = append(b.receivers, receiver)
+}
+
+// BindReceiver 只接管该实例的消息回调，不写入按渠道名的发送表。
+// 多机器人下每台机器人都是一个 receiver，但它们不能共用渠道名这条键 ——
+// 否则后注册的会把先注册的挤掉，回执全部串到最后一台。
+func (b *Bridge) BindReceiver(receiver channel.MessageReceiver) {
 	receiver.OnMessage(func(msg model.Message) {
 		go b.handleMessage(msg)
 	})
 }
 
 func (b *Bridge) RegisterSender(name string, sender channel.MessageSender) {
+	b.sendersMu.Lock()
 	b.senders[name] = sender
+	b.sendersMu.Unlock()
+}
+
+// BotSenderRef 一台机器人实例的发送通道。
+type BotSenderRef struct {
+	BotID   string
+	Channel string
+	Sender  channel.MessageSender
+}
+
+// SyncBotSenders 原子替换整套「按机器人」的发送路由表。
+// 由渠道控制器在实例集合变化后调用（首次注册 / 新增 / 删除 / 热应用）：
+// 先重建实例，再整体同步，避免出现「新实例已收到消息但回不出去」的窗口。
+// 渠道级 senders 不受影响。
+func (b *Bridge) SyncBotSenders(refs []BotSenderRef) {
+	next := make(map[string]channel.MessageSender, len(refs))
+	nextChan := make(map[string]string, len(refs))
+	order := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if r.BotID == "" || r.Sender == nil {
+			continue // 渠道级实例走 senders，不在这里
+		}
+		next[r.BotID] = r.Sender
+		nextChan[r.BotID] = r.Channel
+		order = append(order, r.BotID)
+	}
+	b.sendersMu.Lock()
+	b.botSenders, b.botChannel, b.botOrder = next, nextChan, order
+	b.sendersMu.Unlock()
 }
 
 // Sender 按渠道名取已注册 sender（P2 PushRegistry 注册 IM provider 用）。
+// 多机器人下渠道名不唯一，此时回退到该渠道的管理员机器人（见 senderFor）。
 func (b *Bridge) Sender(name string) (channel.MessageSender, bool) {
-	s, ok := b.senders[name]
-	return s, ok
+	return b.senderFor(name, "")
+}
+
+// senderFor 解析回执通道，按「越具体越优先」回退：
+//
+//  1. bot id —— 多机器人下唯一确定（消息回哪台来就由哪台回）；
+//  2. 渠道名 —— 渠道级单实例；
+//  3. 该渠道的管理员机器人 —— 推送注册等**无 bot 维度**的调用需要一个确定落点；
+//  4. 该渠道按注册顺序的第一台 —— 保证「能发出去」优先于「发得精确」。
+//
+// 第 3/4 步的回退是有意的：多机器人下若没有渠道级实例，Sender("lark")
+// 拿到 nil 会让 outcome 推送静默失效。
+func (b *Bridge) senderFor(channelName, botID string) (channel.MessageSender, bool) {
+	b.sendersMu.RLock()
+	defer b.sendersMu.RUnlock()
+
+	if botID != "" {
+		if s, ok := b.botSenders[botID]; ok {
+			return s, true
+		}
+		// bot id 未知（实例刚被删除 / 重启竞态）：继续往下回退，
+		// 别让这条回执丢在解析阶段。
+	}
+	if s, ok := b.senders[channelName]; ok {
+		return s, true
+	}
+	if b.adminBot != nil {
+		if id := b.adminBot.AdminBotID(); id != "" && b.botChannel[id] == channelName {
+			if s, ok := b.botSenders[id]; ok {
+				return s, true
+			}
+		}
+	}
+	for _, id := range b.botOrder {
+		if b.botChannel[id] != channelName {
+			continue
+		}
+		if s, ok := b.botSenders[id]; ok {
+			return s, true
+		}
+	}
+	return nil, false
 }
 
 // -- Message handling --
@@ -124,7 +235,9 @@ func (b *Bridge) handleMessage(msg model.Message) {
 // -- Reply --
 
 func (b *Bridge) reply(msg model.Message, text string) {
-	s, ok := b.senders[string(msg.Channel)]
+	// 按 bot id 回 —— 多机器人下同一渠道有多台，只按渠道名取 sender
+	// 会把 A 台收到的消息从 B 台发出去。
+	s, ok := b.senderFor(string(msg.Channel), msg.BotID)
 	if !ok {
 		return
 	}
@@ -157,7 +270,7 @@ func (b *Bridge) NotifyOrigin(task *model.Task, text string) {
 	if task.OriginChannel == "" || task.OriginChatID == "" {
 		return
 	}
-	s, ok := b.senders[task.OriginChannel]
+	s, ok := b.senderFor(task.OriginChannel, "")
 	if !ok {
 		return
 	}
@@ -188,7 +301,7 @@ func (b *Bridge) NotifyTunnelHeal(res auth.TunnelResult) {
 		b.logger.Debug("tunnel healed but no admin chat recorded; skip push")
 		return
 	}
-	s, ok := b.senders[string(model.ChannelLark)]
+	s, ok := b.senderFor(string(model.ChannelLark), "")
 	if !ok {
 		b.logger.Debug("tunnel healed but lark sender not registered; skip push")
 		return
@@ -209,7 +322,7 @@ func (b *Bridge) NotifyTunnelHealErr(_ error) {
 		b.logger.Debug("tunnel heal failed but no admin chat recorded; skip push")
 		return
 	}
-	s, ok := b.senders[string(model.ChannelLark)]
+	s, ok := b.senderFor(string(model.ChannelLark), "")
 	if !ok {
 		b.logger.Debug("tunnel heal failed but lark sender not registered; skip push")
 		return
@@ -267,11 +380,24 @@ func (b *Bridge) handleTunnelCommand(msg model.Message, op string, ttl time.Dura
 		b.reply(msg, "⚠️ 隧道系统未启用（config 未接线）。")
 		return
 	}
-	// 身份：仅 lark 渠道（消息 UserID 即飞书 open_id）+ 绑定管理员可操作。
-	// 其他渠道无 open_id 语义，一律拒绝。
+	// 身份（第一道）：仅 lark 渠道（消息 UserID 即飞书 open_id）+ 绑定管理员可操作。
+	// 其他渠道无 open_id 语义，一律拒绝。这是「特权属于人」的落地。
 	if msg.Channel != model.ChannelLark || b.adminBinding == nil || !b.adminBinding.Match(msg.UserID) {
 		b.reply(msg, "⛔ 仅绑定的飞书管理员可操作隧道。")
 		return
+	}
+
+	// 身份（第二道，Q2）：特权只由**管理员机器人**承载 —— 即便发送者本人是管理员，
+	// 若这条消息是别的机器人收到的，也一律拒绝（多机器人下管理员只通过某一台操作）。
+	//
+	// msg.BotID 为空表示投递方未标注来源（渠道级单实例 / 老路径），
+	// 此时**不收紧**，保持单机器人行为不变；具名机器人实例会填充 BotID
+	// （见 channel/lark 的 convertMessage 与长连接回调），判定即在此生效。
+	if b.adminBot != nil && msg.BotID != "" {
+		if id := b.adminBot.AdminBotID(); id != "" && msg.BotID != id {
+			b.reply(msg, "⛔ 无权操作：该命令仅管理员机器人受理。")
+			return
+		}
 	}
 
 	// 记录最近操作隧道的飞书会话，供自动自愈（NotifyTunnelHeal/Err）推送新链接。

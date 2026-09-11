@@ -91,6 +91,7 @@ type PieqiConfig struct {
 	HookTools               []string      `mapstructure:"hook_tools"`                 // PreToolUse 拦截的工具名，默认 Bash/Write/Edit/NotebookEdit
 	MaxConcurrentPerProject int           `mapstructure:"max_concurrent_per_project"` // 每项目并发上限，默认 4
 	BaseBranch              string        `mapstructure:"base_branch"`                // worktree 基准分支，默认 "main"
+	BotsDir                 string        `mapstructure:"bots_dir"`                   // IM 机器人绑定记录目录；空 = ~/.pieqi/bots
 	ACP                     ACPConfig     `mapstructure:"acp"`                        // ACP 协议配置（Phase 2 引入；use_acp=false 时走 Phase 1 PrintAgent 路径）
 }
 
@@ -216,6 +217,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pieqi.max_concurrent_per_project", 4)
 	v.SetDefault("pieqi.worktree_base", "") // 空 = DefaultDataRoot()/worktrees（main 侧解析）
 	v.SetDefault("pieqi.base_branch", "main")
+	v.SetDefault("pieqi.bots_dir", filepath.Join(DefaultDataRoot(), "bots"))
 	v.SetDefault("pieqi.acp.use_acp", false)
 	v.SetDefault("pieqi.acp.agent_type", "claude-code")
 	v.SetDefault("pieqi.acp.init_timeout", "30s")
@@ -259,6 +261,11 @@ func Load(configPath string) (*Config, error) {
 	// 空 credentials_file 回退默认路径(同 feishu_binding_file 模式)
 	if cfg.Channels.Lark.CredentialsFile == "" {
 		cfg.Channels.Lark.CredentialsFile = filepath.Join(DefaultDataRoot(), "lark_credentials.json")
+	}
+
+	// 空 bots_dir 回退默认路径（同上：显式空值会覆盖 viper 默认值）
+	if cfg.Pieqi.BotsDir == "" {
+		cfg.Pieqi.BotsDir = filepath.Join(DefaultDataRoot(), "bots")
 	}
 
 	// P5 迁移（multi-agent.md §9）：pieqi.acp.* → agents.*。

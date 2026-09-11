@@ -6,7 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"pieqi/internal/core"
 	"pieqi/internal/larkreg"
+	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
 )
@@ -30,6 +32,11 @@ type larkRegState struct {
 	appSecret string
 	err       string
 	startedAt time.Time
+	// sysPrompt 是本次创建携带的预设提示词（D2：跟随 bot 记录）。
+	// 由 /start 的可选 body 传入，poll 成功后写入新建的 Bot。
+	sysPrompt string
+	// botID 是本次创建落的 bot 记录 id（幂等标记：poll 重复调用只创建一次）。
+	botID string
 }
 
 // SetLarkReg 注入 Device Flow runner 和凭据落盘路径。仅测试与 main.go 调用。
@@ -70,6 +77,13 @@ func (s *Server) larkRegStart(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "lark registration not configured"})
 		return
 	}
+	// 可选 body：{"sys_prompt": "..."} —— 预设提示词随本次创建一起带给新机器人。
+	// body 缺失 / 非 JSON 都视为「不带提示词」，不阻断扫码流程。
+	var body struct {
+		SysPrompt string `json:"sys_prompt"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
 	// 重置状态(只允许同时一个进行中的 flow)
 	s.larkRegState.mu.Lock()
 	s.larkRegState.done = false
@@ -78,6 +92,7 @@ func (s *Server) larkRegStart(c *gin.Context) {
 	s.larkRegState.err = ""
 	s.larkRegState.qrURL = ""
 	s.larkRegState.startedAt = time.Now()
+	s.larkRegState.sysPrompt = body.SysPrompt
 	s.larkRegState.mu.Unlock()
 
 	go func() {
@@ -145,6 +160,33 @@ func (s *Server) larkRegPoll(c *gin.Context) {
 			return
 		}
 	}
+	// 多机器人落点（D1/D2）：除上面的单例凭据（渠道 bootstrap 用，行为不变）外，
+	// 再落一条 bot 记录 + per-bot 凭据。前端会重复轮询，故用状态里的 botID 做**幂等**。
+	botWarn := ""
+	if s.bots != nil && s.larkRegState.botID == "" && s.larkRegState.appID != "" {
+		bot, err := s.bots.Create(model.Bot{
+			Channel:   model.ChannelLark,
+			SysPrompt: s.larkRegState.sysPrompt,
+			AppID:     s.larkRegState.appID,
+			// Name / Role 留空：由 BotStore 按「首个绑定自动 admin」规则推导
+		})
+		if err != nil {
+			// 不阻断：凭据已落盘、渠道可用；bot 记录失败只降级提示。
+			botWarn = "机器人记录创建失败: " + err.Error()
+		} else {
+			s.larkRegState.botID = bot.ID
+			// per-bot 凭据文件（含 secret，0600）。写失败只影响该 bot 的独立凭据，
+			// 不影响已生效的单例凭据，故不阻断也不升级为错误。
+			if cfg, ok := larkreg.LoadConfig(s.larkRegCredPath); ok {
+				_ = larkreg.SaveConfig(s.bots.CredsPath(bot.ID), cfg)
+			}
+			// 新增了一台 → 让渠道控制器建实例。apply 路径稍后也会重建一次
+			// （差量重建，第二次是 no-op），这里显式触发是为了不把
+			// "新机器人必须真的开始收发"这件事挂在不相关的热应用步骤上。
+			s.notifyBotChanged()
+		}
+	}
+
 	// 热应用新凭据（已接线 applier 时即刻生效；否则保持旧"重启生效"提示）
 	hint := "restart pieqi to apply new credentials"
 	if s.larkConfigApplier != nil {
@@ -158,9 +200,13 @@ func (s *Server) larkRegPoll(c *gin.Context) {
 			}
 		}
 	}
+	if botWarn != "" {
+		hint = botWarn
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"status": "success",
 		"app_id": s.larkRegState.appID,
+		"bot_id": s.larkRegState.botID,
 		"hint":   hint,
 	})
 }
@@ -225,6 +271,7 @@ func (s *Server) larkRegConfigUpdate(c *gin.Context) {
 		VerifyToken string `json:"verify_token"`
 		EncryptKey  string `json:"encrypt_key"`
 		EventMode   string `json:"event_mode"`
+		SysPrompt   string `json:"sys_prompt"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
@@ -269,6 +316,21 @@ func (s *Server) larkRegConfigUpdate(c *gin.Context) {
 		return
 	}
 
+	// 落 bot 记录（幂等键 = 渠道 + app_id）。
+	// 手动配置与扫码**是同一件事的两种达成方式**：都要得到"一台可用的机器人"。
+	// 放在这里而不是让前端再发一次 POST /api/bots —— 否则会出现
+	// "配置保存成功、机器人却没建出来"的中间态，而用户在界面上看不出来。
+	botID, botWarn := "", ""
+	if id, created, err := s.upsertBotForApp(cfg, body.SysPrompt); err != nil {
+		botWarn = "机器人记录写入失败: " + err.Error()
+	} else if id != "" {
+		botID = id
+		if created {
+			// 新增了一台 → 让渠道控制器建实例（否则它只存在于列表里，不收发消息）。
+			s.notifyBotChanged()
+		}
+	}
+
 	// 热应用。applier 未接线（旧测试/未注入）时仅落盘，需重启生效。
 	restartRequired := true
 	msg := "已保存，重启 Pieqi 生效"
@@ -290,9 +352,60 @@ func (s *Server) larkRegConfigUpdate(c *gin.Context) {
 			msg = "已生效"
 		}
 	}
+	if botWarn != "" {
+		msg = botWarn
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"applied":          true,
 		"restart_required": restartRequired,
 		"message":          msg,
+		"bot_id":           botID,
 	})
+}
+
+// upsertBotForApp 由「手动配置」路径调用：把一次成功的配置保存落成一台机器人。
+//
+// 幂等键是 (channel, app_id)：同一个应用反复保存只更新那一台，不新增。
+// 这条很关键 —— 这个端点同时承担"新建"和"改凭据"两种用途（合并语义），
+// 没有幂等键的话，用户每改一次 secret 就会多出一台机器人。
+//
+// 凭据写在该机器人**自己**的路径上（BotStore.CredsPath），与其他机器人隔离。
+// 新建时若凭据落盘失败，会撤销刚建的记录 —— 不留"有记录、无凭据"的坏状态
+// （那种机器人会让控制器每次重建都跳过它，而用户看到它明明在列表里）。
+//
+// 返回 (botID, created, err)。BotStore 未接线时返回 ("", false, nil)：视为
+// "这次只改了渠道级配置"，不是错误。
+func (s *Server) upsertBotForApp(cfg larkreg.ChannelConfig, sysPrompt string) (string, bool, error) {
+	if s.bots == nil || cfg.AppID == "" {
+		return "", false, nil
+	}
+	if existing, ok := s.bots.FindByAppID(model.ChannelLark, cfg.AppID); ok {
+		// 提示词用「非空即覆盖」：与端点其余字段的合并语义一致
+		// （空 = 用户没填，保持原值，不当作"清空"）。
+		if sysPrompt != "" && sysPrompt != existing.SysPrompt {
+			p := sysPrompt
+			if _, err := s.bots.Update(existing.ID, core.BotPatch{SysPrompt: &p}); err != nil {
+				return "", false, err
+			}
+		}
+		// 凭据也刷新一次（可能只改了 secret / event_mode）。
+		if err := larkreg.SaveConfig(s.bots.CredsPath(existing.ID), cfg); err != nil {
+			return "", false, err
+		}
+		return existing.ID, false, nil
+	}
+	bot, err := s.bots.Create(model.Bot{
+		Channel:   model.ChannelLark,
+		SysPrompt: sysPrompt,
+		AppID:     cfg.AppID,
+		// Name / Role 留空：由 BotStore 按「首个绑定自动 admin」规则推导
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if err := larkreg.SaveConfig(s.bots.CredsPath(bot.ID), cfg); err != nil {
+		_ = s.bots.Delete(bot.ID)
+		return "", false, err
+	}
+	return bot.ID, true, nil
 }

@@ -40,6 +40,9 @@ func (a *Adapter) startLongConnection(ctx context.Context, logger *zap.Logger) e
 	dispatcher := dispatcher.NewEventDispatcher("", "").
 		OnP2MessageReceiveV1(func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
 			msg := convertP2Message(event)
+			// 标注来源机器人（多机器人下同一渠道有多条长连接，
+			// 不标注则 Bridge 无法区分是哪台收到的）。
+			msg.BotID = a.botID
 			if a.onMessage != nil {
 				a.onMessage(msg)
 			}
