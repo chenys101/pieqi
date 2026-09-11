@@ -16,6 +16,8 @@ import ChecksPanel from './ChecksPanel.vue'
 import OutcomeCard from './OutcomeCard.vue'
 import EvidenceCard from './EvidenceCard.vue'
 import DiffView from './DiffView.vue'
+import FilePreview from './FilePreview.vue'
+import { previewKind } from '../filePreview'
 import { useNotificationStore } from '@/stores/notification'
 
 const props = defineProps<{
@@ -37,6 +39,8 @@ const rewindingFile = ref<string | null>(null)
 const view = ref<'event' | 'baseline'>('event')
 /** Baseline 视角下展开的文件路径 */
 const openBaselinePath = ref<string | null>(null)
+/** Baseline 视角下展开预览的文件路径 */
+const previewBaselinePath = ref<string | null>(null)
 /** Rewind → Verify 的验证摘要（最近一次） */
 const verification = ref<RewindVerificationDto | null>(null)
 
@@ -188,19 +192,29 @@ watch(
       <div v-else class="rounded-lg border border-border/60 bg-surface/60">
         <div v-if="!baselineFiles.length" class="px-3 py-2 text-xs text-muted">暂无累计变更</div>
         <div v-for="fc in baselineFiles" :key="fc.path" class="border-b border-border/30 last:border-b-0">
-          <button
-            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-elevated"
-            @click="openBaselinePath = openBaselinePath === fc.path ? null : fc.path"
-          >
-            <span class="min-w-0 flex-1 truncate font-mono text-muted" :title="fc.path">{{ fc.path }}</span>
-            <span class="shrink-0 font-mono">
-              <span v-if="fc.additions || fc.deletions" class="text-success">+{{ fc.additions ?? 0 }}</span>
-              <span v-if="fc.additions || fc.deletions" class="ml-1 text-error">-{{ fc.deletions ?? 0 }}</span>
-            </span>
-            <span class="shrink-0 text-muted transition-transform" :class="openBaselinePath === fc.path ? '' : '-rotate-90'">▾</span>
-          </button>
+          <div class="flex items-center gap-2">
+            <button
+              class="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-elevated"
+              @click="openBaselinePath = openBaselinePath === fc.path ? null : fc.path"
+            >
+              <span class="min-w-0 flex-1 truncate font-mono text-muted" :title="fc.path">{{ fc.path }}</span>
+              <span class="shrink-0 font-mono">
+                <span v-if="fc.additions || fc.deletions" class="text-success">+{{ fc.additions ?? 0 }}</span>
+                <span v-if="fc.additions || fc.deletions" class="ml-1 text-error">-{{ fc.deletions ?? 0 }}</span>
+              </span>
+              <span class="shrink-0 text-muted transition-transform" :class="openBaselinePath === fc.path ? '' : '-rotate-90'">▾</span>
+            </button>
+            <button
+              v-if="previewKind(fc.path)"
+              class="shrink-0 px-2.5 py-1 text-xs"
+              :class="previewBaselinePath === fc.path ? 'text-accent' : 'text-muted hover:text-text'"
+              @click="previewBaselinePath = previewBaselinePath === fc.path ? null : fc.path"
+            >预览</button>
+          </div>
           <!-- turn 省略 = Baseline 累计 diff -->
           <DiffView v-if="openBaselinePath === fc.path" :task-id="taskId" :path="fc.path" />
+          <!-- 文件预览（markdown/pdf） -->
+          <FilePreview v-if="previewBaselinePath === fc.path" :task-id="taskId" :path="fc.path" />
         </div>
       </div>
 

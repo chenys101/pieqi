@@ -7,6 +7,7 @@ import { useSession } from '@/composables/useSession'
 import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '@/features/session'
 import { FeedbackPanel } from '@/features/feedback'
 import EmptyState from '@/components/ui/EmptyState.vue'
+import Button from '@/components/ui/Button.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -61,11 +62,20 @@ async function onDeny() {
   }
 }
 
-async function onRemove() {
+// 删除必需确认，但**不用原生 confirm()**（SPEC 已禁）：它是模态的，会盖住任务标题与上下文，
+// 而用户恰恰要看着那些才知道删的是不是这个。改为紧接着头部长出的内联确认条。
+const removeConfirming = ref(false)
+
+function askRemove() {
+  removeConfirming.value = true
+}
+
+async function doRemove() {
   if (!task.value) return
-  if (!confirm('确定删除该任务？删除后不可恢复。')) return
+  removeConfirming.value = false
   await taskStore.deleteTask(task.value.id)
-  router.replace('/tasks')
+  // 删除后回仪表盘而不是 /tasks：任务浏览器页是移动端专用，桌面由侧栏树承接（SPEC §6.1）
+  router.replace('/dashboard')
 }
 </script>
 
@@ -73,7 +83,20 @@ async function onRemove() {
   <!-- 两栏排布：会话主列 flex-1 + 变更反馈侧栏 dock 右侧（PC）；移动端 Drawer 覆盖式，主列独占 -->
   <div v-if="task" class="flex h-full">
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-      <SessionHeader :task="task" :can-cancel="canCancel" @cancel="cancel" @remove="onRemove" @feedback="feedbackOpen = true" />
+      <SessionHeader :task="task" :can-cancel="canCancel" @cancel="cancel" @remove="askRemove" @feedback="feedbackOpen = true" />
+
+      <!-- 内联确认条：紧贴任务头部，用户看着任务名确认删的是不是它 -->
+      <div
+        v-if="removeConfirming"
+        class="mx-auto w-full max-w-3xl shrink-0 px-3 pb-2 md:px-4"
+      >
+        <div class="flex flex-wrap items-center gap-2 rounded-lg border border-error/40 bg-error/5 px-3 py-2">
+          <span class="min-w-0 flex-1 text-xs text-error">删除该任务？删除后不可恢复。</span>
+          <Button variant="ghost" size="sm" @click="removeConfirming = false">取消</Button>
+          <Button variant="danger" size="sm" @click="doRemove">删除</Button>
+        </div>
+      </div>
+
       <SessionTimeline :task-id="task.id" :consume-force-scroll="consumeForceScroll" />
 
       <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20） -->
