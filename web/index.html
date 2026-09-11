@@ -1,12 +1,33 @@
 <!DOCTYPE html>
+<!-- 主题：`data-theme` 是**生效值**，由下面的内联脚本在首屏渲染前设置（防 FOUC），
+     之后交给 useTheme 维护。无 JS / 脚本异常时由 :root 的浅色兜底（D4：浅色优先）。 -->
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#0a0a0c" />
+  <meta name="theme-color" content="#F6F7F9" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <title>Pieqi</title>
+  <script>
+    // 首屏防闪：必须**同步**执行，且在任何样式生效之前完成，否则会闪一下默认色。
+    // 与 src/composables/useTheme.ts 共用同一个 key 与同一套解析规则 —— 改一处必须改两处。
+    (function () {
+      try {
+        var pref = localStorage.getItem('pieqi.theme.pref');
+        if (pref !== 'light' && pref !== 'dark' && pref !== 'system') pref = 'system';
+        var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var root = document.documentElement;
+        root.setAttribute('data-theme', pref === 'system' ? (dark ? 'dark' : 'light') : pref);
+        root.setAttribute('data-theme-pref', pref);
+        if (localStorage.getItem('pieqi.reduce-motion') === 'true') {
+          root.setAttribute('data-reduce-motion', 'true');
+        }
+      } catch (e) {
+        // 存储被禁：保持 :root 的浅色兜底，不阻断渲染
+      }
+    })();
+  </script>
 </head>
 <body>
   <div id="app"></div>

@@ -20,3 +20,31 @@
     @apply h-full;
   }
 }
+
+/* ---------- 减弱动效（设置 → 外观与偏好） ----------
+   两个来源合成一个效果：
+   1. 用户显式开启（html[data-reduce-motion="true"]）
+   2. 系统开启 prefers-reduced-motion —— 系统已经说了"别动"，不必再让用户设一次
+
+   用 0.001ms 而非 0：保留 transitionend / animationend 事件的触发，
+   否则依赖它们收尾的逻辑会永远等不到。放在 @layer base 之外，
+   以保证能压过 utilities 里的 transition-* / animate-*。 */
+html[data-reduce-motion='true'] *,
+html[data-reduce-motion='true'] *::before,
+html[data-reduce-motion='true'] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

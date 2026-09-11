@@ -1,34 +1,94 @@
-/* 设计令牌（方案 §29）：所有颜色的唯一来源。
-   dark-first（Linear + GitHub Actions + AI Agent Console 风格）。 */
+/* 设计令牌（SPEC §3.1 浅色 / §3.2 深色）：所有颜色的唯一来源。
+   业务组件禁止写任意色值（见 tailwind.config.ts）。
 
+   默认是**浅色**（D4 定案）：`:root` 即浅色值，深色在 `html[data-theme="dark"]`。
+   所以没有 `html[data-theme="light"]` 这一块 —— `data-theme="light"` 由 `:root` 承接。
+
+   ⚠️ `data-theme` 是**生效值**，必须始终写在 <html> 上：
+   首屏由 index.html 的内联脚本设置（防闪），之后由 useTheme 接管。
+   少了它，`dark:` 变体与 `html[data-theme=...]` 规则全都命中不了 ——
+   那就是它此前沦为死代码的原因。偏好值（system / light / dark）由 `data-theme-pref` 承载。
+
+   值格式为 "R G B"，供 Tailwind 的 rgb(var(--x) / <alpha-value>) 使用。 */
+
+/* 浅色（SPEC §3.1）：非纯白策略 —— 卡片纯白浮起，靠**阴影**而非边框建立层次，
+   所以边框在这里退为极弱分隔（border-subtle），加重它会让界面显脏。 */
 :root {
-  /* 暗色（默认） */
-  --color-background: 10 10 12;       /* #0a0a0c */
-  --color-surface: 20 20 24;          /* #141418 */
-  --color-elevated: 30 30 36;         /* #1e1e24 */
-  --color-border: 48 48 56;           /* #303038 */
-  --color-text: 237 237 240;          /* #ededf0 */
-  --color-text-muted: 148 148 158;    /* #94949e */
+  /* ---- 表面：canvas → surface → subtle / muted / inset ---- */
+  --color-background: 246 247 249;     /* canvas   #F6F7F9 */
+  --color-surface: 255 255 255;        /*          #FFFFFF */
+  --color-surface-subtle: 248 249 251; /*          #F8F9FB */
+  --color-surface-muted: 240 242 245;  /*          #F0F2F5 */
+  --color-surface-inset: 233 236 241;  /*          #E9ECF1 */
+  --color-elevated: 240 242 245;       /* 兼容旧类名 bg-elevated → surface-muted */
 
-  --color-success: 63 185 80;         /* #3fb950 */
-  --color-warning: 187 128 9;         /* #bb8009 */
-  --color-error: 218 54 51;           /* #da3633 */
-  --color-info: 57 139 216;           /* #398bd8 */
-  --color-accent: 136 87 245;         /* #8857f5 */
+  /* ---- 边框：subtle → 默认 → strong ---- */
+  --color-border-subtle: 237 239 243;  /* #EDEFF3 */
+  --color-border: 225 228 234;         /* #E1E4EA */
+  --color-border-strong: 205 210 219;  /* #CDD2DB */
+
+  /* ---- 文字：四级 ---- */
+  --color-text: 21 23 28;              /* #15171C  15.8:1 */
+  --color-text-secondary: 74 81 96;    /* #4A5160   7.8:1 */
+  --color-text-tertiary: 107 114 128;  /* #6B7280   4.8:1 */
+  --color-text-disabled: 155 162 175;  /* #9BA2AF   2.6:1（豁免对比） */
+  --color-text-muted: 74 81 96;        /* 兼容旧类名 text-muted → secondary */
+
+  /* ---- 强调 ---- */
+  --color-accent: 110 65 205;          /* #6E41CD   6.4:1 */
+  --color-accent-hover: 94 52 184;     /* #5E34B8 */
+  --color-accent-active: 81 44 158;    /* #512C9E */
+
+  /* ---- 语义（同时通过各自浅底上的 AA） ---- */
+  --color-success: 26 127 69;          /* #1A7F45 */
+  --color-warning: 180 83 9;           /* #B45309 */
+  --color-error: 180 35 24;            /* #B42318 */
+  --color-info: 23 92 211;             /* #175CD3 */
+
+  /* ---- 阴影：浅色的层次全靠它（SPEC §3.5） ---- */
+  --shadow-xs: 0 1px 2px rgba(16, 18, 27, .04);
+  --shadow-sm: 0 1px 3px rgba(16, 18, 27, .06), 0 1px 2px rgba(16, 18, 27, .04);
+  --shadow-md: 0 4px 8px -2px rgba(16, 18, 27, .08), 0 2px 4px -2px rgba(16, 18, 27, .04);
+  --shadow-lg: 0 12px 16px -4px rgba(16, 18, 27, .08), 0 4px 6px -2px rgba(16, 18, 27, .03);
 }
 
-/* 亮色主题（Settings 可切换，html.light） */
-html.light {
-  --color-background: 246 247 248;
-  --color-surface: 255 255 255;
-  --color-elevated: 241 243 245;
-  --color-border: 208 212 216;
-  --color-text: 23 26 29;
-  --color-text-muted: 106 112 118;
+/* 深色（SPEC §3.2）：阴影一律 none，层次改由边框承担（SPEC §3.5）——
+   深色下投影几乎不可见，靠它分层只会得到一团糊。 */
+html[data-theme="dark"] {
+  /* ---- 表面 ---- */
+  --color-background: 12 13 17;        /* canvas            #0C0D11 */
+  --color-surface: 20 22 27;           /* 卡片 / 弹层        #14161B */
+  --color-surface-subtle: 26 29 35;    /* 次级区块          #1A1D23 */
+  --color-surface-muted: 34 38 46;     /* 禁用态、代码块底   #22262E */
+  --color-surface-inset: 25 28 34;     /* 凹槽（Diff 行）    #191C22 */
+  --color-elevated: 34 38 46;
 
-  --color-success: 31 122 43;
-  --color-warning: 143 96 6;
-  --color-error: 178 34 30;
-  --color-info: 9 88 165;
-  --color-accent: 110 65 205;
+  /* ---- 边框 ---- */
+  --color-border-subtle: 31 35 42;     /* 极弱分隔          #1F232A */
+  --color-border: 42 47 56;            /* 默认边框          #2A2F38 */
+  --color-border-strong: 58 64 73;     /* 悬停 / 聚焦边框    #3A4049 */
+
+  /* ---- 文字 ---- */
+  --color-text: 242 243 245;           /* primary           #F2F3F5  14.2:1 */
+  --color-text-secondary: 162 169 181; /* 次级信息          #A2A9B5   7.6:1 */
+  --color-text-tertiary: 123 130 144;  /* 时间戳、辅助说明   #7B8290   4.7:1 */
+  --color-text-disabled: 123 130 144;
+  --color-text-muted: 162 169 181;
+
+  /* ---- 强调 ---- */
+  --color-accent: 155 109 255;         /* #9B6DFF */
+  --color-accent-hover: 168 129 255;
+  --color-accent-active: 140 90 235;
+
+  /* ---- 语义 ---- */
+  --color-success: 78 201 126;         /* #4EC97E */
+  --color-warning: 232 163 61;         /* #E8A33D */
+  --color-error: 249 112 102;          /* #F97066 */
+  --color-info: 91 155 239;            /* #5B9BEF */
+
+  /* ---- 阴影：一律 none（层次交给边框） ---- */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: none;
 }

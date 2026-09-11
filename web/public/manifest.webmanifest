@@ -2,8 +2,8 @@
   "name": "Pieqi",
   "short_name": "Pieqi",
   "display": "standalone",
-  "background_color": "#0a0a0c",
-  "theme_color": "#0a0a0c",
+  "background_color": "#F6F7F9",
+  "theme_color": "#F6F7F9",
   "start_url": "/",
   "icons": [
     {
