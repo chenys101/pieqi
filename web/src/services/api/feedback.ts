@@ -15,7 +15,7 @@
 //	POST /api/tasks/:id/rewind（scope:file）  文件级回退（P2）
 //	POST /api/tasks/:id/push              Evidence Push（P2）
 
-import { request } from './client'
+import { request, requestText } from './client'
 import type {
   ApprovalDiffDto,
   CheckDto,
@@ -50,6 +50,18 @@ export async function getFeedbackDiff(
   const qs = new URLSearchParams({ path })
   if (turn && turn > 0) qs.set('turn', String(turn))
   return request<FeedbackDiffDto>(`/tasks/${encodeURIComponent(taskId)}/feedback/diff?${qs}`)
+}
+
+/** GET /api/tasks/:id/file 的原始内容 URL（pdf 直接作 iframe src，同源鉴权）。 */
+export function taskFileURL(taskId: string, path: string): string {
+  const qs = new URLSearchParams({ path })
+  return `/api/tasks/${encodeURIComponent(taskId)}/file?${qs}`
+}
+
+/** GET /api/tasks/:id/file 的原始文本（markdown 渲染前拉取）。 */
+export async function getTaskFileText(taskId: string, path: string): Promise<string> {
+  const qs = new URLSearchParams({ path })
+  return requestText(`/tasks/${encodeURIComponent(taskId)}/file?${qs}`)
 }
 
 /**
