@@ -67,3 +67,10 @@ services/claude-sdk-bridge/package-lock.json
 Thumbs.db
 pieqi.exe~
 data/approvals.json
+
+# 二进制/构建产物的本地备份（换 pieqi.exe 前的留底，不进 git）
+pieqi.exe.bak.*
+web/dist.bak.*
+
+# WorkBuddy 会话数据与记忆（.workbuddy/ 是项目数据，按约定保留在磁盘但不入库）
+.workbuddy/
