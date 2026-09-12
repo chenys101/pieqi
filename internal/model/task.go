@@ -167,6 +167,11 @@ type Task struct {
 	// Baseline Task 创建时记录的工作区起始状态（Feedback P0）。nil = 旧任务未捕获。
 	Baseline *TaskBaseline `json:"baseline,omitempty"`
 
+	// Interventions 用户干预记录（R6 / S3 §2.1 M3）。**挂在 Task 上**与任务同生命周期
+	// —— 口径是"该任务是否被打断"，独立存储会引入两处数据要同步的第二来源。
+	// 单条极小（kind/source/created_at），次数受人工操作频次约束。
+	Interventions []Intervention `json:"interventions,omitempty"`
+
 	// IM 来源回执：waiting_input 时通过原渠道 push 通知，让用户在手机上也能收到
 	OriginChannel  string `json:"origin_channel,omitempty"`
 	OriginChatID   string `json:"origin_chat_id,omitempty"`

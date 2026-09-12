@@ -74,6 +74,23 @@ export interface TaskDto {
   finished_at?: string
   /** 终态时的累计代码改动快照（见 core.SnapshotDiffStat：这是随时间丢失的数据，必须当场固存） */
   diff_stat?: DiffStatDto
+  /** 用户干预记录（R6）。旧任务/新口径前任务没有 → undefined；**消费方一律 `?? []`**（Go nil 切片序列化为 null 的老坑在适配层归一） */
+  interventions?: InterventionDto[]
+}
+
+/** 用户对任务的一次干预（R6，后端 model.Intervention） */
+export interface InterventionDto {
+  id: string
+  task_id: string
+  /** "decision"（审批） | "append_prompt"（续问） */
+  kind: string
+  decision_id?: string
+  /** "approve" | "deny"（仅 decision） */
+  choice?: string
+  text?: string
+  /** 来源渠道（im/http/cli） */
+  source: string
+  created_at: string
 }
 
 export interface DiffStatDto {

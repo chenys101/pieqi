@@ -14,6 +14,7 @@
 // 变更类动作：关闭 / 续期 / 重置 Token —— 它们本来就要求 token。
 import { onMounted, ref } from 'vue'
 import Button from '@/components/ui/Button.vue'
+import Select from '@/components/ui/Select.vue'
 import { isLarkMobile } from '@/utils/lark'
 import { tunnelToken } from '@/services/api/client'
 import {
@@ -119,15 +120,19 @@ onMounted(refresh)
     <!-- 在跑 + 有凭据 + 飞书移动端：变更类动作 -->
     <template v-else>
       <div class="flex flex-wrap items-center gap-2">
-        <select
-          v-model="ttl"
-          class="rounded-md border border-border bg-background px-2 py-1 text-xs outline-none"
-          aria-label="TTL"
-        >
-          <option value="15m">15 分钟</option>
-          <option value="1h">1 小时</option>
-          <option value="4h">4 小时</option>
-        </select>
+        <!-- 固定宽壳：Select 根元素是 w-full，裸放在 flex-wrap 行里会吞掉整行 -->
+        <div class="w-32">
+          <Select
+            size="sm"
+            aria-label="TTL"
+            :model-value="ttl"
+            @update:model-value="(v) => (ttl = v as TunnelTTL)"
+          >
+            <option value="15m">15 分钟</option>
+            <option value="1h">1 小时</option>
+            <option value="4h">4 小时</option>
+          </Select>
+        </div>
         <Button size="sm" variant="danger" :disabled="busy" @click="op(() => stopTunnel())">关闭隧道</Button>
         <Button size="sm" :disabled="busy" @click="op(() => renewTunnel(ttl), `已续期 +${ttl}，以下方最新链接为准`)">续期</Button>
         <Button size="sm" :disabled="busy" @click="onReset">重置 Token</Button>

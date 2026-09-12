@@ -17,6 +17,13 @@ import type { Task } from '@/types/task'
 /** 窗口天数（含今天） */
 export const INSIGHT_DAYS = 7
 
+/**
+ * R6 指标的数据起点（AC-R6-03/04）：Intervention 记录从 2.2.0 才开始落盘，
+ * 之前创建的任务没有干预数据 —— 分母里混入它们会把一次通过率**虚高**成 100%。
+ * ⚠️ 2.2.0 正式发布时必须把这里改成实际上线日（并在 S5 记录留痕）。
+ */
+export const METRICS_SINCE = '2026-09-12'
+
 export interface InsightDay {
   /** 该自然日 00:00 的时间戳，作为 key */
   at: number
@@ -34,6 +41,13 @@ export interface WeeklyInsight {
   days: InsightDay[]
   /** 平均耗时（分钟）；null = 无有效样本 */
   avgMinutes: number | null
+  /**
+   * 一次通过率（%）：无干预 completed ÷ completed（AC-R6-02）。
+   * 口径三约束：只算 **METRICS_SINCE 之后创建** 的任务（此前无干预记录，混入即虚高）；
+   * **分母为 0 → null**，展示 "—" 而不是 0%/100%（没有样本 ≠ 全军覆没）；
+   * 分子分母**同一次循环计数**，与任务记录手工复算一致。
+   */
+  oneShotRate: number | null
   /** 累计代码改动 */
   diff: { files: number; additions: number; deletions: number }
   /** 是否有任何可展示的数据 —— 决定要不要走空态 */
@@ -74,7 +88,10 @@ export function computeWeeklyInsight(tasks: Task[], now: number = Date.now()): W
   let prevCompletedCount = 0
   let durationsSum = 0
   let durationsN = 0
+  let oneShotN = 0
+  let oneShotTotal = 0
   const diff = { files: 0, additions: 0, deletions: 0 }
+  const since = new Date(`${METRICS_SINCE}T00:00:00`).getTime()
 
   for (const t of tasks) {
     if (t.status !== 'completed' || !t.finishedAt) continue
@@ -98,6 +115,12 @@ export function computeWeeklyInsight(tasks: Task[], now: number = Date.now()): W
         diff.additions += t.diffStat.additions
         diff.deletions += t.diffStat.deletions
       }
+      // 一次通过率（AC-R6-02/03/05）：分母含**被干预过**的 completed（否则"拒绝
+      // 一切"能刷到 100%）；起点前创建的样本整体剔除（分子分母一起剔，不留偏样本）
+      if (timestamp(t.createdAt) >= since) {
+        oneShotTotal++
+        if ((t.interventions?.length ?? 0) === 0) oneShotN++
+      }
     } else {
       // 落在上一个窗口才是"上周"
       if (fin >= prevWindowStart) prevCompletedCount++
@@ -109,6 +132,7 @@ export function computeWeeklyInsight(tasks: Task[], now: number = Date.now()): W
     deltaVsPrev: prevCompletedCount > 0 ? completedCount - prevCompletedCount : null,
     days,
     avgMinutes: durationsN > 0 ? Math.round(durationsSum / durationsN / 60_000) : null,
+    oneShotRate: oneShotTotal > 0 ? Math.round((oneShotN / oneShotTotal) * 100) : null,
     diff,
     hasData: completedCount > 0 || diff.files > 0,
   }

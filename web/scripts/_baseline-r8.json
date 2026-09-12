@@ -1,0 +1,168 @@
+{
+  "generatedAt": "2026-09-12T07:49:54.705Z",
+  "note": "T4 R8 三档基线（web 靶点）",
+  "results": {
+    "detail@1280": {
+      "consoleErrors": [],
+      "ref": {
+        "l": 361,
+        "r": 1129,
+        "w": 768
+      },
+      "inner": {
+        "l": 361,
+        "r": 1129,
+        "w": 768
+      },
+      "textarea": {
+        "l": 361,
+        "r": 1085,
+        "w": 724
+      },
+      "hit": 88,
+      "radius": "6px",
+      "ring3": true
+    },
+    "detail@768": {
+      "consoleErrors": [],
+      "ref": {
+        "l": 16,
+        "r": 752,
+        "w": 736
+      },
+      "inner": {
+        "l": 16,
+        "r": 752,
+        "w": 736
+      },
+      "textarea": {
+        "l": 16,
+        "r": 708,
+        "w": 692
+      },
+      "hit": 88,
+      "radius": "6px",
+      "ring3": true
+    },
+    "detail@375": {
+      "consoleErrors": [],
+      "ref": {
+        "l": 12,
+        "r": 363,
+        "w": 351
+      },
+      "inner": {
+        "l": 12,
+        "r": 363,
+        "w": 351
+      },
+      "textarea": {
+        "l": 12,
+        "r": 319,
+        "w": 307
+      },
+      "hit": 88,
+      "radius": "6px",
+      "ring3": true
+    },
+    "newtask@1280": {
+      "consoleErrors": [],
+      "ref": {
+        "l": 384,
+        "r": 1152,
+        "w": 768
+      },
+      "inner": {
+        "l": 384,
+        "r": 1152,
+        "w": 768
+      },
+      "textarea": {
+        "l": 384,
+        "r": 1086,
+        "w": 702
+      },
+      "hit": 90,
+      "radius": "6px",
+      "ring3": true
+    },
+    "newtask@768": {
+      "consoleErrors": [],
+      "ref": {
+        "l": 16,
+        "r": 752,
+        "w": 736
+      },
+      "inner": {
+        "l": 16,
+        "r": 752,
+        "w": 736
+      },
+      "textarea": {
+        "l": 16,
+        "r": 686,
+        "w": 670
+      },
+      "hit": 90,
+      "radius": "6px",
+      "ring3": true
+    },
+    "newtask@375": {
+      "consoleErrors": [],
+      "ref": {
+        "l": 12,
+        "r": 363,
+        "w": 351
+      },
+      "inner": {
+        "l": 12,
+        "r": 363,
+        "w": 351
+      },
+      "textarea": {
+        "l": 12,
+        "r": 297,
+        "w": 285
+      },
+      "hit": 90,
+      "radius": "6px",
+      "ring3": true
+    },
+    "settings@1280": {
+      "consoleErrors": [],
+      "ref": null,
+      "inner": null,
+      "textarea": null,
+      "hit": 0,
+      "radius": null,
+      "ring3": false
+    },
+    "settings@768": {
+      "consoleErrors": [],
+      "ref": null,
+      "inner": null,
+      "textarea": null,
+      "hit": 0,
+      "radius": null,
+      "ring3": false
+    },
+    "settings@375": {
+      "consoleErrors": [],
+      "ref": null,
+      "inner": null,
+      "textarea": null,
+      "hit": 0,
+      "radius": null,
+      "ring3": false
+    },
+    "tasks@375": {
+      "consoleErrors": [],
+      "ref": null,
+      "inner": null,
+      "textarea": null,
+      "hit": 0,
+      "radius": null,
+      "ring3": true
+    }
+  }
+}

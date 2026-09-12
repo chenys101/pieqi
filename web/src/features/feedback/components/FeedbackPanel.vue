@@ -10,9 +10,9 @@
 // 留着贴边条与收起按钮就是**点了没反应的死控件**。
 //
 // 数据流：打开/刷新时现场派生（后端不存第二份聚合，ADR-0001）。
-import { computed, ref, watch } from 'vue'
-import { getFeedback, rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
-import type { FeedbackBundleDto, FileStatDto, RewindVerificationDto } from '@/types/api'
+import { computed, nextTick, ref, watch } from 'vue'
+import { rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
+import type { FileStatDto, RewindVerificationDto } from '@/types/api'
 import SegmentedControl from '@/components/ui/SegmentedControl.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import TurnCard from './TurnCard.vue'
@@ -25,6 +25,7 @@ import FilePreview from './FilePreview.vue'
 import { previewKind } from '../filePreview'
 import { useNotificationStore } from '@/stores/notification'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
+import { useFeedbackBundleStore } from '@/stores/feedbackBundle'
 
 const props = withDefaults(
   defineProps<{
@@ -46,6 +47,8 @@ const emit = defineEmits<{ close: [] }>()
 
 const notify = useNotificationStore()
 const fb = useFeedbackPanelStore()
+/** bundle 数据持有者 = 共享 store（Timeline 分组头同源，AC-R3-02/06） */
+const bundleStore = useFeedbackBundleStore()
 
 /** 四个视图：SPEC §5.2 的「概览 · 变更 · 检查 · 预览」 */
 const TABS = [
@@ -67,7 +70,8 @@ const VIEWS = [
 ]
 const view = ref('event')
 
-const bundle = ref<FeedbackBundleDto | null>(null)
+/** bundle 来自共享 store：Timeline 与本面板读同一份对象，不存在两个版本 */
+const bundle = computed(() => bundleStore.bundle(props.taskId))
 const loading = ref(false)
 const rewinding = ref<number | null>(null)
 /** P2：文件级回退中的路径（按钮态） */
@@ -132,7 +136,8 @@ async function refresh() {
   if (!props.taskId) return
   loading.value = true
   try {
-    bundle.value = await getFeedback(props.taskId)
+    // force：回退 / 重跑后必须看到新数字，本地有缓存也要重拉
+    await bundleStore.load(props.taskId, true)
   } catch (err) {
     notify.error(err instanceof Error ? err.message : '加载反馈数据失败')
   } finally {
@@ -195,10 +200,27 @@ watch(
   },
   { immediate: true },
 )
+
+/** AC-R3-06：Timeline「查看本轮变更」→ 变更 Tab（本轮变化视图）滚动定位到对应
+ *  TurnCard。注意不是「概览」—— 那里是 R4 的证据卡，TurnCard 只住在「变更」。
+ *  activeTurn 在 store 里持久（切页回来仍定位），但只有变化瞬间才滚动 ——
+ *  常驻高亮会让"上次的选中"变成噪音。 */
+const panelEl = ref<HTMLElement | null>(null)
+watch(
+  () => fb.activeTurn,
+  async (turn) => {
+    if (!turn || !bodyOn.value) return
+    tab.value = 'changes'
+    view.value = 'event'
+    await nextTick()
+    panelEl.value?.querySelector(`[data-turn="${turn}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  },
+)
 </script>
 
 <template>
   <div
+    ref="panelEl"
     class="flex h-full min-h-0 flex-col bg-surface-subtle"
     :class="mode === 'drawer' ? 'w-[420px] shrink-0' : 'w-full'"
     data-testid="feedback-panel"
@@ -316,6 +338,7 @@ watch(
                 :turn="t"
                 :checkpointed="checkpointSet.has(t.turn)"
                 :can-rewind="canRewind && rewinding === null && rewindingFile === null"
+                :highlighted="fb.activeTurn === t.turn"
                 @rewind="onRewind"
                 @rewind-file="onRewindFile"
               />

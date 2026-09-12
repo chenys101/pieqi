@@ -43,6 +43,9 @@ type TaskOutcome struct {
 	Checks      []CheckSummary `json:"checks"`
 	Issues      []string       `json:"issues"` // failed checks + task.error + 末轮 is_error
 	Rewinds     []RewindInfo   `json:"rewinds"`
+	// Interventions 用户干预记录（R6）。**切片永不为 nil**：Go nil 切片序列化成
+	// JSON null，而消费方按数组声明 —— 恰好"没有干预"时最容易白屏（仓库已有判据）。
+	Interventions []model.Intervention `json:"interventions"`
 	GeneratedAt string         `json:"generated_at"`
 }
 
@@ -52,9 +55,13 @@ type TaskOutcome struct {
 // 合并后的 checks（agent 派生 + rerun）、preview 状态（nil = 不可用）。
 func DeriveOutcome(task *model.Task, changes []FileChange, checks []Check, preview *FeedbackPreview) TaskOutcome {
 	outcome := TaskOutcome{
-		TaskID:      task.ID,
-		Changes:     SummarizeAll(changes),
-		GeneratedAt: time.Now().Format(time.RFC3339),
+		TaskID:        task.ID,
+		Changes:       SummarizeAll(changes),
+		Interventions: task.Interventions,
+		GeneratedAt:   time.Now().Format(time.RFC3339),
+	}
+	if outcome.Interventions == nil {
+		outcome.Interventions = []model.Intervention{}
 	}
 	if preview != nil {
 		outcome.Preview = preview

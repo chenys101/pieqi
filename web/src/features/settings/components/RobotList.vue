@@ -20,6 +20,8 @@ import { computed, onMounted, ref } from 'vue'
 import Button from '@/components/ui/Button.vue'
 import Badge from '@/components/ui/Badge.vue'
 import CapTag from '@/components/ui/CapTag.vue'
+import Input from '@/components/ui/Input.vue'
+import Textarea from '@/components/ui/Textarea.vue'
 import { listBots, updateBot, deleteBot, type BotDto } from '@/services/api/bots'
 import { getLarkStatus } from '@/services/api/larkreg'
 import RobotCreateModal from './RobotCreateModal.vue'
@@ -200,19 +202,11 @@ defineExpose({ reload: load })
         >
           <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
             名称
-            <input
-              v-model="editName"
-              class="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
-            />
+            <Input v-model="editName" />
           </label>
           <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
             预设提示词
-            <textarea
-              v-model="editPrompt"
-              rows="2"
-              placeholder="这台机器人在应答时始终遵守的指令"
-              class="resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
-            />
+            <Textarea v-model="editPrompt" :rows="2" placeholder="这台机器人在应答时始终遵守的指令" />
           </label>
           <div class="flex flex-wrap items-center justify-between gap-2">
             <span v-if="editError" class="text-[11px] text-error">{{ editError }}</span>
@@ -244,19 +238,11 @@ defineExpose({ reload: load })
       >
         <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
           名称
-          <input
-            v-model="editName"
-            class="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
-          />
+          <Input v-model="editName" />
         </label>
         <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
           预设提示词
-          <textarea
-            v-model="editPrompt"
-            rows="2"
-            placeholder="这台机器人在应答时始终遵守的指令"
-            class="resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
-          />
+          <Textarea v-model="editPrompt" :rows="2" placeholder="这台机器人在应答时始终遵守的指令" />
         </label>
         <div class="flex flex-wrap items-center justify-between gap-2">
           <span v-if="editError" class="text-[11px] text-error">{{ editError }}</span>

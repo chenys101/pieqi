@@ -4,8 +4,11 @@
 //  - 导航请求 / index.html：network-first —— 每次拉最新 HTML，从而引用最新带 hash 的 bundle；
 //  - /assets/*（文件名带内容 hash，不可变）：cache-first —— 离线可加载；
 //  - API / WS 一律不缓存。
-// 版本号随每次前端发布递增，activate 时清掉旧版本缓存，强制刷新。
-const VERSION = 'v2';
+// 版本号由构建期 vite 插件（vite.config.ts `sw-version-inject`）注入：
+// `<pkg.version>+<构建时间戳>`。占位符缺失/未替换都会让构建**失败**（AC-R4-03）——
+// 一个带旧版本号的 SW 会把用户钉死在旧缓存上，比没有 SW 更糟。
+// 连续两次构建版本号必然不同（时间戳，AC-R4-01）；activate 清理旧缓存（AC-R4-02）。
+const VERSION = '__SW_VERSION__';
 const SHELL_CACHE = `pieqi-shell-${VERSION}`;
 const ASSET_CACHE = `pieqi-assets-${VERSION}`;
 

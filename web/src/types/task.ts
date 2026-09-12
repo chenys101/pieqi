@@ -48,6 +48,11 @@ export interface Task {
   startedAt?: string
   finishedAt?: string
   /**
+   * 用户干预记录（R6）。**适配层已归一为数组**（永远不是 undefined/null）——
+   * "一次通过"的判定就是 `interventions.length === 0`，不允许各消费方自行判空。
+   */
+  interventions: TaskIntervention[]
+  /**
    * 终态时的累计代码改动快照。
    *
    * **只有 completed 任务才有**（后端刻意不给 failed/cancelled 做快照 ——
@@ -63,6 +68,20 @@ export interface DiffStat {
   additions: number
   deletions: number
   capturedAt: string
+}
+
+/** 用户对任务的一次干预（R6，来自后端 model.Intervention） */
+export interface TaskIntervention {
+  id: string
+  taskId: string
+  /** "decision"（审批） | "append_prompt"（续问） */
+  kind: string
+  /** "approve" | "deny"（仅 decision） */
+  choice?: string
+  text?: string
+  /** 来源渠道（im/http/cli） */
+  source: string
+  createdAt: string
 }
 
 /** 项目分组（侧栏 / Projects 页） */

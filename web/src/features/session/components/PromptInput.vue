@@ -1,7 +1,12 @@
 <script setup lang="ts">
 // 输入框 + 斜杠补全（V1 autocomplete.js 的 Vue 化，方案 §21）：
 // 输入 / 后弹出 Commands + Skills 分组菜单，↑↓ 选择、回车插入、Esc 关闭。
+//
+// 外壳交给 T1 的 Textarea（R8：全站输入控件共用一套外壳，见 SPEC §4.4）——
+// 本组件只负责补全逻辑，不再自己写一份输入框样式。
+// 斜杠补全依赖**真实光标位置**，故用 Textarea 暴露的内部元素（`defineExpose({ el })`）。
 import { computed, nextTick, ref, watch } from 'vue'
+import Textarea from '@/components/ui/Textarea.vue'
 import { useAppStore } from '@/stores/app'
 
 const props = withDefaults(
@@ -10,15 +15,22 @@ const props = withDefaults(
     placeholder?: string
     rows?: number
     disabled?: boolean
+    ariaLabel?: string
   }>(),
-  { placeholder: '', rows: 3, disabled: false },
+  { placeholder: '', rows: 3, disabled: false, ariaLabel: '输入指令' },
 )
 const emit = defineEmits<{ 'update:modelValue': [value: string]; submit: [] }>()
 
 const appStore = useAppStore()
-const inputEl = ref<HTMLTextAreaElement | null>(null)
+
+// 只声明用得到的那一项：Textarea 通过 defineExpose 交出内部 textarea
+const taRef = ref<{ el: HTMLTextAreaElement | null } | null>(null)
 const menuOpen = ref(false)
 const activeIndex = ref(-1)
+const currentQuery = ref<string | null>(null)
+
+/** 光标类操作（selectionStart / setSelectionRange / focus）必须打在真实元素上 */
+const el = () => taRef.value?.el ?? null
 
 interface MatchItem {
   name: string
@@ -41,13 +53,16 @@ const matches = computed<MatchItem[]>(() => {
   return [...cmds, ...skills]
 })
 
-const currentQuery = ref<string | null>(null)
-
-/** 检测光标前最近的 /（前须为行首/空格），返回查询词；无匹配置 null 关闭菜单 */
-function detectQuery() {
-  const el = inputEl.value
-  if (!el) return
-  const before = props.modelValue.slice(0, el.selectionStart ?? props.modelValue.length)
+/**
+ * 检测光标前最近的 /（前须为行首/空格），返回查询词；无匹配置 null 关闭菜单。
+ *
+ * 入参是**刚输入的值**而不是 `props.modelValue` —— props 要等父组件重渲染才更新，
+ * 而 `selectionStart` 是当下的；两者混用会让识别一直慢一个字符（`/ab` 时菜单还停在 `/a`）。
+ */
+function detectQuery(value: string) {
+  const t = el()
+  if (!t) return
+  const before = value.slice(0, t.selectionStart ?? value.length)
   const slash = before.lastIndexOf('/')
   if (slash < 0 || (slash > 0 && ![' ', '\n'].includes(before[slash - 1] ?? ''))) {
     currentQuery.value = null
@@ -61,10 +76,9 @@ function detectQuery() {
   currentQuery.value = query
 }
 
-function onInput(e: Event) {
-  const val = (e.target as HTMLTextAreaElement).value
+function onInput(val: string) {
   emit('update:modelValue', val)
-  detectQuery()
+  detectQuery(val)
   activeIndex.value = -1
   nextTick(() => {
     menuOpen.value = currentQuery.value !== null && matches.value.length > 0
@@ -95,9 +109,9 @@ function onKeydown(e: KeyboardEvent) {
 
 /** 把 /name 插入到光标前最近的 / 处，光标停在 name 后留空格 */
 function insert(item: MatchItem) {
-  const el = inputEl.value
-  if (!el) return
-  const caret = el.selectionStart ?? props.modelValue.length
+  const t = el()
+  if (!t) return
+  const caret = t.selectionStart ?? props.modelValue.length
   const before = props.modelValue.slice(0, caret)
   const slash = before.lastIndexOf('/')
   const after = props.modelValue.slice(caret)
@@ -107,8 +121,8 @@ function insert(item: MatchItem) {
   currentQuery.value = null
   nextTick(() => {
     const pos = slash + item.name.length + 2
-    el.focus()
-    el.setSelectionRange(pos, pos)
+    t.focus()
+    t.setSelectionRange(pos, pos)
   })
 }
 
@@ -134,21 +148,22 @@ watch(matches, (m) => {
 
 <template>
   <div class="relative">
-    <textarea
-      ref="inputEl"
-      :value="modelValue"
-      :placeholder="placeholder"
+    <Textarea
+      ref="taRef"
+      :model-value="modelValue"
       :rows="rows"
+      :placeholder="placeholder"
       :disabled="disabled"
-      class="w-full resize-none rounded-lg border border-border bg-background px-3 py-2.5 text-sm outline-none transition-colors placeholder:text-muted/60 focus:border-accent/60 disabled:opacity-50"
-      @input="onInput"
+      :resizable="false"
+      :aria-label="ariaLabel"
+      @update:model-value="onInput"
       @keydown="onKeydown"
       @blur="onBlur"
     />
     <!-- 斜杠补全菜单（贴输入框上方） -->
     <div
       v-if="menuOpen"
-      class="absolute inset-x-0 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border bg-elevated shadow-xl"
+      class="absolute inset-x-0 bottom-full z-20 mb-1 max-h-56 overflow-y-auto rounded-[var(--radius-md)] border border-border bg-elevated shadow-xl"
     >
       <template v-for="[group, items] in groups" :key="group">
         <div class="border-b border-border/50 px-3 py-1 text-xs text-muted last:border-b-0">{{ group }}</div>

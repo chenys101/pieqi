@@ -4,6 +4,8 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Button from '@/components/ui/Button.vue'
+import Input from '@/components/ui/Input.vue'
+import Select from '@/components/ui/Select.vue'
 import PromptInput from '@/features/session/components/PromptInput.vue'
 import { useTaskStore } from '@/stores/task'
 import { useSessionStore } from '@/stores/session'
@@ -91,28 +93,24 @@ async function submit() {
 
       <!-- 主区（对应详情页 Timeline 位置）：项目选择 -->
       <div class="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-4">
-        <div class="mx-auto flex max-w-3xl flex-col gap-2">
+        <div class="mx-auto flex max-w-3xl flex-col gap-2" data-testid="page-content">
           <div class="rounded-lg border border-border bg-surface p-3">
             <div class="mb-1.5 text-xs font-medium text-muted">项目</div>
             <div class="flex gap-2">
               <template v-if="mode === 'select'">
-                <select
-                  v-model="selectedPath"
-                  class="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-accent/60"
-                >
+                <Select v-model="selectedPath" class="min-w-0 flex-1">
                   <option v-for="p in projects" :key="groupKey(p.projectPath)" :value="p.projectPath">
                     {{ p.projectId || p.projectPath }}
                   </option>
                   <option v-if="!projects.length" value="" disabled>暂无历史项目 — 请自定义路径</option>
-                </select>
+                </Select>
                 <Button size="sm" @click="mode = 'path'">自定义路径</Button>
               </template>
               <template v-else>
-                <input
+                <Input
                   v-model="customPath"
-                  type="text"
+                  class="min-w-0 flex-1"
                   placeholder="输入绝对路径，如 G:\workspace\erp"
-                  class="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-accent/60"
                 />
                 <Button v-if="projects.length" size="sm" @click="mode = 'select'">选项目</Button>
               </template>
@@ -122,17 +120,31 @@ async function submit() {
         </div>
       </div>
 
-      <!-- 底部输入条（对应详情页 InterveneInput 位置）：prompt + 创建 -->
-      <div class="flex items-end gap-2 border-t border-border bg-surface/80 px-3 py-2.5 backdrop-blur">
-        <div class="min-w-0 flex-1">
-          <PromptInput
-            v-model="prompt"
-            :rows="3"
-            placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"
-            @submit="submit"
-          />
+      <!-- 底部输入条（对应详情页 InterveneInput 位置）：prompt + 创建
+           内层 max-w-3xl 与上方 header / 主区的正文左边界对齐（AC-R8-01） -->
+      <div class="border-t border-border bg-surface/80 px-3 py-2.5 backdrop-blur md:px-4" data-testid="composer-bar">
+        <div class="mx-auto flex w-full max-w-3xl items-end gap-2" data-testid="composer-inner">
+          <div class="min-w-0 flex-1">
+            <PromptInput
+              v-model="prompt"
+              :rows="3"
+              aria-label="任务描述"
+              placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"
+              @submit="submit"
+            />
+          </div>
+          <!-- 视觉不变，命中区用伪元素外扩到 ≥44px 高（AC-R8-04） -->
+          <Button
+            variant="primary"
+            :loading="creating"
+            :disabled="!canSubmit"
+            title="创建任务 (Ctrl+Enter)"
+            class="relative after:absolute after:-inset-y-1.5 after:content-['']"
+            @click="submit"
+          >
+            创建
+          </Button>
         </div>
-        <Button variant="primary" :loading="creating" :disabled="!canSubmit" @click="submit">创建</Button>
       </div>
     </div>
   </div>

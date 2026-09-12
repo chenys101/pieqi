@@ -182,6 +182,11 @@ func (s *Server) intervene(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
+		// choice 续问也是一次干预（R6）：进程已退出走 Resume，但"用户被请回来
+		// 做了一件事"这个事实与 approve/deny 同价。
+		s.runner.RecordIntervention(id, model.Intervention{
+			TaskID: id, Kind: "append_prompt", Text: req.Text, Source: model.SourceHTTP,
+		})
 		c.JSON(http.StatusAccepted, gin.H{"ok": true, "resumed": true})
 		return
 	}
@@ -195,6 +200,10 @@ func (s *Server) intervene(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
+		// 终态续问同样是一次干预（R6 / AC-R6-01）：入口在 intervene，口径不变
+		s.runner.RecordIntervention(id, model.Intervention{
+			TaskID: id, Kind: "append_prompt", Text: req.Text, Source: model.SourceHTTP,
+		})
 		c.JSON(http.StatusAccepted, gin.H{"ok": true, "resumed": true})
 		return
 	}

@@ -36,6 +36,8 @@ import SetGroup from '@/components/ui/SetGroup.vue'
 import SettingRow from '@/components/ui/SettingRow.vue'
 import SegmentedControl from '@/components/ui/SegmentedControl.vue'
 import Switch from '@/components/ui/Switch.vue'
+import Input from '@/components/ui/Input.vue'
+import Select from '@/components/ui/Select.vue'
 
 const { connection, reconnect } = useWebSocket()
 const sessionStore = useSessionStore()
@@ -182,22 +184,24 @@ const appVersion = __APP_VERSION__
           <!-- 起止**始终可见**：关着的时候也要能看出"打开后会是什么时段"，
                否则用户是在盲开一个开关。 -->
           <div class="flex items-center gap-1.5 text-[11.5px] text-text-tertiary">
-            <input
+            <Input
               type="time"
-              :value="settings?.dnd_start ?? '22:00'"
+              size="sm"
+              class="font-mono"
+              :model-value="settings?.dnd_start ?? '22:00'"
               :disabled="!settings?.dnd_enabled"
               aria-label="免打扰开始时间"
-              class="rounded-md border border-border bg-background px-2 py-1 font-mono text-[11.5px] text-text outline-none focus:border-accent/60 disabled:opacity-60"
-              @change="(e) => apply({ dnd_start: (e.target as HTMLInputElement).value })"
+              @change="(e: Event) => apply({ dnd_start: (e.target as HTMLInputElement).value })"
             />
             <span>–</span>
-            <input
+            <Input
               type="time"
-              :value="settings?.dnd_end ?? '08:00'"
+              size="sm"
+              class="font-mono"
+              :model-value="settings?.dnd_end ?? '08:00'"
               :disabled="!settings?.dnd_enabled"
               aria-label="免打扰结束时间"
-              class="rounded-md border border-border bg-background px-2 py-1 font-mono text-[11.5px] text-text outline-none focus:border-accent/60 disabled:opacity-60"
-              @change="(e) => apply({ dnd_end: (e.target as HTMLInputElement).value })"
+              @change="(e: Event) => apply({ dnd_end: (e.target as HTMLInputElement).value })"
             />
           </div>
         </SettingRow>
@@ -312,15 +316,18 @@ const appVersion = __APP_VERSION__
           label="事件保留上限"
           desc="超出后从最旧的开始丢弃，避免长任务把内存吃掉。"
         >
-          <select
-            :value="settings?.event_retention ?? 5000"
-            :disabled="!settings"
-            aria-label="事件保留上限"
-            class="rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-text outline-none focus:border-accent/60"
-            @change="onRetentionChange"
-          >
-            <option v-for="o in retentionOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-          </select>
+          <!-- 固定宽壳：Select 根元素是 w-full，在 SettingRow 右侧会吞掉整行 -->
+          <div class="w-32">
+            <Select
+              size="sm"
+              :model-value="settings?.event_retention ?? 5000"
+              :disabled="!settings"
+              aria-label="事件保留上限"
+              @change="onRetentionChange"
+            >
+              <option v-for="o in retentionOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </Select>
+          </div>
         </SettingRow>
 
         <SettingRow label="诊断日志" desc="导出最近 7 天日志用于排查问题。">

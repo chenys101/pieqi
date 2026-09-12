@@ -1015,7 +1015,12 @@ func (tr *TaskRunner) Intervene(taskID string, in model.Intervention) error {
 			if ph == nil {
 				return fmt.Errorf("no pending permission on task %s", taskID)
 			}
-			return ph.Resolve(in.DecisionID, in.Choice)
+			if err := ph.Resolve(in.DecisionID, in.Choice); err != nil {
+				return err
+			}
+			// 落盘在**成功收下**之后：Resolve 失败 = 干预没发生，不能记（R6 / S3 §2.1）
+			tr.RecordIntervention(taskID, in)
+			return nil
 		}
 		return fmt.Errorf("append_prompt not supported on ACP path; use resume")
 	}
@@ -1026,6 +1031,7 @@ func (tr *TaskRunner) Intervene(taskID string, in model.Intervention) error {
 		// hook 已放行/拒绝，claude 会继续执行；task 从 waiting_input 切回 running。
 		// （deny 时 claude 收到拒绝也会继续走别的路，仍是 running 而非卡住）
 		tr.setRunning(taskID)
+		tr.RecordIntervention(taskID, in)
 		return nil
 	}
 	// append_prompt：写新 user 消息到 claude stdin（stream-json）
@@ -1040,7 +1046,27 @@ func (tr *TaskRunner) Intervene(taskID string, in model.Intervention) error {
 		return fmt.Errorf("write stdin: %w", err)
 	}
 	tr.setRunning(taskID)
+	tr.RecordIntervention(taskID, in)
 	return nil
+}
+
+// RecordIntervention 把一次干预追加到 Task 记录（R6 / S3 §2.1 M3）。
+// 补齐 ID / TaskID / CreatedAt —— 调用方只管业务字段；失败仅记日志不打断主流程：
+// 干预投递已经成功，落盘失败不该让用户看到错误（但这是观察项 X6 的旁证）。
+func (tr *TaskRunner) RecordIntervention(taskID string, in model.Intervention) {
+	if in.ID == "" {
+		in.ID = uuid.NewString()
+	}
+	in.TaskID = taskID
+	if in.CreatedAt.IsZero() {
+		in.CreatedAt = time.Now()
+	}
+	if _, err := tr.store.Update(taskID, func(t *model.Task) bool {
+		t.Interventions = append(t.Interventions, in)
+		return true
+	}); err != nil {
+		tr.logger.Warn("record intervention failed", zap.String("task", taskID), zap.Error(err))
+	}
 }
 
 // Cancel 取消任务：杀 claude 进程。

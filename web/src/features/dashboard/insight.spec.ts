@@ -5,7 +5,7 @@
 // 都不能靠肉眼对着界面发现。所以每个用例都锚定一个固定的 now。
 
 import { describe, expect, it } from 'vitest'
-import { computeWeeklyInsight, sparkHeight, INSIGHT_DAYS } from './insight'
+import { computeWeeklyInsight, sparkHeight, INSIGHT_DAYS, METRICS_SINCE } from './insight'
 import type { Task } from '@/types/task'
 
 // 固定基准：2026-09-11 12:00（周四），本地时区
@@ -25,6 +25,7 @@ function t(over: Partial<Task> = {}): Task {
     createdAt: new Date(BASE).toISOString(),
     updatedAt: new Date(BASE).toISOString(),
     finishedAt: new Date(BASE).toISOString(),
+    interventions: [],
     ...over,
   }
 }
@@ -120,5 +121,50 @@ describe('sparkHeight', () => {
     expect(sparkHeight(2, 4)).toBe(50)
     // count 很小但非零时不能塌缩成 0 高度（看不见等于没有）
     expect(sparkHeight(1, 100)).toBe(12)
+  })
+})
+
+describe('一次通过率（R6）', () => {
+  // 用例日期全部从 METRICS_SINCE 派生 —— 常量随发布日更新时用例不脆
+  const SINCE_T = new Date(`${METRICS_SINCE}T12:00:00`).getTime()
+  const FIN = new Date(SINCE_T + 2 * DAY).toISOString() // 起点后第 2 天完成（落在窗口内的前提由 now 保证）
+
+  function intervention(over: Record<string, unknown> = {}) {
+    return { id: 'i1', taskId: 't1', kind: 'decision', choice: 'approve', source: 'http', createdAt: FIN, ...over }
+  }
+
+  it('与手工复算一致：3 个 completed、1 个被干预 → 67%（AC-R6-02）', () => {
+    const tasks = [
+      t({ id: 'a', createdAt: new Date(SINCE_T).toISOString(), finishedAt: FIN, interventions: [] }),
+      t({ id: 'b', createdAt: new Date(SINCE_T).toISOString(), finishedAt: FIN, interventions: [intervention()] }),
+      t({ id: 'c', createdAt: new Date(SINCE_T).toISOString(), finishedAt: FIN, interventions: [] }),
+    ]
+    // now = 完成日之后 → 三者都在 7 天窗口内
+    const r = computeWeeklyInsight(tasks, new Date(SINCE_T + 3 * DAY).getTime())
+    expect(r.completedCount).toBe(3)
+    expect(r.oneShotRate).toBe(67)
+  })
+
+  it('起点前创建的 completed 不进分子也不进分母（AC-R6-03）', () => {
+    const tasks = [
+      // 起点前创建、被干预 1 次 —— 若混入分母，4 取 2 = 50%；正确答案 2 取 2 = 100%
+      t({ id: 'old', createdAt: new Date(SINCE_T - DAY).toISOString(), finishedAt: FIN, interventions: [intervention()] }),
+      t({ id: 'a', createdAt: new Date(SINCE_T).toISOString(), finishedAt: FIN, interventions: [] }),
+      t({ id: 'b', createdAt: new Date(SINCE_T).toISOString(), finishedAt: FIN, interventions: [] }),
+    ]
+    const r = computeWeeklyInsight(tasks, new Date(SINCE_T + 3 * DAY).getTime())
+    expect(r.oneShotRate).toBe(100)
+  })
+
+  it('起点后没有 completed 样本 → null（展示 "—"，不编 0% 或 100%）', () => {
+    // 只有起点前的任务（本轮其余用例的默认情形）
+    const r = computeWeeklyInsight([t({})], BASE)
+    expect(r.oneShotRate).toBeNull()
+    // 分母为 0 的另一种形态：起点后只有 failed
+    const r2 = computeWeeklyInsight(
+      [t({ id: 'f', status: 'failed', createdAt: new Date(SINCE_T).toISOString() })],
+      new Date(SINCE_T + 3 * DAY).getTime(),
+    )
+    expect(r2.oneShotRate).toBeNull()
   })
 })

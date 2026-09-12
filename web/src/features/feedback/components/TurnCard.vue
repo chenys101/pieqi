@@ -2,21 +2,26 @@
 // TurnCard：Feedback 总览里的单个 Turn 卡片（p0-design.md §5.1）。
 // 折叠态 = 一行摘要；展开态 = 文件变更列表（每项再展开懒加载 diff）。
 // 回退按钮：恢复到「Turn N 开始之前」（时间线事件永不删除，仅改文件）。
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import type { FileChangeDto, TurnInfoDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import DiffView from './DiffView.vue'
 import FilePreview from './FilePreview.vue'
 import { previewKind } from '../filePreview'
 
-const props = defineProps<{
-  taskId: string
-  turn: TurnInfoDto
-  /** 该 Turn 是否已有磁盘快照（checkpoint） */
-  checkpointed: boolean
-  /** 是否允许回退（Agent 执行中禁止，静止边界原则） */
-  canRewind: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    taskId: string
+    turn: TurnInfoDto
+    /** 该 Turn 是否已有磁盘快照（checkpoint） */
+    checkpointed: boolean
+    /** 是否允许回退（Agent 执行中禁止，静止边界原则） */
+    canRewind: boolean
+    /** Timeline「查看本轮变更」联动高亮（AC-R3-06）：变化瞬间展开+描边 */
+    highlighted?: boolean
+  }>(),
+  { highlighted: false },
+)
 
 const emit = defineEmits<{
   rewind: [turn: number]
@@ -55,6 +60,14 @@ const pendingFile = ref<string | null>(null)
 // confirm() 是模态的，会盖住用户正看着的那个文件 / 那一行 diff，
 // 而这恰恰是需要他确认"是不是它"的唯一依据（SPEC 已明令禁止原生 confirm）。
 
+// 联动高亮：被 Timeline 定位时自动展开（用户点的是"看这轮"，折叠态等于没响应）
+watch(
+  () => props.highlighted,
+  (on) => {
+    if (on) expanded.value = true
+  },
+)
+
 function askRewind() {
   pendingRewind.value = true
 }
@@ -77,7 +90,11 @@ function confirmRewindFile() {
 </script>
 
 <template>
-  <div class="rounded-lg border border-border/60 bg-surface/60">
+  <div
+    :data-turn="turn.turn"
+    class="rounded-lg border bg-surface/60"
+    :class="highlighted ? 'border-accent ring-2 ring-accent/30' : 'border-border/60'"
+  >
     <!-- 折叠摘要行：Turn 号 + prompt + 统计 -->
     <button class="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:text-text" @click="expanded = !expanded">
       <span class="shrink-0 font-mono font-semibold">Turn #{{ turn.turn }}</span>

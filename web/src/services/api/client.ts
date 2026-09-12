@@ -191,6 +191,16 @@ export function adaptTask(dto: TaskDto): Task {
     updatedAt: dto.updated_at,
     startedAt: dto.started_at,
     finishedAt: dto.finished_at,
+    // 适配层归一：Go 侧旧任务无该字段（omitempty 不下发），消费方拿到的永远是数组
+    interventions: (dto.interventions ?? []).map((iv) => ({
+      id: iv.id,
+      taskId: iv.task_id,
+      kind: iv.kind,
+      choice: iv.choice,
+      text: iv.text,
+      source: iv.source,
+      createdAt: iv.created_at,
+    })),
     diffStat: dto.diff_stat
       ? {
           files: dto.diff_stat.files,

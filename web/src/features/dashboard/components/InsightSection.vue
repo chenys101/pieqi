@@ -11,9 +11,12 @@
 // 宁缺不滥 —— 比一个假指标更有用的是承认这块还没定义好。
 import { computed } from 'vue'
 import type { WeeklyInsight } from '../insight'
-import { sparkHeight } from '../insight'
+import { sparkHeight, METRICS_SINCE } from '../insight'
 
 const props = defineProps<{ insight: WeeklyInsight }>()
+
+/** 数据起始日（R6）：干预记录从 2.2.0 才开始落盘，展示处必须可见 */
+const metricsSince = METRICS_SINCE
 
 /** 柱状图最高值（至少 1，避免全 0 时的 0/0） */
 const maxDay = computed(() => Math.max(1, ...props.insight.days.map((d) => d.count)))
@@ -61,6 +64,21 @@ const deltaText = computed(() => {
             :class="d.isToday ? 'bg-accent' : 'bg-accent/20'"
             :style="{ height: sparkHeight(d.count, maxDay) + '%' }"
           />
+        </div>
+        <!-- 一次通过率（R6）：挂在这里因为它是完成任务的质量切面。
+             "—" = 起点后还没有 completed 样本（没有样本 ≠ 0%，0% 是一个结论，
+             "—" 只是没有数据）；起始日必须可见（AC-R6-04），否则读者无法判断
+             这是从哪天开始数的。 -->
+        <div
+          v-if="insight.oneShotRate !== null || insight.completedCount"
+          class="mt-1.5 text-xs text-muted"
+          data-testid="one-shot-rate"
+        >
+          一次通过率
+          <span class="font-semibold tabular-nums text-text-secondary">{{
+            insight.oneShotRate !== null ? `${insight.oneShotRate}%` : '—'
+          }}</span>
+          <span class="ml-1">· 自 {{ metricsSince }} 起统计</span>
         </div>
       </div>
 

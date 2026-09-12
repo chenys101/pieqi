@@ -21,6 +21,9 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import Modal from '@/components/ui/Modal.vue'
 import Button from '@/components/ui/Button.vue'
+import Input from '@/components/ui/Input.vue'
+import Textarea from '@/components/ui/Textarea.vue'
+import Select from '@/components/ui/Select.vue'
 import { tunnelQrUrl } from '@/services/api/tunnel'
 import { startLarkReg, pollLarkReg, getLarkConfig, saveLarkConfig } from '@/services/api/larkreg'
 
@@ -55,8 +58,8 @@ const form = ref({
 const secretSet = ref(false)
 const saving = ref(false)
 const fieldError = ref('')
-const appIdEl = ref<HTMLInputElement | null>(null)
-const secretEl = ref<HTMLInputElement | null>(null)
+const appIdEl = ref<InstanceType<typeof Input> | null>(null)
+const secretEl = ref<InstanceType<typeof Input> | null>(null)
 
 /** 共用的预设提示词：两半都带它（D2：跟随 bot 记录） */
 const sysPrompt = ref('')
@@ -302,11 +305,10 @@ const headline = computed(() => {
       <!-- 预设提示词：位置在扫码区**之后** —— 它正好填在等待扫码的空档里，但不该挡住码 -->
       <label class="flex flex-col gap-1 border-t border-border-subtle pt-3 text-[11px] text-text-tertiary">
         预设提示词（可选）
-        <textarea
+        <Textarea
           v-model="sysPrompt"
-          rows="2"
+          :rows="2"
           placeholder="这台机器人在应答时始终遵守的指令"
-          class="resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
         />
       </label>
 
@@ -326,33 +328,31 @@ const headline = computed(() => {
     <form v-else class="flex flex-col gap-3" @submit.prevent="submitManual">
       <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
         接入方式
-        <select
-          v-model="form.eventMode"
-          class="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
+        <Select
+          :model-value="form.eventMode"
+          @update:model-value="(v) => (form.eventMode = v as 'longconn' | 'webhook')"
         >
           <option value="longconn">长连接 longconn（推荐，无需公网回调）</option>
           <option value="webhook">Webhook（需公网回调地址）</option>
-        </select>
+        </Select>
       </label>
       <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
         App ID
-        <input
+        <Input
           ref="appIdEl"
           v-model="form.appId"
           placeholder="cli_xxxxxxxx"
           autocomplete="off"
-          class="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
         />
       </label>
       <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
         App Secret
-        <input
+        <Input
           ref="secretEl"
           v-model="form.appSecret"
           type="password"
           :placeholder="secretSet ? '留空则保持原值' : '必填'"
           autocomplete="new-password"
-          class="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
         />
       </label>
       <!-- webhook 的两个字段是**条件存在**，不是灰着占位 ——
@@ -360,31 +360,20 @@ const headline = computed(() => {
       <template v-if="form.eventMode === 'webhook'">
         <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
           Verify Token
-          <input
-            v-model="form.verifyToken"
-            placeholder="留空则保持原值"
-            autocomplete="off"
-            class="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
-          />
+          <Input v-model="form.verifyToken" placeholder="留空则保持原值" autocomplete="off" />
         </label>
         <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
           Encrypt Key
-          <input
-            v-model="form.encryptKey"
-            placeholder="留空则保持原值"
-            autocomplete="off"
-            class="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
-          />
+          <Input v-model="form.encryptKey" placeholder="留空则保持原值" autocomplete="off" />
         </label>
       </template>
 
       <label class="flex flex-col gap-1 text-[11px] text-text-tertiary">
         预设提示词（可选）
-        <textarea
+        <Textarea
           v-model="sysPrompt"
-          rows="2"
+          :rows="2"
           placeholder="这台机器人在应答时始终遵守的指令"
-          class="resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-text outline-none focus:border-accent/60"
         />
       </label>
 

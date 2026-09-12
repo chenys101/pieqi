@@ -18,6 +18,8 @@ import { TaskBrowserGroup } from '@/features/task'
 import type { BrowserGroup } from '@/features/task/types'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Spinner from '@/components/ui/Spinner.vue'
+import Input from '@/components/ui/Input.vue'
+import Select from '@/components/ui/Select.vue'
 import type { TaskStatus } from '@/types/task'
 import { STATUS_LABELS } from '@/utils/format'
 
@@ -159,27 +161,30 @@ function clearFilter() {
       <template v-else>
         <!-- 工具栏：整屏空间充足，所以搜索与状态筛选都保留（侧栏没有，那里放不下） -->
         <div class="mt-4 flex flex-wrap items-center gap-2">
-          <label class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-surface px-2.5 py-1.5 focus-within:border-accent">
-            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <label class="relative block min-w-0 flex-1">
+            <svg viewBox="0 0 24 24" class="pointer-events-none absolute top-1/2 left-2.5 z-10 h-3.5 w-3.5 -translate-y-1/2 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
               <circle cx="11" cy="11" r="8" />
               <path d="M21 21l-4.35-4.35" />
             </svg>
-            <input
+            <Input
               v-model="search"
               type="search"
-              class="min-w-0 flex-1 bg-transparent text-xs text-text outline-none placeholder:text-text-tertiary"
+              size="sm"
+              class="pl-8"
               placeholder="搜索项目或任务名…"
               aria-label="搜索项目或任务"
-            >
+            />
           </label>
-          <select
-            v-model="status"
-            class="w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs text-text outline-none focus:border-accent sm:w-auto"
+          <Select
+            size="sm"
+            class="w-full sm:w-auto"
             aria-label="按状态筛选"
+            :model-value="status"
+            @update:model-value="(v) => (status = v as TaskStatus | '')"
           >
             <option value="">全部状态</option>
             <option v-for="(label, k) in STATUS_LABELS" :key="k" :value="k">{{ label }}</option>
-          </select>
+          </Select>
         </div>
 
         <div class="mt-2.5 flex items-center gap-2.5 text-xs text-text-tertiary">

@@ -6,6 +6,7 @@ import { computed, ref, watch } from 'vue'
 import { continueWithEvidence, getEvidence, pushToChannel } from '@/services/api/feedback'
 import type { CheckSummaryDto, EvidenceDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
+import Input from '@/components/ui/Input.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useNotificationStore } from '@/stores/notification'
 
@@ -199,11 +200,11 @@ watch(
 
     <!-- 续问输入 + 发送（Agent 执行中禁用） -->
     <div v-else class="mt-2 flex items-start gap-2">
-      <input
+      <Input
         v-model="instruction"
-        type="text"
+        size="sm"
+        class="min-w-0 flex-1"
         placeholder="补充指令（可空），如：请继续处理 build 失败"
-        class="min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs outline-none placeholder:text-muted/70 focus:border-accent/60"
         :disabled="!canContinue || continuing"
         @keyup.enter="canContinue && onContinue()"
       />

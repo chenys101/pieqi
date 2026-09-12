@@ -90,6 +90,9 @@ export function usePwa() {
 
 /** 注册 Service Worker（main.ts 调用一次） */
 export function registerServiceWorker(): void {
+  // dev 不注册（R4 dev 守卫）：dev server 上 sw.js 是未注入版本号的占位产物，
+  // 注册它 = 开发期被旧缓存坑 + 版本语义全错。SW 只属于生产构建。
+  if (import.meta.env.DEV) return
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {
       // 注册失败：离线兜底不可用，不影响在线功能
