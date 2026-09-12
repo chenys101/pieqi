@@ -244,8 +244,6 @@ GOOS=windows GOARCH=amd64 go build -o build/pieqi-windows-amd64.exe ./cmd/pieqi
 
 * `docs/spikes/claude-sdk-bridge/` — Claude Agent SDK 桥接技术验证
 
-* `.trae/specs/migrate-to-acp-protocol/` — ACP 迁移 spec / tasks / checklist
-
 ***
 
 ## 已知限制

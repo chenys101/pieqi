@@ -26,6 +26,10 @@ data/wechat_token.json
 .vscode/
 *.swp
 
+# TRAE IDE（spec / 分享包产物，不入库）
+.trae/
+.trae-html-share-packages/
+
 # Debug logs
 data/*.log
 data/*.err
