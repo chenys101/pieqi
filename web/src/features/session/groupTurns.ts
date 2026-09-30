@@ -20,6 +20,14 @@ export interface TurnGroup {
   info: TurnInfoDto | null
 }
 
+/** 左侧 Turn 快速跳转泡泡的最小数据（详情页 UI 优化 · 需求 2） */
+export interface TurnRailItem {
+  /** 1 起步的 Turn 序号 */
+  turn: number
+  /** 该轮用户文案（用于 title 提示；缺省为空串） */
+  text: string
+}
+
 /** 持久化事件 id = `${taskId}:${seq}`；流式增量 / 乐观插入没有 seq → null */
 function parseSeq(id: string): number | null {
   const m = /:(\d+)$/.exec(id)
