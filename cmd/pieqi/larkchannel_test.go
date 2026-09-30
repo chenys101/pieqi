@@ -161,6 +161,55 @@ func TestController_FallsBackToChannelCredentials(t *testing.T) {
 	}
 }
 
+// 渠道级实例（BotStore 为空 / 该渠道没有可用机器人时的兜底）必须**同时**登记为
+// 渠道名发送落点。它没有 bot id 可寻址，若只 BindReceiver，Bridge.senderFor 的
+// 三步回退（bot id → 渠道名 → 管理员机器人 → 首台）全部落空 → reply 静默 return，
+// 表现就是「在飞书里发『隧道』没任何反应」（隧道其实已经起来了）。
+func TestController_ChannelLevelInstanceReachableByChannelName(t *testing.T) {
+	c, _, bridge, _ := newTestController(t)
+	if err := c.Init(config.LarkConfig{AppID: "cli_x", AppSecret: "s", EventMode: "webhook"}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if _, ok := bridge.Sender("lark"); !ok {
+		t.Fatal("channel-level instance must be reachable by channel name (否则回执发不出去)")
+	}
+	// 幂等：重建（规格未变 → 复用实例）后仍可寻址。
+	if err := c.Rebuild(); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if _, ok := bridge.Sender("lark"); !ok {
+		t.Fatal("rebuild must keep the channel-level sender registered")
+	}
+}
+
+// 渠道级实例被具名机器人取代后，渠道名不应再指向已下线的老实例 ——
+// 否则回执会打到一条已停止的连接上，而按机器人寻址的正路被这层残留遮住。
+func TestController_ChannelLevelSenderRetiredWhenBotsAppear(t *testing.T) {
+	c, bots, bridge, _ := newTestController(t)
+	if err := c.Init(config.LarkConfig{AppID: "cli_x", AppSecret: "s", EventMode: "webhook"}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	before, ok := bridge.Sender("lark")
+	if !ok {
+		t.Fatal("setup: channel-level instance should be reachable first")
+	}
+	bot, err := bots.Create(model.Bot{Channel: model.ChannelLark, Name: "A"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeCreds(t, bots, bot.ID)
+	if err := c.Rebuild(); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	after, ok := bridge.Sender("lark")
+	if !ok {
+		t.Fatal("named bot instance must be reachable by channel name")
+	}
+	if after == before {
+		t.Fatal("channel name must not keep pointing at the retired channel-level adapter")
+	}
+}
+
 // 一台机器人有记录但没凭据 → 跳过它，不阻塞其余机器人。
 func TestController_SkipsBotWithoutCredentials(t *testing.T) {
 	c, bots, _, _ := newTestController(t)

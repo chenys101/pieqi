@@ -229,6 +229,20 @@ func (c *larkChannelController) rebuildLocked() error {
 		c.mux.Replace(adapters)
 	}
 	c.bridge.SyncBotSenders(refs)
+
+	// 渠道级实例（botID 为空：BotStore 为空 / 该渠道无可用机器人的兜底）没有
+	// bot id 可寻址，必须**额外**登记为渠道名发送落点 —— 否则 Bridge.senderFor
+	// 的四步回退全部落空，reply() 静默 return：隧道回执、任务通知、引导语
+	// 一律发不出去（隧道其实已经起来了，只是没人回）。
+	//
+	// 具名机器人只进 botSenders，两台机器人不会互相串话；渠道级实例消失时
+	// 一并注销，免得渠道名指到一条已停用的连接上。
+	if inst, ok := next[""]; ok {
+		c.bridge.RegisterSender("lark", inst.adapter)
+	} else {
+		c.bridge.UnregisterSender("lark")
+	}
+
 	for _, inst := range fresh {
 		c.bridge.BindReceiver(inst.adapter)
 		if inst.mode == "longconn" {

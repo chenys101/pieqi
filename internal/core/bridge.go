@@ -131,9 +131,21 @@ func (b *Bridge) BindReceiver(receiver channel.MessageReceiver) {
 	})
 }
 
+// RegisterSender 登记**渠道级**发送落点（渠道名可寻址）。
 func (b *Bridge) RegisterSender(name string, sender channel.MessageSender) {
 	b.sendersMu.Lock()
 	b.senders[name] = sender
+	b.sendersMu.Unlock()
+}
+
+// UnregisterSender 摘掉某渠道的渠道级发送落点。**不影响**按机器人路由
+// （botSenders 由 SyncBotSenders 整体替换）。
+//
+// 用途：实例集合变化后撤下已停用的渠道级实例。残留比缺失更坏 ——
+// 渠道名会命中一条已经停掉的连接，把按机器人寻址的正路遮住。
+func (b *Bridge) UnregisterSender(name string) {
+	b.sendersMu.Lock()
+	delete(b.senders, name)
 	b.sendersMu.Unlock()
 }
 
