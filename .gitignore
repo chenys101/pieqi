@@ -78,3 +78,5 @@ web/dist.bak.*
 
 # WorkBuddy 会话数据与记忆（.workbuddy/ 是项目数据，按约定保留在磁盘但不入库）
 .workbuddy/
+# 旧目录名（早期版本的会话数据/验证产物：artifacts、memory、tmp）
+.workbuddy-ai/
