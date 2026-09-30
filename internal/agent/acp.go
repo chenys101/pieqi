@@ -55,6 +55,15 @@ type ACPAgent struct {
 	conn   acpConn
 	done   chan struct{} // 进程退出或连接断开时关闭（Done() 返回它）
 
+	// lifeCtx/lifeCancel：agent 进程的**自持**生命周期 ctx（构造时 WithCancel(Background)，
+	// Close 时 cancel）。spawn 只绑它、不绑调用方的 per-turn ctx —— 调用方 ctx 在轮末即被
+	// cancel（TaskRunner.runACP 的 defer cancel()），若绑它，跨轮保活（runACPTurn keepAlive=true）
+	// 会在轮末被 exec.CommandContext 顺手杀掉 agent 进程，下一轮续问写向已关闭的 stdin
+	// 直接失败（"write |1: file already closed"）。进程终止统一由 Close 负责（优雅 EOF →
+	// 超时强杀 → lifeCancel 兜底），与调用方 turn 边界解耦。
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+
 	// agentCaps 握手时 agent 声明的能力（Initialize 后填充）。NewSession 据此决定
 	// 续问走 session/load（LoadSession=true）还是 session/resume。
 	agentCaps acp.AgentCapabilities
@@ -116,6 +125,7 @@ func NewACPAgent(cfg config.ACPConfig, logger *zap.Logger) *ACPAgent {
 		cfg.InitTimeout = 30 * time.Second
 	}
 	name, args := buildSpawnCommand(cfg)
+	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	return &ACPAgent{
 		cfg:          cfg,
 		logger:       logger,
@@ -123,6 +133,8 @@ func NewACPAgent(cfg config.ACPConfig, logger *zap.Logger) *ACPAgent {
 		cmdArgs:      args,
 		done:         make(chan struct{}),
 		pendingPerms: make(map[string]chan PermissionResponse),
+		lifeCtx:      lifeCtx,
+		lifeCancel:   lifeCancel,
 	}
 }
 
@@ -207,6 +219,10 @@ func (a *ACPAgent) Start(ctx context.Context) error {
 		a.startErr = a.startInternal(ctx)
 		if a.startErr == nil {
 			a.started = true
+		} else {
+			// 启动失败：释放自持 ctx（此路径可能没走到 Close，如 cmd.Start 直接失败）。
+			// cancel 幂等，若已由 Close 释放过则无副作用。
+			a.lifeCancel()
 		}
 	})
 	return a.startErr
@@ -216,7 +232,9 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 	if a.cmdName == "" {
 		return fmt.Errorf("acp: empty spawn command (agent_type=%q)", a.cfg.AgentType)
 	}
-	cmd := exec.CommandContext(ctx, a.cmdName, a.cmdArgs...)
+	// 绑自持 lifeCtx 而非调用方 ctx：进程存活期 = 会话存活期，不随调用方 turn 结束被取消
+	// （见 lifeCtx 字段注释）。调用方 ctx 只用于下面的 initialize 握手超时。
+	cmd := exec.CommandContext(a.lifeCtx, a.cmdName, a.cmdArgs...)
 	cmd.Stderr = newLineCollector(a.logger, "acp agent stderr")
 
 	stdin, err := cmd.StdinPipe()
@@ -506,6 +524,9 @@ func (a *ACPAgent) Close(ctx context.Context) error {
 		}
 		a.permMu.Unlock()
 		a.markDone()
+		// 释放自持 lifeCtx（最后一步）：若上面优雅等待超时且进程仍在，此处经 CommandContext
+		// 兜底强杀。cancel 幂等，重复 Close / 启动失败路径重复调用均安全。
+		a.lifeCancel()
 	})
 	return nil
 }

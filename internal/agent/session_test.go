@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeAdapter4Session 会话桥接测试用的最小 AgentAdapter。
@@ -23,6 +24,10 @@ type fakeAdapter4Session struct {
 	onD ContentDeltaFunc
 	onP PermissionRequestFunc
 	onT ToolCallUpdateFunc
+
+	// done 底层"进程退出/连接断开"信号（懒建；未 markDone 前永不关闭）
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 var _ AgentAdapter = (*fakeAdapter4Session)(nil)
@@ -86,7 +91,25 @@ func (f *fakeAdapter4Session) Close(ctx context.Context) error {
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeAdapter4Session) Done() <-chan struct{} { return nil }
+func (f *fakeAdapter4Session) Done() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.done == nil {
+		f.done = make(chan struct{})
+	}
+	return f.done
+}
+
+// markDone 模拟底层进程退出/连接断开（触发 Done 关闭）。
+func (f *fakeAdapter4Session) markDone() {
+	f.mu.Lock()
+	if f.done == nil {
+		f.done = make(chan struct{})
+	}
+	ch := f.done
+	f.mu.Unlock()
+	f.doneOnce.Do(func() { close(ch) })
+}
 
 // 触发 fake 的回调（模拟底层 adapter 派发事件）。
 func (f *fakeAdapter4Session) fireDelta(d ContentDelta) {
@@ -224,5 +247,82 @@ func TestOpenRegistry(t *testing.T) {
 
 	if _, err := Open(context.Background(), OpenParams{Agent: "no-such-agent"}); !errors.Is(err, ErrUnknownAgent) {
 		t.Fatalf("Open unknown agent err = %v, want ErrUnknownAgent", err)
+	}
+}
+
+// TestSessionAdapterReportsExitAsEventError 底层进程异常退出（Done 关闭且非 Close）时，
+// sessionAdapter 必须上报中性 EventError。
+//
+// 回归背景：上层 sessionBackedAdapter 只在 EventError 时 markDone()，TaskRunner.adapterDead
+// 才据此摘除死会话。若死亡信号只关到 adapter 内部不上报，续问会复用已死会话并写向已关闭的
+// stdin（"write |1: file already closed"）。
+func TestSessionAdapterReportsExitAsEventError(t *testing.T) {
+	fake := &fakeAdapter4Session{sessionID: "s1", realID: "real-s1"}
+	sess := NewSessionAdapter(fake, "s1", Caps{MultiTurnPersistent: true})
+
+	got := make(chan Event, 4)
+	sess.OnEvent(func(ev Event) { got <- ev })
+
+	fake.markDone() // 模拟 qodercli 进程被杀/异常退出
+
+	select {
+	case ev := <-got:
+		if ev.Kind != EventError {
+			t.Fatalf("event kind = %q, want %q", ev.Kind, EventError)
+		}
+		if ev.SessionID != "real-s1" {
+			t.Errorf("event session id = %q, want real-s1", ev.SessionID)
+		}
+		if ev.Err == nil {
+			t.Error("error event carries nil Err")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout: 进程退出未上报 EventError")
+	}
+	// 只上报一次
+	select {
+	case ev := <-got:
+		t.Fatalf("unexpected duplicate event: %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestSessionAdapterCloseDoesNotReportError 显式 Close 也会关闭底层 Done，
+// 但那不是异常终止，不得上报 EventError（否则正常关停会被误判为崩溃）。
+func TestSessionAdapterCloseDoesNotReportError(t *testing.T) {
+	fake := &fakeAdapter4Session{sessionID: "s1"}
+	sess := NewSessionAdapter(fake, "s1", Caps{})
+
+	got := make(chan Event, 4)
+	sess.OnEvent(func(ev Event) { got <- ev })
+
+	if err := sess.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case ev := <-got:
+		t.Fatalf("Close 后不应上报事件，收到 %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestSessionAdapterDeliversPendingExitOnLateOnEvent 死亡早于 OnEvent 注册时（open 后进程
+// 立刻崩），信号不能丢：注册回调应补投一次 EventError。
+func TestSessionAdapterDeliversPendingExitOnLateOnEvent(t *testing.T) {
+	fake := &fakeAdapter4Session{sessionID: "s1"}
+	sess := NewSessionAdapter(fake, "s1", Caps{})
+
+	fake.markDone() // 尚无任何回调
+
+	got := make(chan Event, 4)
+	sess.OnEvent(func(ev Event) { got <- ev })
+
+	select {
+	case ev := <-got:
+		if ev.Kind != EventError {
+			t.Fatalf("event kind = %q, want %q", ev.Kind, EventError)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout: 迟注册的 OnEvent 未补投 EventError（死亡信号丢失）")
 	}
 }

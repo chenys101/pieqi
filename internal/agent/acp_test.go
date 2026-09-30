@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -666,5 +670,106 @@ func TestRequestPermission_DoneCancels(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout: Done did not cancel pending permission")
+	}
+}
+
+// --- 跨轮保活：进程生命周期与调用方 per-turn ctx 解耦 ---
+
+// fakeACPHelperEnv 标记"本进程是被测代码 spawn 出来的假 ACP agent 子进程"。
+const fakeACPHelperEnv = "PIEQI_FAKE_ACP_HELPER"
+
+// TestFakeACPHelperProcess 假 ACP agent：line-delimited JSON-RPC 2.0，只应答请求。
+// 由 TestACPAgent_ProcessSurvivesCallerCtxCancel 以 fakeACPHelperEnv=1 启动；
+// 平时（无 env）直接 skip，避免被当普通测试跑导致读 stdin 阻塞。
+//
+// 之所以不 os.Exit：在 -test.paniconexit0 下测试内调 os.Exit(0) 会 panic；
+// 正常 return 只在 stdin EOF（父进程 Close）后发生，此时 testing 打印的 "PASS"
+// 落在已进入关停流程的管道上，无副作用。
+func TestFakeACPHelperProcess(t *testing.T) {
+	if os.Getenv(fakeACPHelperEnv) != "1" {
+		t.Skip("helper process for TestACPAgent_ProcessSurvivesCallerCtxCancel")
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.Unmarshal(line, &req); err != nil || len(req.ID) == 0 {
+			continue // 非法消息 / 通知：无 id 不需应答
+		}
+		result := "{}"
+		switch req.Method {
+		case "initialize":
+			result = `{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}`
+		case "session/new", "session/load", "session/resume":
+			result = `{"sessionId":"fake-sess"}`
+		case "session/prompt":
+			result = `{"stopReason":"end_turn"}`
+		}
+		fmt.Fprintf(os.Stdout, `{"jsonrpc":"2.0","id":%s,"result":%s}`+"\n", req.ID, result)
+	}
+}
+
+// TestACPAgent_ProcessSurvivesCallerCtxCancel 回归：agent 进程不能随调用方（per-turn）ctx
+// 的取消而死。
+//
+// 回归背景：TaskRunner.runACP 用 ctx, defer cancel() 包住一轮，若 ACPAgent 用该 ctx 作
+// exec.CommandContext 的 ctx，进程会在轮末被顺手杀掉——跨轮保活（runACPTurn keepAlive=true）
+// 形同虚设，续问写向已关闭的 stdin 报 "write |1: file already closed"。
+// 这里用真实子进程验证：轮末 cancel 后进程仍存活，且能在**同一会话**上再跑一轮。
+func TestACPAgent_ProcessSurvivesCallerCtxCancel(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	t.Setenv(fakeACPHelperEnv, "1") // 子进程继承：声明自己是假 agent
+
+	a := NewACPAgent(config.ACPConfig{
+		AgentType:    "fake-acp",
+		SpawnCommand: []string{exe, "-test.run=^TestFakeACPHelperProcess$"},
+		InitTimeout:  15 * time.Second,
+	}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := a.Start(ctx); err != nil {
+		t.Fatalf("Start (initialize 握手): %v", err)
+	}
+	sid, err := a.NewSession(ctx, SessionConfig{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if err := a.SendPrompt(ctx, sid, "第一轮"); err != nil {
+		t.Fatalf("SendPrompt #1: %v", err)
+	}
+
+	// 模拟 runACP 轮末的 defer cancel()
+	cancel()
+	select {
+	case <-a.Done():
+		t.Fatal("agent 进程随调用方 ctx 取消而退出：spawn 绑错 ctx，跨轮保活被打破")
+	case <-time.After(500 * time.Millisecond):
+		// 仍存活：符合预期
+	}
+
+	// 同会话第二轮（keepAlive 语义：不重新 spawn / 不 LoadSession）
+	if err := a.SendPrompt(context.Background(), sid, "第二轮"); err != nil {
+		t.Fatalf("SendPrompt #2（轮末之后复用同会话）: %v", err)
+	}
+
+	// Close：优雅关停（关 stdin → 子进程 EOF 自行退出），Done 必须关闭
+	if err := a.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-a.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout: Close 后 Done 未关闭")
 	}
 }

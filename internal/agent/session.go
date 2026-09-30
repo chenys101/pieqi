@@ -132,15 +132,26 @@ func Open(ctx context.Context, p OpenParams) (AgentSession, error) {
 // sessionAdapter 把现有 AgentAdapter + sessionID 桥接为 AgentSession（不重写现有实现）。
 // 供当前 ACP/print 路径在 bridge 落地前使用；bridge 客户端将原生实现 AgentSession。
 //
-// 仅桥接 delta / tool / permission 三类事件（现有 adapter 的能力边界）；TurnEnd/Error/
-// StateChanged 由 Prompt 返回 + 上层驱动判定，bridge 客户端原生实现时补齐。
+// 桥接的事件：delta / tool / permission 三类由现有 adapter 回调直译；**error 由底层
+// adapter.Done()（进程退出/连接断开）翻译而来**（见 watchExit）；TurnEnd/StateChanged
+// 由 Prompt 返回 + 上层驱动判定，bridge 客户端原生实现时补齐。
 type sessionAdapter struct {
 	adapter   AgentAdapter
 	sessionID string
 	caps      Caps
 
-	eventMu sync.RWMutex
-	onEvent func(Event)
+	// eventMu 守护 onEvent 与三个生命周期标记。注意：投递事件前必须先在锁内取出 fn、
+	// 解锁后再调用，不可持锁调 fire（RWMutex 不可重入）。
+	//   closed       会话已显式 Close（正常关停，不上报 EventError）。
+	//   exited       进程/连接已异常终止（Done 关闭且非 Close 所致）。
+	//   errDelivered EventError 是否已投递（保证只投一次；注册晚于死亡时由 OnEvent 补投）。
+	eventMu      sync.RWMutex
+	onEvent      func(Event)
+	closed       bool
+	exited       bool
+	errDelivered bool
+
+	watchOnce sync.Once
 }
 
 var _ AgentSession = (*sessionAdapter)(nil)
@@ -148,7 +159,9 @@ var _ AgentSession = (*sessionAdapter)(nil)
 // NewSessionAdapter 用现有 AgentAdapter + sessionID 构造 AgentSession 桥接。
 // caps 由调用方按 adapter 类型提供（如 ACP 保活 MultiTurnPersistent=true）。
 func NewSessionAdapter(adapter AgentAdapter, sessionID string, caps Caps) AgentSession {
-	return &sessionAdapter{adapter: adapter, sessionID: sessionID, caps: caps}
+	s := &sessionAdapter{adapter: adapter, sessionID: sessionID, caps: caps}
+	s.watchExit()
+	return s
 }
 
 // ID 返回会话的真实 id（可用于持久化与续问）。
@@ -164,8 +177,11 @@ func (s *sessionAdapter) Cancel(ctx context.Context) error {
 	return s.adapter.Cancel(ctx, s.sessionID)
 }
 
-// Close 关闭会话（幂等）。
+// Close 关闭会话（幂等）。先置 closed（让 watchExit 把随后的 Done 视作正常关停而非异常）。
 func (s *sessionAdapter) Close(ctx context.Context) error {
+	s.eventMu.Lock()
+	s.closed = true
+	s.eventMu.Unlock()
 	return s.adapter.Close(ctx)
 }
 
@@ -182,9 +198,17 @@ func (s *sessionAdapter) RespondPermission(ctx context.Context, reqID string, al
 func (s *sessionAdapter) OnEvent(fn func(Event)) {
 	s.eventMu.Lock()
 	s.onEvent = fn
+	// 死亡早于注册（watchExit 判定异常终止时还没有回调可投）：补投一次，避免信号丢失。
+	pending := fn != nil && s.exited && !s.errDelivered
+	if pending {
+		s.errDelivered = true
+	}
 	s.eventMu.Unlock()
 	if fn == nil {
 		return
+	}
+	if pending {
+		fn(s.exitEvent())
 	}
 	s.adapter.OnContentDelta(func(d ContentDelta) {
 		k := EventTextDelta
@@ -209,6 +233,43 @@ func (s *sessionAdapter) OnEvent(fn func(Event)) {
 
 // Caps 返回会话能力。
 func (s *sessionAdapter) Caps() Caps { return s.caps }
+
+// watchExit 把底层 adapter 的进程死亡信号（Done 关闭）翻译为中性 EventError 事件。
+//
+// 为什么必须在这一层兜住：AgentSession 的公开接口按设计不暴露 Done（见文件头"进程死亡
+// 信号由底层实现内部兜住"），而上层 sessionBackedAdapter 只在收到 EventError 时才
+// markDone()，TaskRunner.adapterDead 才据此摘除死会话。若 ACP 侧死亡只关到
+// ACPAgent.done 而不上报，信号就断在 adapter 内部——续问会复用已死会话，写向已关闭的
+// stdin 失败（"acp: prompt: write |1: file already closed"）。
+//
+// 会话被显式 Close 时 Done 同样会关闭，那不是异常终止，故用 closed 标记区分。
+func (s *sessionAdapter) watchExit() {
+	s.watchOnce.Do(func() {
+		go func() {
+			<-s.adapter.Done()
+			s.eventMu.Lock()
+			if s.closed {
+				s.eventMu.Unlock()
+				return
+			}
+			s.exited = true
+			fn := s.onEvent
+			deliver := fn != nil && !s.errDelivered
+			if deliver {
+				s.errDelivered = true
+			}
+			s.eventMu.Unlock()
+			if deliver {
+				fn(s.exitEvent())
+			}
+		}()
+	})
+}
+
+// exitEvent 构造"底层进程异常退出"的中性事件。
+func (s *sessionAdapter) exitEvent() Event {
+	return Event{Kind: EventError, SessionID: s.ID(), Err: errors.New("agent process exited")}
+}
 
 func (s *sessionAdapter) fire(ev Event) {
 	s.eventMu.RLock()

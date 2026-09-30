@@ -72,7 +72,10 @@ agents:
     transport: acp                  # acp(默认, qodercli --acp)
     acp:
       agent_type: qodercli
-      spawn_command: []             # 空 = 按 agent_type 取默认；如 ["qodercli","--acp","--port","1234"]
+      # 显式带 -m 选用 Qwen3.8-Flash（Qoder 国际版限时免费，0 Credits）。
+      # 不带 -m 时走账号默认模型（qmodel_38max，付费），Credits 耗尽会报
+      # "credit usage limit"（error_code 118）。空数组 = 按 agent_type 取默认。
+      spawn_command: ["qodercli","--acp","-m","Qwen3.8-Flash"]
       init_timeout: 30s
       idle_timeout: 15m
 
