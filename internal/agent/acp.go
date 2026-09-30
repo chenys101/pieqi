@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -641,6 +642,15 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 	if params.ToolCall.Title != nil {
 		title = *params.ToolCall.Title
 	}
+	// 权限链路此前**没有任何日志**，"批准了却被拒"这类事故无从定位（选项 id 是回选的，
+	// 答错 id agent 只会静默当作未批准）。这里把请求与响应都记下来，代价是一行 Debug。
+	a.logger.Debug("acp permission requested",
+		zap.String("req_id", reqID),
+		zap.String("session", string(params.SessionId)),
+		zap.String("title", title),
+		zap.String("kind", toolKindString(params.ToolCall.Kind)),
+		zap.String("options", formatPermissionOptions(opts)),
+	)
 	onPerm(PermissionRequest{
 		ReqID:      reqID,
 		SessionID:  string(params.SessionId),
@@ -654,9 +664,15 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 
 	select {
 	case resp := <-ch:
+		a.logger.Debug("acp permission resolved",
+			zap.String("req_id", reqID),
+			zap.Bool("selected", resp.Selected),
+			zap.String("option", resp.OptionID),
+		)
 		return acp.RequestPermissionResponse{Outcome: toACPOutcome(resp, opts)}, nil
 	case <-ctx.Done():
 		a.takePending(reqID)
+		a.logger.Debug("acp permission cancelled by ctx", zap.String("req_id", reqID), zap.Error(ctx.Err()))
 		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, ctx.Err()
 	case <-a.done:
 		a.takePending(reqID)
@@ -725,6 +741,16 @@ func toPermissionOptions(in []acp.PermissionOption) []PermissionOption {
 		out = append(out, PermissionOption{ID: string(o.OptionId), Name: o.Name, Kind: string(o.Kind)})
 	}
 	return out
+}
+
+// formatPermissionOptions 把选项列表压成 "id(allow_once),id2(reject_once)" 形式，仅供日志。
+// 必须能一眼看出 agent 给了哪些 optionId —— 回选错了 id 是"批准被当成拒绝"的唯一原因。
+func formatPermissionOptions(opts []PermissionOption) string {
+	parts := make([]string, 0, len(opts))
+	for _, o := range opts {
+		parts = append(parts, o.ID+"("+o.Kind+")")
+	}
+	return strings.Join(parts, ",")
 }
 
 // autoApproveOutcome 无回调时的自动放行：选首个 allow_once，次选 allow_always，

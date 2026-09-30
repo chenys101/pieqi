@@ -23,9 +23,13 @@ import (
 // AgentKindSession 标识 sessionBackedAdapter（agent.Open 工厂驱动的会话）。
 const AgentKindSession AgentKind = "session"
 
-// 合成权限选项：桥的 RespondPermission(allow, optionID) 只认 allow，无 reject 选项概念。
-// 仅给一个 allow_once，让 PermissionWire.Resolve 的 approve 走到 Approve、deny 落到 Deny
-// （pickRejectOption 无匹配 → callAdapterDeny → RespondPermission(allow=false)）。
+// 合成权限选项（**仅**用于底层不带选项的会话，如 claude 桥）。
+// claude 桥的 RespondPermission(allow, optionID) 只认 allow、无 optionId 概念，
+// 故给它一个 allow_once，让 PermissionWire.Resolve 的 approve 走到 Approve、
+// deny 落到 Deny（pickRejectOption 无匹配 → callAdapterDeny → RespondPermission(allow=false)）。
+//
+// ACP 系会话（qoder）自带真实选项，必须原样透传，**不要**用这个覆盖 ——
+// 详见 onEvent 的 EventPermissionNeeded 分支注释。
 var sessionPermOptions = []PermissionOption{
 	{ID: "allow", Name: "允许", Kind: PermissionOptionAllowOnce},
 }
@@ -209,9 +213,26 @@ func (a *sessionBackedAdapter) onEvent(ev Event) {
 		})
 	case EventPermissionNeeded:
 		p := ev.Permission
+		// ⚠️ 选项必须透传底层 agent 的真实 optionId，不能无条件换成 sessionPermOptions：
+		// ACP 的 selected outcome 是**按 optionId 回选**的，agent 只认自己给出的那几个 id
+		// （qoder 是 proceed_always / proceed_once / cancel）。塞一个它不认识的 id（历史上的
+		// 合成 "allow"），agent 会当作"没有批准"处理 —— 表现就是用户点了"批准"，
+		// 工具却回一句 "The user doesn't want to proceed with this tool use"，编辑不落盘。
+		//
+		// 只有底层确实不带选项（claude 桥只传 allow bool，无 optionId 概念）时才合成兜底，
+		// 否则 pickAllowOption 找不到 allow 选项，Resolve("approve") 会直接报错。
+		opts := p.Options
+		if len(opts) == 0 {
+			opts = sessionPermOptions
+		}
 		a.emitPerm(PermissionRequest{
 			ReqID: p.ReqID, SessionID: a.sid, ToolCallID: p.ToolCallID,
-			ToolTitle: p.ToolTitle, RawInput: p.RawInput, Options: sessionPermOptions,
+			ToolTitle: p.ToolTitle,
+			// ToolKind 同样必须透传：PermissionWire 的免审名单是**按 ToolKind 匹配**的，
+			// 丢了它等于让所有请求都退化成人工审批（本该自动放行的 edit 也要弹卡）。
+			ToolKind: p.ToolKind,
+			RawInput: p.RawInput,
+			Options:  opts,
 		})
 	case EventError:
 		a.markDone()

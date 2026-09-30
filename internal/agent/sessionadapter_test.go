@@ -18,6 +18,7 @@ type fakeSession4Adapter struct {
 	permN     int
 	permReq   string
 	permAllow bool
+	permOpt   string
 	onEvent   func(Event)
 	onErr     func(Event) // 测试注入：EventError 时联动（模拟桥崩 dispatch）
 }
@@ -54,6 +55,7 @@ func (f *fakeSession4Adapter) RespondPermission(ctx context.Context, reqID strin
 	f.permN++
 	f.permReq = reqID
 	f.permAllow = allow
+	f.permOpt = optionID
 	f.mu.Unlock()
 	return nil
 }
@@ -161,6 +163,65 @@ func TestSessionBackedAdapterEventTranslation(t *testing.T) {
 	// 权限必须带合成 allow 选项（PermissionWire.Resolve 的 approve 路径依赖它）
 	if len(perms[0].Options) != 1 || perms[0].Options[0].Kind != PermissionOptionAllowOnce {
 		t.Fatalf("permission options wrong: %+v", perms[0].Options)
+	}
+}
+
+// TestSessionBackedAdapterPermissionPassthroughACP 回归：ACP 系 agent（qoder）的真实权限选项
+// 与 ToolKind 必须原样透传到 PermissionWire。
+//
+// 背景（真实事故）：这两者此前都被 sessionadapter 丢掉 —— Options 被无条件替换成合成的
+// {ID:"allow"}，ToolKind 直接不传。后果有两条，且都表现为"用户点了批准，工具仍被拒绝"：
+//  1. Resolve("approve") 把 optionId="allow" 回选给 qoder，而 qoder 只认自己给出的
+//     proceed_always / proceed_once / cancel —— 不认识即当作未批准，编辑不落盘。
+//  2. ToolKind 缺失 → PermissionWire 的免审名单（按 ToolKind 匹配）永不命中，
+//     本该自动放行的 edit 也退化成人工弹卡。
+//
+// 用真实 qoder 选项实测过：回选 proceed_always → 文件写入成功；回选 "allow" → 不写入。
+func TestSessionBackedAdapterPermissionPassthroughACP(t *testing.T) {
+	fake := &fakeSession4Adapter{id: "qoder-sess"}
+	adapter := newSessionBackedAdapter("qoder", openFake("qoder", fake))
+	if _, err := adapter.NewSession(context.Background(), SessionConfig{Cwd: "/tmp"}); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	var perms []PermissionRequest
+	adapter.OnPermissionRequest(func(p PermissionRequest) { perms = append(perms, p) })
+
+	// qodercli 1.1.64 对 "Edit <file>" 的真实请求形状
+	realOpts := []PermissionOption{
+		{ID: "proceed_always", Name: "Allow for this session", Kind: PermissionOptionAllowAlways},
+		{ID: "proceed_once", Name: "Allow", Kind: PermissionOptionAllowOnce},
+		{ID: "cancel", Name: "Reject", Kind: PermissionOptionRejectOnce},
+	}
+	fake.fire(Event{Kind: EventPermissionNeeded, Permission: PermissionRequest{
+		ReqID: "call_abc", ToolCallID: "call_abc", ToolTitle: "Edit hello.txt",
+		ToolKind: "edit", Options: realOpts,
+	}})
+
+	if len(perms) != 1 {
+		t.Fatalf("perms = %d, want 1", len(perms))
+	}
+	got := perms[0]
+	if got.ToolKind != "edit" {
+		t.Errorf("ToolKind = %q, want \"edit\"（丢了它免审名单永不命中，edit 也要弹卡）", got.ToolKind)
+	}
+	if len(got.Options) != len(realOpts) {
+		t.Fatalf("Options = %+v, want 原样透传 %+v", got.Options, realOpts)
+	}
+	for i, o := range realOpts {
+		if got.Options[i] != o {
+			t.Fatalf("Options[%d] = %+v, want %+v（不得被合成 {id:allow} 顶替）", i, got.Options[i], o)
+		}
+	}
+
+	// 批准必须把**真实** optionId 回传给会话（回选错 id = agent 当作未批准）
+	if err := adapter.Approve(context.Background(), "call_abc", "proceed_once"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if !fake.permAllow || fake.permOpt != "proceed_once" {
+		t.Fatalf("session got allow=%v option=%q, want allow=true option=proceed_once", fake.permAllow, fake.permOpt)
 	}
 }
 
