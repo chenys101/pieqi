@@ -33,12 +33,14 @@ type fakeAgentRunner struct {
 	mu         sync.Mutex
 	adapters   map[string]*fakeAgentAdapter
 	runCancels map[string]context.CancelFunc
+	runActive  map[string]bool // taskID -> 有进行中的 Run（镜像 AgentManager 的单 Run 约束）
 	script     fakeScript
 	fellBack   bool
 	openErr    error
 	openCalls  []fakeOpenCall
 	closeN     int
 	runN       int // Run（prompt turn）调用次数，断言保活复用时用
+	busyN      int // 接下来 N 次 Run 返回 ErrSessionBusy（模拟并发提交撞上"已有轮次在跑"）
 	sessSeq    int
 	onClosed   func(taskID string) // SetOnSessionClosed 注册；Close 时触发（镜像 AgentManager）
 }
@@ -49,6 +51,7 @@ type fakeScript struct {
 	permReq       *agent.PermissionRequest // 非空 → SendPrompt 触发 onP 后阻塞等 Approve/Deny 释放
 	sendErr       error                    // SendPrompt 返回的错误
 	block         bool                     // true → SendPrompt 阻塞到 ctx 取消（Cancel 测试用）
+	delay         time.Duration            // 非零 → SendPrompt 先等这么久（拉长轮次，构造并发排队窗口）
 	realSessionID string                   // 非空 → adapter.RealSessionID 返回它（模拟真实协议 sid 持久化）
 }
 
@@ -61,6 +64,7 @@ func newFakeAgentRunner(script fakeScript, fellBack bool) *fakeAgentRunner {
 	return &fakeAgentRunner{
 		adapters:   make(map[string]*fakeAgentAdapter),
 		runCancels: make(map[string]context.CancelFunc),
+		runActive:  make(map[string]bool),
 		script:     script,
 		fellBack:   fellBack,
 	}
@@ -80,6 +84,7 @@ func (f *fakeAgentRunner) Open(ctx context.Context, taskID, projectID string, cf
 		permReq:           f.script.permReq,
 		sendErr:           f.script.sendErr,
 		block:             f.script.block,
+		delay:             f.script.delay,
 		realSessionID:     f.script.realSessionID,
 		permRelease:       make(chan struct{}),
 		sendPromptStarted: make(chan struct{}, 1),
@@ -104,7 +109,24 @@ func (f *fakeAgentRunner) Run(ctx context.Context, taskID, prompt string) error 
 	f.mu.Lock()
 	a := f.adapters[taskID]
 	f.runN++
+	// 镜像 AgentManager：同一 task 同时只允许一个 Run，并发第二个返回 ErrSessionBusy。
+	// （不还原这条约束，测试就对"并发提交把任务打成 failed"这个 bug 免疫 —— 那正是回归盲区。）
+	if f.runActive[taskID] {
+		f.mu.Unlock()
+		return fmt.Errorf("%w: prompt already running for task %s", agent.ErrSessionBusy, taskID)
+	}
+	if f.busyN > 0 {
+		f.busyN--
+		f.mu.Unlock()
+		return fmt.Errorf("%w: prompt already running for task %s", agent.ErrSessionBusy, taskID)
+	}
+	f.runActive[taskID] = true
 	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		delete(f.runActive, taskID)
+		f.mu.Unlock()
+	}()
 	if a == nil {
 		return fmt.Errorf("agent: no session for task %s", taskID)
 	}
@@ -145,11 +167,16 @@ func (f *fakeAgentRunner) Cancel(ctx context.Context, taskID string) error {
 func (f *fakeAgentRunner) Close(taskID string) error {
 	f.mu.Lock()
 	a := f.adapters[taskID]
+	cancel := f.runCancels[taskID]
 	delete(f.adapters, taskID)
 	delete(f.runCancels, taskID)
 	f.closeN++
 	onClosed := f.onClosed
 	f.mu.Unlock()
+	// 对齐 *agent.AgentManager.Close：先中断进行中的 turn（否则阻塞中的 SendPrompt 永不返回）。
+	if cancel != nil {
+		cancel()
+	}
 	if a == nil {
 		return nil
 	}
@@ -208,6 +235,13 @@ func (f *fakeAgentRunner) setOpenErr(err error) {
 	f.openErr = err
 }
 
+// setBusyN 让接下来 n 次 Run 返回 ErrSessionBusy（模拟并发提交撞上"已有轮次在跑"）。
+func (f *fakeAgentRunner) setBusyN(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.busyN = n
+}
+
 func (f *fakeAgentRunner) closeCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -231,13 +265,17 @@ type fakeAgentAdapter struct {
 	permReq       *agent.PermissionRequest
 	sendErr       error
 	block         bool
-	realSessionID string // 非空 → RealSessionID 返回它（模拟 ACPAgent 真实协议 sid 与句柄 sid 一致时的持久化目标）
+	delay         time.Duration // 非零 → SendPrompt 先等这么久（构造并发排队窗口）
+	realSessionID string        // 非空 → RealSessionID 返回它（模拟 ACPAgent 真实协议 sid 与句柄 sid 一致时的持久化目标）
 
 	mu           sync.Mutex
 	approveCalls []fakeApproveArgs
 	cancelN      int
 	closeN       int
 	permFiredN   int // onP 触发次数（测试据此判断已进 waiting_input 且 goroutine 阻塞）
+	inFlight     int // 当前在跑 SendPrompt 的次数
+	maxInFlight  int // 峰值并发 SendPrompt 数：串行化（排队）的直接证据
+	promptN      int // SendPrompt 总调用次数
 
 	releaseOnce sync.Once
 	closeOnce   sync.Once
@@ -272,10 +310,33 @@ func (f *fakeAgentAdapter) RealSessionID(sessionID string) string {
 }
 
 func (f *fakeAgentAdapter) SendPrompt(ctx context.Context, sessionID, prompt string) error {
+	// 并发探测：SendPrompt 同时在跑的次数必须恒为 1（串行队列不变式）。
+	f.mu.Lock()
+	f.inFlight++
+	f.promptN++
+	if f.inFlight > f.maxInFlight {
+		f.maxInFlight = f.inFlight
+	}
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.inFlight--
+		f.mu.Unlock()
+	}()
+
 	// 通知测试 SendPrompt 已进入（Cancel / append_prompt 测试据此同步）。
 	select {
 	case f.sendPromptStarted <- struct{}{}:
 	default:
+	}
+
+	// 脚本化延时：拉长一轮的时长，便于在"轮还在跑"的窗口里提交并发请求。
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	f.cbMu.RLock()
@@ -392,6 +453,20 @@ func (f *fakeAgentAdapter) permFired() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.permFiredN > 0
+}
+
+// maxConcurrentPrompts 返回峰值并发 SendPrompt 次数（1 = 全程串行，没有两轮并行）。
+func (f *fakeAgentAdapter) maxConcurrentPrompts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxInFlight
+}
+
+// promptCount 返回 SendPrompt 被调用的总次数。
+func (f *fakeAgentAdapter) promptCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.promptN
 }
 
 // --- 测试辅助 ---

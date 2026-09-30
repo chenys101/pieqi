@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -24,6 +25,15 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// ErrSessionBusy 同一 task 的会话已被并发占用：Open 撞上已登记的会话，或 Run 撞上
+// 进行中的 prompt turn。
+//
+// 这是**并发提交**的信号，不是任务本身失败 —— 调用方应排队/重试（TaskRunner 经
+// submitTurn 串行化；兜底见 core 的 runAgentTurn 退避重试），绝不能据此把任务判死
+// （历史 bug：并发 Resume 撞出该错误 → failTask → 正在正常跑的任务被打成 failed，
+// 终态→终态又被 transition 拦住，任务永远停在 failed）。
+var ErrSessionBusy = errors.New("agent: session busy")
 
 // AgentKind 标识 adapter 底层类型（诊断/回退事件记录用）。
 type AgentKind string
@@ -152,7 +162,7 @@ func (m *AgentManager) Open(ctx context.Context, taskID, projectID string, cfg S
 	m.mu.Lock()
 	if _, exists := m.sessions[taskID]; exists {
 		m.mu.Unlock()
-		return nil, false, fmt.Errorf("agent: session already open for task %s", taskID)
+		return nil, false, fmt.Errorf("%w: session already open for task %s", ErrSessionBusy, taskID)
 	}
 	m.mu.Unlock()
 
@@ -188,7 +198,7 @@ func (m *AgentManager) Open(ctx context.Context, taskID, projectID string, cfg S
 		m.mu.Unlock()
 		_ = att.adapter.Close(ctx)
 		sem.release()
-		return nil, false, fmt.Errorf("agent: session already open for task %s", taskID)
+		return nil, false, fmt.Errorf("%w: session already open for task %s", ErrSessionBusy, taskID)
 	}
 	m.sessions[taskID] = sess
 	m.mu.Unlock()
@@ -288,7 +298,8 @@ func (m *AgentManager) DefaultAgent() string {
 	return m.defaultAgent
 }
 
-// Run 对已 Open 的 task 发送一轮 prompt。同一 task 同时只允许一个 Run（并发第二个返回错误）。
+// Run 对已 Open 的 task 发送一轮 prompt。同一 task 同时只允许一个 Run（并发第二个返回
+// ErrSessionBusy，调用方应排队而非判死，见 ErrSessionBusy 注释）。
 // 内部为该轮派生 cancelable ctx，Cancel/Close 经它中断 SendPrompt。
 func (m *AgentManager) Run(ctx context.Context, taskID, prompt string) error {
 	m.mu.Lock()
@@ -301,7 +312,7 @@ func (m *AgentManager) Run(ctx context.Context, taskID, prompt string) error {
 	sess.runMu.Lock()
 	if sess.running {
 		sess.runMu.Unlock()
-		return fmt.Errorf("agent: prompt already running for task %s", taskID)
+		return fmt.Errorf("%w: prompt already running for task %s", ErrSessionBusy, taskID)
 	}
 	sess.lastActivity = time.Now() // 轮开始：重置空闲计时
 	runCtx, cancel := context.WithCancel(ctx)

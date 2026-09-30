@@ -73,6 +73,11 @@ type TaskRunner struct {
 	wireMu sync.Mutex
 	wires  map[string]*acpWires // taskID -> ACP 路径的 wire 句柄
 
+	// turns 每任务串行 turn 队列（见 turn_queue.go）：并发 Resume/续问排队执行，
+	// 不再同时打进同一会话把正在跑的任务撞成 failed。
+	turnMu sync.Mutex
+	turns  map[string]*turnQueue
+
 	mu      sync.Mutex
 	running map[string]*liveProc // taskID -> 活跃进程
 }
@@ -140,6 +145,7 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 		maxConcurrent:    maxConcurrent,
 		running:          make(map[string]*liveProc),
 		wires:            make(map[string]*acpWires),
+		turns:            make(map[string]*turnQueue),
 	}
 	// hook 触发时置 waiting_input（hook 是 waiting_input 的权威信号，见 plan A.6）
 	if hooks != nil {
@@ -312,8 +318,9 @@ func (tr *TaskRunner) projectSem(projectID string) *semaphore {
 // 任务的取消由 Cancel 方法通过内部 cancel 控制。
 // Start 启动一轮新任务：建 worktree -> spawn claude（stream-json）。
 // ctx 仅用于派生，实际运行用 context.Background()（见 run 注释）。
+// 经 submitTurn 入队（串行化，见 turn_queue.go）：同一 task 同时只会有一轮在跑。
 func (tr *TaskRunner) Start(ctx context.Context, task *model.Task) {
-	go tr.run(context.Background(), task, "")
+	tr.submitTurn(task.ID, func(cur *model.Task) { tr.run(context.Background(), cur, "") })
 }
 
 // Resume 在已结束（completed/failed/cancelled）的任务上续问：复用同一 ClaudeSessionID
@@ -321,15 +328,20 @@ func (tr *TaskRunner) Start(ctx context.Context, task *model.Task) {
 //
 // 也接受路径 B 的 waiting_input（choice kind）：Claude 文本提问后进程已 end_turn 退出，
 // 用户选完选项续跑。路径 A 的 waiting_input（approval kind）进程仍活着挂 hook channel，
-// 不允许 Resume（会起第二个 claude 进程争抢 session），应走 Intervene。
+// 应走 Intervene 回答那张卡。
+//
+// **也接受 running**（方案②排队）：提交的轮次排进该 task 的串行队列（turn_queue.go），
+// 等当前轮收尾后再跑。重复提交/连发两条因此不再报错、更不再互撞把任务打死 —— 只要
+// 队列还在，任何并发提交都只有"排队"一种结果，不看时序。
 func (tr *TaskRunner) Resume(taskID, text string) error {
 	t, ok := tr.store.Get(taskID)
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
 	}
 	// 路径 B 的 choice waiting_input 也可 resume；路径 A 的 approval waiting_input 不行
+	// （那是在等一个决策，不是等一轮新输入）。
 	resumable := t.Status == model.TaskCompleted || t.Status == model.TaskFailed ||
-		t.Status == model.TaskCancelled ||
+		t.Status == model.TaskCancelled || t.Status == model.TaskRunning ||
 		(t.Status == model.TaskWaitingInput && t.CurrentDecision != nil &&
 			t.CurrentDecision.Kind == model.DecisionKindChoice)
 	if !resumable {
@@ -338,6 +350,15 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 	if t.WorktreePath == "" {
 		return fmt.Errorf("task missing worktree, cannot resume")
 	}
+
+	// Turn 边界快照：只有上一轮确实已结束（终态提交）才捕获。running 中提交的排在当前轮
+	// 之后，此刻 capture 只能采到**半程**状态，反而是脏数据；那一轮的快照由它自己的终态
+	// 转换捕获（见 transition 内的 captureTurnEnd）。
+	if t.Status != model.TaskRunning {
+		tr.captureTurnEnd(taskID)
+	}
+	// 追加一条 user 事件，标记续问起点（前端渲染为右对齐气泡，与首次 prompt 一致）
+	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text})
 
 	// ACP 路径（Task 5）：续问经 session/load/resume 复用已有会话上下文（M4 的 re-Open 丢失
 	// 上下文限制已修复）。runACP 据 task.ACPSessionID 构造 SessionConfig.ResumeFrom 触发 load/resume。
@@ -348,29 +369,24 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 		if tr.agentMgr.Adapter(taskID) == nil && t.ACPSessionID == "" && t.ClaudeSessionID == "" {
 			return fmt.Errorf("task missing session, cannot resume")
 		}
-		// Turn 边界：下一 EventUser 到达 = 上一 Turn 结束，先捕获快照（幂等）
-		tr.captureTurnEnd(taskID)
-		tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text})
-		go tr.runACP(context.Background(), t, text)
+		// 排队提交（turn_queue.go）：上一轮还没跑完时排在它后面，而不是同时打进同一会话
+		// （并发第二个 Run 会被 AgentManager 拒掉，老代码据此 failTask 把任务打死）。
+		tr.noteQueued(taskID, tr.submitTurn(taskID, func(cur *model.Task) {
+			tr.runACP(context.Background(), cur, text)
+		}))
 		return nil
 	}
 
 	// 原 claude -p 路径：复用同一 ClaudeSessionID 与 --resume 续上下文。
+	// 不再检查"进程是否还活着"：进程活着 = 有一轮在跑 = 本轮排队等它（老代码在这里拒绝，
+	// 但排队已由队列保证，见 turn_queue.go）。排队时以**轮开始时**的 task 为准（submitTurn
+	// 重取），ClaudeSessionID 因此是首轮真实落库后的值，不会拿提交瞬间的旧快照去 --resume。
 	if t.ClaudeSessionID == "" {
 		return fmt.Errorf("task missing session, cannot resume")
 	}
-	// 双保险：确认进程确实已死（不在 tr.running），避免对路径 A 误 resume 起第二个 claude。
-	tr.mu.Lock()
-	_, alive := tr.running[taskID]
-	tr.mu.Unlock()
-	if alive {
-		return fmt.Errorf("task still has a live process, use intervene instead")
-	}
-	// Turn 边界：下一 EventUser 到达 = 上一 Turn 结束，先捕获快照（幂等）
-	tr.captureTurnEnd(taskID)
-	// 追加一条 user 事件，标记续问起点（前端渲染为右对齐气泡，与首次 prompt 一致）
-	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text})
-	go tr.run(context.Background(), t, text)
+	tr.noteQueued(taskID, tr.submitTurn(taskID, func(cur *model.Task) {
+		tr.run(context.Background(), cur, text)
+	}))
 	return nil
 }
 
@@ -676,6 +692,15 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	}
 	adapter, fellBack, err := tr.agentMgr.Open(ctx, task.ID, task.ProjectID, cfg)
 	if err != nil {
+		// 会话忙（同 task 已有会话/轮次在跑）：并发提交的信号，**不是**续问失败。
+		// 不 surface 失败（把正在跑的任务判死正是历史 bug，见 turn_queue.go），交回调用方：
+		// Open 报 already open 意味着 sessions[taskID] 已登记 → 调用方的 Adapter() 非空 →
+		// 落到 runACPTurn 复用既有会话，会话真忙时由 runAgentTurn 的退避重试兜底。
+		if errors.Is(err, agent.ErrSessionBusy) {
+			tr.logger.Debug("agent open skipped: session busy",
+				zap.String("task", task.ID), zap.String("agent", task.Agent), zap.Bool("resume", resumeFrom != ""))
+			return false
+		}
 		// 续问路径 Open 失败多为原会话丢失（ACP load/resume 报错，或 PrintAgent --resume
 		// 报 "No conversation found"）。由协议层 surface：追加 status 事件 + 置 failed 带明确原因，
 		// 不静默失败。
@@ -760,7 +785,7 @@ func (tr *TaskRunner) refreshResumeID(taskID string) {
 // keepAlive=false（PrintAgent 回退）：轮末关会话并 unwire（一次性进程语义）。
 func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt string, keepAlive bool) {
 	tr.setRunning(task.ID)
-	runErr := tr.agentMgr.Run(ctx, task.ID, prompt)
+	runErr := tr.runAgentTurn(ctx, task.ID, prompt)
 
 	// 桥路径：turn_end 后才带出 SDK resume id，轮末回写 ACPSessionID（续问用）。
 	// 若 adapter 是带 ResumeID() 的会话（sessionBackedAdapter），id 非空时覆盖旧值。
@@ -811,6 +836,38 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 	// PrintAgent 一次性：轮末关会话并 unwire；ACP 保活：不关（由回收/取消/删任务/关停关）。
 	if !keepAlive && tr.agentMgr.Adapter(task.ID) != nil {
 		_ = tr.agentMgr.Close(task.ID)
+	}
+}
+
+// busyRetryLimit / busyRetryDelay "会话忙"（agent.ErrSessionBusy）的轮内退避重试参数。
+//
+// 正常路径不可达：Start / Resume 都经 submitTurn 串行化（turn_queue.go），同一 task
+// 不会有第二轮 Run 并发进入。这是兜底 —— 万一还有别的入口并发占用同一会话，也**绝不能
+// 把任务判死**：老代码在这里直接 failTask，于是"重复提交一次"就能把正在跑的任务打成
+// failed（而赢的那轮照常跑完，终态→终态被 transition 拦住，任务永远停在 failed）。
+const (
+	busyRetryLimit = 3
+	busyRetryDelay = 300 * time.Millisecond
+)
+
+// runAgentTurn 跑一轮 SendPrompt。会话忙（同 task 已有轮次在跑）时退避重试：
+// 把"并发提交"当等待信号，而不是任务失败。
+func (tr *TaskRunner) runAgentTurn(ctx context.Context, taskID, prompt string) error {
+	for attempt := 0; ; attempt++ {
+		err := tr.agentMgr.Run(ctx, taskID, prompt)
+		if !errors.Is(err, agent.ErrSessionBusy) {
+			return err
+		}
+		if attempt >= busyRetryLimit || ctx.Err() != nil {
+			return err
+		}
+		tr.logger.Warn("agent session busy, retrying turn",
+			zap.String("task", taskID), zap.Int("attempt", attempt+1))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(busyRetryDelay):
+		}
 	}
 }
 
@@ -1075,6 +1132,12 @@ func (tr *TaskRunner) RecordIntervention(taskID string, in model.Intervention) {
 // 路径 B 的 waiting_input（choice）进程已死、不在 tr.running，直接置 cancelled
 // 不依赖杀进程。路径 A 的 waiting_input 进程仍活着，走原杀进程逻辑。
 func (tr *TaskRunner) Cancel(taskID string) error {
+	// 取消 = 停止：排队中**尚未开跑**的轮次一并作废（turn_queue.go）。否则取消后
+	// 它们还会依次跑起来，用户会看到"取消了还在继续"。已在跑的那轮由下面的
+	// agentMgr.Cancel / lp.cancel 打断，不走这里。
+	if n := tr.flushTurns(taskID); n > 0 {
+		tr.logger.Debug("cancel: dropped queued turns", zap.String("task", taskID), zap.Int("count", n))
+	}
 	// ACP 路径（Task 4.4）：先置 cancelled（终态），再中断 Run；取消即停止，
 	// 顺带关闭会话并 unwire（不保活，避免取消后会话残留）。runACPTurn 的 defer 见 cancelled
 	// 会再 Close（幂等），worktree 清理由会话关闭回调统一处理。
