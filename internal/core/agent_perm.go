@@ -256,8 +256,18 @@ func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary
 		applied = true
 		return true
 	})
-	if err != nil || !applied {
+	if !applied || updated == nil {
+		// 任务不存在或已终态：这次暂停请求不该展示（也不该留下悬挂状态）。
 		return nil, false
+	}
+	if err != nil {
+		// 内存已生效（waiting_input + CurrentDecision 都置上了），只是没落盘。
+		// **绝不能**当成「不展示」：那会让调用方静默 Deny（用户看不到卡就被拒），
+		// 同时内存里留下一个永远没人能 Resolve 的 waiting_input。
+		// 内存是运行时唯一真相，卡片照常展示；磁盘留旧快照，重启后由 load() 的
+		// 孤儿恢复兜底。
+		pw.logger.Warn("persist waiting approval failed (card shown anyway)",
+			zap.String("task", pw.taskID), zap.String("req", reqID), zap.Error(err))
 	}
 	return updated, true
 }
@@ -422,8 +432,14 @@ func (pw *PermissionWire) backToRunning(decisionID string) (*model.Task, bool) {
 		applied = true
 		return true
 	})
-	if err != nil || !applied {
+	if !applied || updated == nil {
 		return nil, false
+	}
+	if err != nil {
+		// 同 setWaitingApproval：内存已经回到 running，只是没落盘 —— 照常推送，
+		// 否则前端会一直停在上一张审批卡上（状态在内存里已经变了，UI 不同步）。
+		pw.logger.Warn("persist back-to-running failed (publishing anyway)",
+			zap.String("task", pw.taskID), zap.String("decision", decisionID), zap.Error(err))
 	}
 	pw.bus.Publish(Event{Type: "task_updated", TaskID: pw.taskID, Task: updated})
 	return updated, true

@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -780,5 +782,71 @@ func TestWirePermission_QueueDenyPromotesNext(t *testing.T) {
 	}
 	if got := fa.denyCount(); got != 2 {
 		t.Fatalf("deny calls=%d, want 2 (A and B)", got)
+	}
+}
+
+// TestWirePermission_PersistFailureStillShowsCard 落盘失败**不得**退化成静默 Deny。
+//
+// 回归对象：setWaitingApproval 原本写的是 `if err != nil || !applied { return nil, false }`，
+// 把「落盘失败」和「任务不存在/已终态」混成同一件事。于是 show() 返回 false，
+// onPermissionRequest 走它那条「task 不存在或已终态」的兜底分支：
+// 用户看不到审批卡、工具被静默 Deny，而且此时**内存改动其实已经生效**，
+// 留下一个永远没人能 Resolve 的 waiting_input。
+//
+// 这里的落盘失败是构造出来的：把落点占成一个同名目录，rename 到它上面必然失败。
+func TestWirePermission_PersistFailureStillShowsCard(t *testing.T) {
+	fa, _, sub, store, taskID, pw, _ := setupPermWire(t, time.Hour)
+	defer pw.Unwire()
+
+	// 让落盘必然失败：把落点上的文件换成同名目录，rename 到它上面必定失败。
+	// （不能直接 MkdirAll —— 同名文件还在时 Windows 报 ERROR_PATH_NOT_FOUND。）
+	path := filepath.Join(store.tasksDir, taskID+".json")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 自检：确认「落盘失败」这个前提真的成立了，否则下面的断言全是空转；
+	// 顺带钉住 Update 的返回契约 —— 落盘失败也必须连同已生效的快照一起返回，
+	// 返回 nil 正是当初被误判成「任务不存在」的起因。
+	snap, err := store.Update(taskID, func(t *model.Task) bool { t.Title = "probe"; return true })
+	if err == nil {
+		t.Fatal("注入失败：落盘本该失败却成功了")
+	}
+	if snap == nil {
+		t.Fatal("落盘失败时 Update 仍须返回已生效的快照（返回 nil 会被误判成任务不存在）")
+	}
+	if snap.Title != "probe" {
+		t.Fatalf("快照应包含已生效的改动，Title = %q", snap.Title)
+	}
+
+	fa.emitPerm(permReq("req-persist-fail", "Bash", "execute", standardOptions()))
+
+	// 卡片必须照常展示：任务进 waiting_input 且带着这条决策。
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, 3*time.Second)
+	got, _ := store.Get(taskID)
+	if got.CurrentDecision == nil || got.CurrentDecision.ID != "req-persist-fail" {
+		t.Fatalf("CurrentDecision = %+v, want id req-persist-fail", got.CurrentDecision)
+	}
+
+	// 前端要收到带卡片的 task_updated（否则 PWA 上根本没有审批入口）。
+	tt := findTaskUpdated(t, drainEvents(sub, 200*time.Millisecond))
+	if tt.CurrentDecision == nil || tt.CurrentDecision.ID != "req-persist-fail" {
+		t.Fatalf("task_updated 未携带审批卡: %+v", tt.CurrentDecision)
+	}
+
+	// 核心断言：绝不能被静默拒绝。
+	if n := fa.denyCount(); n != 0 {
+		t.Errorf("adapter.Deny 被调用了 %d 次；落盘失败不得当成「不该展示」而静默拒绝", n)
+	}
+
+	// 而且这张卡是真能用的（用户点批准 → 正常放行），证明不是个死状态。
+	if err := pw.Resolve("req-persist-fail", "approve"); err != nil {
+		t.Fatalf("Resolve approve: %v", err)
+	}
+	if n := fa.approveCount(); n != 1 {
+		t.Errorf("approve calls = %d, want 1", n)
 	}
 }
