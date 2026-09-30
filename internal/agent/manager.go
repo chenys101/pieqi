@@ -49,11 +49,19 @@ type adapterFactory func() (AgentAdapter, AgentKind, error)
 // 透明回退、Run/Cancel/Close 生命周期。本身不碰 EventBus/TaskStore（由 core 侧 Wire*
 // 连接器在 Open 返回的 adapter 上注册回调完成事件路由）。
 type AgentManager struct {
-	logger    *zap.Logger
-	cfg       ManagerConfig
-	primary   adapterFactory // 默认按 cfg 构建：UseACP=true→ACP，false→Print
-	fallback  adapterFactory // primary 失败时回退；UseACP=true 时为 Print 工厂，否则 nil
+	logger     *zap.Logger
+	cfg        ManagerConfig
+	primary    adapterFactory                        // 默认按 cfg 构建：UseACP=true→ACP，false→Print
+	fallback   adapterFactory                        // primary 失败时回退；UseACP=true 时为 Print 工厂，否则 nil
 	onFallback func(taskID string, primaryErr error) // 回退事件回调（可选，调用方注入记录回退事件）
+
+	// agentFactories 按 agent 名注册的会话工厂（多 agent：新任务页可选 agent）。
+	//
+	// 非空时 Open 按 cfg.Agent 选工厂（未指定取 defaultAgent，未知名取 defaultAgent 兜底）；
+	// 为空时保持单 agent 语义（一律走 primary）。fallback 语义不变——它描述的是
+	// 「primary 打不开时换哪种传输」，与「用哪个 agent」正交。
+	agentFactories map[string]adapterFactory
+	defaultAgent   string
 
 	// onSessionClosed 会话关闭回调（可选，调用方注入清理会话级资源，如 TaskRunner 的 wires）。
 	// 在 Close 的 closeOnce 内触发，恰好一次；reaper 空闲回收也会走 Close 触发。
@@ -61,7 +69,7 @@ type AgentManager struct {
 
 	mu       sync.Mutex
 	sessions map[string]*managedSession // taskID -> session
-	projSems sync.Map                    // projectID -> *semaphore
+	projSems sync.Map                   // projectID -> *semaphore
 
 	reaperMu   sync.Mutex
 	reaperStop chan struct{} // StartReaper 的停止信号；nil=未启动
@@ -138,7 +146,7 @@ func (m *AgentManager) SetOnSessionClosed(fn func(taskID string)) {
 // Open 为 task 创建 agent 会话：取项目并发槽 → 调 primary 工厂创建 adapter 并 NewSession
 // （失败时按 4.3 透明回退到 fallback）→ 登记会话。返回的 adapter 由调用方注册回调。
 //
-// cfg.Cwd 用于 worktree；cfg 整体透传给 NewSession（含 ResumeFrom 续问字段）。
+// cfg.Cwd 用于 worktree；cfg 整体透传给 NewSession（含 ResumeFrom 续问字段、Agent 选路字段）。
 // 已存在同 taskID 的会话返回错误。回退时 fellBack=true。
 func (m *AgentManager) Open(ctx context.Context, taskID, projectID string, cfg SessionConfig) (AgentAdapter, bool, error) {
 	m.mu.Lock()
@@ -205,7 +213,7 @@ type adapterAttempt struct {
 // 调用方负责在 err != nil 时释放并发槽（本方法不碰 sem，避免双重释放）；在 err == nil 时
 // 登记 session。primary NewSession 失败时先 Close primary adapter 再回退，防资源泄漏。
 func (m *AgentManager) createAdapterWithFallback(ctx context.Context, cfg SessionConfig) (adapterAttempt, error) {
-	primaryAdapter, primaryKind, perr := m.primary()
+	primaryAdapter, primaryKind, perr := m.primaryFor(cfg.Agent)()
 	if perr == nil {
 		sid, nerr := primaryAdapter.NewSession(ctx, cfg)
 		if nerr == nil {
@@ -231,6 +239,53 @@ func (m *AgentManager) createAdapterWithFallback(ctx context.Context, cfg Sessio
 		return adapterAttempt{primaryErr: perr}, fmt.Errorf("agent: primary failed (%v); fallback new session: %w", perr, ferr2)
 	}
 	return adapterAttempt{adapter: fbAdapter, kind: fbKind, sessionID: fbSid, fellBack: true, primaryErr: perr}, nil
+}
+
+// primaryFor 解析本轮该用哪个 agent 的 primary 工厂（多 agent 选择）。
+//
+// 未注册任何 agent 工厂（单 agent 语义）时直接返回 m.primary，行为与改造前完全一致。
+// 注册了（多 agent）时按 cfg 里的 agent 名取；空名取 defaultAgent；未知/未配置的 agent
+// 也落回 defaultAgent —— 选路失败应当降级到默认 agent 干活，而不是让任务创建即失败。
+func (m *AgentManager) primaryFor(agent string) adapterFactory {
+	m.mu.Lock()
+	factories, def, primary := m.agentFactories, m.defaultAgent, m.primary
+	m.mu.Unlock()
+
+	if len(factories) == 0 {
+		return primary
+	}
+	if agent == "" {
+		agent = def
+	}
+	if f, ok := factories[agent]; ok {
+		return f
+	}
+	if f, ok := factories[def]; ok {
+		return f
+	}
+	return primary
+}
+
+// SetAgentFactories 注册可被任务选择的 agent → session 工厂（多 agent 编排）。
+// defaultAgent 为 cfg.Agent 为空时的落点；同时作为未知名 agent 的兜底。
+// factories 为空时为 no-op（保持构造时的单 agent 语义）。
+func (m *AgentManager) SetAgentFactories(factories map[string]adapterFactory, defaultAgent string) {
+	if len(factories) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.agentFactories = factories
+	if defaultAgent != "" {
+		m.defaultAgent = defaultAgent
+	}
+}
+
+// DefaultAgent 返回未指定 agent 时的落点名（单 agent 语义下为空串）。
+func (m *AgentManager) DefaultAgent() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.defaultAgent
 }
 
 // Run 对已 Open 的 task 发送一轮 prompt。同一 task 同时只允许一个 Run（并发第二个返回错误）。

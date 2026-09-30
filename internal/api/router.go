@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"pieqi/internal/agent"
 	"pieqi/internal/auth"
 	"pieqi/internal/config"
 	"pieqi/internal/core"
@@ -38,9 +39,9 @@ type Server struct {
 
 	// Lark Device Flow (扫码一键创建飞书应用)。wired by SetLarkReg;
 	// nil-safe for tests that don't exercise larkreg routes.
-	larkRegRunner    larkRegRunner
-	larkRegState     *larkRegState
-	larkRegCredPath  string
+	larkRegRunner     larkRegRunner
+	larkRegState      *larkRegState
+	larkRegCredPath   string
 	larkConfigApplier larkConfigApplier // wired by SetLarkConfigApplier; nil-safe
 
 	// 机器人绑定记录（复数，D1 定案）。wired by SetBotStore; nil-safe
@@ -60,6 +61,12 @@ type Server struct {
 	// wired by SetLogDir; 空 = 未接线（导出端点返回 503）。
 	logDir    string
 	startedAt time.Time
+
+	// 可被任务选择的 agent 目录（新任务页选择器）。wired by SetAgents。
+	// 未接线（nil）时降级为「只有 claude 可选」——这正是本字段上线前的实际行为，
+	// 老测试与最小构造路径不必为此改动。
+	agents       []agent.AgentInfo
+	defaultAgent string
 }
 
 // NewServer 创建 API 服务。
@@ -164,6 +171,7 @@ func (s *Server) Register(r gin.IRouter) {
 		api.Use(authMiddleware(token))
 	}
 	{
+		api.GET("/agents", s.listAgents) // 新任务页 agent 选择器的可选列表
 		api.GET("/tasks", s.listTasks)
 		api.GET("/tasks/:id", s.getTask)
 		api.POST("/tasks", s.createTask)
@@ -188,9 +196,9 @@ func (s *Server) Register(r gin.IRouter) {
 		api.GET("/tasks/:id/file", s.getTaskFile)
 		// preview 控制端点与代理共用一条 wildcard 路由（见 previewRoute 分发说明）
 		api.Any("/tasks/:id/preview/*path", s.previewRoute)
-		api.GET("/skills", s.listSkills)   // Phase 6 实现，先占位
+		api.GET("/skills", s.listSkills) // Phase 6 实现，先占位
 		api.GET("/commands", s.listCommands)
-		api.GET("/ws", s.handleWS)         // Phase 5 实现
+		api.GET("/ws", s.handleWS) // Phase 5 实现
 	}
 
 	// Preview 代理挂载点：刻意独立于 /api（见 core.PreviewMountPrefix 说明），

@@ -36,8 +36,14 @@ type MCPServer struct {
 
 // SessionConfig NewSession 的参数。
 type SessionConfig struct {
-	Cwd string      // 工作目录（必须绝对路径，对应 acp.NewSessionRequest.Cwd）
-	MCP []MCPServer // 可选 MCP servers
+	// Agent 期望的 agent 名（"claude" / "qoder"）。空 = 会话管理器的默认 agent。
+	//
+	// 多 agent 编排的选路点：新建任务时用户选的 agent 存在 Task.Agent 上，TaskRunner 在
+	// Open 时透传到这里，AgentManager 据此选对应工厂（见 manager.agentFactory）。
+	// 续问同样带该字段——会话属于哪个 agent，就该由哪个 agent 续，不能中途换。
+	Agent string
+	Cwd   string      // 工作目录（必须绝对路径，对应 acp.NewSessionRequest.Cwd）
+	MCP   []MCPServer // 可选 MCP servers
 	// ResumeFrom 非空时表示续问：复用已有会话上下文而非创建新会话。
 	//   ACPAgent：优先 session/load（agent 在 Initialize 声明 LoadSession 能力时），
 	//             否则 session/resume。会话丢失（agent 报错）返回错误，由调用方 surface。

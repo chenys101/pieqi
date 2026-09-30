@@ -171,18 +171,32 @@ func main() {
 
 	// ACP 路径（Phase 2）→ 已由多 Agent 默认驱动取代（#2）：
 	//   agents.claude.transport=sdk-bridge（默认）→ 任务经 agent.Open("claude") 驱动
-	//     （桥为主力，桥不可用自动回退 print）；transport=print 且 qoder 已配置 → "qoder"。
+	//     （桥为主力，桥不可用自动回退 print）；
+	//   多 Agent（本处新增）：进入该路径后，**每个任务**按 Task.Agent 选 agent——
+	//     新任务页选择器写 Task.Agent，"claude"（默认）/ "qoder" 均可，由同一 AgentManager
+	//     按名分发到对应 provider（见 agent.NewMultiAgentSessionManager）。
 	//   以上均不命中时回退旧 use_acp AgentManager（transport=print + use_acp=true）。
 	//   默认路径（use_acp=false + transport=print）保持 Phase 1 claude -p 不变。
 	var acpMgr *agent.AgentManager
-	sessionAgent := ""
-	if cfg.Agents.Claude.Transport == "sdk-bridge" {
-		sessionAgent = "claude"
-	} else if cfg.Agents.Qoder.Transport == "acp" && cfg.Agents.Qoder.ACPConfig().AgentType != "" {
-		sessionAgent = "qoder"
+
+	// 可被任务选择的 agent 目录：新任务页选择器的数据源，同时也是 AgentManager 的选路依据。
+	// AvailableAgents 恒含 claude（且排首位），故默认 agent = 列表首位 = Claude Code。
+	availableAgents := agent.AvailableAgents(cfg.Agents)
+	agentNames := make([]string, 0, len(availableAgents))
+	for _, a := range availableAgents {
+		agentNames = append(agentNames, a.Name)
 	}
-	if sessionAgent != "" {
-		mgr := agent.NewAgentSessionManager(sessionAgent, agent.ManagerConfig{
+	defaultAgentName := agent.AgentClaude
+	if len(agentNames) > 0 {
+		defaultAgentName = agentNames[0]
+	}
+
+	// 是否进入 session 驱动路径：沿用改造前的判据（claude 走桥，或 qoder 已配置）。
+	// 判据不变是刻意的——本次改动只让「进来之后选哪个 agent」变得可选，不改变
+	// 「哪些配置会进入这条路径」，避免旧配置（use_acp + print）被无声改道。
+	qoderConfigured := cfg.Agents.Qoder.Transport == "acp" && cfg.Agents.Qoder.ACPConfig().AgentType != ""
+	if cfg.Agents.Claude.Transport == "sdk-bridge" || qoderConfigured {
+		mgr := agent.NewMultiAgentSessionManager(agentNames, defaultAgentName, agent.ManagerConfig{
 			MaxConcurrent: cfg.Pieqi.MaxConcurrentPerProject,
 			// 会话空闲回收阈值：复用旧 acp.idle_timeout（默认 15m），轮间保活上限
 			IdleTimeout: cfg.Pieqi.ACP.IdleTimeout,
@@ -190,7 +204,9 @@ func main() {
 		acpMgr = mgr
 		runner.SetAgentManager(mgr, true, cfg.Pieqi.HookTimeout)
 		logger.Info("agent session manager enabled",
-			zap.String("agent", sessionAgent), zap.String("transport", cfg.Agents.Claude.Transport))
+			zap.Strings("agents", agentNames),
+			zap.String("default_agent", defaultAgentName),
+			zap.String("claude_transport", cfg.Agents.Claude.Transport))
 		// 后台空闲回收：会话跨轮保活，超过 idle_timeout 无对话优雅关闭（避免孤儿进程累积）。
 		mgr.StartReaper(cfg.Pieqi.ACP.IdleTimeout / 3)
 	} else if cfg.Pieqi.ACP.UseACP {
@@ -327,6 +343,9 @@ func main() {
 	// API
 	if cfg.API.Enabled {
 		apiServer := api.NewServer(cfg, store, runner, hooks, bus, skills, commands)
+		// 新任务页 agent 选择器的目录（与 runner 用的是同一份 availableAgents，
+		// 单一事实源：能选的 agent 就是 AgentManager 真能分发的 agent）。
+		apiServer.SetAgents(availableAgents, defaultAgentName)
 		apiServer.SetAuth(authSvc, tunnelMgr)
 		apiServer.SetFeedback(feedbackStore, previewMgr)
 		apiServer.SetCheckRunner(checkRunner)

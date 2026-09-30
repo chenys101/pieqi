@@ -53,6 +53,8 @@ export interface DecisionDto {
 export interface TaskDto {
   id: string
   source: string
+  /** 本任务使用的 agent 名（claude / qoder）。旧任务无该字段 → 适配层兜底为默认 agent */
+  agent?: string
   project_id: string
   project_path: string
   worktree_path: string
@@ -515,4 +517,22 @@ export interface RewindVerificationDto {
   restored_files: number
   checks: CheckDto[]
   preview: { state: PreviewStateDto; url?: string }
+}
+
+/** 一个可选 agent（GET /api/agents 的元素，后端 agent.AgentInfo） */
+export interface AgentDto {
+  /** 业务名：claude / qoder —— 也是 POST /api/tasks 的 `agent` 取值 */
+  name: string
+  display_name: string
+  description?: string
+  /** 传输层描述（展示用） */
+  transport?: string
+  capabilities?: string[]
+}
+
+/** GET /api/agents 响应 */
+export interface AgentsResponseDto {
+  agents: AgentDto[]
+  /** 服务端默认 agent（新任务页选择器初始选中项） */
+  default: string
 }

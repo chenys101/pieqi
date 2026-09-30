@@ -25,7 +25,7 @@ describe('normalizeWsMessage', () => {
     const msg = normalizeWsMessage({ type: 'snapshot', tasks: [dto()] })
     expect(msg).toEqual({
       type: 'snapshot',
-      tasks: [expect.objectContaining({ id: 't1', project: 'erp', agent: 'claude-code' })],
+      tasks: [expect.objectContaining({ id: 't1', project: 'erp', agent: 'claude' })],
       dtos: [dto()],
     })
   })

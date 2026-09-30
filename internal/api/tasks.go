@@ -18,6 +18,9 @@ type createTaskReq struct {
 	// ProjectPath 任意本地路径（绝对路径优先），用于直接在原路径运行，不建 worktree
 	ProjectPath string `json:"project_path" binding:"required"`
 	Prompt      string `json:"prompt" binding:"required"`
+	// Agent 可选的 agent 名（见 GET /api/agents）。空 = 服务端默认（Claude Code）。
+	// 取值为 agent 业务名（claude / qoder），不是前端展示名。
+	Agent string `json:"agent"`
 }
 
 func (s *Server) createTask(c *gin.Context) {
@@ -30,6 +33,14 @@ func (s *Server) createTask(c *gin.Context) {
 	req.Prompt = strings.TrimSpace(req.Prompt)
 	if req.Prompt == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "prompt is empty"})
+		return
+	}
+
+	// Agent 选路：校验后落到 task 上，TaskRunner 在 Open 会话时据此选 agent。
+	// 空串归一为默认（Claude Code），未知 agent 直接 400（不静默兜底，见 resolveAgent）。
+	agentName, err := s.resolveAgent(strings.TrimSpace(req.Agent))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -51,6 +62,7 @@ func (s *Server) createTask(c *gin.Context) {
 	// 且已持久化，WS 推送不会丢。续问事件由 Resume 以 EventUser 追加，风格一致。
 	task, err := s.store.Create(&model.Task{
 		Source:       model.SourceHTTP,
+		Agent:        agentName,
 		ProjectID:    projectID,
 		ProjectPath:  projectPath,
 		WorktreePath: worktreePath,

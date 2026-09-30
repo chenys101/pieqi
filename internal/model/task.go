@@ -69,19 +69,19 @@ func (l RiskLevel) AutoApprovable() bool { return l == RiskL0 || l == RiskL1 }
 // 路径 A（approval）：Claude 原生 permission 经 PreToolUse hook 上报，options 固定 ["approve","deny"]。
 // 路径 B（choice）：Claude 输出 [CHOICE] 格式提问，options 为候选选项列表。
 type Decision struct {
-	ID        string       `json:"id"`                   // 关联 stream-json 的 tool_use id（路径 A）或新生成 uuid（路径 B）
-	Kind      DecisionKind `json:"kind,omitempty"`       // approval | choice；空串兼容旧持久化
+	ID   string       `json:"id"`             // 关联 stream-json 的 tool_use id（路径 A）或新生成 uuid（路径 B）
+	Kind DecisionKind `json:"kind,omitempty"` // approval | choice；空串兼容旧持久化
 	// Risk 本次决策的风险分级（L0–L3）。
 	//
 	// 只给**路径 A（工具审批）**打标 —— 风险是"这个操作会干什么"的属性，
 	// 而路径 B（Claude 文本提问）没有工具语义，硬套一个等级只会给出假信息。
 	// 空串 = 未知（旧持久化任务 / choice 类决策），前端按 L2 的视觉强度兜底：
 	// 未定级不等于低风险，"不知道"必须往保守那侧倒。
-	Risk      RiskLevel    `json:"risk,omitempty"`
-	ToolName  string       `json:"tool_name,omitempty"`  // 路径 A: Bash/Edit/...；路径 B: 空
-	Summary   string       `json:"summary"`              // 路径 A: 工具摘要；路径 B: 问题文本
-	Options   []string     `json:"options"`              // approval: ["approve","deny"]；choice: 候选项
-	CreatedAt time.Time    `json:"created_at"`
+	Risk      RiskLevel `json:"risk,omitempty"`
+	ToolName  string    `json:"tool_name,omitempty"` // 路径 A: Bash/Edit/...；路径 B: 空
+	Summary   string    `json:"summary"`             // 路径 A: 工具摘要；路径 B: 问题文本
+	Options   []string  `json:"options"`             // approval: ["approve","deny"]；choice: 候选项
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Intervention 用户对 waiting_input 任务的一次干预。
@@ -113,14 +113,14 @@ const (
 // TaskEvent 执行流中的一个事件,按时间顺序追加到 Task.Events。
 // 前端详情视图按 Seq 顺序渲染,实时展示 claude code 执行过程。
 type TaskEvent struct {
-	Seq       int             `json:"seq"`                  // 单调递增序号,前端判断是否新增
+	Seq       int             `json:"seq"` // 单调递增序号,前端判断是否新增
 	Type      TaskEventType   `json:"type"`
-	Text      string          `json:"text,omitempty"`       // type=text 时
-	ToolName  string          `json:"tool_name,omitempty"`  // tool_use/tool_result 的工具名
+	Text      string          `json:"text,omitempty"`      // type=text 时
+	ToolName  string          `json:"tool_name,omitempty"` // tool_use/tool_result 的工具名
 	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`      // tool_use 的参数(原样 JSON)
-	Result    string          `json:"result,omitempty"`     // tool_result 文本化内容
-	IsError   bool            `json:"is_error,omitempty"`   // tool_result 是否失败
+	Input     json.RawMessage `json:"input,omitempty"`    // tool_use 的参数(原样 JSON)
+	Result    string          `json:"result,omitempty"`   // tool_result 文本化内容
+	IsError   bool            `json:"is_error,omitempty"` // tool_result 是否失败
 	At        time.Time       `json:"at"`
 }
 
@@ -138,16 +138,19 @@ type DiffStat struct {
 
 // Task 一次在 Git Worktree 中运行的编码任务。
 type Task struct {
-	ID              string     `json:"id"` // uuid
-	Source          TaskSource `json:"source"`
-	ProjectID       string     `json:"project_id"`
-	ProjectPath     string     `json:"project_path"`     // repo root，REQ-01 分组依据
-	WorktreePath    string     `json:"worktree_path"`    // worktree 建好后填
-	ClaudeSessionID string     `json:"claude_session_id"` // uuid.New()，--resume 目标
-	ACPSessionID    string     `json:"acp_session_id,omitempty"` // ACP 路径：真实协议 sessionId（session/load/resume 目标）。PrintAgent 回退路径仍用 ClaudeSessionID。
-	Status          TaskStatus `json:"status"`
-	Prompt          string     `json:"prompt"`
-	Title           string     `json:"title,omitempty"` // 一句话标题（异步大模型摘要生成；缺失时前端用 prompt 智能截断兜底）
+	ID     string     `json:"id"` // uuid
+	Source TaskSource `json:"source"`
+	// Agent 本任务使用的 agent 名（"claude" / "qoder"），由新建任务时用户选择。
+	// 空串 = 旧任务（本字段上线前创建），按默认 agent 处理 —— 语义等同于显式 "claude"。
+	Agent           string      `json:"agent,omitempty"`
+	ProjectID       string      `json:"project_id"`
+	ProjectPath     string      `json:"project_path"`             // repo root，REQ-01 分组依据
+	WorktreePath    string      `json:"worktree_path"`            // worktree 建好后填
+	ClaudeSessionID string      `json:"claude_session_id"`        // uuid.New()，--resume 目标
+	ACPSessionID    string      `json:"acp_session_id,omitempty"` // ACP 路径：真实协议 sessionId（session/load/resume 目标）。PrintAgent 回退路径仍用 ClaudeSessionID。
+	Status          TaskStatus  `json:"status"`
+	Prompt          string      `json:"prompt"`
+	Title           string      `json:"title,omitempty"`  // 一句话标题（异步大模型摘要生成；缺失时前端用 prompt 智能截断兜底）
 	Output          string      `json:"output,omitempty"` // 流式累积的最新文本
 	Events          []TaskEvent `json:"events,omitempty"` // 执行事件流(文本/工具调用/结果),供详情视图
 	// NextEventSeq 是**下一个**事件序号（单调递增，不从 0 开始计数）。
@@ -156,9 +159,9 @@ type Task struct {
 	// 一旦裁过，len 就不再能推出"下一个序号"——重复的 Seq 会让所有按 seq
 	// 定位的逻辑（Checkpoint 快照点、Evidence、rewindEventSeq）静默取到错的事件，
 	// 而错误表现是"少了/多了几条"，不是报错。
-	NextEventSeq   int         `json:"next_event_seq,omitempty"`
-	CurrentDecision *Decision  `json:"current_decision,omitempty"`
-	Error           string      `json:"error,omitempty"`
+	NextEventSeq    int       `json:"next_event_seq,omitempty"`
+	CurrentDecision *Decision `json:"current_decision,omitempty"`
+	Error           string    `json:"error,omitempty"`
 
 	// DiffStat 终态时的累计改动快照。**只有 completed 任务才有**（见 SnapshotDiffStat 的理由），
 	// failed/cancelled 为 nil —— 它们的改动不是有效产出，计入会污染概览。
@@ -186,8 +189,8 @@ type Task struct {
 // TaskBaseline Task 创建时记录的工作区起始状态（ADR-0002：只读 Git，绝不写用户分支）。
 // 职责：作为「累计真实 Diff」的基准；与 Checkpoint（Rewind 恢复资产）分离。
 type TaskBaseline struct {
-	HeadSHA    string    `json:"head_sha"`           // git HEAD，只读参照；非 git 项目为空
-	CapturedAt time.Time `json:"captured_at"`         // 捕获时间
+	HeadSHA    string    `json:"head_sha"`              // git HEAD，只读参照；非 git 项目为空
+	CapturedAt time.Time `json:"captured_at"`           // 捕获时间
 	DirtyPaths []string  `json:"dirty_paths,omitempty"` // Task 起始与 HEAD 不一致的文件（含 untracked）
 }
 
@@ -197,6 +200,6 @@ type TaskBaseline struct {
 // 仅在运行期构造，供 WorktreeManager.Create 使用。
 type Project struct {
 	ID         string `json:"id"`
-	RepoPath   string `json:"repo_path"`    // 绝对路径，project_path 取此
-	BaseBranch string `json:"base_branch"`  // 默认 "main"
+	RepoPath   string `json:"repo_path"`   // 绝对路径，project_path 取此
+	BaseBranch string `json:"base_branch"` // 默认 "main"
 }

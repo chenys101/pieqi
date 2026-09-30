@@ -668,10 +668,11 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	if tr.agentMgr.Adapter(task.ID) != nil {
 		return false // 复用活会话（wires 已注册），无回退
 	}
-	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom}
+	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom, Agent: task.Agent}
 	if resumeFrom != "" {
 		tr.logger.Debug("agent session open (resume)",
-			zap.String("task", task.ID), zap.String("resume_from", resumeFrom))
+			zap.String("task", task.ID), zap.String("agent", task.Agent),
+			zap.String("resume_from", resumeFrom))
 	}
 	adapter, fellBack, err := tr.agentMgr.Open(ctx, task.ID, task.ProjectID, cfg)
 	if err != nil {

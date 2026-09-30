@@ -23,11 +23,11 @@ type fakeAdapter struct {
 	mu sync.Mutex
 
 	// NewSession
-	newSessionID    string
-	newSessionErr   error
-	newSessionN     int
-	newSessionCwd   []string
-	newSessionCfg   []SessionConfig
+	newSessionID  string
+	newSessionErr error
+	newSessionN   int
+	newSessionCwd []string
+	newSessionCfg []SessionConfig
 
 	// SendPrompt
 	sendPromptErr     error
@@ -42,10 +42,10 @@ type fakeAdapter struct {
 	closeN    int
 
 	// 回调注册
-	cbMu   sync.RWMutex
-	onD    ContentDeltaFunc
-	onP    PermissionRequestFunc
-	onT    ToolCallUpdateFunc
+	cbMu sync.RWMutex
+	onD  ContentDeltaFunc
+	onP  PermissionRequestFunc
+	onT  ToolCallUpdateFunc
 
 	done chan struct{}
 }
@@ -102,12 +102,18 @@ func (f *fakeAdapter) SendPrompt(ctx context.Context, sessionID, prompt string) 
 
 func (f *fakeAdapter) OnContentDelta(fn ContentDeltaFunc) { f.cbMu.Lock(); f.onD = fn; f.cbMu.Unlock() }
 func (f *fakeAdapter) OnPermissionRequest(fn PermissionRequestFunc) {
-	f.cbMu.Lock(); f.onP = fn; f.cbMu.Unlock()
+	f.cbMu.Lock()
+	f.onP = fn
+	f.cbMu.Unlock()
 }
-func (f *fakeAdapter) OnToolCallUpdate(fn ToolCallUpdateFunc) { f.cbMu.Lock(); f.onT = fn; f.cbMu.Unlock() }
+func (f *fakeAdapter) OnToolCallUpdate(fn ToolCallUpdateFunc) {
+	f.cbMu.Lock()
+	f.onT = fn
+	f.cbMu.Unlock()
+}
 
 func (f *fakeAdapter) Approve(ctx context.Context, reqID, optionID string) error { return nil }
-func (f *fakeAdapter) Deny(ctx context.Context, reqID string) error               { return nil }
+func (f *fakeAdapter) Deny(ctx context.Context, reqID string) error              { return nil }
 func (f *fakeAdapter) RespondPermission(ctx context.Context, reqID string, allow bool, optionID string) error {
 	return nil
 }
@@ -134,36 +140,43 @@ func (f *fakeAdapter) Done() <-chan struct{} { return f.done }
 
 // fake 计数/参数读取辅助。
 func (f *fakeAdapter) newSessionCount() int {
-	f.mu.Lock(); defer f.mu.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.newSessionN
 }
 func (f *fakeAdapter) closeCount() int {
-	f.mu.Lock(); defer f.mu.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.closeN
 }
 func (f *fakeAdapter) sendPromptCount() int {
-	f.mu.Lock(); defer f.mu.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.sendPromptN
 }
 func (f *fakeAdapter) cancelCount() int {
-	f.mu.Lock(); defer f.mu.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.cancelN
 }
 func (f *fakeAdapter) newSessionCwdsCopy() []string {
-	f.mu.Lock(); defer f.mu.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	out := make([]string, len(f.newSessionCwd))
 	copy(out, f.newSessionCwd)
 	return out
 }
 func (f *fakeAdapter) lastNewSessionCfg() (SessionConfig, bool) {
-	f.mu.Lock(); defer f.mu.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if len(f.newSessionCfg) == 0 {
 		return SessionConfig{}, false
 	}
 	return f.newSessionCfg[len(f.newSessionCfg)-1], true
 }
 func (f *fakeAdapter) firstSendArg() fakeSendArg {
-	f.mu.Lock(); defer f.mu.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if len(f.sendPromptArgs) == 0 {
 		return fakeSendArg{}
 	}
@@ -892,5 +905,55 @@ func TestManagerConfigFromPieqi_UseACPFalse(t *testing.T) {
 	m := NewAgentManager(mc, nil)
 	if m.fallback != nil {
 		t.Error("UseACP=false: fallback factory != nil, want nil")
+	}
+}
+
+// TestOpenSelectsAgentByName 多 agent 选路：AgentManager 按 cfg.Agent 选 primary 工厂。
+//
+// 这是「新任务页选 agent」能生效的机制层保证——选择器写进 Task.Agent，TaskRunner 透传到
+// SessionConfig.Agent，最终在这里落到不同的会话工厂。选错了就是一整个任务跑错 agent，
+// 且从事件流上看不出来，所以必须钉住。
+func TestOpenSelectsAgentByName(t *testing.T) {
+	m := NewAgentSessionManager(AgentClaude, ManagerConfig{}, nil)
+	claudeAd := newFakeAdapter("s-claude")
+	qoderAd := newFakeAdapter("s-qoder")
+	m.SetAgentFactories(map[string]adapterFactory{
+		AgentClaude: func() (AgentAdapter, AgentKind, error) { return claudeAd, AgentKindSession, nil },
+		AgentQoder:  func() (AgentAdapter, AgentKind, error) { return qoderAd, AgentKindSession, nil },
+	}, AgentClaude)
+
+	cases := []struct {
+		agent string
+		want  string
+		why   string
+	}{
+		{"", "s-claude", "未指定 → 默认 agent（Claude Code）"},
+		{AgentClaude, "s-claude", "显式 claude"},
+		{AgentQoder, "s-qoder", "显式 qoder"},
+		{"nonsense", "s-claude", "未知名 → 落回默认，不让任务创建即失败"},
+	}
+	for i, tc := range cases {
+		taskID := "task-" + string(rune('a'+i))
+		if _, _, err := m.Open(context.Background(), taskID, "proj", SessionConfig{Agent: tc.agent, Cwd: "/tmp"}); err != nil {
+			t.Fatalf("%s: Open err = %v", tc.why, err)
+		}
+		if got := m.SessionID(taskID); got != tc.want {
+			t.Fatalf("%s: sessionID = %q, want %q", tc.why, got, tc.want)
+		}
+	}
+}
+
+// TestOpenWithoutAgentFactoriesKeepsSingleAgent 未注册多 agent 时行为与改造前一致：
+// 一律走 primary，cfg.Agent 不影响选路（老路径/老测试的兼容性保证）。
+func TestOpenWithoutAgentFactoriesKeepsSingleAgent(t *testing.T) {
+	ad := newFakeAdapter("s-only")
+	m := NewAgentSessionManager(AgentClaude, ManagerConfig{}, nil)
+	m.primary = func() (AgentAdapter, AgentKind, error) { return ad, AgentKindSession, nil }
+
+	if _, _, err := m.Open(context.Background(), "t1", "proj", SessionConfig{Agent: AgentQoder}); err != nil {
+		t.Fatalf("Open err = %v", err)
+	}
+	if got := m.SessionID("t1"); got != "s-only" {
+		t.Fatalf("sessionID = %q, want s-only（单 agent 语义下 cfg.Agent 应被忽略）", got)
 	}
 }

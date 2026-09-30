@@ -30,7 +30,7 @@ describe('SessionStore', () => {
   it('syncFromTask：写入会话元信息 + 全量事件并登记去重', () => {
     const s = useSessionStore()
     s.syncFromTask(dto())
-    expect(s.session('t1')).toMatchObject({ id: 't1', status: 'running', agent: 'claude-code' })
+    expect(s.session('t1')).toMatchObject({ id: 't1', status: 'running', agent: 'claude' })
     expect(s.events('t1').map((e) => e.type)).toEqual(['user_message', 'text_delta'])
     // 去重集合已登记持久化事件 id
     expect(s.deduper('t1').has('t1:1')).toBe(true)

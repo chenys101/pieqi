@@ -106,9 +106,10 @@ export const useTaskStore = defineStore('task', {
       this.tasks = this.tasks.filter((t) => t.id !== id)
     },
 
-    /** 创建任务：本地立即 upsert + 返回完整 DTO（含预置 user 事件） */
-    async createTask(projectPath: string, prompt: string): Promise<Task> {
-      const dto = await api.createTask(projectPath, prompt)
+    /** 创建任务：本地立即 upsert + 返回完整 DTO（含预置 user 事件）。
+     *  agent 为 agent 业务名（claude / qoder）；省略 = 后端默认（Claude Code）。 */
+    async createTask(projectPath: string, prompt: string, agent?: string): Promise<Task> {
+      const dto = await api.createTask(projectPath, prompt, agent)
       const task = adaptTask(dto)
       this.upsertTask(task)
       return task

@@ -20,7 +20,7 @@ function t(over: Partial<Task> = {}): Task {
     project: 'demo',
     projectPath: 'G:/ws/demo',
     status: 'completed',
-    agent: 'claude-code',
+    agent: 'claude',
     sessionId: 's',
     createdAt: new Date(BASE).toISOString(),
     updatedAt: new Date(BASE).toISOString(),

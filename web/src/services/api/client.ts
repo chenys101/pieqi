@@ -160,7 +160,9 @@ export async function requestBlob(path: string): Promise<{ blob: Blob; filename:
 
 // ---------- Task DTO → 前端模型 Adapter（方案 §55） ----------
 
-const DEFAULT_AGENT = 'claude-code'
+// 兜底 agent：与后端默认一致（新任务默认走 Claude Code）。
+// 新任务页真正的默认值取自 GET /api/agents 的 `default`；旧任务 DTO 无 agent 字段时用它兜底。
+export const DEFAULT_AGENT = 'claude'
 
 /** 后端 DTO → 前端领域模型：字段命名 / 兜底逻辑收敛在此 */
 export function adaptTask(dto: TaskDto): Task {
@@ -171,7 +173,8 @@ export function adaptTask(dto: TaskDto): Task {
     project: dto.project_id || dto.project_path,
     projectPath: dto.project_path,
     status: dto.status,
-    agent: DEFAULT_AGENT,
+    // 后端 agent 业务名（claude / qoder）；旧任务无该字段 → 默认 agent
+    agent: dto.agent || DEFAULT_AGENT,
     sessionId: dto.claude_session_id || dto.acp_session_id || dto.id,
     decision: dto.current_decision
       ? {

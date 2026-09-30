@@ -9,6 +9,7 @@ import type { TaskDto } from '@/types/api'
 import type { TaskStatus } from '@/types/task'
 import { isTerminalStatus } from '@/types/task'
 import { normalizeEvents } from '@/services/websocket/normalizer'
+import { DEFAULT_AGENT } from '@/services/api/client'
 import { EventDeduper, mergeDeltaIntoEvents } from '@/utils/event'
 import type { ConnectionState } from '@/services/websocket/client'
 
@@ -77,7 +78,8 @@ export const useSessionStore = defineStore('session', {
       this.sessions[dto.id] = {
         id: dto.id,
         taskId: dto.id,
-        agent: 'claude-code',
+        // 执行该任务的 agent（claude / qoder）；旧任务 DTO 无该字段 → 默认 agent
+        agent: dto.agent || DEFAULT_AGENT,
         status: dto.status,
         startedAt: dto.started_at,
         endedAt: dto.finished_at,

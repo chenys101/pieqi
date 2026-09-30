@@ -13,7 +13,7 @@ function task(over: Partial<Task> = {}): Task {
     project: 'erp',
     projectPath: 'G:/ws/erp',
     status: 'running',
-    agent: 'claude-code',
+    agent: 'claude',
     sessionId: 's1',
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:01:00Z',

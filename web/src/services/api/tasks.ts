@@ -43,11 +43,16 @@ export async function getTaskDto(id: string): Promise<TaskDto> {
   return request<TaskDto>(`/tasks/${encodeURIComponent(id)}`)
 }
 
-/** POST /api/tasks：创建成功返回完整 DTO（含预置 user 事件） */
-export async function createTask(projectPath: string, prompt: string): Promise<TaskDto> {
+/**
+ * POST /api/tasks：创建成功返回完整 DTO（含预置 user 事件）。
+ *
+ * agent 为 agent 业务名（claude / qoder，见 GET /api/agents）；空串 = 后端默认（Claude Code）。
+ * 后端会校验：未在可选目录里的 agent 直接 400，不会静默换成别的 agent。
+ */
+export async function createTask(projectPath: string, prompt: string, agent?: string): Promise<TaskDto> {
   return request<TaskDto>('/tasks', {
     method: 'POST',
-    body: { project_path: projectPath, prompt },
+    body: { project_path: projectPath, prompt, agent: agent || undefined },
   })
 }
 

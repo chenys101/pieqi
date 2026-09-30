@@ -265,3 +265,33 @@ func NewAgentSessionManager(name string, cfg ManagerConfig, logger *zap.Logger) 
 	m.fallback = nil
 	return m
 }
+
+// NewMultiAgentSessionManager 多 agent 版：任务可在 Open 时按 cfg.Agent 选 agent
+// （新任务页的 agent 选择器落点），defaultAgent 为未指定/未知名时的兜底。
+//
+// 语义与 NewAgentSessionManager 的差异仅限「primary 工厂从哪个 agent 取」：
+// 每项目并发信号量 / reaper 空闲回收 / 会话登记 / onSessionClosed 全部共享同一份 ——
+// 并发上限仍然是「每项目」而不是「每项目 × 每 agent」，这是刻意的（换 agent 不该偷偷放大并发）。
+//
+// available 为空时退化为单 agent 管理器（defaultAgent 即唯一 agent）。
+func NewMultiAgentSessionManager(available []string, defaultAgent string, cfg ManagerConfig, logger *zap.Logger) *AgentManager {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	if defaultAgent == "" && len(available) > 0 {
+		defaultAgent = available[0]
+	}
+	m := NewAgentSessionManager(defaultAgent, cfg, logger)
+	if len(available) <= 1 {
+		return m
+	}
+	factories := make(map[string]adapterFactory, len(available))
+	for _, name := range available {
+		n := name // 闭包捕获副本（循环变量在 Go 1.22 前是复用的）
+		factories[n] = func() (AgentAdapter, AgentKind, error) {
+			return newSessionBackedAdapter(n, nil), AgentKindSession, nil
+		}
+	}
+	m.SetAgentFactories(factories, defaultAgent)
+	return m
+}
