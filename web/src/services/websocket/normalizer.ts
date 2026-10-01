@@ -29,6 +29,9 @@ export function normalizeWsMessage(raw: unknown): RealtimeMessage | null {
       return { type: 'snapshot', tasks: msg.tasks.map(adaptTask), dtos: msg.tasks }
     case 'task_created':
     case 'task_updated':
+    // 后端 completed 终态走专用类型（task_runner.go transition），载荷与 task_updated 相同；
+    // 不接住则命中 default 被静默丢弃，详情页状态要刷新页面才更新
+    case 'task_completed':
       if (!msg.task_id || !msg.task) return null
       return { type: 'task_upserted', task: adaptTask(msg.task), dto: msg.task }
     case 'task_deleted':

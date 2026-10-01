@@ -1173,7 +1173,9 @@ func (tr *TaskRunner) Cancel(taskID string) error {
 		return fmt.Errorf("task not cancellable: %s", taskID)
 	}
 	lp.cancel()
-	tr.store.Update(taskID, func(t *model.Task) bool {
+	// 必须带上更新后的 task：前端 task_updated 分支要求 msg.task 存在，
+	// 裸 TaskID 事件会被归一化层静默丢弃，详情页要刷新才看到 cancelled
+	updated, _ := tr.store.Update(taskID, func(t *model.Task) bool {
 		if t.Status == model.TaskRunning || t.Status == model.TaskWaitingInput {
 			t.Status = model.TaskCancelled
 			now := time.Now()
@@ -1182,7 +1184,7 @@ func (tr *TaskRunner) Cancel(taskID string) error {
 		}
 		return false
 	})
-	tr.bus.Publish(Event{Type: "task_updated", TaskID: taskID})
+	tr.bus.Publish(Event{Type: "task_updated", TaskID: taskID, Task: updated})
 	return nil
 }
 

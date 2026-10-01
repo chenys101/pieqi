@@ -38,6 +38,13 @@ describe('normalizeWsMessage', () => {
     expect(normalizeWsMessage({ type: 'task_created', task_id: 't1' })).toBeNull()
   })
 
+  it('task_completed：与 task_updated 同样适配（后端 completed 终态走此类型）', () => {
+    const completed = dto({ status: 'completed' })
+    const msg = normalizeWsMessage({ type: 'task_completed', task_id: 't1', task: completed })
+    expect(msg?.type).toBe('task_upserted')
+    expect(msg).toEqual({ type: 'task_upserted', task: expect.objectContaining({ status: 'completed' }), dto: completed })
+  })
+
   it('task_deleted：取 task_id', () => {
     expect(normalizeWsMessage({ type: 'task_deleted', task_id: 't1' })).toEqual({
       type: 'task_deleted',

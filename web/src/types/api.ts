@@ -124,8 +124,9 @@ export interface WsSnapshotDto {
   tasks: TaskDto[]
 }
 
+/** task_completed 是后端 completed 终态的专用类型，载荷与 task_updated 相同 */
 export interface WsTaskEventDto {
-  type: 'task_created' | 'task_updated'
+  type: 'task_created' | 'task_updated' | 'task_completed'
   task_id: string
   task: TaskDto
 }
