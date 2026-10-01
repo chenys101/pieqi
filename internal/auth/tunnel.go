@@ -227,12 +227,31 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 
 	urlCh := make(chan string, 2)
 	doneCh := make(chan struct{}, 2)
+	// scanPipe 有两个职责：(1) 抓 trycloudflare URL；(2) **把管道一直读到 EOF**。
+	//
+	// 第 (2) 条不是优化，是保命：父进程一旦停止读，cloudflared 自己的日志
+	// （QUIC 抖动时的 `Failed to dial a quic connection` / `Retrying connection`
+	// 会成批刷）写满管道缓冲（Windows 64KB）后 write 就**永久阻塞**，进程随即卡死
+	// ——Go runtime 还活着、metrics 端口还能抓，但套接字全部消失、边缘连接再也建不
+	// 起来，公网访问退化成 Cloudflare 530 "Tunnel error" 且永不恢复。
+	// 2026-10-01 实测：卡死进程 41MB / 22 goroutines / metrics 正常，
+	// 但除 metrics 监听外零套接字；健康对照进程则有 UDP(QUIC) + 到边缘的 TCP。
+	//
+	// 因此：命中 URL 后**不能 return**，要继续读到进程退出（watch 的 Wait 关闭管道
+	// → EOF）。读到的行一律丢弃（无界内存增长风险为 0，行是瞬时对象）。
 	scanPipe := func(r io.Reader) {
-		scan := bufio.NewScanner(r)
-		for scan.Scan() {
-			if m := urlRegex.FindString(scan.Text()); m != "" {
-				urlCh <- m
-				return
+		br := bufio.NewReader(r)
+		found := false
+		for {
+			line, err := br.ReadString('\n')
+			if !found && line != "" {
+				if m := urlRegex.FindString(line); m != "" {
+					found = true
+					urlCh <- m // 缓冲容量 2，每条管道至多发一次，绝不阻塞
+				}
+			}
+			if err != nil {
+				break // EOF（进程已退出）或读错误：管道已到尽头
 			}
 		}
 		doneCh <- struct{}{}
@@ -604,11 +623,24 @@ func logHostnameOnly(rawURL string) string {
 	return u.Host
 }
 
+// statusCloudflareTunnelError 是 Cloudflare 边缘在**隧道未连接**时返回的状态码
+// （错误页标题 "Cloudflare Tunnel error"，CF 侧即 error 1033）。它必须与其它
+// 5xx 区别对待：502/504 说明请求已经**被隧道转发到源站**、只是源站出错（隧道活
+// 着）；而 530 说明边缘压根没找到隧道连接（隧道已死）。trycloudflare 快速隧道
+// 没有普通 zone 的 "Origin DNS error(1016)" 场景，530 只可能是隧道错误。
+const statusCloudflareTunnelError = 530
+
 // hostAlive 默认探测：GET https://<host>/ 能否拿到任何 HTTP 响应。
-// 关键：**任何状态码（含 401/403/302/502）都证明 hostname 在公网存活**
-// —— 请求能到达 Cloudflare 边缘并被隧道转发回来；只有 DNS 解析失败 /
-// 连接失败 / 超时算"死亡"。因此 token 过期导致的 401 不会误触发换域名，
-// 域名存活检测与 token 存活检测（RenewToken 的职责）被正确解耦。
+// 关键：**除 530 外任何状态码（含 401/403/302/502）都证明 hostname 在公网存活**
+// —— 请求能到达 Cloudflare 边缘并被隧道转发回来；只有 DNS 解析失败 / 连接失败 /
+// 超时算"死亡"。因此 token 过期导致的 401 不会误触发换域名，域名存活检测与
+// token 存活检测（RenewToken 的职责）被正确解耦。
+//
+// 但 530 例外：域名解析正常、边缘也在应答，却说明**隧道连接不存在** —— 这是
+// "域名存活"与"隧道存活"的分水岭。此前把 530 也算存活，导致隧道卡死时巡检永远
+// 判活、永不触发自愈（2026-10-01 线上事故：cloudflared 卡死 → 持续 530 →
+// 链接无法访问且系统无任何恢复动作）。故 530 判死。
+//
 // 每次探测新建 Client + Transport{Proxy:nil}：忽略 HTTP(S)_PROXY 环境变量，
 // 保证 NXDOMAIN 对本机 DNS 真实可观测，且不命中 keep-alive 的旧连接。
 func hostAlive(rawURL string) bool {
@@ -636,6 +668,9 @@ func hostAlive(rawURL string) bool {
 	}
 	_, _ = io.Copy(io.Discard, resp.Body) // 排干 body，避免 keep-alive 钉住陈旧连接
 	_ = resp.Body.Close()
+	if resp.StatusCode == statusCloudflareTunnelError {
+		return false
+	}
 	return true
 }
 

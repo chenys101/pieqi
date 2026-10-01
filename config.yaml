@@ -88,7 +88,7 @@ auth:
     default_ttl: 15m                   # 15m | 1h | 4h
     # 自动自愈：Cloudflare 会周期性回收 trycloudflare 域名（链接失效）。按间隔
     # 探测 hostname 存活，连续失败达阈值即自动重启隧道换新域名并推送飞书。
-    health_check_interval: 5m          # <=0 关闭巡检
+    health_check_interval: 1m          # <=0 关闭巡检（1m×3 次 ≈ 3 分钟内自愈；此前的 5m×3 = 15 分钟，与 15m 默认 TTL 等长，检测出来链接也已失效）
     health_check_failures: 3           # 连续失败次数阈值
   ratelimit:
     max_failures_per_min: 5            # 5 次/分钟 → 拉黑

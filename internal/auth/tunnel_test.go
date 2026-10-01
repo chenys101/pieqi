@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -70,6 +72,125 @@ func fakeCloudflaredScriptLong(t *testing.T) string {
 		t.Fatalf("write fake cf: %v", err)
 	}
 	return path
+}
+
+// fakeCloudflaredChatty 模拟真实 cloudflared 的输出特征：**先**打印
+// trycloudflare URL，**随后**持续刷日志（QUIC 抖动时官方会成批刷
+// `Failed to dial a quic connection` / `Retrying connection`）。
+//
+// 它在 URL 之后向 stdout 写 ~200KB，最后落一个 marker 文件。~200KB 远超管道
+// 缓冲（Windows/Unix 均 ~64KB），因此：
+//   - 父进程持续读管道 → 子进程写完 → marker 出现；
+//   - 父进程抓到 URL 后弃读 → 写入在 ~64KB 处永久阻塞 → marker 永不出现。
+//
+// marker 是"子进程没被卡死"的确定性证据，无需任何超时竞猜。
+func fakeCloudflaredChatty(t *testing.T, dir, rawURL, markerPath string) string {
+	t.Helper()
+	pad := strings.Repeat("0123456789", 20) // 200 字节/行
+	const iterations = 1000                 // 1000 × ~202B ≈ 200KB，是 64KB 缓冲的 3 倍
+	var path, content string
+	if runtime.GOOS == "windows" {
+		path = filepath.Join(dir, "cloudflared-chatty.bat")
+		content = "@echo off\r\n" +
+			"echo INF url=" + rawURL + "\r\n" +
+			"set PAD=" + pad + "\r\n" +
+			"for /L %%i in (1,1," + strconv.Itoa(iterations) + ") do @echo %PAD%\r\n" +
+			"echo done > \"" + markerPath + "\"\r\n" +
+			"ping -n 30 127.0.0.1 > nul\r\n"
+	} else {
+		path = filepath.Join(dir, "cloudflared-chatty.sh")
+		content = "#!/bin/sh\n" +
+			"echo 'INF url=" + rawURL + "'\n" +
+			"PAD='" + pad + "'\n" +
+			"i=0\n" +
+			"while [ $i -lt " + strconv.Itoa(iterations) + " ]; do echo \"$PAD\"; i=$((i+1)); done\n" +
+			"echo done > \"" + markerPath + "\"\n" +
+			"sleep 30\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		t.Fatalf("write chatty fake cf: %v", err)
+	}
+	return path
+}
+
+// TestTunnel_StartKeepsDrainingChildPipes 是"cloudflared 卡死"的回归测试。
+//
+// 缺陷：Start() 抓到 URL 后 scanPipe 直接 return，stdout/stderr 两条管道从此无人
+// 读取。子进程只要在 URL 之后继续输出（真实 cloudflared 在 QUIC 抖动时会成批刷
+// 重试日志），写满 ~64KB 管道缓冲后 write 就永久阻塞 —— 进程卡死：Go runtime 还
+// 活着、metrics 还能抓，但套接字全无、边缘连接再也建不起来，公网访问退化成
+// Cloudflare 530 且永不恢复（2026-10-01 线上事故）。
+//
+// 断言：Start() 返回后子进程仍能把 ~200KB 日志写完（marker 出现）。
+// 反向验证：把 scanPipe 改回"命中 URL 即 return"，本用例必须 FAIL。
+func TestTunnel_StartKeepsDrainingChildPipes(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "child-finished")
+	binary := fakeCloudflaredChatty(t, dir, "https://chatty-pipe.trycloudflare.com", marker)
+	m := NewTunnelManager(TunnelConfig{
+		BinaryPath: binary, LocalURL: "http://localhost:3000",
+		Tokens: NewTokenStore(),
+	})
+	res, err := m.Start(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = m.Stop(context.Background()) }()
+	if !strings.Contains(res.TunnelURL, "chatty-pipe.trycloudflare.com") {
+		t.Fatalf("url = %q, want the fake trycloudflare url", res.TunnelURL)
+	}
+
+	deadline := time.Now().Add(25 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return // 子进程把 URL 之后的 ~200KB 全部写完 ⇒ 管道确实被持续读取
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("子进程在 URL 之后写满管道即阻塞：Start() 抓完 URL 就弃读管道，" +
+		"真实的 cloudflared 会因此卡死并失去边缘连接（公网 530）")
+}
+
+// TestHostAlive_CloudflareTunnelErrorIsDead 钉住"530 = 隧道已死"这条判据。
+// 此前 hostAlive 对**任何**状态码都判活（为容忍 token 过期的 401），后果是隧道
+// 卡死时巡检永远判活、永不触发自愈 —— 链接失效且系统无任何恢复动作。
+func TestHostAlive_CloudflareTunnelErrorIsDead(t *testing.T) {
+	cases := []struct {
+		status int
+		want   bool
+		why    string
+	}{
+		{530, false, "Cloudflare Tunnel error：边缘没找到隧道连接 ⇒ 死"},
+		{401, true, "token 过期，但请求确实被隧道转回了源站 ⇒ 活"},
+		{403, true, "源站拒绝 ⇒ 隧道活着"},
+		{502, true, "源站出错 ⇒ 隧道活着"},
+		{302, true, "源站重定向 ⇒ 隧道活着"},
+		{200, true, "正常 ⇒ 活"},
+	}
+	for _, c := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(c.status)
+		}))
+		got := hostAlive(srv.URL + "/?token=probe")
+		srv.Close()
+		if got != c.want {
+			t.Errorf("status %d: hostAlive = %v, want %v (%s)", c.status, got, c.want, c.why)
+		}
+	}
+}
+
+// TestHostAlive_UnreachableIsDead 保证真正的失联（DNS/连接失败）仍判死。
+func TestHostAlive_UnreachableIsDead(t *testing.T) {
+	// 关闭的端口：连接必然失败
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	u := srv.URL
+	srv.Close()
+	if hostAlive(u + "/") {
+		t.Fatal("closed server must be reported dead")
+	}
+	if hostAlive("http://no-such-host.invalid/") {
+		t.Fatal("unresolvable host must be reported dead")
+	}
 }
 
 func TestTunnel_StartParsesURL(t *testing.T) {
