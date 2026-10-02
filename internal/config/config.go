@@ -177,10 +177,43 @@ func (q AgentQoderConfig) ACPConfig() ACPConfig {
 // AuthConfig 飞书身份绑定 + Cloudflared 隧道安全系统配置。
 // 最高优先级是 DebugSkipAllAuth：true 时所有鉴权全部跳过（仅本地开发用）。
 type AuthConfig struct {
-	DebugSkipAllAuth  bool              `mapstructure:"debug_skip_all_auth"` // 默认 false；true 全量放行（仅开发）
-	FeishuBindingFile string            `mapstructure:"feishu_binding_file"` // 绑定账号持久化路径
-	Cloudflared       CloudflaredConfig `mapstructure:"cloudflared"`
-	RateLimit         RateLimitConfig   `mapstructure:"ratelimit"`
+	DebugSkipAllAuth  bool                 `mapstructure:"debug_skip_all_auth"` // 默认 false；true 全量放行（仅开发）
+	FeishuBindingFile string               `mapstructure:"feishu_binding_file"`  // 绑定账号持久化路径
+	Cloudflared       CloudflaredConfig    `mapstructure:"cloudflared"`
+	Access            CloudflareAccessConf `mapstructure:"cloudflare_access"`
+	RateLimit         RateLimitConfig      `mapstructure:"ratelimit"`
+}
+
+// CloudflareAccessConf 是把外网访问前置给 Cloudflare Access 的配置（可选）。
+//
+// 动机：固定域名上线后，域名证书（Let's Encrypt）必然进证书透明日志，等于
+// 可被公开枚举，"靠域名没人知道"这层遮蔽不再成立；而面板能在本机执行 agent
+// 命令。Access 把访问控制变成「按人授权、可随时撤销、URL 不带凭据」。
+//
+// 源站侧必须**自行验签** Cf-Access-Jwt-Assertion，否则伪造同名头即可绕过
+// （见 internal/auth/access.go）。
+type CloudflareAccessConf struct {
+	// Enabled 开启后用 Access JWT 作为外网主凭据。
+	Enabled bool `mapstructure:"enabled"`
+	// TeamDomain 团队域，如 https://myteam.cloudflareaccess.com（可省略 scheme）。
+	TeamDomain string `mapstructure:"team_domain"`
+	// Audience Access 应用（Self-hosted / Fixed hostname）的 AUD tag。
+	// 可用 PIEQI_AUTH_CLOUDFLARE_ACCESS_AUDIENCE 环境变量覆盖，避免入库。
+	Audience string `mapstructure:"audience"`
+	// JWKSURL 公钥地址；留空 = <TeamDomain>/cdn-cgi/access/certs。
+	JWKSURL string `mapstructure:"jwks_url"`
+	// TokenFallback 是否保留「外链 ?token=」作为 Access 之外的第二道兜底。
+	// 默认 true：Access 配好并验证通过后再关（走 Access-only），避免把自己
+	// 锁在门外。置 false 即 TokenDisabled。
+	TokenFallback *bool `mapstructure:"token_fallback"`
+}
+
+// TokenFallbackEnabled 解析 TokenFallback，未配置时默认 true（保留兜底）。
+func (c CloudflareAccessConf) TokenFallbackEnabled() bool {
+	if c.TokenFallback == nil {
+		return true
+	}
+	return *c.TokenFallback
 }
 
 // CloudflaredConfig Cloudflared 隧道配置。
@@ -303,6 +336,11 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("auth.cloudflared.health_check_failures", 3)
 	v.SetDefault("auth.ratelimit.max_failures_per_min", 5)
 	v.SetDefault("auth.ratelimit.blacklist_duration", "10m")
+	v.SetDefault("auth.cloudflare_access.enabled", false)
+	v.SetDefault("auth.cloudflare_access.team_domain", "")
+	v.SetDefault("auth.cloudflare_access.audience", "")
+	v.SetDefault("auth.cloudflare_access.jwks_url", "")
+	v.SetDefault("auth.cloudflare_access.token_fallback", true)
 	v.SetDefault("channels.lark.event_mode", "webhook")
 	v.SetDefault("channels.lark.credentials_file", filepath.Join(DefaultDataRoot(), "lark_credentials.json"))
 

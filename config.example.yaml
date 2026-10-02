@@ -135,6 +135,40 @@ auth:
     health_check_interval: 1m         # <=0 关闭巡检（1m×3 ≈ 3 分钟内自愈）
     health_check_failures: 3          # 连续失败次数阈值
 
+  # --- Cloudflare Access（可选）：把外网访问前置给 CF，按人授权、URL 不带凭据 ---
+  #
+  # 为什么值得上：固定域名的证书（Let's Encrypt）**必然进证书透明日志(CT)**，
+  # 域名可被公开枚举——"靠域名没人知道"这层遮蔽不再成立，而本面板能在这台机器上
+  # 跑 agent 命令。Access 把访问控制变成「按人授权、可随时撤销」，且 URL 干净。
+  #
+  # ⚠️ 关键：光在 Cloudflare 控制台挂上 Access **不够**。源站（本程序）必须自行
+  # 验签 Cf-Access-Jwt-Assertion，否则任何人伪造一个同名请求头就绕过了 Access。
+  # 本程序已实现验签（RS256 + aud/iss/exp），但前提是下面的 team_domain 与
+  # audience 填对：audience 填错 = 一律验签失败 = 退回 token 兜底。
+  #
+  # 控制台步骤：
+  #   1. Zero Trust → Access → Applications → Add an application → Self-hosted
+  #   2. Application domain 填你的固定域名（如 304456.xyz）
+  #   3. 加一条策略（如 Allow + Emails 指定邮箱，或 One-time PIN 邮箱白名单）
+  #   4. 保存后在该应用详情页复制 **Application Audience (AUD) Tag** 到下面
+  #   5. team_domain 填 Zero Trust 概览页的团队域（形如 https://<team>.cloudflareaccess.com）
+  #   6. 先保持 token_fallback: true 验证 Access 能进（URL 不带 ?token=），
+  #      确认无误后再考虑改成 false 走 Access-only
+  cloudflare_access:
+    enabled: false                    # 默认关闭。开启前请先确认 team_domain/audience 填对
+    team_domain: ""                   # 如 https://myteam.cloudflareaccess.com（可省略 https://）
+    audience: ""                      # Access 应用的 AUD tag（凭据类信息，建议用环境变量传）
+    jwks_url: ""                      # 留空 = <team_domain>/cdn-cgi/access/certs
+    token_fallback: true              # 是否保留外链 ?token= 作为第二道兜底（建议先 true）
+    # 建议用环境变量注入，避免入库：
+    #   PIEQI_AUTH_CLOUDFLARE_ACCESS_ENABLED=true
+    #   PIEQI_AUTH_CLOUDFLARE_ACCESS_TEAM_DOMAIN=https://myteam.cloudflareaccess.com
+    #   PIEQI_AUTH_CLOUDFLARE_ACCESS_AUDIENCE=<aud tag>
+    #   PIEQI_AUTH_CLOUDFLARE_ACCESS_TOKEN_FALLBACK=false
+    #
+    # 两道凭据通道（Access 与 token）**同时关闭 = 外网全拒**（401）。这是
+    # deny-by-default，不会裸奔；启动日志会有 WARN 提示。
+
   ratelimit:
     max_failures_per_min: 5           # 外网 token 暴力破解限流：5 次/分钟 → 拉黑
     blacklist_duration: 10m           # 拉黑时长

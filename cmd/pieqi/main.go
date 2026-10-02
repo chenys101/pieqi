@@ -310,12 +310,42 @@ func main() {
 		logger.Fatal("init binding store", zap.Error(err))
 	}
 	authTokens := auth.NewTokenStore()
+
+	// Cloudflare Access（可选）：外网主鉴权。源站必须自行验签
+	// Cf-Access-Jwt-Assertion，否则伪造同名头即可绕过（见 internal/auth/access.go）。
+	// 配置不全时**不静默降级**：警告并保持未启用，让 token 兜底继续生效。
+	var accessVerifier *auth.AccessVerifier
+	if cfg.Auth.Access.Enabled {
+		v, err := auth.NewAccessVerifier(auth.AccessParams{
+			TeamDomain: cfg.Auth.Access.TeamDomain,
+			Audience:   cfg.Auth.Access.Audience,
+			JWKSURL:    cfg.Auth.Access.JWKSURL,
+		})
+		if err != nil {
+			logger.Warn("cloudflare access enabled but misconfigured; 该通道不生效，"+
+				"外网仍只认 tunnel token 兜底", zap.Error(err))
+		} else {
+			accessVerifier = v
+			logger.Info("cloudflare access enabled",
+				zap.String("team_domain", cfg.Auth.Access.TeamDomain),
+				zap.Bool("token_fallback", cfg.Auth.Access.TokenFallbackEnabled()))
+		}
+	}
+	tokenDisabled := cfg.Auth.Access.Enabled && !cfg.Auth.Access.TokenFallbackEnabled()
+	if accessVerifier == nil && tokenDisabled {
+		// 两道凭据通道都关掉 = 外网全拒。宁可响亮地警告，也不静默裸奔或静默锁死。
+		logger.Warn("外网无任何可用凭据通道：cloudflare_access 未生效且 token_fallback=false，" +
+			"所有外网请求将返回 401（内网/本机不受影响）")
+	}
+
 	authSvc := &auth.Service{
-		Debug:    auth.NewDebugSwitch(cfg.Auth.DebugSkipAllAuth),
-		Bindings: authBindings,
-		Tokens:   authTokens,
-		Limiter:  auth.NewIPLimiter(cfg.Auth.RateLimit.MaxFailuresPerMin, cfg.Auth.RateLimit.BlacklistDuration),
-		Audit:    auth.NewAuditLogger(logger),
+		Debug:         auth.NewDebugSwitch(cfg.Auth.DebugSkipAllAuth),
+		Bindings:      authBindings,
+		Tokens:        authTokens,
+		Limiter:       auth.NewIPLimiter(cfg.Auth.RateLimit.MaxFailuresPerMin, cfg.Auth.RateLimit.BlacklistDuration),
+		Audit:         auth.NewAuditLogger(logger),
+		Access:        accessVerifier,
+		TokenDisabled: tokenDisabled,
 	}
 	// 隧道凭据解析：优先配置值（含 PIEQI_AUTH_CLOUDFLARED_TUNNEL_TOKEN 覆盖），
 	// 其次仓外 token 文件（默认 ~/.pieqi/cloudflared_token）。

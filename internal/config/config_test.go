@@ -525,3 +525,83 @@ func TestConfig_ExampleQoderSpawnIsBareName(t *testing.T) {
 		t.Fatalf("模板应显式 -m Qwen3.8-Flash（否则走付费默认模型），实际 %v", cmd)
 	}
 }
+
+// TestConfig_AccessDefaults 守卫 Cloudflare Access 的默认值：
+// 必须**默认关闭**且**保留 token 兜底** —— 否则升级后老部署会突然全站 401
+// （Access 没配、token 又被关掉 = 外网无任何凭据通道）。
+func TestConfig_AccessDefaults(t *testing.T) {
+	p := writeTestConfig(t, "server:\n  port: 3000\n  auth:\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	a := cfg.Auth.Access
+	if a.Enabled {
+		t.Fatal("cloudflare_access.enabled 默认必须为 false")
+	}
+	if !a.TokenFallbackEnabled() {
+		t.Fatal("token_fallback 默认必须为 true（未配置时保留兜底）")
+	}
+	// 显式关闭才关得掉。
+	off := false
+	a.TokenFallback = &off
+	if a.TokenFallbackEnabled() {
+		t.Fatal("token_fallback=false 时 TokenFallbackEnabled 必须为 false")
+	}
+}
+
+// TestConfig_AccessEnvOverride 守卫 AUD / 团队域可走环境变量注入：
+// AUD tag 与隧道 token 一样属于凭据类信息，不能强迫使用者写进 git 跟踪的
+// config.yaml，必须能用 PIEQI_AUTH_CLOUDFLARE_ACCESS_* 覆盖。
+// （嵌套 key 依赖 viper 的 SetEnvKeyReplacer，即 "." → "_"。）
+func TestConfig_AccessEnvOverride(t *testing.T) {
+	p := writeTestConfig(t, "server:\n  port: 3000\n  auth:\n")
+	t.Setenv("PIEQI_AUTH_CLOUDFLARE_ACCESS_ENABLED", "true")
+	t.Setenv("PIEQI_AUTH_CLOUDFLARE_ACCESS_TEAM_DOMAIN", "https://envteam.cloudflareaccess.com")
+	t.Setenv("PIEQI_AUTH_CLOUDFLARE_ACCESS_AUDIENCE", "env-aud-tag")
+	t.Setenv("PIEQI_AUTH_CLOUDFLARE_ACCESS_TOKEN_FALLBACK", "false")
+
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	a := cfg.Auth.Access
+	if !a.Enabled {
+		t.Fatal("PIEQI_AUTH_CLOUDFLARE_ACCESS_ENABLED=true 未生效")
+	}
+	if a.TeamDomain != "https://envteam.cloudflareaccess.com" {
+		t.Fatalf("team_domain = %q，环境变量未生效（检查 SetEnvKeyReplacer）", a.TeamDomain)
+	}
+	if a.Audience != "env-aud-tag" {
+		t.Fatalf("audience = %q，环境变量未生效", a.Audience)
+	}
+	if a.TokenFallbackEnabled() {
+		t.Fatal("PIEQI_AUTH_CLOUDFLARE_ACCESS_TOKEN_FALLBACK=false 未生效")
+	}
+}
+
+// TestConfig_ExampleAccessSectionIsSafe 守卫模板里的 Access 段：
+// 必须默认关闭、凭据留空、且注释里带上"源站必须自行验签"的关键提示，
+// 否则使用者会以为在 CF 控制台挂上 Access 就完事（那样伪造头即可绕过）。
+func TestConfig_ExampleAccessSectionIsSafe(t *testing.T) {
+	cfg, err := Load(exampleConfigPath)
+	if err != nil {
+		t.Fatalf("load example: %v", err)
+	}
+	if cfg.Auth.Access.Enabled {
+		t.Fatal("模板里 cloudflare_access.enabled 必须为 false（零配置可跑的路径）")
+	}
+	if cfg.Auth.Access.TeamDomain != "" || cfg.Auth.Access.Audience != "" {
+		t.Fatal("模板里 team_domain / audience 必须留空（AUD 属凭据类信息）")
+	}
+	if !cfg.Auth.Access.TokenFallbackEnabled() {
+		t.Fatal("模板里 token_fallback 必须为 true")
+	}
+	raw, err := os.ReadFile(exampleConfigPath)
+	if err != nil {
+		t.Fatalf("read example: %v", err)
+	}
+	if !strings.Contains(string(raw), "cloudflare_access:") {
+		t.Fatal("模板缺少 cloudflare_access 段")
+	}
+}
