@@ -33,9 +33,14 @@ func (a *AuditLogger) Log(r *http.Request, ev AuditEvent) {
 	if a == nil || a.log == nil {
 		return
 	}
+	// ip_source 记录「IP 是依据哪个头判定的」（cf / xff / peer / none）——
+	// 内网判定建立在 ClientIP 之上，审计必须能回答"这次为什么被判成内网"，
+	// 否则安全判定不可回溯（见 auth.go IPSource）。
+	ip, ipSource := IPSource(r)
 	fields := []zap.Field{
 		zap.String("op", ev.Op),
-		zap.String("ip", ClientIP(r)),
+		zap.String("ip", ip),
+		zap.String("ip_source", ipSource),
 		zap.String("ua", r.Header.Get("User-Agent")),
 		zap.String("openid", r.Header.Get("X-Feishu-Openid")),
 		zap.Bool("token_ok", ev.TokenOK),
