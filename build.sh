@@ -22,7 +22,10 @@ GOOS=windows GOARCH=amd64 go build -o "$OUT/pieqi-windows-amd64.exe" ./cmd/pieqi
 RELEASE="$OUT/pieqi-$VERSION"
 mkdir -p "$RELEASE"
 cp "$OUT/pieqi-linux-amd64" "$OUT/pieqi-windows-amd64.exe" "$RELEASE/"
-cp config.yaml README.md "$RELEASE/"
+cp config.example.yaml README.md "$RELEASE/"
+# 发布包里直接给一份 config.yaml（内容 = 模板）：解压后双击 start.bat 即可运行。
+# 单独留一份 .example.yaml 供对照，避免用户以为里面的值"已经是自己的"。
+cp config.example.yaml "$RELEASE/config.yaml"
 cp start.bat restart.bat "$RELEASE/"
 
 echo "==> 打包 tar.gz + zip"

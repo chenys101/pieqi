@@ -1,0 +1,136 @@
+# Pieqi 配置示例（模板）
+#
+# 用法：
+#   cp config.example.yaml config.yaml     # 复制一份再改，config.yaml 已被 .gitignore 忽略
+#   ./pieqi.exe                            # 默认读取同目录 config.yaml
+#
+# 覆盖方式（优先级：环境变量 > 配置文件 > 内置默认值）：
+#   PIEQI_CONFIG=/path/to/other.yaml        换配置文件路径
+#   PIEQI_HOME=/path/to/data                换运行时数据根（默认 ~/.pieqi）
+#   PIEQI_SERVER_PORT=8080                  PIEQI_ 前缀 + 点换下划线，可覆盖任意配置项
+#
+# ⚠️ 凭据纪律：本仓库 / 本文件会被提交、可能公开。任何 app_secret / api token /
+#    隧道 token 都不要写进这里 —— 留空，改用环境变量或仓外文件（见 auth.cloudflared）。
+
+# ── HTTP 服务 ────────────────────────────────────────────────────────────────
+server:
+  port: 3000
+  mode: debug                      # debug | release
+
+# ── IM 渠道 ──────────────────────────────────────────────────────────────────
+channels:
+  lark:
+    enabled: true
+    # event_mode: webhook(默认,需公网回调地址) | longconn(长连接,无需公网,推荐)
+    event_mode: longconn
+    # 长连接模式只需 app_id + app_secret；webhook 模式还需 verify_token + encrypt_key。
+    # 更省事的做法：用 PWA「设置 → 添加渠道 → 扫码」一键注册，凭据自动落盘，无需手填。
+    app_id: ""
+    app_secret: ""
+    verify_token: ""
+    encrypt_key: ""
+    # 一键接入(扫码)拿到的凭据会写入这里，覆盖上面的 app_id/app_secret。
+    # 空 = ~/.pieqi/lark_credentials.json。详见 /api/larkreg/start。
+    credentials_file: ""
+  wecom:
+    enabled: false                   # 企业微信
+  wechat:
+    enabled: false                   # 个人微信（iLink）
+    base_url: ""                     # 默认 https://ilinkai.weixin.qq.com
+
+# ── 监控/干预 API（PWA 前端调它）────────────────────────────────────────────
+api:
+  enabled: true
+  token: ""                          # 空 = 不鉴权（仅本地）；绑 0.0.0.0 必须设
+  cors_origins: []                   # 空 = 允许所有（本地 dev）
+
+# ── Pieqi 后端：worktree 并行任务 ────────────────────────────────────────────
+pieqi:
+  enabled: true                      # 总开关；开启后 IM 消息走 TaskCreator
+  # 运行时数据根目录：留空 = ~/.pieqi（或环境变量 PIEQI_HOME 覆盖）。
+  # tasks/worktrees/sessions 等全部数据存到用户主目录，不入仓库。
+  worktree_base: ""                  # worktree 根目录；留空默认 ~/.pieqi/worktrees
+  skills_dirs: []                    # 空 = 默认 ~/.claude/skills + CLAUDE_CONFIG_DIR/.claude/skills
+  permission_mode: bypassPermissions # claude 自身不拦，由 PreToolUse hook 拦截
+  # ACP 审批免审名单（按 ToolKind 匹配）：命中直接自动放行，不中断等人工审核。
+  # 默认 edit/delete/move（Edit/Write/MultiEdit/NotebookEdit→edit，Delete→delete，Rename→move）。
+  # 清空 [] 关闭免审（全部走人工审批）；可加 execute/read 等其它 kind 或移除不想要的。
+  auto_approve_tools: [edit, delete, move]
+  cleanup_worktrees: true            # 任务完成即清 worktree
+  hook_timeout: 30m                  # hook 等人类决策的上限
+  hook_tools: [Bash, Write, Edit, NotebookEdit]   # PreToolUse 拦截的工具；读类不拦
+  max_concurrent_per_project: 4      # 每项目并发上限
+  base_branch: main                  # worktree 基准分支（按你仓库的主分支改：main / master）
+  bots_dir: ""                       # IM 机器人绑定记录目录；空 = ~/.pieqi/bots
+  # ⚠️ 以下 acp 节已弃用（P5 迁移到 agents.*）。显式配置会触发告警。
+  #    保留在此仅为从旧配置迁移时对照，**新配置请直接改 agents 节**。
+  # acp:
+  #   use_acp: true                  # 弃用：→ agents.claude.transport
+  #   agent_type: claude-code        # 弃用：claude-code → agents.claude；qodercli → agents.qoder.acp
+  #   acp_spawn_command: []          # 弃用：→ agents.qoder.acp.spawn_command
+  #   init_timeout: 30s              # 弃用：→ agents.qoder.acp.init_timeout
+  #   idle_timeout: 15m              # 弃用：→ agents.qoder.acp.idle_timeout
+
+# ── 多 Agent（multi-agent.md §9）─────────────────────────────────────────────
+agents:
+  claude:
+    transport: sdk-bridge           # sdk-bridge(默认,官方 Agent SDK 常驻桥) | print(直连 claude -p)
+    bridge:
+      base_url: "http://127.0.0.1:18790"   # 桥监听地址；改端口需与 auto_start 同步
+      token: ""                     # 桥鉴权 token（空 = 不鉴权，仅本地私有端口）；建议设
+      auto_start: true              # 探活失败自动 spawn node src/index.js（桥源码随服务同装）
+      # dir: ""                     # 桥源码目录(含 src/index.js)；空 = 自动探测(exe/cwd 邻接 services/claude-sdk-bridge)
+    print:
+      command: claude               # bridge 不可用时的 print 回退
+      permission_mode: bypassPermissions
+      model: ""                     # 空 = 用 CLI 默认模型
+      sys_prompt: ""
+  qoder:
+    transport: acp                  # acp(默认, qodercli --acp)
+    acp:
+      agent_type: qodercli
+      # 显式带 -m 选用 Qwen3.8-Flash（Qoder 国际版限时免费，0 Credits）。
+      # 不带 -m 时走账号默认模型（付费），Credits 耗尽会报 "credit usage limit"（error_code 118）。
+      # 空数组 = 按 agent_type 取默认。
+      spawn_command: ["qodercli", "--acp", "-m", "Qwen3.8-Flash"]
+      init_timeout: 30s
+      idle_timeout: 15m             # 会话空闲回收阈值；<=0 禁用
+  # 可用 agent 列表以后端 /api/agents 为唯一事实源；未知名字会被拒（400）。
+
+# ── 鉴权 + Cloudflared 隧道（PRD §8）────────────────────────────────────────
+auth:
+  debug_skip_all_auth: false          # true = 跳过所有鉴权（**仅本地开发**，绝不要暴露到公网）
+  feishu_binding_file: ""             # 空 = ~/.pieqi/feishu_binding.json
+
+  cloudflared:
+    binary_path: cloudflared          # PATH 中查找；或绝对路径，如 C:\Program Files (x86)\cloudflared\cloudflared.exe
+    default_ttl: 15m                  # 外链 ?token= 有效期：15m | 1h | 4h
+
+    # mode: quick = trycloudflare 临时域名（默认）。零配置即可用，但域名随机、
+    #               会被 Cloudflare 周期性回收（回收后旧链接永久失效，靠自愈换新域名）。
+    #       named = 固定域名。需先有域名并配好，见下方两项。域名永不失效。
+    mode: quick
+
+    # 以下两项仅 named 模式需要 ────────────────────────────────────────────
+    # public_hostname 对外域名（必须已在 Cloudflare Zero Trust 里配好 Public Hostname，
+    # 指向本机服务，如 HTTP + localhost:3000）。带不带 scheme 都行。
+    public_hostname: ""               # 例：https://pieqi.example.com
+
+    # tunnel_token 是 Cloudflare 的隧道**凭据**（Zero Trust → Networks → Tunnels
+    # → 创建 Cloudflared 隧道后下发的一长串 base64）。它等同于隧道控制权，
+    # **绝不要写进本文件**。三种给法（优先级从高到低）：
+    #   1) 环境变量 PIEQI_AUTH_CLOUDFLARED_TUNNEL_TOKEN
+    #   2) tunnel_token（下面这行，不推荐：本文件会被提交）
+    #   3) tunnel_token_file 指向的仓外文件（推荐）
+    tunnel_token: ""
+    tunnel_token_file: ""             # 空 = ~/.pieqi/cloudflared_token。请把权限收紧到仅本人可读
+                                      # （Linux/macOS: chmod 600；Windows: icacls <f> /inheritance:r /grant:r "<user>:F"）
+
+    # 自动自愈：按间隔探测隧道域名是否还活着，连续失败达阈值即重启隧道并推送新链接。
+    # 间隔 × 阈值 必须显著小于 default_ttl，否则检出时链接也早已过期。
+    health_check_interval: 1m         # <=0 关闭巡检（1m×3 ≈ 3 分钟内自愈）
+    health_check_failures: 3          # 连续失败次数阈值
+
+  ratelimit:
+    max_failures_per_min: 5           # 外网 token 暴力破解限流：5 次/分钟 → 拉黑
+    blacklist_duration: 10m           # 拉黑时长

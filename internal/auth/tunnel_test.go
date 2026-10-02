@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -41,6 +42,7 @@ func fakeCloudflaredScript(t *testing.T, url string) string {
 //     （不能用 %RANDOM%：Windows cmd 在同一时间窗口启动的进程会产出相同值。）
 //   - 寿命 ~10 分钟（ping -n 600 / sleep 600），避免 ~30s 的短脚本在自愈测试
 //     途中提前退出（watch 会清空 m.cmd，让巡检误以为"无活跃隧道"而跳过）。
+//
 // 自愈的 stopLocked 与测试收尾的 Stop 会 Kill 掉这些进程，无残留。
 func fakeCloudflaredScriptLong(t *testing.T) string {
 	t.Helper()
@@ -613,7 +615,242 @@ func TestTunnel_AutoHeal_DisabledWithoutStart(t *testing.T) {
 		BinaryPath: "unused", LocalURL: "http://localhost:3000",
 		Tokens: NewTokenStore(),
 	})
-	m.StartHealthCheck(0, 1)    // interval<=0 → no-op
+	m.StartHealthCheck(0, 1)           // interval<=0 → no-op
 	m.StartHealthCheck(time.Minute, 0) // threshold<1 → no-op
-	m.StopHealthCheck()         // healthStop nil → no-op
+	m.StopHealthCheck()                // healthStop nil → no-op
+}
+
+// fakeNamedCloudflared 模拟 named tunnel 模式的 cloudflared：向 stderr 打印
+// "Registered tunnel connection"（真实 cloudflared 与边缘建好连接后的固定输出）
+// 并保持存活，直到被 Kill。打印行数可控：printed=0 时只存活不打印（用于
+// 30s 超时路径的短测版则直接静默存活）。
+func fakeNamedCloudflared(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	var path, content string
+	if runtime.GOOS == "windows" {
+		path = filepath.Join(dir, "cloudflared-named.bat")
+		content = "@echo off\r\n" +
+			"echo INF Registered tunnel connection conn=(x\r\n" +
+			"ping -n 30 127.0.0.1 > nul\r\n"
+	} else {
+		path = filepath.Join(dir, "cloudflared-named.sh")
+		content = "#!/bin/sh\necho 'INF Registered tunnel connection conn=(x'\nsleep 30\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		t.Fatalf("write fake named cf: %v", err)
+	}
+	return path
+}
+
+// fakeNamedCloudflaredDead 从不打印 Registered 且立即退出 —— 用于断言
+// "进程在注册前退出"的失败路径（bad token / 网络不通时真实 cloudflared 的行为）。
+func fakeNamedCloudflaredDead(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	var path, content string
+	if runtime.GOOS == "windows" {
+		path = filepath.Join(dir, "cloudflared-dead.bat")
+		content = "@echo off\r\necho INF some unrelated line\r\n"
+	} else {
+		path = filepath.Join(dir, "cloudflared-dead.sh")
+		content = "#!/bin/sh\necho 'INF some unrelated line'\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		t.Fatalf("write fake dead cf: %v", err)
+	}
+	return path
+}
+
+// TestTunnel_NamedMode_Start verifies named mode: no stdout URL scraping —
+// the returned URL is always PublicHostname?token=..., success gated on the
+// "Registered tunnel connection" line, and the process keeps draining pipes.
+func TestTunnel_NamedMode_Start(t *testing.T) {
+	binary := fakeNamedCloudflared(t)
+	m := NewTunnelManager(TunnelConfig{
+		BinaryPath:     binary,
+		LocalURL:       "http://localhost:3000",
+		Tokens:         NewTokenStore(),
+		Mode:           "named",
+		TunnelToken:    "eyJhIjoiYiJ9",
+		PublicHostname: "304456.xyz",
+	})
+	res, err := m.Start(context.Background(), 15*time.Minute)
+	if err != nil {
+		t.Fatalf("Start named: %v", err)
+	}
+	defer m.Stop(context.Background())
+
+	if !strings.HasPrefix(res.TunnelURL, "https://304456.xyz?token=") {
+		t.Fatalf("url = %q, want https://304456.xyz?token=...", res.TunnelURL)
+	}
+	if res.Token == "" || res.ExpiresAt.IsZero() {
+		t.Fatalf("token/expiry missing: %+v", res)
+	}
+	if !m.IsActive() {
+		t.Fatal("tunnel should be active after named start")
+	}
+	if st := m.Status(); !st.Active || !strings.HasPrefix(st.TunnelURL, "https://304456.xyz?token=***") {
+		t.Fatalf("status = %+v, want masked named url", st)
+	}
+	// PublicHostname 已带 scheme 的写法同样可用。
+	m2 := NewTunnelManager(TunnelConfig{
+		BinaryPath: binary, LocalURL: "http://localhost:3000", Tokens: NewTokenStore(),
+		Mode: "named", TunnelToken: "tok", PublicHostname: "https://fixed.example.com/",
+	})
+	res2, err := m2.Start(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatalf("Start named (scheme'd host): %v", err)
+	}
+	defer m2.Stop(context.Background())
+	if !strings.HasPrefix(res2.TunnelURL, "https://fixed.example.com?token=") {
+		t.Fatalf("url = %q, want trailing slash trimmed", res2.TunnelURL)
+	}
+}
+
+// TestTunnel_NamedMode_MissingConfig verifies the fail-fast guards: named
+// mode without public_hostname / tunnel_token must error before spawning.
+func TestTunnel_NamedMode_MissingConfig(t *testing.T) {
+	binary := fakeNamedCloudflared(t)
+	for _, tc := range []struct{ name, host, tok string }{
+		{"no hostname", "", "tok"},
+		{"no token", "304456.xyz", ""},
+	} {
+		m := NewTunnelManager(TunnelConfig{
+			BinaryPath: binary, LocalURL: "http://localhost:3000", Tokens: NewTokenStore(),
+			Mode: "named", PublicHostname: tc.host, TunnelToken: tc.tok,
+		})
+		if _, err := m.Start(context.Background(), time.Minute); err == nil {
+			t.Fatalf("%s: expected error, got nil", tc.name)
+		}
+		if m.IsActive() {
+			t.Fatalf("%s: must not spawn a process", tc.name)
+		}
+	}
+}
+
+// TestTunnel_NamedMode_ProcessDiesBeforeRegister verifies that a cloudflared
+// that exits without ever registering (bad token, blocked network) fails the
+// Start with a clear error and leaves no active tunnel / stale tokens.
+func TestTunnel_NamedMode_ProcessDiesBeforeRegister(t *testing.T) {
+	binary := fakeNamedCloudflaredDead(t)
+	ts := NewTokenStore()
+	m := NewTunnelManager(TunnelConfig{
+		BinaryPath: binary, LocalURL: "http://localhost:3000", Tokens: ts,
+		Mode: "named", TunnelToken: "bad", PublicHostname: "304456.xyz",
+	})
+	if _, err := m.Start(context.Background(), time.Minute); err == nil {
+		t.Fatal("expected error for process dying before register")
+	}
+	if m.IsActive() {
+		t.Fatal("no tunnel should be active after failed start")
+	}
+}
+
+// fakeNamedCloudflaredSpy 记录**自己的命令行参数**与 TUNNEL_TOKEN 环境变量是否可见，
+// 落盘到同目录 args.txt，然后照常打印 Registered 建连行。
+// 用途：证明隧道凭据走环境变量而非 argv —— argv 对同机任何进程可见
+// （tasklist / wmic / /proc/<pid>/cmdline），等于把凭据写在明处。
+func fakeNamedCloudflaredSpy(t *testing.T, spyPath string) string {
+	t.Helper()
+	dir := t.TempDir()
+	var path, content string
+	if runtime.GOOS == "windows" {
+		path = filepath.Join(dir, "cloudflared-spy.bat")
+		content = "@echo off\r\n" +
+			"> \"" + spyPath + "\" echo ARGS=%*\r\n" +
+			"if defined TUNNEL_TOKEN (>> \"" + spyPath + "\" echo ENV=set) else (>> \"" + spyPath + "\" echo ENV=missing)\r\n" +
+			"echo INF Registered tunnel connection connIndex=0\r\n" +
+			"ping -n 30 127.0.0.1 > nul\r\n"
+	} else {
+		path = filepath.Join(dir, "cloudflared-spy.sh")
+		content = "#!/bin/sh\n" +
+			"D=\"" + spyPath + "\"\n" +
+			"printf 'ARGS=%s\n' \"$*\" > \"$D\"\n" +
+			"if [ -n \"$TUNNEL_TOKEN\" ]; then echo 'ENV=set' >> \"$D\"; else echo 'ENV=missing' >> \"$D\"; fi\n" +
+			"echo 'INF Registered tunnel connection connIndex=0'\n" +
+			"sleep 30\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
+		t.Fatalf("write spy cf: %v", err)
+	}
+	return path
+}
+
+// TestTunnel_NamedMode_TokenNotInArgv 是凭据泄漏的回归测试。
+// 断言：token 必须经 TUNNEL_TOKEN 环境变量传给 cloudflared，**不得**出现在 argv。
+// 反向验证：把 startNamed 改回 `--token <tok>`，本用例必须 FAIL。
+func TestTunnel_NamedMode_TokenNotInArgv(t *testing.T) {
+	const secret = "SECRET_TUNNEL_TOKEN_abc123"
+	spy := filepath.Join(t.TempDir(), "args.txt")
+	binary := fakeNamedCloudflaredSpy(t, spy)
+
+	m := NewTunnelManager(TunnelConfig{
+		BinaryPath: binary, LocalURL: "http://localhost:3000", Tokens: NewTokenStore(),
+		Mode: "named", TunnelToken: secret, PublicHostname: "304456.xyz",
+	})
+	if _, err := m.Start(context.Background(), time.Minute); err != nil {
+		t.Fatalf("Start named: %v", err)
+	}
+	defer m.Stop(context.Background())
+
+	var rec string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(spy); err == nil && len(b) > 0 {
+			rec = string(b)
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if rec == "" {
+		t.Fatal("spy file never appeared; cloudflared did not run")
+	}
+	if strings.Contains(rec, secret) {
+		t.Fatalf("凭据泄漏：token 出现在命令行参数中 → %q", rec)
+	}
+	if !strings.Contains(rec, "ENV=set") {
+		t.Fatalf("token 未通过 TUNNEL_TOKEN 环境变量传入 → %q", rec)
+	}
+	if !strings.Contains(rec, "tunnel") || !strings.Contains(rec, "--no-autoupdate") {
+		t.Fatalf("argv 形态异常（应含 tunnel --no-autoupdate run）→ %q", rec)
+	}
+}
+
+// TestHostAlive_TunnelDeadSignatures 固化"边缘判死"的两种签名。
+//
+// 背景：quick 隧道无连接 → 530；**named 隧道无连接 → 502 + 兜底页
+// "error code: 502"**（2026-10-02 实测）。两者都必须判死，否则自愈永不触发。
+// 反向验证：删掉 hostAlive 里的 502 body 判断，本用例的 named 子例必 FAIL。
+func TestHostAlive_TunnelDeadSignatures(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		body     string
+		wantLive bool
+	}{
+		{"quick 隧道无连接：530 判死", 530, "Cloudflare Tunnel error", false},
+		{"named 隧道无连接：502 + 兜底页判死", 502, "error code: 502\n", false},
+		{"源站自己的 502 仍算活（隧道通、源站出错）", 502, "<html><body>Origin bad gateway</body></html>", true},
+		{"token 过期 401 算活（域名与隧道都在）", 401, "unauthorized", true},
+		{"正常 200 算活", 200, "<html>ok</html>", true},
+		{"504 算活（请求已被转发到源站）", 504, "gateway timeout", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			// hostAlive 直接取 rawURL 的 scheme+host，故用 http 的 httptest 服务。
+			if got := hostAlive(srv.URL + "/?token=x"); got != tc.wantLive {
+				t.Fatalf("hostAlive = %v, want %v (status=%d body=%q)", got, tc.wantLive, tc.status, tc.body)
+			}
+		})
+	}
+	// 连接失败（服务没起）必须判死
+	if hostAlive("http://127.0.0.1:1/") {
+		t.Fatal("connection refused must be judged dead")
+	}
 }

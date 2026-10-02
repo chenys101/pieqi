@@ -25,6 +25,19 @@ type TunnelConfig struct {
 	Tokens     *TokenStore // token store; start/reset mutate this
 	Logger     *zap.Logger // nil = silent
 
+	// Mode 隧道模式："quick"（默认，trycloudflare 随机域名）| "named"
+	// （固定域名：Cloudflare Zero Trust 里创建 named tunnel 后，用其 token 运行
+	// `cloudflared tunnel run --token`，对外域名恒为 PublicHostname，不再被回收）。
+	// 空 / 未知值一律按 quick 处理。
+	Mode string
+	// TunnelToken named 模式的 cloudflared tunnel token（base64 串，来自
+	// Zero Trust → Networks → Tunnels → Create a tunnel）。quick 模式忽略。
+	// 注意这是 Cloudflare 的隧道凭据，绝不落日志（与 ?token= 外链 token 是两回事）。
+	TunnelToken string
+	// PublicHostname named 模式对外域名，如 "304456.xyz" 或 "https://304456.xyz"
+	// （不带 scheme 自动补 https://）。quick 模式忽略。
+	PublicHostname string
+
 	// PIDFile 可选：cloudflared 子进程 PID 的落盘路径。用于跨重启清理
 	// 孤儿进程 —— 服务被强杀（defer Stop 不执行）时 cloudflared 会残留，
 	// 下次 Start 时按此文件杀掉上一次的残留，避免多份隧道堆积。
@@ -95,12 +108,12 @@ type TunnelManager struct {
 	// --- 自动自愈（域名回收检测）---
 	// healthLoop 是进程生命周期的单例 goroutine（StartHealthCheck 幂等启动），
 	// 每 tick 探测当前活跃隧道的 hostname；连续失败达到阈值后自动重启换新域名。
-	healthStop chan struct{}            // 关闭即停止巡检（StopHealthCheck）
-	healthDone chan struct{}            // 巡检 goroutine 退出信号（测试收尾用）
-	healthOnce sync.Once                // 保证只启动一个巡检 goroutine
-	stopOnce   sync.Once                // 保证 healthStop 只 close 一次
+	healthStop  chan struct{}            // 关闭即停止巡检（StopHealthCheck）
+	healthDone  chan struct{}            // 巡检 goroutine 退出信号（测试收尾用）
+	healthOnce  sync.Once                // 保证只启动一个巡检 goroutine
+	stopOnce    sync.Once                // 保证 healthStop 只 close 一次
 	healthCheck func(rawURL string) bool // 注入式探测；nil = 默认 HTTP 探测 hostAlive
-	ttl        time.Duration            // 最近一次 Start 的 TTL，自愈重启时沿用（用户设定的 15m/1h/4h 意图）
+	ttl         time.Duration            // 最近一次 Start 的 TTL，自愈重启时沿用（用户设定的 15m/1h/4h 意图）
 }
 
 // NewTunnelManager constructs a manager. Does NOT start anything.
@@ -205,6 +218,10 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 		return TunnelResult{}, fmt.Errorf("issue token: %w", err)
 	}
 
+	if strings.EqualFold(strings.TrimSpace(m.cfg.Mode), "named") {
+		return m.startNamed(ctx, ttl, tok)
+	}
+
 	subCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(subCtx, m.cfg.BinaryPath, "tunnel", "--url", m.cfg.LocalURL)
 	// cloudflared 把日志（含 trycloudflare URL）打到 stderr 而非 stdout，
@@ -282,11 +299,15 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 		}
 	}
 
-	// Wire the token into the URL and build the Lark deep link. The token
-	// is embedded as a literal ?token= query param (not percent-encoded)
-	// so the front-end can hand the link straight to Lark and the Pieqi
-	// server's ?token= extractor (PRD §4.6) reads it without re-decoding.
-	full := cfURL
+	// 收尾与 named 模式共用 finalizeTunnel（?token= 拼接、stash、PID、watch）。
+	return m.finalizeTunnel(cmd, cancel, cfURL, tok, ttl), nil
+}
+
+// finalizeTunnel 是 quick / named 两条 Start 路径共用的收尾：把 ?token= 接进
+// URL、stash 状态、写 PID 文件、起 watch 兜底进程退出。调用方必须已持有分配好
+// 的 cmd/cancel 且尚未 stash（watch 靠 m.cmd != cmd 识别被替换的旧实例）。
+func (m *TunnelManager) finalizeTunnel(cmd *exec.Cmd, cancel context.CancelFunc, base, tok string, ttl time.Duration) TunnelResult {
+	full := base
 	q := url.Values{}
 	q.Set("token", tok)
 	if strings.Contains(full, "?") {
@@ -296,7 +317,6 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 	}
 	lark := "lark://open?url=" + full
 
-	// Stash state + supervise the process so its death clears tokens.
 	expires := time.Now().Add(ttl)
 	m.mu.Lock()
 	m.cmd = cmd
@@ -308,19 +328,118 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 	m.mu.Unlock()
 	m.writePIDFile(cmd.Process.Pid)
 
-	// Background watcher reaps the process and, on an *unexpected* exit,
-	// clears all tokens (PRD §4.4 trigger: Cloudflared 进程意外退出).
 	go m.watch(cmd, cancel)
 
 	if m.cfg.Logger != nil {
-		m.cfg.Logger.Info("tunnel started", zap.String("tunnel_url_no_token", cfURL), zap.Time("expires_at", expires))
+		m.cfg.Logger.Info("tunnel started", zap.String("tunnel_url_no_token", base), zap.Time("expires_at", expires))
 	}
 	return TunnelResult{
 		TunnelURL:    full,
 		LarkDeepLink: lark,
 		Token:        tok,
 		ExpiresAt:    expires,
-	}, nil
+	}
+}
+
+// startNamed 以固定域名模式启动隧道：`cloudflared tunnel run --token <tok>`。
+// 与 quick 模式的差异：
+//   - 对外 URL 恒为 PublicHostname（不再从 stdout 抓 trycloudflare 域名）；
+//   - 启动成功的判据是 stderr/stdout 出现 "Registered tunnel connection"
+//     （cloudflared 与边缘建好 4 条连接后打印，多年稳定），而非随机 URL；
+//   - **管道排空纪律与 quick 模式完全一致**：命中判据后继续读到 EOF，否则
+//     同样会在 64KB 处写满卡死（那次 530 事故的根因，见 scanPipe 注释）。
+//
+// 自愈巡检对 named 模式依然有效：530 判死 → Start 重启同一 token 的进程，
+// 域名不变，仅外链 ?token= 轮换（IssueForNewTunnel 签发新外链 token）。
+func (m *TunnelManager) startNamed(ctx context.Context, ttl time.Duration, tok string) (TunnelResult, error) {
+	host := strings.TrimSpace(m.cfg.PublicHostname)
+	if host == "" {
+		return TunnelResult{}, fmt.Errorf("named 模式缺少 public_hostname（config.yaml: auth.cloudflared.public_hostname）")
+	}
+	if m.cfg.TunnelToken == "" {
+		return TunnelResult{}, fmt.Errorf("named 模式缺少隧道 token：请设置 PIEQI_AUTH_CLOUDFLARED_TUNNEL_TOKEN，" +
+			"或写入 auth.cloudflared.tunnel_token_file 指向的文件（默认 ~/.pieqi/cloudflared_token）")
+	}
+	if !strings.Contains(host, "://") {
+		host = "https://" + host
+	}
+	host = strings.TrimSuffix(host, "/")
+
+	subCtx, cancel := context.WithCancel(ctx)
+	// --no-autoupdate：cloudflared 的自动更新会自重启进程，绕开 PID 文件与
+	// watch 监管（产生无父管理的孤儿），必须关掉。
+	//
+	// 凭据传递纪律：token 走 **环境变量 TUNNEL_TOKEN**（cloudflared 原生支持），
+	// 绝不放进命令行参数 —— argv 对同机任何进程可见（tasklist / wmic /
+	// /proc/<pid>/cmdline），等于把隧道凭据写在明处。
+	cmd := exec.CommandContext(subCtx, m.cfg.BinaryPath, "tunnel", "--no-autoupdate", "run")
+	cmd.Env = append(os.Environ(), "TUNNEL_TOKEN="+m.cfg.TunnelToken)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return TunnelResult{}, fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return TunnelResult{}, fmt.Errorf("stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return TunnelResult{}, fmt.Errorf("start cloudflared: %w", err)
+	}
+
+	registered := make(chan struct{}, 2)
+	doneCh := make(chan struct{}, 2)
+	// 与 quick 模式的 scanPipe 同一套纪律：命中判据后**继续读到 EOF**（保命），
+	// 命中 "Registered tunnel connection" 发 registered（容量 2，绝不阻塞）。
+	scanPipe := func(r io.Reader) {
+		br := bufio.NewReader(r)
+		found := false
+		for {
+			line, err := br.ReadString('\n')
+			if !found && line != "" && strings.Contains(line, "Registered tunnel connection") {
+				found = true
+				registered <- struct{}{}
+			}
+			if err != nil {
+				break // EOF（进程已退出）或读错误：管道已到尽头
+			}
+		}
+		doneCh <- struct{}{}
+	}
+	go scanPipe(stdout)
+	go scanPipe(stderr)
+
+	// 等 Registered（正常 2~5s）。两条管道都 EOF = 进程已退出 = token 错误或
+	// 网络不通；30s 仍无 Registered 也判失败并杀掉 —— 一个未注册的半死隧道
+	// 只会让公网 530，不如干脆报错让用户重试。
+	doneCount := 0
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-registered:
+			return m.finalizeTunnel(cmd, cancel, host, tok, ttl), nil
+		case <-doneCh:
+			doneCount++
+			if doneCount == 2 {
+				cancel()
+				_ = cmd.Wait()
+				if m.Tokens != nil {
+					m.Tokens.InvalidateAll() // Start 失败：已签发的外链 token 同步作废
+				}
+				return TunnelResult{}, fmt.Errorf("cloudflared exited before registering tunnel (检查 tunnel_token 是否正确)")
+			}
+		case <-timer.C:
+			cancel()
+			_ = cmd.Wait()
+			if m.Tokens != nil {
+				m.Tokens.InvalidateAll()
+			}
+			return TunnelResult{}, fmt.Errorf("cloudflared did not register tunnel connection within 30s")
+		}
+	}
 }
 
 // watch blocks until the cloudflared subprocess exits, then reaps it
@@ -630,16 +749,31 @@ func logHostnameOnly(rawURL string) string {
 // 没有普通 zone 的 "Origin DNS error(1016)" 场景，530 只可能是隧道错误。
 const statusCloudflareTunnelError = 530
 
+// cfOriginErrorBody 是 Cloudflare 边缘（quick 隧道无连接）与 cloudflared
+// （named 隧道无可用连接 / 连不上源站）共用的兜底错误页正文：text/plain，
+// 仅 16 字节 "error code: 502"。
+//
+// 为什么必须按 body 区分 502：改为 named 隧道后实测（2026-10-02），**没有
+// connector 在线时边缘回的是 502 + 这个兜底页，而不是 530**。若沿用"任何 502
+// 都算活"的判据，named 模式下隧道死掉后巡检永远判活 → 自愈永不触发（这正是
+// 530 判死要解决的问题换了个马甲）。而源站自己的 502 会带自己的 HTML/JSON body，
+// 且本服务的源站就是 pieqi 自身（不会吐这个 body），故该标记可安全判死。
+const cfOriginErrorBody = "error code: 502"
+
 // hostAlive 默认探测：GET https://<host>/ 能否拿到任何 HTTP 响应。
 // 关键：**除 530 外任何状态码（含 401/403/302/502）都证明 hostname 在公网存活**
 // —— 请求能到达 Cloudflare 边缘并被隧道转发回来；只有 DNS 解析失败 / 连接失败 /
 // 超时算"死亡"。因此 token 过期导致的 401 不会误触发换域名，域名存活检测与
 // token 存活检测（RenewToken 的职责）被正确解耦。
 //
-// 但 530 例外：域名解析正常、边缘也在应答，却说明**隧道连接不存在** —— 这是
-// "域名存活"与"隧道存活"的分水岭。此前把 530 也算存活，导致隧道卡死时巡检永远
-// 判活、永不触发自愈（2026-10-01 线上事故：cloudflared 卡死 → 持续 530 →
-// 链接无法访问且系统无任何恢复动作）。故 530 判死。
+// 但有两个例外：
+//   - **530**：域名解析正常、边缘也在应答，却说明**隧道连接不存在** —— 这是
+//     "域名存活"与"隧道存活"的分水岭。此前把 530 也算存活，导致隧道卡死时巡检永远
+//     判活、永不触发自愈（2026-10-01 线上事故：cloudflared 卡死 → 持续 530 →
+//     链接无法访问且系统无任何恢复动作）。故 530 判死。
+//   - **502 + 兜底页 `error code: 502`**：named 隧道没有 connector 在线时边缘的
+//     表现（2026-10-02 实测，named 模式不返回 530）。只按状态码判断会把这种情况
+//     算作"源站出错、隧道活着" → 自愈永不触发。故按 body 标记判死。
 //
 // 每次探测新建 Client + Transport{Proxy:nil}：忽略 HTTP(S)_PROXY 环境变量，
 // 保证 NXDOMAIN 对本机 DNS 真实可观测，且不命中 keep-alive 的旧连接。
@@ -666,9 +800,16 @@ func hostAlive(rawURL string) bool {
 	if err != nil {
 		return false
 	}
+	// 读一小段 body 用于区分"边缘/cloudflared 兜底页"与"源站自己的错误"，
+	// 然后排干剩余 body（不排干会钉住陈旧 keep-alive 连接）。
+	head, _ := io.ReadAll(io.LimitReader(resp.Body, 128))
 	_, _ = io.Copy(io.Discard, resp.Body) // 排干 body，避免 keep-alive 钉住陈旧连接
 	_ = resp.Body.Close()
 	if resp.StatusCode == statusCloudflareTunnelError {
+		return false
+	}
+	// named 模式"无连接"表现为 502 + 兜底页（见 cfOriginErrorBody 注释）。
+	if resp.StatusCode == http.StatusBadGateway && strings.Contains(string(head), cfOriginErrorBody) {
 		return false
 	}
 	return true

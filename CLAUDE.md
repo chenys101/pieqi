@@ -11,7 +11,7 @@ Pieqi 把 Claude Code 等 coding agent 接入 IM（飞书/企微/微信）和移
 ```bash
 # 后端
 go build -o bin/pieqi ./cmd/pieqi        # 构建二进制
-go run ./cmd/pieqi                        # 直接运行（读取 config.yaml）
+go run ./cmd/pieqi                        # 直接运行（读取同目录 config.yaml）
 go test ./internal/...                    # 跑所有单元测试
 go test ./internal/core -run TestFoo      # 跑单个测试
 go test -tags integration ./internal/...  # 含集成测试（需要 claude CLI / 桥服务在跑）
@@ -32,6 +32,8 @@ cd services/visual-capture && npm test      # 截图/console/network 采集（�
 ```
 
 环境变量：`PIEQI_CONFIG`（配置文件路径，默认 `config.yaml`）、`PIEQI_HOME`（运行时数据根，默认 `~/.pieqi`）、`PIEQI_` 前缀覆盖任意配置项（如 `PIEQI_SERVER_PORT`）。
+
+**配置**：`config.yaml` 不入库（含个人域名/端口/凭据），模板是 `config.example.yaml`（全字段带注释）。首次运行 `cp config.example.yaml config.yaml`；给 `config.example.yaml` 增删字段时，`go test ./internal/config -run TestConfig_Example` 会校验模板仍可加载且不含凭据。
 
 **坑**：前端改了之后必须 `npm run build` 再重编 Go，才会嵌入新前端。集成测试在 `//go:build integration` 三个文件里，默认 `go test ./internal/...` 不会跑到。
 

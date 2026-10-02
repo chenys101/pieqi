@@ -80,3 +80,12 @@ web/dist.bak.*
 .workbuddy/
 # 旧目录名（早期版本的会话数据/验证产物：artifacts、memory、tmp）
 .workbuddy-ai/
+
+# 隧道凭据（绝不入库；正式位置在 ~/.pieqi/cloudflared_token）
+/cloudflared_token
+*.tunnel_token
+
+# 本地实际配置：含个人域名/端口/渠道凭据，绝不入库。
+# 模板见 config.example.yaml（cp config.example.yaml config.yaml 后修改）。
+/config.yaml
+*.local.yaml

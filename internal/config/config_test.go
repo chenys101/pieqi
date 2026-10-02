@@ -355,3 +355,149 @@ agents:
 		t.Fatalf("qoder acp should keep explicit config (not backfill), got: %v", got)
 	}
 }
+
+// TestConfig_TunnelModeAndTokenFileDefaults verifies the named-tunnel knobs:
+// mode defaults to quick (临时域名), the token file defaults to a path OUTSIDE
+// the repo (~/.pieqi/cloudflared_token), and an explicitly-empty
+// tunnel_token_file falls back to that default (viper's empty-string override).
+func TestConfig_TunnelModeAndTokenFileDefaults(t *testing.T) {
+	p := writeTestConfig(t, "server:\n  port: 3000\n  auth:\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	c := cfg.Auth.Cloudflared
+	if c.Mode != "quick" {
+		t.Fatalf("mode default = %q, want quick (临时域名)", c.Mode)
+	}
+	if c.IsNamed() {
+		t.Fatal("IsNamed must be false for the default quick mode")
+	}
+	wantSuffix := filepath.Join(".pieqi", "cloudflared_token")
+	if !strings.HasSuffix(filepath.ToSlash(c.TunnelTokenFile), filepath.ToSlash(wantSuffix)) {
+		t.Fatalf("tunnel_token_file default = %q, want ...%s", c.TunnelTokenFile, wantSuffix)
+	}
+
+	// 显式空值同样回退默认（同 feishu_binding_file 的既有约定）
+	p2 := writeTestConfig(t, "auth:\n  cloudflared:\n    mode: named\n    tunnel_token_file: \"\"\n")
+	cfg2, err := Load(p2)
+	if err != nil {
+		t.Fatalf("load2: %v", err)
+	}
+	if !cfg2.Auth.Cloudflared.IsNamed() {
+		t.Fatal("IsNamed must be true when mode: named")
+	}
+	if cfg2.Auth.Cloudflared.TunnelTokenFile == "" {
+		t.Fatal("empty tunnel_token_file must fall back to the default path")
+	}
+}
+
+// TestConfig_ResolveTunnelToken documents the credential precedence:
+// inline config value (incl. env override) > token file > nothing.
+// The token must never be reachable from a git-tracked file by default.
+func TestConfig_ResolveTunnelToken(t *testing.T) {
+	// 1) 配置值优先
+	c := CloudflaredConfig{TunnelToken: "inline-tok", TunnelTokenFile: filepath.Join(t.TempDir(), "nope")}
+	tok, src, err := c.ResolveTunnelToken()
+	if err != nil || tok != "inline-tok" || src != "config/env" {
+		t.Fatalf("inline: tok=%q src=%q err=%v", tok, src, err)
+	}
+
+	// 2) 文件次之，且容忍尾随换行/空格
+	dir := t.TempDir()
+	f := filepath.Join(dir, "cloudflared_token")
+	if err := os.WriteFile(f, []byte("file-tok\n"), 0600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	c2 := CloudflaredConfig{TunnelTokenFile: f}
+	tok2, src2, err := c2.ResolveTunnelToken()
+	if err != nil || tok2 != "file-tok" {
+		t.Fatalf("file: tok=%q err=%v (want trimmed file-tok)", tok2, err)
+	}
+	if !strings.HasPrefix(src2, "file:") {
+		t.Fatalf("source = %q, want file:<path>", src2)
+	}
+	if strings.Contains(src2, "file-tok") {
+		t.Fatal("source description must not contain the token itself (日志泄漏)")
+	}
+
+	// 3) 两边都没有 → 空串且不报错（缺 token 由调用方给出可操作的报错）
+	c3 := CloudflaredConfig{TunnelTokenFile: filepath.Join(dir, "missing")}
+	tok3, _, err := c3.ResolveTunnelToken()
+	if err != nil || tok3 != "" {
+		t.Fatalf("missing file: tok=%q err=%v (want empty, nil)", tok3, err)
+	}
+}
+
+// exampleConfigPath 指向仓库根的配置模板。相对路径基于本测试文件所在目录
+// （internal/config）。
+const exampleConfigPath = "../../config.example.yaml"
+
+// TestConfig_ExampleFileIsLoadable 是 config.example.yaml 的守卫测试：
+// 模板必须始终能被 Load 解析，且字段落在文档承诺的值上。任何新增/重命名字段
+// 而忘了同步模板，都会在这里变红 —— 否则用户 copy 模板起来会直接报错。
+func TestConfig_ExampleFileIsLoadable(t *testing.T) {
+	cfg, err := Load(exampleConfigPath)
+	if err != nil {
+		t.Fatalf("config.example.yaml 无法加载（模板已失效，请同步字段）: %v", err)
+	}
+	if cfg.Server.Port != 3000 || cfg.Server.Mode != "debug" {
+		t.Fatalf("server = %+v, want 3000/debug", cfg.Server)
+	}
+	// 默认走"零配置可用"的临时隧道：named 需要使用者自备域名+token。
+	if cfg.Auth.Cloudflared.Mode != "quick" {
+		t.Fatalf("example cloudflared.mode = %q, want quick（模板必须是零配置可跑的路径）", cfg.Auth.Cloudflared.Mode)
+	}
+	if cfg.Auth.Cloudflared.IsNamed() {
+		t.Fatal("example 不应是 named 模式")
+	}
+	if cfg.Pieqi.BaseBranch != "main" {
+		t.Fatalf("example base_branch = %q, want main（默认分支，用户按需改）", cfg.Pieqi.BaseBranch)
+	}
+	if cfg.Agents.Claude.Transport != "sdk-bridge" {
+		t.Fatalf("example agents.claude.transport = %q, want sdk-bridge", cfg.Agents.Claude.Transport)
+	}
+	if cfg.Channels.Lark.EventMode != "longconn" {
+		t.Fatalf("example lark.event_mode = %q, want longconn（无需公网，推荐）", cfg.Channels.Lark.EventMode)
+	}
+	// 弃用字段不应出现在模板里（写了会打弃用告警）。
+	if len(cfg.Deprecations) != 0 {
+		t.Fatalf("example 触发了弃用告警 %v，模板应展示 agents.* 新写法", cfg.Deprecations)
+	}
+}
+
+// TestConfig_ExampleContainsNoCredentials 是**防泄露守卫**：模板是可提交、
+// 可能公开的文件，任何人往里填了真实凭据（或真实域名）都会在这里变红。
+func TestConfig_ExampleContainsNoCredentials(t *testing.T) {
+	cfg, err := Load(exampleConfigPath)
+	if err != nil {
+		t.Fatalf("load example: %v", err)
+	}
+	checks := []struct {
+		name string
+		val  string
+	}{
+		{"channels.lark.app_id", cfg.Channels.Lark.AppID},
+		{"channels.lark.app_secret", cfg.Channels.Lark.AppSecret},
+		{"channels.lark.verify_token", cfg.Channels.Lark.VerifyToken},
+		{"channels.lark.encrypt_key", cfg.Channels.Lark.EncryptKey},
+		{"api.token", cfg.API.Token},
+		{"agents.claude.bridge.token", cfg.Agents.Claude.Bridge.Token},
+		{"auth.cloudflared.tunnel_token", cfg.Auth.Cloudflared.TunnelToken},
+		{"auth.cloudflared.public_hostname", cfg.Auth.Cloudflared.PublicHostname},
+	}
+	for _, c := range checks {
+		if strings.TrimSpace(c.val) != "" {
+			t.Errorf("模板里 %s 非空 (%q)：config.example.yaml 会被提交，凭据/个人域名必须留空", c.name, c.val)
+		}
+	}
+
+	// 兜底：整份文件里不该出现疑似真实隧道 token 的 base64 凭据串。
+	raw, err := os.ReadFile(exampleConfigPath)
+	if err != nil {
+		t.Fatalf("read example: %v", err)
+	}
+	if strings.Contains(string(raw), "eyJhIjoi") {
+		t.Fatal("模板里出现疑似 Cloudflare 隧道凭据（eyJhIjoi…），必须移除")
+	}
+}

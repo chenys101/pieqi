@@ -101,7 +101,8 @@ pieqi/
 ├── web/                       # PWA 前端（Vite），embed.go 嵌入二进制
 ├── docs/                      # 设计文档与规划（见下文文档索引）
 ├── build.sh                   # 构建 + 发布包脚本
-└── config.yaml
+├── config.example.yaml        # 配置模板：全字段 + 注释，复制成 config.yaml 后修改
+└── config.yaml                # 本地实际配置（含个人域名/端口/凭据，.gitignore 忽略，不入库）
 ```
 
 运行时数据在 `~/.pieqi/`（可用环境变量 `PIEQI_HOME` 覆盖）：`tasks/`、`worktrees/`、`sessions/`、`feishu_binding.json`、`lark_credentials.json` 等，不入仓库。
@@ -113,6 +114,9 @@ pieqi/
 ### 后端
 
 ```bash
+# 准备配置（首次运行必做；模板已含可跑默认值）
+cp config.example.yaml config.yaml
+
 # 构建二进制（产物在 bin/）
 mkdir -p bin && go build -o bin/pieqi ./cmd/pieqi
 
@@ -139,7 +143,9 @@ npm run dev          # 开发服务器（:5174，/api、/internal 代理到 :300
 1. **一键注册（推荐）**：本机打开 PWA → 设置 → 添加渠道 → 扫码，自动创建飞书自建应用并写入凭据。
 2. **手动配置**：在[飞书开放平台](https://open.feishu.cn)创建自建应用，填 `config.yaml` 的 `channels.lark`（长连接只需 `app_id` + `app_secret`；webhook 模式还需 `verify_token` + `encrypt_key`）。
 
-### 关键配置（`config.yaml`）
+### 关键配置
+
+完整字段、可选值与环境变量覆盖方式见 **[`config.example.yaml`](config.example.yaml)**（每个旋钮都带注释）。日常最常改的几项：
 
 ```yaml
 server:
@@ -161,13 +167,14 @@ agents:
 
 pieqi:
   max_concurrent_per_project: 4
-  base_branch: master
+  base_branch: main        # worktree 基准分支（按你仓库的主分支改：main / master）
   hook_timeout: 30m        # 审批等待上限（print 回退路径）
   hook_tools: [Bash, Write, Edit, NotebookEdit]
 
 auth:
   cloudflared:
-    default_ttl: 15m       # 隧道 token 有效期：15m | 1h | 4h
+    mode: quick            # quick=临时随机域名(默认,零配置可用) | named=固定域名
+    default_ttl: 15m       # 外链 ?token= 有效期：15m | 1h | 4h
   ratelimit:
     max_failures_per_min: 5
 ```

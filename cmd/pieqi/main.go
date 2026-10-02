@@ -317,11 +317,36 @@ func main() {
 		Limiter:  auth.NewIPLimiter(cfg.Auth.RateLimit.MaxFailuresPerMin, cfg.Auth.RateLimit.BlacklistDuration),
 		Audit:    auth.NewAuditLogger(logger),
 	}
+	// 隧道凭据解析：优先配置值（含 PIEQI_AUTH_CLOUDFLARED_TUNNEL_TOKEN 覆盖），
+	// 其次仓外 token 文件（默认 ~/.pieqi/cloudflared_token）。
+	// 纪律：token 值绝不落日志 —— 只记来源；也不要写进 config.yaml（git 跟踪文件）。
+	tunnelToken, tokenSrc, err := cfg.Auth.Cloudflared.ResolveTunnelToken()
+	if err != nil {
+		logger.Warn("resolve cloudflared tunnel token failed", zap.Error(err))
+	}
+	if cfg.Auth.Cloudflared.IsNamed() {
+		if tunnelToken == "" {
+			logger.Warn("named tunnel mode selected but no tunnel token found; " +
+				"隧道启动会失败（请设置 PIEQI_AUTH_CLOUDFLARED_TUNNEL_TOKEN 或写 " +
+				cfg.Auth.Cloudflared.TunnelTokenFile + "）")
+		} else {
+			logger.Info("named tunnel mode", zap.String("public_hostname", cfg.Auth.Cloudflared.PublicHostname),
+				zap.String("token_source", tokenSrc))
+		}
+	} else {
+		logger.Info("quick tunnel mode (trycloudflare 临时域名)")
+	}
 	tunnelMgr := auth.NewTunnelManager(auth.TunnelConfig{
 		BinaryPath: cfg.Auth.Cloudflared.BinaryPath,
 		LocalURL:   fmt.Sprintf("http://localhost:%d", cfg.Server.Port),
 		Tokens:     authTokens,
 		Logger:     logger,
+		// 隧道模式：quick = trycloudflare 随机域名（默认）；named = 固定域名
+		// （Zero Trust named tunnel，域名永不回收）。named 需 tunnel_token +
+		// public_hostname，见 config.yaml cloudflared 段注释。
+		Mode:           cfg.Auth.Cloudflared.Mode,
+		TunnelToken:    tunnelToken,
+		PublicHostname: cfg.Auth.Cloudflared.PublicHostname,
 		// 跨重启清理孤儿 cloudflared：强杀服务时 defer Stop 不执行，PID 文件
 		// 让下次 Start 能杀掉残留进程（见 auth.TunnelManager.cleanupOrphans）。
 		PIDFile: filepath.Join(dataRoot, "cloudflared.pid"),

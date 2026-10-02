@@ -172,10 +172,27 @@ type AuthConfig struct {
 	RateLimit         RateLimitConfig   `mapstructure:"ratelimit"`
 }
 
-// CloudflaredConfig Cloudflared 临时隧道配置。
+// CloudflaredConfig Cloudflared 隧道配置。
 type CloudflaredConfig struct {
 	BinaryPath string        `mapstructure:"binary_path"` // cloudflared 可执行路径；默认 "cloudflared"（PATH 查找）
 	DefaultTTL time.Duration `mapstructure:"default_ttl"` // 默认 15m；可选 15m/1h/4h
+
+	// Mode 隧道模式："quick"（默认，trycloudflare 随机域名，Cloudflare 会周期性
+	// 回收）| "named"（固定域名：Zero Trust 建 named tunnel，域名永不回收）。
+	Mode string `mapstructure:"mode"` // 默认 quick
+	// TunnelToken named 模式的 cloudflared tunnel token（base64 串）。quick 模式忽略。
+	//
+	// ⚠️ 不要把这个值提交进仓库：config.yaml 是 git 跟踪文件。推荐留空，
+	// 改用 PIEQI_AUTH_CLOUDFLARED_TUNNEL_TOKEN 环境变量，或写入 TunnelTokenFile
+	// 指向的仓外文件（默认 ~/.pieqi/cloudflared_token）。解析顺序：
+	// 环境变量 > 本字段 > TunnelTokenFile。
+	TunnelToken string `mapstructure:"tunnel_token"`
+	// TunnelTokenFile 存放隧道 token 的仓外文件路径；默认
+	// <dataRoot>/cloudflared_token（~/.pieqi/cloudflared_token）。空 = 用默认路径。
+	// 读取时会 TrimSpace，允许文件里带尾随换行。
+	TunnelTokenFile string `mapstructure:"tunnel_token_file"`
+	// PublicHostname named 模式对外域名，如 304456.xyz。quick 模式忽略。
+	PublicHostname string `mapstructure:"public_hostname"`
 
 	// 自动自愈（域名回收检测）：Cloudflare 会周期性回收 trycloudflare 快速
 	// 隧道域名（公网 DNS 变 NXDOMAIN），即使 cloudflared 进程仍存活。TunnelManager
@@ -183,6 +200,37 @@ type CloudflaredConfig struct {
 	// 即判定死亡，自动重启隧道换新域名并推送新链接。
 	HealthCheckInterval time.Duration `mapstructure:"health_check_interval"` // 默认 5m；<=0 关闭巡检
 	HealthCheckFailures int           `mapstructure:"health_check_failures"` // 默认 3；连续失败阈值
+}
+
+// ResolveTunnelToken 解析 named 模式的隧道凭据，返回 (token, 来源描述, error)。
+// 顺序：配置值（含 PIEQI_AUTH_CLOUDFLARED_TUNNEL_TOKEN 环境变量覆盖）
+// > TunnelTokenFile（默认 ~/.pieqi/cloudflared_token，仓外文件）。
+// 两边都没有 → 返回空串且不报错，由调用方按"缺 token"处理（错误信息才好指向配置项）。
+// 来源描述只用于日志，**绝不含 token 本身**。
+func (c CloudflaredConfig) ResolveTunnelToken() (string, string, error) {
+	if t := strings.TrimSpace(c.TunnelToken); t != "" {
+		return t, "config/env", nil
+	}
+	if c.TunnelTokenFile == "" {
+		return "", "", nil
+	}
+	b, err := os.ReadFile(c.TunnelTokenFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", nil // 文件不存在 = 未配置，不算错误
+		}
+		return "", "", fmt.Errorf("read tunnel token file %s: %w", c.TunnelTokenFile, err)
+	}
+	t := strings.TrimSpace(string(b))
+	if t == "" {
+		return "", "", nil
+	}
+	return t, "file:" + c.TunnelTokenFile, nil
+}
+
+// IsNamed 报告是否选用 named（固定域名）隧道模式；其余值（含空）都按 quick 处理。
+func (c CloudflaredConfig) IsNamed() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Mode), "named")
 }
 
 // RateLimitConfig 外网 Token 暴力破解限流。
@@ -198,8 +246,11 @@ func Load(configPath string) (*Config, error) {
 	v.SetConfigFile(configPath)
 	v.SetConfigType("yaml")
 
-	// 环境变量覆盖（如 PIEQI_SERVER_PORT=3000）
+	// 环境变量覆盖（如 PIEQI_SERVER_PORT=3000）。
+	// 嵌套 key 必须配 KeyReplacer：否则 viper 会去找 "PIEQI_AUTH.CLOUDFLARED.TUNNEL_TOKEN"
+	// 这种含点的变量名（合法环境变量名不含点），覆盖永远不生效。
 	v.SetEnvPrefix("PIEQI")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
 	// 默认值
@@ -233,6 +284,10 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("auth.feishu_binding_file", filepath.Join(DefaultDataRoot(), "feishu_binding.json"))
 	v.SetDefault("auth.cloudflared.binary_path", "cloudflared")
 	v.SetDefault("auth.cloudflared.default_ttl", "15m")
+	v.SetDefault("auth.cloudflared.mode", "quick")
+	v.SetDefault("auth.cloudflared.tunnel_token", "")
+	v.SetDefault("auth.cloudflared.tunnel_token_file", filepath.Join(DefaultDataRoot(), "cloudflared_token"))
+	v.SetDefault("auth.cloudflared.public_hostname", "")
 	v.SetDefault("auth.cloudflared.health_check_interval", "5m")
 	v.SetDefault("auth.cloudflared.health_check_failures", 3)
 	v.SetDefault("auth.ratelimit.max_failures_per_min", 5)
@@ -261,6 +316,11 @@ func Load(configPath string) (*Config, error) {
 	// 空 credentials_file 回退默认路径(同 feishu_binding_file 模式)
 	if cfg.Channels.Lark.CredentialsFile == "" {
 		cfg.Channels.Lark.CredentialsFile = filepath.Join(DefaultDataRoot(), "lark_credentials.json")
+	}
+
+	// 空 tunnel_token_file 回退默认路径（同上：显式空值会覆盖 viper 默认值）
+	if cfg.Auth.Cloudflared.TunnelTokenFile == "" {
+		cfg.Auth.Cloudflared.TunnelTokenFile = filepath.Join(DefaultDataRoot(), "cloudflared_token")
 	}
 
 	// 空 bots_dir 回退默认路径（同上：显式空值会覆盖 viper 默认值）
