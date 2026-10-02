@@ -147,7 +147,18 @@ type AgentQoderConfig struct {
 
 // QoderACPConfig qoder 的 ACP 配置（与 ACPConfig 字段对应，但 mapstructure 键不带 acp_ 前缀）。
 type QoderACPConfig struct {
-	AgentType    string        `mapstructure:"agent_type"`
+	AgentType string `mapstructure:"agent_type"`
+	// SpawnCommand spawn 命令分词；空 = 按 AgentType 取默认（裸名 "qodercli"）。
+	//
+	// 首元素的解析顺序（见 agent.resolveSpawnName）：显式路径原样使用 →
+	// exec.LookPath（系统 PATH）→ 各 CLI 常见安装落点回退
+	// （qodercli：~/.qoder/bin/qodercli/<name>、$QODER_HOME/bin/...）。
+	//
+	// 之所以要回退：Windows 的 PATH 是**进程启动那一刻的环境快照**，安装器只写
+	// 用户级 PATH，而宿主（IDE/计划任务/常驻服务）常早于安装启动 → 服务进程继承
+	// 不到，裸名直接 `executable file not found in %PATH%`（症状：claude 正常、
+	// 只有 qoder 全挂）。故**裸名即可**，无需在配置里写死机器相关的绝对路径；
+	// 确实要写死时也支持（显式路径不会被改写）。
 	SpawnCommand []string      `mapstructure:"spawn_command"`
 	InitTimeout  time.Duration `mapstructure:"init_timeout"`
 	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`

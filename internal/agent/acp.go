@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,11 @@ type ACPAgent struct {
 	logger  *zap.Logger
 	cmdName string
 	cmdArgs []string
+
+	// binPath 是实际 exec 的路径：由 cmdName 经 spawnNameResolver 解析而来
+	// （裸名补查常见安装落点，见 resolveSpawnName）。解析不到时等于 cmdName，
+	// 让 exec 报出标准错误。cmdName 保持"配置里写的原样"，供诊断/测试断言。
+	binPath string
 
 	// 进程与连接（Start 后填充；Start 之前为 nil）
 	cmd    *exec.Cmd
@@ -132,6 +138,7 @@ func NewACPAgent(cfg config.ACPConfig, logger *zap.Logger) *ACPAgent {
 		logger:       logger,
 		cmdName:      name,
 		cmdArgs:      args,
+		binPath:      spawnNameResolver(name),
 		done:         make(chan struct{}),
 		pendingPerms: make(map[string]chan PermissionResponse),
 		lifeCtx:      lifeCtx,
@@ -202,6 +209,95 @@ func defaultSpawnCommand(agentType string) (string, []string) {
 	}
 }
 
+// spawnNameResolver 把配置里的 spawn 命令名解析为可直接 exec 的路径。
+// 可覆盖（测试注入用），同 adapterResolver 模式。
+var spawnNameResolver = resolveSpawnName
+
+// vendorHomeDirs 命令名 → 用户主目录下的安装根目录名。
+// 注意 **vendor 目录名与命令名不同**（qodercli 装在 ~/.qoder/），故必须显式映射，
+// 不能靠 ".<命令名>" 推导。
+var vendorHomeDirs = map[string][]string{
+	"qodercli": {".qoder"},
+}
+
+// spawnHomeEnvs 命令名 → 声明安装根的环境变量名（安装器可选提供）。
+var spawnHomeEnvs = map[string][]string{
+	"qodercli": {"QODER_HOME"},
+}
+
+// spawnFallbackPaths 返回裸名 LookPath 失败后可按序尝试的候选**文件**路径。
+func spawnFallbackPaths(name string) []string {
+	if name == "" {
+		return nil
+	}
+	exe := name
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
+
+	// 收集安装根：用户主目录下的 vendor 目录 + 环境变量声明的根。
+	var roots []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		for _, vd := range vendorHomeDirs[name] {
+			roots = append(roots, filepath.Join(home, vd))
+		}
+	}
+	for _, env := range spawnHomeEnvs[name] {
+		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+			roots = append(roots, v)
+		}
+	}
+
+	var files []string
+	seen := make(map[string]bool)
+	for _, r := range roots {
+		for _, p := range []string{
+			// Windows 安装器的典型落点：<root>/bin/<name>/<name>.exe
+			// —— bin 下还有一层**与可执行文件同名**的子目录（qodercli 就是这种）
+			filepath.Join(r, "bin", name, exe),
+			filepath.Join(r, "bin", exe),
+			filepath.Join(r, exe),
+		} {
+			if !seen[p] {
+				seen[p] = true
+				files = append(files, p)
+			}
+		}
+	}
+	return files
+}
+
+// resolveSpawnName 解析 spawn 命令名，返回可直接 exec 的路径：
+//  1. 空串 → 原样返回（由调用方报"empty spawn command"）；
+//  2. 含路径分隔符（相对/绝对路径）→ **原样返回**，绝不改写用户显式指定的路径；
+//  3. exec.LookPath 命中 → 返回解析结果；
+//  4. 依次尝试 spawnFallbackPaths → 命中即返回绝对路径；
+//  5. 都没命中 → 原样返回裸名（让 exec 报出标准错误，调用方再补充提示）。
+//
+// 动机（2026-10-02 线上排查）：Windows 的 PATH 是**进程启动那一刻从父进程继承的
+// 环境快照**，不动态读注册表。安装器只把落点写进用户级 PATH，而宿主（IDE / 常驻
+// 服务 / 沙箱 shell）往往早于安装启动 —— 它派生的 pieqi 进程就继承不到该项，裸名
+// `qodercli` 直接报 `exec: "qodercli": executable file not found in %PATH%`
+// （典型症状：claude 正常、只有 qoder 全挂）。
+// 有了这层回退，配置里只写裸名也能跑，且配置可跨机器复制。
+func resolveSpawnName(name string) string {
+	if name == "" {
+		return name
+	}
+	if strings.ContainsAny(name, `/\`) || filepath.IsAbs(name) {
+		return name
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, cand := range spawnFallbackPaths(name) {
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+			return cand
+		}
+	}
+	return name
+}
+
 // CmdName 返回 spawn 命令名（测试与诊断用）。
 func (a *ACPAgent) CmdName() string { return a.cmdName }
 
@@ -210,6 +306,15 @@ func (a *ACPAgent) CmdArgs() []string {
 	out := make([]string, len(a.cmdArgs))
 	copy(out, a.cmdArgs)
 	return out
+}
+
+// BinPath 返回实际 exec 的可执行文件路径（裸名经 resolveSpawnName 解析后的绝对
+// 路径；解析不到时与 CmdName 相同）。测试与诊断用。
+func (a *ACPAgent) BinPath() string {
+	if a.binPath == "" {
+		return a.cmdName
+	}
+	return a.binPath
 }
 
 // Start spawn agent 进程、建立 ClientSideConnection、完成 initialize 握手。
@@ -235,7 +340,13 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 	}
 	// 绑自持 lifeCtx 而非调用方 ctx：进程存活期 = 会话存活期，不随调用方 turn 结束被取消
 	// （见 lifeCtx 字段注释）。调用方 ctx 只用于下面的 initialize 握手超时。
-	cmd := exec.CommandContext(a.lifeCtx, a.cmdName, a.cmdArgs...)
+	// binPath：裸名已经 resolveSpawnName 解析（构造期），起不来时日志能直接看到绝对路径。
+	binPath := a.BinPath()
+	if binPath != a.cmdName {
+		a.logger.Info("acp spawn command resolved",
+			zap.String("configured", a.cmdName), zap.String("resolved", binPath))
+	}
+	cmd := exec.CommandContext(a.lifeCtx, binPath, a.cmdArgs...)
 	cmd.Stderr = newLineCollector(a.logger, "acp agent stderr")
 
 	stdin, err := cmd.StdinPipe()
@@ -247,7 +358,17 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 		return fmt.Errorf("acp: stdout pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("acp: start %s: %w", a.cmdName, err)
+		// 找不到可执行文件是最常见的一类失败（PATH 未生效 / 装到非 PATH 目录）。
+		// 把已尝试的候选落点一并报出来，避免下一个人再去猜安装位置。
+		if errors.Is(err, exec.ErrNotFound) {
+			hint := ""
+			if cands := spawnFallbackPaths(a.cmdName); len(cands) > 0 {
+				hint = "，也已尝试安装落点: " + strings.Join(cands, ", ")
+			}
+			return fmt.Errorf("acp: start %s: %w（未在 PATH 中找到 %q%s；请将其加入 PATH，或在配置里写绝对路径）",
+				binPath, err, a.cmdName, hint)
+		}
+		return fmt.Errorf("acp: start %s: %w", binPath, err)
 	}
 	a.cmd = cmd
 	a.stdin = stdin

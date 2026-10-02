@@ -501,3 +501,27 @@ func TestConfig_ExampleContainsNoCredentials(t *testing.T) {
 		t.Fatal("模板里出现疑似 Cloudflare 隧道凭据（eyJhIjoi…），必须移除")
 	}
 }
+
+// TestConfig_ExampleQoderSpawnIsBareName 守卫：模板里的 qoder spawn 命令必须写裸名。
+// 裸名由 agent.resolveSpawnName 补「安装落点回退」（见 internal/agent/acp.go），
+// 跨机器可复制；一旦有人往模板里写死某台机器的绝对路径（如 C:\Users\<名字>\...），
+// 这份模板对别人就失效了 —— 正是本用例要拦住的回归。
+func TestConfig_ExampleQoderSpawnIsBareName(t *testing.T) {
+	cfg, err := Load(exampleConfigPath)
+	if err != nil {
+		t.Fatalf("load example: %v", err)
+	}
+	cmd := cfg.Agents.Qoder.ACP.SpawnCommand
+	if len(cmd) == 0 {
+		t.Fatal("example agents.qoder.acp.spawn_command 不应为空（应显式带 -m Qwen3.8-Flash）")
+	}
+	if strings.ContainsAny(cmd[0], `/\`) {
+		t.Fatalf("模板 spawn_command[0] = %q 含路径分隔符：请写裸名（解析器会补安装落点），不要写死机器路径", cmd[0])
+	}
+	if cmd[0] != "qodercli" {
+		t.Fatalf("模板 spawn_command[0] = %q, want qodercli", cmd[0])
+	}
+	if joined := strings.Join(cmd, " "); !strings.Contains(joined, "Qwen3.8-Flash") {
+		t.Fatalf("模板应显式 -m Qwen3.8-Flash（否则走付费默认模型），实际 %v", cmd)
+	}
+}
