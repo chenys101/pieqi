@@ -18,7 +18,8 @@ const preview = computed(() => (props.result ?? '').split('\n')[0]?.slice(0, 100
       @click="collapsed = !collapsed"
     >
       <span>{{ isError ? '✗' : '↳' }}</span>
-      <span class="font-mono">{{ toolName || '结果' }}</span>
+      <!-- 同 ToolCard：工具名可截断，否则长命令撑破视口（横向滚动条） -->
+      <span class="min-w-0 truncate font-mono" :title="toolName">{{ toolName || '结果' }}</span>
       <span v-if="isError">失败</span>
       <span v-if="collapsed && preview" class="min-w-0 flex-1 truncate opacity-70">{{ preview }}</span>
       <span class="ml-auto shrink-0 opacity-70 transition-transform" :class="collapsed ? '-rotate-90' : ''">▾</span>

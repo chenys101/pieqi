@@ -15,7 +15,9 @@ const rows = computed(() => formatToolInput(props.input))
       @click="collapsed = !collapsed"
     >
       <span>🔧</span>
-      <span class="font-mono font-semibold uppercase">{{ toolName }}</span>
+      <!-- 工具名可截断：ACP 把整条命令当作 tool_name（可达数百字符），
+           flex 项默认 min-width:auto 不允许缩到内容宽度以下，会把整行顶出视口 → 详情页横向滚动条 -->
+      <span class="min-w-0 truncate font-mono font-semibold uppercase" :title="toolName">{{ toolName }}</span>
       <!-- 首行参数摘要（折叠时的预览） -->
       <span v-if="collapsed && rows.length" class="min-w-0 flex-1 truncate text-muted">
         {{ rows[0].value }}

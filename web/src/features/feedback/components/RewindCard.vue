@@ -16,7 +16,8 @@ const restored = computed(() => rewind.value?.restored ?? [])
   <div class="event-enter rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
     <button class="flex w-full items-center gap-2 text-left" @click="expanded = !expanded">
       <span>↩</span>
-      <span class="text-warning">
+      <!-- min-w-0：中文长句没有断行点，flex 项默认 min-width:auto 会把整句撑成一行 → 溢出视口 -->
+      <span class="min-w-0 break-words text-warning">
         {{ event.payload.text || `已回退到 Turn #${rewind?.toTurn ?? '?'} 之前` }}
       </span>
       <span v-if="restored.length" class="text-xs text-muted">恢复 {{ restored.length }} 个文件</span>
