@@ -89,3 +89,6 @@ web/dist.bak.*
 # 模板见 config.example.yaml（cp config.example.yaml config.yaml 后修改）。
 /config.yaml
 *.local.yaml
+
+# agent 协作指南：本机维护，不入库（CLAUDE.md 指针已删除，两份都不进仓库）。
+/AGENTS.md
