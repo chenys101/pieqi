@@ -24,7 +24,8 @@ import (
 //     用宽松规则识别 Q/问题行与 A/数字编号选项行。靠「选项行占比」防误判。
 
 // ChoicePromptSection 追加到 system prompt 的方案拍板协议文案。
-// 由 main.go 读 CLAUDE.md 后拼接，经 --append-system-prompt 注入 claude。
+// 当前未接线：TaskRunner 的 sysPrompt 由 main.go 传入空串，实际系统提示来自
+// agents.claude.print.sys_prompt 配置。本常量是要拼进去的文案，尚未被拼入。
 //
 // 设计取舍：不要求模型输出结构化标记（曾用 [CHOICE]...[/CHOICE] 块 + 后端解析拦截
 // completeTask 改 waiting_input，但非 Claude 后端如 deepseek 对格式遵从不稳定、
