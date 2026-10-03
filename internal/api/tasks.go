@@ -154,7 +154,7 @@ func (s *Server) getTask(c *gin.Context) {
 type interveneReq struct {
 	Kind       string `json:"kind" binding:"required"` // "decision" | "append_prompt"
 	DecisionID string `json:"decision_id"`
-	Choice     string `json:"choice"` // approve | deny
+	Choice     string `json:"choice"` // approve | approve_session | deny
 	Text       string `json:"text"`
 }
 

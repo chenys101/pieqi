@@ -18,6 +18,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,18 @@ type PermissionWire struct {
 	// autoApprove 免审名单：ToolKind 命中即自动放行（选首个 allow 选项调 adapter.Approve），
 	// 不置 waiting_input、不弹卡、不推 IM、不启动超时定时器。空 = 关闭（全部走人工审批）。
 	autoApprove map[string]struct{}
+
+	// sessionAlways 是用户在本次会话里点过"同类免审"的 ToolKind 集合。
+	//
+	// 为什么不让 agent 自己去记（ACP 的 allow_always / qodercli 的
+	// proceed_always_and_save）：那等于把"这条以后都不用问了"写进 agent 的配置，
+	// 而 pieqi 的 L2/L3 硬边界（model.RiskLevel.AutoApprovable）判据是**每一笔都要有人看**。
+	// 透传 allow_always 之后 agent 不再发 RequestPermission，pieqi 连拦截的机会都没有 ——
+	// 一次点击就把门禁从"人审"降级成"上次我点过"，而且跨会话、跨任务生效，无人能撤销。
+	//
+	// 所以这份记账留在 wire 里：受 pw.mu 保护、不落盘、随 wire.Unwire/会话销毁而消失。
+	// 语义是"这个任务这一轮会话内，同类操作我认了"。
+	sessionAlways map[string]struct{}
 
 	// mu 守护 pending 与 closed。每个 pending entry 自带 done 标志，
 	// 保证 Resolve 与超时定时器之间只有一个能真正驱动 adapter（先到先得）。
@@ -93,14 +106,15 @@ func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore,
 		logger = zap.NewNop()
 	}
 	pw := &PermissionWire{
-		adapter: adapter,
-		bus:     bus,
-		store:   store,
-		taskID:  taskID,
-		notify:  notify,
-		timeout: timeout,
-		logger:  logger,
-		pending: make(map[string]*permPending),
+		adapter:       adapter,
+		bus:           bus,
+		store:         store,
+		taskID:        taskID,
+		notify:        notify,
+		timeout:       timeout,
+		logger:        logger,
+		pending:       make(map[string]*permPending),
+		sessionAlways: make(map[string]struct{}),
 	}
 	pw.setAutoApprove(autoApprove)
 	adapter.OnPermissionRequest(pw.onPermissionRequest)
@@ -176,10 +190,7 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 //   - adapter.Approve 失败（如请求已被另一路径解决）——回退走人工审批，由 30min 超时兜底，
 //     不会永久卡死。
 func (pw *PermissionWire) tryAutoApprove(req agent.PermissionRequest) bool {
-	if len(pw.autoApprove) == 0 {
-		return false
-	}
-	if _, ok := pw.autoApprove[req.ToolKind]; !ok {
+	if !pw.autoApproves(req.ToolKind) {
 		return false
 	}
 	optionID, ok := pickAllowOption(req.Options)
@@ -202,6 +213,33 @@ func (pw *PermissionWire) tryAutoApprove(req agent.PermissionRequest) bool {
 		zap.String("task", pw.taskID), zap.String("req", req.ReqID),
 		zap.String("tool_kind", req.ToolKind), zap.String("option", optionID))
 	return true
+}
+
+// autoApproves 该 ToolKind 是否免审：配置名单（由 L0/L1 推导）命中，或用户本次会话点过
+// "同类免审"。两个集合都在 pw.mu 下读，但**不持锁调 adapter**（那是一次网络往返）。
+func (pw *PermissionWire) autoApproves(kind string) bool {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	if _, ok := pw.autoApprove[kind]; ok {
+		return true
+	}
+	_, ok := pw.sessionAlways[kind]
+	return ok
+}
+
+// rememberKind 记下"本会话同类免审"的 ToolKind。
+//
+// 空 kind 不记：它的意思是"我们不认识这个操作"（RiskOfKind 把它算作 L2 就是这个理由）。
+// 记下空 kind 等于给以后所有叫不出名字的操作发通行证 —— 白名单会悄悄变成通配符。
+func (pw *PermissionWire) rememberKind(kind string) {
+	if kind == "" {
+		return
+	}
+	pw.mu.Lock()
+	pw.sessionAlways[kind] = struct{}{}
+	pw.mu.Unlock()
+	pw.logger.Info("same-kind approvals auto-passed for the rest of this session",
+		zap.String("task", pw.taskID), zap.String("tool_kind", kind))
 }
 
 // show 把 reqID 展示为当前决策：置 waiting_input(approval) + Publish + IM 通知 + 启动超时定时器。
@@ -242,15 +280,21 @@ func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary
 		}
 		t.Status = model.TaskWaitingInput
 		t.CurrentDecision = &model.Decision{
-			ID:        reqID,
-			Kind:      model.DecisionKindApproval,
-			ToolName:  toolTitle,
+			ID:   reqID,
+			Kind: model.DecisionKindApproval,
+			// 标题只放"一屏读得完的一句话"（见 permLabel）：qodercli 把整条命令塞进
+			// toolCall.title，原样进标题会让标题栏和摘要栏渲染同一串文本（卡片长度翻倍）。
+			// 完整内容始终在 Summary 里 —— 批准前必须能看到它将做什么。
+			ToolName: permLabel(toolTitle, toolKind),
 			// 风险分级在这里落定：**和自动放行判据共用同一张表**（riskLevelKinds）。
 			// 两者必须是同一个真相 —— 若卡片按一张表显示"L3 破坏性"、
 			// 而放行逻辑按另一张表认为它可以自动通过，用户看到的强度就是谎言。
-			Risk:      RiskOfKind(toolKind),
-			Summary:   summary,
-			Options:   []string{"approve", "deny"},
+			Risk:    RiskOfKind(toolKind),
+			Summary: summary,
+			// approve_session 只在这里出现 = 只有 ACP 路径支持"同类免审"。
+			// hook 路径（claude PreToolUse）的 Resolve 不认这个值，前端按这份列表决定
+			// 长第三个按钮 —— 用 Options 当能力声明，而不是让前端去猜"这是哪条路径"。
+			Options:   []string{"approve", "deny", "approve_session"},
 			CreatedAt: time.Now(),
 		}
 		applied = true
@@ -275,6 +319,8 @@ func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary
 // Resolve 投递用户审批决策。由 M4 的 AgentManager.Intervene 路由调用（ACP 路径）。
 //
 //   - choice="approve"：从记录的 options 选首个 allow（allow_once 优先，次 allow_always）→ adapter.Approve(reqID, optionID)
+//   - choice="approve_session"：同 approve，另外把该请求的 ToolKind 记进本会话免审集合
+//     （pieqi 侧记账，不写 agent 配置；见 sessionAlways 的注释）
 //   - choice="deny"：选 reject 选项（reject_once 优先）用 Approve 选中；无 reject 选项则 adapter.Deny（→Cancelled）
 //
 // 成功后 task 回 running（清 CurrentDecision + Publish task_updated），停掉超时定时器。
@@ -307,16 +353,24 @@ func (pw *PermissionWire) Resolve(decisionID, choice string) error {
 		}
 	}
 	options := entry.options
+	toolKind := entry.toolKind
 	pw.mu.Unlock()
 
 	var adapterErr error
 	switch choice {
-	case "approve":
+	case "approve", "approve_session":
 		optionID, ok := pickAllowOption(options)
 		if !ok {
 			return fmt.Errorf("no allow option to approve for decision %q", decisionID)
 		}
 		adapterErr = pw.callAdapterApprove(decisionID, optionID)
+		// "同类免审"只在**这次真的放行了**之后记账：approve 失败说明这次没批，
+		// 记下去会让以后同类静默通过。
+		// 注意回给 agent 的仍是 allow_once —— 会话内的免审由 pieqi 自己判，
+		// agent 侧那份"始终允许"不会被写（理由见 PermissionWire.sessionAlways）。
+		if adapterErr == nil && choice == "approve_session" {
+			pw.rememberKind(toolKind)
+		}
 	case "deny":
 		if optID, ok := pickRejectOption(options); ok {
 			// 选中 reject 选项即拒绝（ACP Selected outcome 带该 optionId）。
@@ -326,7 +380,7 @@ func (pw *PermissionWire) Resolve(decisionID, choice string) error {
 			adapterErr = pw.callAdapterDeny(decisionID)
 		}
 	default:
-		return fmt.Errorf("invalid choice %q (want approve/deny)", choice)
+		return fmt.Errorf("invalid choice %q (want approve/approve_session/deny)", choice)
 	}
 	if adapterErr != nil {
 		return fmt.Errorf("adapter: %w", adapterErr)
@@ -512,17 +566,20 @@ func (pw *PermissionWire) callAdapterDeny(reqID string) error {
 
 // --- 辅助 ---
 
-// buildPermSummary 由 PermissionRequest 构造决策摘要：ToolTitle (+ToolKind) 优先，
-// 次 ToolKind，再次 RawInput 截断，兜底 ToolCallID。参考 setWaitingInput 的 summary 语义。
+// buildPermSummary 由 PermissionRequest 构造决策摘要：**全文，不截断**。
+//
+// 摘要栏是用户点"批准"前唯一能看到"将发生什么"的地方，而飞书那条 `/approve` 就印在同一段
+// 文本下面 —— 在这里截断等于让人盲批。长度问题交给前端折叠展示（ApprovalCard/Banner 的
+// "展开全文"），不靠删内容解决。
+//
+// 优先 ToolTitle，次 KindLabel(ToolKind)，再次 RawInput 截断（兜底分支不是要人批的内容，
+// 只是"我们没拿到标题"时的线索，所以给它上限），最后 ToolCallID。
 func buildPermSummary(req agent.PermissionRequest) string {
 	if req.ToolTitle != "" {
-		if req.ToolKind != "" {
-			return req.ToolTitle + " (" + req.ToolKind + ")"
-		}
 		return req.ToolTitle
 	}
 	if req.ToolKind != "" {
-		return req.ToolKind
+		return KindLabel(req.ToolKind)
 	}
 	if len(req.RawInput) > 0 {
 		const max = 200
@@ -534,6 +591,28 @@ func buildPermSummary(req agent.PermissionRequest) string {
 		return s
 	}
 	return req.ToolCallID
+}
+
+// permLabelMaxRunes 审批卡标题的长度上限。超过就不如不说 —— 换成人读操作类型。
+const permLabelMaxRunes = 40
+
+// permLabel 审批卡标题：title 是"一行、够短"才用它，否则退化成 kind 的人读标签。
+//
+// 两条路各有得失，这里选"够短就说人话，否则只报类别"：
+//   - claude-code 适配器给的 title 本来就是 "Bash" / "Edit src/a.go" 这种短名 → 原样保留；
+//   - qodercli 给的是整条命令（实测最长 1109 字符，且与摘要栏是同一串文本）→ 只报"执行命令"，
+//     完整命令留给摘要栏（可展开），标题不再重复一遍。
+//
+// 含换行的一律不用 —— 多行命令的**首行**往往没有信息量（`python -c "` 后面才是正文），
+// 拿它当标题比只报类别更容易误导。
+func permLabel(toolTitle, toolKind string) string {
+	if toolTitle == "" || strings.ContainsAny(toolTitle, "\r\n") {
+		return KindLabel(toolKind)
+	}
+	if len([]rune(toolTitle)) <= permLabelMaxRunes {
+		return toolTitle
+	}
+	return KindLabel(toolKind)
 }
 
 // pickAllowOption 选首个 allow 选项（allow_once 优先，次 allow_always），返回其 optionId。

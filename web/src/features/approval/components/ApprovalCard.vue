@@ -5,9 +5,10 @@ import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Button from '@/components/ui/Button.vue'
 import { ApprovalDiffCard } from '@/features/feedback'
+import ApprovalSummary from './ApprovalSummary.vue'
 import { useApprovalStore } from '@/stores/approval'
 import { useTaskStore } from '@/stores/task'
-import { RISK_LABELS, riskOf, type ApprovalRequest, type RiskLevel } from '@/types/approval'
+import { RISK_LABELS, riskOf, type ApprovalChoice, type ApprovalRequest, type RiskLevel } from '@/types/approval'
 import { timeAgo } from '@/utils/date'
 
 const props = defineProps<{ approval: ApprovalRequest }>()
@@ -15,7 +16,7 @@ const approvalStore = useApprovalStore()
 const taskStore = useTaskStore()
 const router = useRouter()
 
-const loading = ref<'approve' | 'deny' | null>(null)
+const loading = ref<ApprovalChoice | null>(null)
 const task = computed(() => taskStore.byId(props.approval.taskId))
 /** 前瞻性 Diff 展开/收起（不展开不请求） */
 const showDiff = ref(false)
@@ -59,19 +60,25 @@ const TONE: Record<RiskLevel, { box: string; head: string; badge: string; title:
 const tone = computed(() => TONE[risk.value])
 
 /** L3 二次确认：只拦"允许"，不拦"拒绝"（拒绝是安全方向，再确认一次是添堵） */
-const confirming = ref(false)
 const needsConfirm = computed(() => risk.value === 'L3')
+/** 被 L3 确认条拦下来的那个允许动作；null = 没有在确认中 */
+const pending = ref<'approve' | 'approve_session' | null>(null)
 
-async function act(kind: 'approve' | 'deny') {
-  if (kind === 'approve' && needsConfirm.value && !confirming.value) {
-    confirming.value = true
+/** 「同类免审」由后端在 options 里声明可用（只有 ACP 路径带） */
+const canApproveSession = computed(() => props.approval.options.includes('approve_session'))
+
+async function act(kind: ApprovalChoice) {
+  if (kind !== 'deny' && needsConfirm.value && pending.value === null) {
+    pending.value = kind
     return
   }
-  confirming.value = false
+  pending.value = null
   loading.value = kind
   try {
-    if (kind === 'approve') await approvalStore.approve(props.approval.taskId)
-    else await approvalStore.deny(props.approval.taskId)
+    const taskId = props.approval.taskId
+    if (kind === 'approve') await approvalStore.approve(taskId)
+    else if (kind === 'approve_session') await approvalStore.approveSession(taskId)
+    else await approvalStore.deny(taskId)
   } finally {
     loading.value = null
   }
@@ -94,8 +101,11 @@ async function act(kind: 'approve' | 'deny') {
       {{ task?.title ?? '' }}
       <span v-if="task"> · {{ task.project }}</span>
     </div>
-    <div class="mt-2 break-all rounded border border-border/60 bg-background px-2.5 py-2 font-mono text-xs">
-      {{ approval.tool ? `${approval.tool}: ` : '' }}{{ approval.summary }}
+    <!-- 工具标签独立一行：它已经是一个短人读标签（后端 permLabel 保证），
+         和摘要挤在同一个折叠块里会被算进"3 行"里，把真正要看的命令挤出折叠线 -->
+    <div v-if="approval.tool" class="mt-2 text-xs font-medium text-muted">{{ approval.tool }}</div>
+    <div class="mt-1">
+      <ApprovalSummary :text="approval.summary" />
     </div>
 
     <!-- P1：展开前瞻性 Diff（决策前看将发生什么） -->
@@ -104,22 +114,27 @@ async function act(kind: 'approve' | 'deny') {
     <!-- L3 内联二次确认：不用 confirm()（SPEC 已禁 —— 模态会盖住上下文，
          而这恰恰需要用户看着"要删的是这个文件"再确认） -->
     <div
-      v-if="confirming"
+      v-if="pending"
       class="mt-3 rounded border border-error/40 bg-error/5 px-3 py-2"
     >
-      <div class="text-xs font-medium text-error">此操作不可逆，确认允许？</div>
+      <div class="text-xs font-medium text-error">
+        此操作不可逆，确认{{ pending === 'approve_session' ? '允许并让同类操作在本会话免审' : '允许' }}？
+      </div>
       <div class="mt-0.5 text-[11.5px] text-muted">
-        批准后 Agent 会立即执行，无法撤回。不确定就先看 Diff 或进会话看上下文。
+        <template v-if="pending === 'approve_session'">
+          批准后 Agent 立即执行，且本任务剩余时间内同类操作不再问你 —— 后面几次发生什么你不会再看到。不确定就先看 Diff。
+        </template>
+        <template v-else>
+          批准后 Agent 会立即执行，无法撤回。不确定就先看 Diff 或进会话看上下文。
+        </template>
       </div>
       <div class="mt-2 flex gap-2">
-        <Button variant="danger" size="sm" :loading="loading === 'approve'" @click="act('approve')">
-          确认允许
-        </Button>
-        <Button variant="ghost" size="sm" @click="confirming = false">取消</Button>
+        <Button variant="danger" size="sm" :loading="loading === pending" @click="act(pending)">确认允许</Button>
+        <Button variant="ghost" size="sm" @click="pending = null">取消</Button>
       </div>
     </div>
 
-    <div v-if="!confirming" class="mt-3 flex gap-2">
+    <div v-if="!pending" class="mt-3 flex flex-wrap gap-2">
       <Button
         :variant="needsConfirm ? 'danger' : 'primary'"
         size="sm"
@@ -128,6 +143,18 @@ async function act(kind: 'approve' | 'deny') {
         @click="act('approve')"
       >
         允许一次
+      </Button>
+      <!-- 同类免审排在"允许一次"之后、拒绝之前：它是**更大的授权**，
+           视觉上不能比单次批准更抢眼，但必须摸得到 -->
+      <Button
+        v-if="canApproveSession"
+        variant="secondary"
+        size="sm"
+        :disabled="!!loading"
+        title="本任务剩余时间内，同一类操作（ToolKind）不再弹卡；不落盘、不跨任务、不改 agent 权限配置"
+        @click="act('approve_session')"
+      >
+        同类免审
       </Button>
       <Button variant="danger" size="sm" :loading="loading === 'deny'" :disabled="!!loading" @click="act('deny')">
         拒绝

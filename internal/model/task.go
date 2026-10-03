@@ -85,13 +85,13 @@ type Decision struct {
 }
 
 // Intervention 用户对 waiting_input 任务的一次干预。
-// kind=decision 时携带 Choice(approve/deny)；kind=append_prompt 时携带 Text（可含 /skill）。
+// kind=decision 时携带 Choice(approve/approve_session/deny)；kind=append_prompt 时携带 Text（可含 /skill）。
 type Intervention struct {
 	ID         string     `json:"id"`
 	TaskID     string     `json:"task_id"`
 	Kind       string     `json:"kind"` // "decision" | "append_prompt"
 	DecisionID string     `json:"decision_id,omitempty"`
-	Choice     string     `json:"choice,omitempty"` // "approve" | "deny"
+	Choice     string     `json:"choice,omitempty"` // "approve" | "approve_session" | "deny"
 	Text       string     `json:"text,omitempty"`
 	Source     TaskSource `json:"source"`
 	CreatedAt  time.Time  `json:"created_at"`

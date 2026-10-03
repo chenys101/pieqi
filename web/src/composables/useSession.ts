@@ -70,6 +70,15 @@ export function useSession(taskId: Ref<string>) {
     }
   }
 
+  /** 批准 + 本会话同类免审（只有 ACP 路径的决策带这个动作） */
+  async function approveSession() {
+    try {
+      await approvalStore.approveSession(taskId.value)
+    } catch (err) {
+      notify.error(err instanceof Error ? err.message : '审批失败')
+    }
+  }
+
   async function deny() {
     try {
       await approvalStore.deny(taskId.value)
@@ -97,6 +106,7 @@ export function useSession(taskId: Ref<string>) {
     submitPrompt,
     cancel,
     approve,
+    approveSession,
     deny,
     consumeForceScroll,
   }

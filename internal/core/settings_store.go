@@ -52,6 +52,36 @@ var kindRisk = func() map[string]RiskLevel {
 	return m
 }()
 
+// kindLabels ACP ToolKind 的人读标签。审批卡标题用它。
+//
+// 为什么需要它：ACP 的 `toolCall.title` 语义是"给人看的一句话"，但各家 agent
+// 实现不一 —— claude-code 适配器给的是 "Bash" 这种短名，qodercli 给的是**整条命令原文**
+// （实测平均 191 字符、最长 1109、9% 带换行）。标题栏塞进整条命令，卡片就得滚半屏，
+// 而且和摘要行是同一串文本（重复渲染）。
+//
+// 与 riskLevelKinds 同表维护：新增 ToolKind 时两边一起加，否则它会落到 `other` 的兜底标签，
+// 卡片上看不出那是什么操作。
+var kindLabels = map[string]string{
+	"read":        "读取",
+	"search":      "搜索",
+	"fetch":       "网络请求",
+	"think":       "思考",
+	"edit":        "文件编辑",
+	"move":        "移动/重命名",
+	"execute":     "执行命令",
+	"delete":      "删除",
+	"switch_mode": "切换模式",
+	"other":       "工具调用",
+}
+
+// KindLabel 由 ACP ToolKind 取人读标签；未知/空 kind 落到"工具调用"。
+func KindLabel(kind string) string {
+	if l, ok := kindLabels[kind]; ok {
+		return l
+	}
+	return "工具调用"
+}
+
 // RiskOfKind 由 ACP ToolKind 反查风险分级。
 //
 // **未知 / 空 kind 一律算 L2**，这不是保守过头的默认值，而是与 `other` 归 L2 同一个判据：

@@ -214,15 +214,23 @@ func TestWirePermission_RequestTriggersWaitingInput(t *testing.T) {
 	if cd.Kind != model.DecisionKindApproval {
 		t.Errorf("decision.Kind=%q, want approval", cd.Kind)
 	}
+	// 标题是"一屏读得完的一句话"：这条请求的 title 本来就短（"Bash"），原样保留。
 	if cd.ToolName != "Bash" {
 		t.Errorf("decision.ToolName=%q, want Bash", cd.ToolName)
 	}
-	if !strings.Contains(cd.Summary, "Bash") || !strings.Contains(cd.Summary, "execute") {
-		t.Errorf("decision.Summary=%q, want contain Bash+execute", cd.Summary)
+	// 摘要是要人批的正文：**全文原样**，不再拼 " (execute)"（kind 语义已由标题/风险承载）。
+	if cd.Summary != "Bash" {
+		t.Errorf("decision.Summary=%q, want 原样 title", cd.Summary)
 	}
-	wantOpts := []string{"approve", "deny"}
-	if len(cd.Options) != 2 || cd.Options[0] != wantOpts[0] || cd.Options[1] != wantOpts[1] {
-		t.Errorf("decision.Options=%v, want %v", cd.Options, wantOpts)
+	// approve_session 出现在 Options 里 = 告诉前端"这条路径支持同类免审"。
+	wantOpts := []string{"approve", "deny", "approve_session"}
+	if len(cd.Options) != len(wantOpts) {
+		t.Fatalf("decision.Options=%v, want %v", cd.Options, wantOpts)
+	}
+	for i, w := range wantOpts {
+		if cd.Options[i] != w {
+			t.Errorf("decision.Options[%d]=%q, want %q", i, cd.Options[i], w)
+		}
 	}
 
 	// IM notify 应被调用一次，文案含「需要决策」与摘要。
@@ -619,9 +627,10 @@ func TestWirePermission_BuildPermSummary(t *testing.T) {
 		req  agent.PermissionRequest
 		want string
 	}{
-		{"title+kind", permReq("r", "Bash", "execute", nil), "Bash (execute)"},
+		{"title 原样全文", permReq("r", "Bash", "execute", nil), "Bash"},
+		{"长命令不截断", agent.PermissionRequest{ReqID: "r", ToolTitle: strings.Repeat("a", 500)}, strings.Repeat("a", 500)},
 		{"title only", agent.PermissionRequest{ReqID: "r", ToolTitle: "Write"}, "Write"},
-		{"kind only", agent.PermissionRequest{ReqID: "r", ToolKind: "execute"}, "execute"},
+		{"kind only → 人读标签", agent.PermissionRequest{ReqID: "r", ToolKind: "execute"}, "执行命令"},
 		{"raw input fallback", agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"cmd":"ls"}`)}, `{"cmd":"ls"}`},
 		{"raw input truncated", agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(strings.Repeat("a", 300))}, strings.Repeat("a", 200) + "…"},
 		{"fallback id", agent.PermissionRequest{ReqID: "r", ToolCallID: "call-9"}, "call-9"},
@@ -633,6 +642,111 @@ func TestWirePermission_BuildPermSummary(t *testing.T) {
 				t.Errorf("buildPermSummary=%q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestPermLabel 验证审批卡标题：短 title 原样用，长/多行 title 退化成 kind 人读标签。
+// 后者是 qodercli 的现实（title = 整条命令，实测最长 1109 字符），塞进标题栏会让卡片
+// 标题与摘要重复渲染同一串文本。
+func TestPermLabel(t *testing.T) {
+	cases := []struct {
+		name        string
+		title, kind string
+		want        string
+	}{
+		{"短 title 原样", "Bash", "execute", "Bash"},
+		{"带路径的短 title", "Edit src/a.go", "edit", "Edit src/a.go"},
+		{"空 title 用 kind 标签", "", "execute", "执行命令"},
+		{"未知 kind 兜底", "", "brand_new_kind", "工具调用"},
+		{"整条长命令退化成类别", strings.Repeat("git ", 20), "execute", "执行命令"},
+		{"多行退化成类别（首行本身也长）", "python -c \"\n" + strings.Repeat("a", 100) + "\nprint(1)\"", "execute", "执行命令"},
+		{"多行且首行短也退化（首行没有信息量）", "git status\n第二行无关", "execute", "执行命令"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := permLabel(c.title, c.kind); got != c.want {
+				t.Errorf("permLabel=%q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestWirePermission_ApproveSessionPassesSameKindLater 用户点"同类免审"后：
+// 本次照常放行（回给 agent 的是 allow_once），之后同 kind 不再弹卡；不同 kind 仍弹。
+func TestWirePermission_ApproveSessionPassesSameKindLater(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-1", "rm -rf build", "execute", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+
+	if err := pw.Resolve("req-1", "approve_session"); err != nil {
+		t.Fatalf("resolve approve_session: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+	// 放行的必须是 allow_once —— 把 allow_always 透给 agent 会让它自己记住，
+	// 之后连 RequestPermission 都不发，pieqi 的 L2 硬边界就形同虚设。
+	if _, optionID, ok := fa.lastApprove(); !ok || optionID != "o1" {
+		t.Fatalf("lastApprove option=%q ok=%v, want o1(allow_once)", optionID, ok)
+	}
+	if fa.approveCount() != 1 {
+		t.Fatalf("approveCount=%d, want 1", fa.approveCount())
+	}
+
+	// 同 kind 第二次：不再弹卡，直接自动放行（emitPerm 同步走完回调，无需等待）。
+	fa.emitPerm(permReq("req-2", "ls", "execute", standardOptions()))
+	if fa.approveCount() != 2 {
+		t.Fatalf("approveCount=%d, want 2（同类应免审）", fa.approveCount())
+	}
+	if tt, _ := store.Get(taskID); tt.Status != model.TaskRunning {
+		t.Fatalf("status=%q, want running（同类不该再弹卡）", tt.Status)
+	}
+
+	// 不同 kind（delete = L3）仍要人批。
+	fa.emitPerm(permReq("req-3", "drop table", "delete", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if tt, _ := store.Get(taskID); tt.CurrentDecision == nil || tt.CurrentDecision.ID != "req-3" {
+		t.Fatalf("decision=%+v, want req-3 展示", tt.CurrentDecision)
+	}
+}
+
+// TestWirePermission_ApproveSessionEmptyKindNotRemembered 空 kind 不记账：
+// 记下它等于给以后所有"叫不出名字的操作"发通行证，白名单会悄悄变成通配符。
+func TestWirePermission_ApproveSessionEmptyKindNotRemembered(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-E1", "mystery tool", "", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-E1", "approve_session"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+
+	fa.emitPerm(permReq("req-E2", "another mystery", "", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if fa.approveCount() != 1 {
+		t.Fatalf("approveCount=%d, want 1（空 kind 不该被记住）", fa.approveCount())
+	}
+}
+
+// TestWirePermission_ApproveSessionNotSharedAcrossWires 免审记账是**会话级**的：
+// 新任务（新 wire）从零开始，不会被上一个任务的"同类免审"带过去。
+func TestWirePermission_ApproveSessionNotSharedAcrossWires(t *testing.T) {
+	fa1, _, _, store1, id1, pw1, _ := setupPermWire(t, time.Minute)
+	defer pw1.Unwire()
+	fa1.emitPerm(permReq("r1", "ls", "execute", standardOptions()))
+	waitForStatus(t, store1, id1, model.TaskWaitingInput, time.Second)
+	if err := pw1.Resolve("r1", "approve_session"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	fa2, _, _, store2, id2, pw2, _ := setupPermWire(t, time.Minute)
+	defer pw2.Unwire()
+	fa2.emitPerm(permReq("r2", "ls", "execute", standardOptions()))
+	waitForStatus(t, store2, id2, model.TaskWaitingInput, time.Second)
+	if fa2.approveCount() != 0 {
+		t.Fatalf("第二个任务的 approveCount=%d, want 0（记账不跨任务）", fa2.approveCount())
 	}
 }
 

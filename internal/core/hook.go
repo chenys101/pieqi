@@ -106,6 +106,12 @@ func (h *HookService) RegisterPending(p HookPayload) HookResult {
 // Resolve 投递用户决策。返回 error 若任务无待决策。
 // 由 TaskRunner.Intervene 调用。
 func (h *HookService) Resolve(taskID, decisionID, choice string) error {
+	// hook 路径只有"这一次批不批"：pieqi 不在这里记同类免审（claude 侧的权限由它自己的
+	// settings 管）。显式拒绝而不是落到 deny —— 静默拒绝会让用户以为"批准按钮坏了"，
+	// 而且 task 会被标回 running，等于一次没发生的干预被记进账（R6）。
+	if choice != "approve" && choice != "deny" {
+		return fmt.Errorf("hook path only supports approve/deny, got %q", choice)
+	}
 	h.mu.Lock()
 	pd, ok := h.pending[taskID]
 	if !ok {

@@ -59,7 +59,11 @@ export async function createTask(projectPath: string, prompt: string, agent?: st
 export interface IntervenePayload {
   kind: 'decision' | 'append_prompt'
   decisionId?: string
-  choice?: 'approve' | 'deny'
+  /**
+   * approve=只批这一次；approve_session=批这一次并把同 kind 的操作记入本会话免审；
+   * deny=拒绝。可用动作由后端 Decision.options 声明（不是所有路径都支持 approve_session）。
+   */
+  choice?: 'approve' | 'approve_session' | 'deny'
   text?: string
 }
 

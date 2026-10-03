@@ -1,8 +1,12 @@
 // Approval 模型（方案 §9.4）。
-// Backend First：当前协议只支持 approve / deny 两种动作；
-// allow_always 需要后端协议演进后再放开（方案 §3.1）。
+// 动作集由**后端在 Decision.options 里声明**（见下），前端不猜路径：
+//   approve / deny                —— 两条审批路径（ACP 与 claude PreToolUse hook）都有
+//   approve_session               —— 仅 ACP 路径：本会话内同类 ToolKind 免审
+// ACP 的 allow_always **刻意不透传**：那会把"以后都不用问"写进 agent 自己的配置，
+// 之后 agent 不再发 RequestPermission，后端的 L2/L3 硬边界就失去拦截点。
+// 会话级免审由后端记账（不落盘、随会话销毁），见 internal/core/agent_perm.go 的 sessionAlways。
 
-export type ApprovalChoice = 'approve' | 'deny'
+export type ApprovalChoice = 'approve' | 'approve_session' | 'deny'
 
 /** 审批风险分级。等级由**后端**判定（复用 riskLevelKinds），前端不自己算 —— 见 riskOf()。 */
 export type RiskLevel = 'L0' | 'L1' | 'L2' | 'L3'

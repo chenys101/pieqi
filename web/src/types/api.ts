@@ -87,7 +87,7 @@ export interface InterventionDto {
   /** "decision"（审批） | "append_prompt"（续问） */
   kind: string
   decision_id?: string
-  /** "approve" | "deny"（仅 decision） */
+  /** "approve" | "approve_session" | "deny"（仅 decision） */
   choice?: string
   text?: string
   /** 来源渠道（im/http/cli） */
@@ -114,7 +114,7 @@ export interface TaskGroupDto {
 export interface InterveneRequestDto {
   kind: 'decision' | 'append_prompt'
   decision_id?: string
-  choice?: 'approve' | 'deny'
+  choice?: 'approve' | 'approve_session' | 'deny'
   text?: string
 }
 

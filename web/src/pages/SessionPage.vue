@@ -26,7 +26,8 @@ const { isMobile, isWide } = useResponsive()
 const fbPanel = useFeedbackPanelStore()
 
 const taskId = computed(() => route.params.id as string)
-const { task, canCancel, canSendPrompt, submitPrompt, cancel, approve, deny, consumeForceScroll } = useSession(taskId)
+const { task, canCancel, canSendPrompt, submitPrompt, cancel, approve, approveSession, deny, consumeForceScroll } =
+  useSession(taskId)
 
 /** 决策横幅：waiting_input 且带 decision 时展示 */
 const decision = computed(() => (task.value?.status === 'waiting_input' ? task.value.decision : undefined))
@@ -81,23 +82,19 @@ watch(
   { immediate: true },
 )
 
-async function onApprove() {
+/** 决策请求期间的忙态：三个动作共用同一段收尾，各写一份 try/finally 才会漏掉一个 */
+async function runDecision(fn: () => Promise<void>) {
   approvalBusy.value = true
   try {
-    await approve()
+    await fn()
   } finally {
     approvalBusy.value = false
   }
 }
 
-async function onDeny() {
-  approvalBusy.value = true
-  try {
-    await deny()
-  } finally {
-    approvalBusy.value = false
-  }
-}
+const onApprove = () => runDecision(approve)
+const onApproveSession = () => runDecision(approveSession)
+const onDeny = () => runDecision(deny)
 
 // 删除必需确认，但**不用原生 confirm()**（SPEC 已禁）：它是模态的，会盖住任务标题与上下文，
 // 而用户恰恰要看着那些才知道删的是不是这个。改为紧接着头部长出的内联确认条。
@@ -157,7 +154,13 @@ async function doRemove() {
 
         <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20） -->
         <div v-if="decision" class="mx-auto w-full max-w-3xl px-3 pb-2 md:px-4">
-          <ApprovalBanner :decision="decision" :loading="approvalBusy" @approve="onApprove" @deny="onDeny" />
+          <ApprovalBanner
+            :decision="decision"
+            :loading="approvalBusy"
+            @approve="onApprove"
+            @approve-session="onApproveSession"
+            @deny="onDeny"
+          />
         </div>
 
         <InterveneInput
