@@ -1,8 +1,15 @@
 // Task Store 单测（方案 §48.2）：getters / upsert / 乐观更新（不触网）
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useTaskStore } from './task'
+import * as api from '@/services/api/tasks'
 import type { Task } from '@/types/task'
+
+// 只拦 getTasks：loaded 的两条分支（拉到 / 拉挂）都得能断言，其余保持真实实现
+vi.mock('@/services/api/tasks', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/api/tasks')>()),
+  getTasks: vi.fn(),
+}))
 
 /** 最小 Task fixture */
 function task(over: Partial<Task> = {}): Task {
@@ -38,6 +45,27 @@ describe('TaskStore', () => {
     s.upsertTask(task())
     s.applySnapshot([task({ id: 't2' }), task({ id: 't3' })])
     expect(s.tasks.map((t) => t.id)).toEqual(['t2', 't3'])
+  })
+
+  // loaded 是"空数组到底是不是真的空"的唯一判据，新建任务页靠它决定默认项目模式
+  it('loaded：applySnapshot 即算到了（空快照也算）', () => {
+    const s = useTaskStore()
+    expect(s.loaded).toBe(false)
+    s.applySnapshot([])
+    expect(s.loaded).toBe(true)
+  })
+
+  it('loaded：loadTasks 成功与失败都置位（拉挂时也要能落到自定义路径）', async () => {
+    const s = useTaskStore()
+    vi.mocked(api.getTasks).mockResolvedValueOnce({ tasks: [task()], groups: [] } as never)
+    await s.loadTasks()
+    expect(s.loaded).toBe(true)
+    expect(s.error).toBeNull()
+
+    vi.mocked(api.getTasks).mockRejectedValueOnce(new Error('offline'))
+    await s.loadTasks()
+    expect(s.loaded).toBe(true)
+    expect(s.error).toBe('offline')
   })
 
   it('getters：running / waiting / failed / needsAttention / counts', () => {

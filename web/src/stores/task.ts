@@ -13,6 +13,13 @@ export const useTaskStore = defineStore('task', {
   state: () => ({
     tasks: [] as Task[],
     loading: false,
+    /**
+     * 首屏列表是否**已到**（HTTP 拉完，或收到 WS 快照）。
+     * 与 loading 互补：loading 只说"正在拉"，loaded 说"空数组是真的空"——
+     * 新建任务页要靠它区分「还没有历史项目」和「项目还没到」，
+     * 否则冷启动（移动端首屏尤其明显）会把后者误判成前者。
+     */
+    loaded: false,
     error: null as string | null,
   }),
 
@@ -87,12 +94,15 @@ export const useTaskStore = defineStore('task', {
         this.error = err instanceof Error ? err.message : String(err)
       } finally {
         this.loading = false
+        // 失败也算"到了"：拿不到项目时新建任务页要落到自定义路径，而不是空下拉框干等
+        this.loaded = true
       }
     },
 
     /** WS snapshot 全量替换 */
     applySnapshot(tasks: Task[]) {
       this.tasks = tasks
+      this.loaded = true
     },
 
     /** WS task_created / task_updated：不存在则插入，存在则替换 */

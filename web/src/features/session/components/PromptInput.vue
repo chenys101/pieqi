@@ -5,7 +5,7 @@
 // 外壳交给 T1 的 Textarea（R8：全站输入控件共用一套外壳，见 SPEC §4.4）——
 // 本组件只负责补全逻辑，不再自己写一份输入框样式。
 // 斜杠补全依赖**真实光标位置**，故用 Textarea 暴露的内部元素（`defineExpose({ el })`）。
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, useSlots, watch } from 'vue'
 import Textarea from '@/components/ui/Textarea.vue'
 import { useAppStore } from '@/stores/app'
 
@@ -22,6 +22,11 @@ const props = withDefaults(
 const emit = defineEmits<{ 'update:modelValue': [value: string]; submit: [] }>()
 
 const appStore = useAppStore()
+
+// 动作按钮（发送/中止/创建）嵌在输入框内部右下角（PC 与移动端同一套结构）。
+// 只有真传了 #actions 才让出底部空间，否则空一块 padding 会让输入框显得松垮。
+const slots = useSlots()
+const hasActions = computed(() => !!slots.actions)
 
 // 只声明用得到的那一项：Textarea 通过 defineExpose 交出内部 textarea
 const taRef = ref<{ el: HTMLTextAreaElement | null } | null>(null)
@@ -156,10 +161,20 @@ watch(matches, (m) => {
       :disabled="disabled"
       :resizable="false"
       :aria-label="ariaLabel"
+      :class="hasActions ? 'pb-12' : undefined"
       @update:model-value="onInput"
       @keydown="onKeydown"
       @blur="onBlur"
     />
+    <!-- 右下角动作区：整条 pointer-events-none，只有按钮本身可点，
+         让出的底部 padding 仍然能点进 textarea -->
+    <div
+      v-if="hasActions"
+      class="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center justify-end gap-1.5 px-2 pb-2"
+      data-testid="composer-actions"
+    >
+      <slot name="actions" />
+    </div>
     <!-- 斜杠补全菜单（贴输入框上方） -->
     <div
       v-if="menuOpen"

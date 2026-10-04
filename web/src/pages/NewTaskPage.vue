@@ -7,6 +7,7 @@ import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Select from '@/components/ui/Select.vue'
 import PromptInput from '@/features/session/components/PromptInput.vue'
+import Spinner from '@/components/ui/Spinner.vue'
 import { useTaskStore } from '@/stores/task'
 import { useSessionStore } from '@/stores/session'
 import { useAgentStore } from '@/stores/agent'
@@ -34,23 +35,25 @@ const projects = computed(() => taskStore.recentProjects)
 /** 当前选中的 agent 目录项（展示 transport / 说明用） */
 const selectedAgent = computed(() => agentStore.byId(agent.value))
 
-// 初始默认选中最近项目；无历史项目直接切自定义路径
 onMounted(async () => {
-  const first = projects.value[0]
-  if (first) selectedPath.value = first.projectPath
-  else mode.value = 'path'
-
   // 目录就绪后再落默认值：先渲染再选中的顺序能避免"选择器空着闪一下"
   await agentStore.loadCatalog()
   if (!agent.value) agent.value = agentStore.defaultAgent
 })
 
-// 冷启动（任务列表后到）：最近项目就绪后自动选中第一个
-watch(projects, (list) => {
-  if (mode.value === 'select' && !selectedPath.value && list.length) {
-    selectedPath.value = list[0].projectPath
-  }
-})
+// 项目默认值：有历史项目就选中第一个，确认「一条都没有」才切自定义路径。
+// 判空必须等 taskStore.loaded —— 冷启动时（移动端首屏尤其明显）此刻 tasks 往往
+// 还没到，在 onMounted 里判空会把"还没到"当成"没有"（PC 上因列表先到才没暴露）。
+// 落到 path 模式后不再自动切回：用户可能正在往路径框里打字。
+watch(
+  [projects, () => taskStore.loaded],
+  ([list, loaded]) => {
+    if (mode.value !== 'select' || selectedPath.value) return
+    if (list.length) selectedPath.value = list[0].projectPath
+    else if (loaded) mode.value = 'path'
+  },
+  { immediate: true },
+)
 
 // 目录晚于页面就绪（或曾拉取失败后重试成功）：补上默认 agent
 watch(
@@ -151,30 +154,35 @@ async function submit() {
         </div>
       </div>
 
-      <!-- 底部输入条（对应详情页 InterveneInput 位置）：prompt + 创建
-           内层 max-w-3xl 与上方 header / 主区的正文左边界对齐（AC-R8-01） -->
+      <!-- 底部输入条（对应详情页 InterveneInput 位置）：prompt + 嵌在输入框右下角的创建按钮
+           内层 max-w-3xl 与上方 header / 主区的正文左边界对齐（AC-R8-01）；
+           PC 与移动端共用这一套 DOM，按钮位置两端一致 -->
       <div class="border-t border-border bg-surface/80 px-3 py-2.5 backdrop-blur md:px-4" data-testid="composer-bar">
-        <div class="mx-auto flex w-full max-w-3xl items-end gap-2" data-testid="composer-inner">
-          <div class="min-w-0 flex-1">
-            <PromptInput
-              v-model="prompt"
-              :rows="3"
-              aria-label="任务描述"
-              placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"
-              @submit="submit"
-            />
-          </div>
-          <!-- 视觉不变，命中区用伪元素外扩到 ≥44px 高（AC-R8-04） -->
-          <Button
-            variant="primary"
-            :loading="creating"
-            :disabled="!canSubmit"
-            title="创建任务 (Ctrl+Enter)"
-            class="relative after:absolute after:-inset-y-1.5 after:content-['']"
-            @click="submit"
+        <div class="mx-auto w-full max-w-3xl" data-testid="composer-inner">
+          <PromptInput
+            v-model="prompt"
+            :rows="3"
+            aria-label="任务描述"
+            placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"
+            @submit="submit"
           >
-            创建
-          </Button>
+            <template #actions>
+              <!-- 视觉 36×36，命中区用伪元素外扩到 ≥44px 高（AC-R8-04） -->
+              <button
+                class="pointer-events-auto relative shrink-0 rounded-[var(--radius-sm)] bg-accent p-2.5 text-white transition-opacity after:absolute after:-inset-1 after:content-[''] hover:opacity-90 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
+                :disabled="!canSubmit"
+                title="创建任务 (Ctrl+Enter)"
+                aria-label="创建任务"
+                data-testid="composer-submit"
+                @click="submit"
+              >
+                <Spinner v-if="creating" class="h-4 w-4" />
+                <svg v-else viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
+                  <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+            </template>
+          </PromptInput>
         </div>
       </div>
     </div>

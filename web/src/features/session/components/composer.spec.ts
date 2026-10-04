@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type Component } from 'vue'
+import { createApp, defineComponent, h, nextTick, type Component } from 'vue'
 import PromptInput from './PromptInput.vue'
 import InterveneInput from './InterveneInput.vue'
 
@@ -178,5 +178,40 @@ describe('InterveneInput', () => {
     const { host } = mount(InterveneInput, { canCancel: false, canSend: false })
     await type(host, '文字')
     expect((host.querySelector('button[aria-label="发送"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+/** 带 #actions 的 PromptInput（动作按钮嵌在输入框内右下角） */
+const WithActions = defineComponent({
+  render: () =>
+    h(
+      PromptInput,
+      { modelValue: 'x' },
+      { actions: () => h('button', { class: 'pointer-events-auto', 'aria-label': '创建任务' }, '飞') },
+    ),
+})
+
+describe('输入框内嵌动作按钮（PC 与移动端同一套 DOM）', () => {
+  it('动作区与 textarea 同父、绝对定位贴右下角', () => {
+    const { host } = mount(WithActions)
+    const actions = host.querySelector('[data-testid="composer-actions"]')!
+    const t = ta(host)
+    // "嵌在框内" 的结构性判据：与 textarea 共用那个 relative 容器
+    expect(actions.parentElement).toBe(t.parentElement)
+    expect(actions.parentElement!.className).toContain('relative')
+    for (const cls of ['absolute', 'bottom-0', 'justify-end', 'pointer-events-none'])
+      expect(actions.className, `缺少 ${cls}`).toContain(cls)
+  })
+
+  it('有动作区时 textarea 让出底部空间，没有则不留空 padding', () => {
+    expect(ta(mount(WithActions).host).className).toContain('pb-12')
+    expect(ta(mount(PromptInput, { modelValue: '' }).host).className).not.toContain('pb-')
+  })
+
+  it('详情页发送按钮同样嵌在框内（与新建任务页一致，不按断点分两套）', () => {
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true })
+    const send = host.querySelector('button[aria-label="发送"]')!
+    expect(send.parentElement!.getAttribute('data-testid')).toBe('composer-actions')
+    expect(send.querySelector('svg')).not.toBeNull()
   })
 })
