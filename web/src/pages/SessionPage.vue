@@ -4,7 +4,7 @@
 // **变更反馈按 SPEC §6.4 分三档摆放**，不是"一个抽屉走天下"：
 //   宽屏 ≥1280   常驻右栏，宽度由 grid 驱动（展开 420px ⇄ 收起 46px 贴边条）
 //   平板 768–1279 420px 侧栏，靠头部按钮开合
-//   移动端 <768  整屏，顶部 SegmentedControl 切换 时间线 / 变更反馈
+//   移动端 <768  整屏，由头部那一行的反馈图标切换 时间线 / 变更反馈
 // 1280 是"反馈怎么摆"的拐点而不是 768 —— 理由见 useResponsive 的注释。
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -14,7 +14,6 @@ import { useResponsive } from '@/composables/useResponsive'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
 import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '@/features/session'
 import { FeedbackPanel } from '@/features/feedback'
-import SegmentedControl from '@/components/ui/SegmentedControl.vue'
 import Drawer from '@/components/ui/Drawer.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Button from '@/components/ui/Button.vue'
@@ -40,17 +39,12 @@ const canRewind = computed(() => !!task.value && task.value.status !== 'running'
 
 /** 平板档：反馈走 420px 侧栏（宽屏常驻、移动端整屏，都不用它） */
 const feedbackOpen = ref(false)
-/** 移动端整屏：时间线 / 变更反馈 二选一（SPEC §5.2.1：移动端没有"收起"这个概念） */
-const MOBILE_PANES = [
-  { value: 'timeline', label: '时间线' },
-  { value: 'feedback', label: '变更反馈' },
-]
-const mobilePane = ref('timeline')
+/** 移动端整屏：时间线 / 变更反馈 二选一（头部那一行的反馈图标来回切） */
+const mobilePane = ref<'timeline' | 'feedback'>('timeline')
 
 /**
- * 头部「反馈」按钮的落点按档位不同 —— 三档的入口本来就不是同一个东西。
- * 宽屏与移动端**不显示这个按钮**：那两档各有自己的入口（贴边条 / 顶部分段），
- * 再挂一个按钮就是同一件事给两个入口，而且位置还都不是它真正生效的地方。
+ * 反馈入口的落点按档位不同 —— 三档的入口本来就不是同一个东西。
+ * 宽屏**没有这个按钮**（贴边条就是它的入口）。
  */
 function openFeedback() {
   if (isWide.value) {
@@ -58,7 +52,8 @@ function openFeedback() {
     return
   }
   if (isMobile.value) {
-    mobilePane.value = 'feedback'
+    // 移动端图标是**开关**：面板里没别的路回时间线，再点一次就是回去
+    mobilePane.value = mobilePane.value === 'timeline' ? 'feedback' : 'timeline'
     return
   }
   feedbackOpen.value = true
@@ -69,6 +64,8 @@ watch(
   taskId,
   (id) => {
     probed.value = false
+    // 换任务回到时间线：停在「变更反馈」里换到一个新任务，看到的是上一任务的语境残留
+    mobilePane.value = 'timeline'
     if (!id) return
     if (taskStore.byId(id)) {
       probed.value = true
@@ -115,84 +112,75 @@ async function doRemove() {
 
 <template>
   <div v-if="task" class="flex h-full flex-col">
-    <!-- 移动端：整屏切换的两个入口。放在最顶是因为下面那两屏各自占满高度，
-         没有别的位置能同时够到它们。 -->
-    <div v-if="isMobile" class="shrink-0 border-b border-border bg-surface px-3 py-2">
-      <SegmentedControl v-model="mobilePane" :options="MOBILE_PANES" fill aria-label="会话视图" />
-    </div>
-
     <!-- 宽屏用 grid（宽度由 grid-template-columns 驱动，展开/收起只切 class，
          动画交给浏览器排版 —— 不写内联宽度、不测量像素，SPEC §5.2.1）；
          其余档位是普通 flex 排布。 -->
     <div class="min-h-0 flex-1" :class="isWide ? ['se-grid', { 'is-fb-collapsed': fbPanel.collapsed }] : 'flex'">
-      <div
-        class="flex min-h-0 min-w-0 flex-1 flex-col"
-        :class="{ hidden: isMobile && mobilePane === 'feedback' }"
-      >
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col">
         <SessionHeader
           :task="task"
           :can-cancel="canCancel"
-          :show-feedback="!isWide && !isMobile"
+          :compact="isMobile"
+          :show-feedback="!isWide"
+          :feedback-active="mobilePane === 'feedback'"
           @cancel="cancel"
           @remove="askRemove"
           @feedback="openFeedback"
         />
 
-        <!-- 内联确认条：紧贴任务头部，用户看着任务名确认删的是不是它 -->
-        <div
-          v-if="removeConfirming"
-          class="mx-auto w-full max-w-3xl shrink-0 px-3 pb-2 md:px-4"
-        >
-          <div class="flex flex-wrap items-center gap-2 rounded-lg border border-error/40 bg-error/5 px-3 py-2">
-            <span class="min-w-0 flex-1 text-xs text-error">删除该任务？删除后不可恢复。</span>
-            <Button variant="ghost" size="sm" @click="removeConfirming = false">取消</Button>
-            <Button variant="danger" size="sm" @click="doRemove">删除</Button>
+        <!-- 移动端切到「变更反馈」时，时间线整段让位（v-show：不卸载，切回来保留滚动位置） -->
+        <div v-show="!isMobile || mobilePane === 'timeline'" class="flex min-h-0 flex-1 flex-col">
+          <!-- 内联确认条：紧贴任务头部，用户看着任务名确认删的是不是它 -->
+          <div v-if="removeConfirming" class="mx-auto w-full max-w-3xl shrink-0 px-3 pb-2 md:px-4">
+            <div class="flex flex-wrap items-center gap-2 rounded-lg border border-error/40 bg-error/5 px-3 py-2">
+              <span class="min-w-0 flex-1 text-xs text-error">删除该任务？删除后不可恢复。</span>
+              <Button variant="ghost" size="sm" @click="removeConfirming = false">取消</Button>
+              <Button variant="danger" size="sm" @click="doRemove">删除</Button>
+            </div>
           </div>
-        </div>
 
-        <SessionTimeline :task-id="task.id" :consume-force-scroll="consumeForceScroll" />
+          <SessionTimeline :task-id="task.id" :consume-force-scroll="consumeForceScroll" />
 
-        <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20） -->
-        <div v-if="decision" class="mx-auto w-full max-w-3xl px-3 pb-2 md:px-4">
-          <ApprovalBanner
-            :decision="decision"
-            :loading="approvalBusy"
-            @approve="onApprove"
-            @approve-session="onApproveSession"
-            @deny="onDeny"
+          <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20） -->
+          <div v-if="decision" class="mx-auto w-full max-w-3xl px-3 pb-2 md:px-4">
+            <ApprovalBanner
+              :decision="decision"
+              :loading="approvalBusy"
+              @approve="onApprove"
+              @approve-session="onApproveSession"
+              @deny="onDeny"
+            />
+          </div>
+
+          <InterveneInput
+            :can-cancel="canCancel"
+            :can-send="canSendPrompt || !!decision"
+            @send="submitPrompt"
+            @cancel="cancel"
           />
         </div>
 
-        <InterveneInput
-          :can-cancel="canCancel"
-          :can-send="canSendPrompt || !!decision"
-          @send="submitPrompt"
-          @cancel="cancel"
+        <!-- 移动端：整屏反馈。放在左列内部（而不是它的兄弟）是因为那唯一一行
+             头部要一直留着 —— 否则切进反馈后就没有回时间线的路了。
+             用 v-show 而不是 v-if，切回来时不重新挂载、不重拉。 -->
+        <FeedbackPanel
+          v-if="isMobile"
+          v-show="mobilePane === 'feedback'"
+          class="min-h-0 flex-1"
+          mode="full"
+          :active="mobilePane === 'feedback'"
+          :task-id="task.id"
+          :can-rewind="canRewind"
         />
       </div>
 
       <!-- 宽屏：常驻右栏（收起时就是那条 46px 贴边条，宽度由上面的 grid 给） -->
       <FeedbackPanel v-if="isWide" mode="dock" :task-id="task.id" :can-rewind="canRewind" />
 
-      <!-- 移动端：整屏。用 v-show 而不是 v-if，切回来时不重新挂载、不重拉。 -->
-      <FeedbackPanel
-        v-else-if="isMobile"
-        v-show="mobilePane === 'feedback'"
-        mode="full"
-        :active="mobilePane === 'feedback'"
-        :task-id="task.id"
-        :can-rewind="canRewind"
-      />
-
       <!-- 平板：420px 侧栏（Drawer 就是那个 420px 的框；面板自带头部与滚动，
            所以 flush 让 Drawer 别再加内边距和第二层滚动） -->
-      <Drawer v-else :open="feedbackOpen" width="420px" flush @close="feedbackOpen = false">
-        <FeedbackPanel
-          mode="drawer"
-          :task-id="task.id"
-          :can-rewind="canRewind"
-          @close="feedbackOpen = false"
-        />
+      <Drawer v-if="!isWide && !isMobile" :open="feedbackOpen" width="420px" flush @close="feedbackOpen = false">
+        <FeedbackPanel mode="drawer" :task-id="task.id" :can-rewind="canRewind" @close="feedbackOpen = false" />
       </Drawer>
     </div>
   </div>
