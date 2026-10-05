@@ -177,41 +177,44 @@ func TestConfig_AgentsDefaults(t *testing.T) {
 	}
 }
 
-func TestConfig_AutoApproveTools(t *testing.T) {
-	// 默认：文件改动类 ACP ToolKind 免审（edit/delete/move）。
+// TestConfig_AutoApproveToolsRemoved pieqi.auto_approve_tools 已移除：显式配置必须
+// 触发一条弃用告警（而不是静默忽略）。
+//
+// 为什么必须告警而不是静默删：老用户可能真的以为这个字段在生效 —— 它此前**只被解析、
+// 无人消费**，免审名单一直来自设置页的 auto_approve_l0/l1。静默忽略等于让人继续
+// 以为改这里有用（而它的默认值里 delete 还属 L3，与硬边界矛盾）。
+func TestConfig_AutoApproveToolsRemoved(t *testing.T) {
+	// 默认配置不再有这个字段 → 无告警。
 	p := writeTestConfig(t, "server:\n  port: 3000\n")
 	cfg, err := Load(p)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	want := []string{"edit", "delete", "move"}
-	if len(cfg.Pieqi.AutoApproveTools) != len(want) {
-		t.Fatalf("auto_approve_tools default = %v, want %v", cfg.Pieqi.AutoApproveTools, want)
-	}
-	for i, w := range want {
-		if cfg.Pieqi.AutoApproveTools[i] != w {
-			t.Fatalf("auto_approve_tools default = %v, want %v", cfg.Pieqi.AutoApproveTools, want)
+	for _, d := range cfg.Deprecations {
+		if strings.Contains(d, "auto_approve_tools") {
+			t.Fatalf("默认配置不该产生 auto_approve_tools 告警：%s", d)
 		}
 	}
 
-	// 覆盖：显式配置全量替换默认（如只留 edit，或清空关闭免审）。
-	p2 := writeTestConfig(t, "pieqi:\n  auto_approve_tools: [\"edit\"]\n")
-	cfg2, err := Load(p2)
-	if err != nil {
-		t.Fatalf("load override: %v", err)
-	}
-	if len(cfg2.Pieqi.AutoApproveTools) != 1 || cfg2.Pieqi.AutoApproveTools[0] != "edit" {
-		t.Fatalf("auto_approve_tools override = %v, want [edit]", cfg2.Pieqi.AutoApproveTools)
-	}
-
-	// 空名单 = 显式关闭免审（所有权限请求都走人工审批）。
-	p3 := writeTestConfig(t, "pieqi:\n  auto_approve_tools: []\n")
-	cfg3, err := Load(p3)
-	if err != nil {
-		t.Fatalf("load empty: %v", err)
-	}
-	if len(cfg3.Pieqi.AutoApproveTools) != 0 {
-		t.Fatalf("auto_approve_tools empty = %v, want []", cfg3.Pieqi.AutoApproveTools)
+	// 显式配置（无论什么值）→ 一条告警，且不因加载失败。
+	for _, body := range []string{
+		"pieqi:\n  auto_approve_tools: [\"edit\"]\n",
+		"pieqi:\n  auto_approve_tools: []\n",
+		"pieqi:\n  auto_approve_tools: [edit, delete, move]\n",
+	} {
+		cfgN, err := Load(writeTestConfig(t, body))
+		if err != nil {
+			t.Fatalf("load %q: %v", body, err)
+		}
+		found := false
+		for _, d := range cfgN.Deprecations {
+			if strings.Contains(d, "auto_approve_tools") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("显式配置 auto_approve_tools 必须产生弃用告警，body=%q，got %v", body, cfgN.Deprecations)
+		}
 	}
 }
 

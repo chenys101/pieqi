@@ -52,10 +52,8 @@ pieqi:
   worktree_base: ""                  # worktree 根目录；留空默认 ~/.pieqi/worktrees
   skills_dirs: []                    # 空 = 默认 ~/.claude/skills + CLAUDE_CONFIG_DIR/.claude/skills
   permission_mode: bypassPermissions # claude 自身不拦，由 PreToolUse hook 拦截
-  # ACP 审批免审名单（按 ToolKind 匹配）：命中直接自动放行，不中断等人工审核。
-  # 默认 edit/delete/move（Edit/Write/MultiEdit/NotebookEdit→edit，Delete→delete，Rename→move）。
-  # 清空 [] 关闭免审（全部走人工审批）；可加 execute/read 等其它 kind 或移除不想要的。
-  auto_approve_tools: [edit, delete, move]
+  # 注：旧的 auto_approve_tools 已移除 —— 它从未生效（免审名单一直来自设置页的
+  #     auto_approve_l0 / auto_approve_l1 开关，默认都开）。显式配置它只会得到一条弃用告警。
   cleanup_worktrees: true            # 任务完成即清 worktree
   hook_timeout: 30m                  # hook 等人类决策的上限
   hook_tools: [Bash, Write, Edit, NotebookEdit]   # PreToolUse 拦截的工具；读类不拦

@@ -82,10 +82,9 @@ type APIConfig struct {
 // PieqiConfig Pieqi 后端总开关与行为参数
 type PieqiConfig struct {
 	Enabled                 bool          `mapstructure:"enabled"`
-	WorktreeBase            string        `mapstructure:"worktree_base"`      // worktree 根目录
-	SkillsDirs              []string      `mapstructure:"skills_dirs"`        // 空 = 默认 ~/.claude/skills
-	PermissionMode          string        `mapstructure:"permission_mode"`    // 默认 "bypassPermissions"，hook 真正拦截
-	AutoApproveTools        []string      `mapstructure:"auto_approve_tools"` // 免审名单：ACP ToolKind 命中即自动放行（不中断等人工审批）；默认 edit/delete/move
+	WorktreeBase            string        `mapstructure:"worktree_base"`   // worktree 根目录
+	SkillsDirs              []string      `mapstructure:"skills_dirs"`     // 空 = 默认 ~/.claude/skills
+	PermissionMode          string        `mapstructure:"permission_mode"` // 默认 "bypassPermissions"，hook 真正拦截
 	CleanupWorktrees        bool          `mapstructure:"cleanup_worktrees"`
 	HookTimeout             time.Duration `mapstructure:"hook_timeout"`               // hook 等决策上限，Phase 0 验证后定
 	HookTools               []string      `mapstructure:"hook_tools"`                 // PreToolUse 拦截的工具名，默认 Bash/Write/Edit/NotebookEdit
@@ -210,7 +209,7 @@ func (d AgentDshConfig) ACPConfig() ACPConfig {
 // 最高优先级是 DebugSkipAllAuth：true 时所有鉴权全部跳过（仅本地开发用）。
 type AuthConfig struct {
 	DebugSkipAllAuth  bool                 `mapstructure:"debug_skip_all_auth"` // 默认 false；true 全量放行（仅开发）
-	FeishuBindingFile string               `mapstructure:"feishu_binding_file"`  // 绑定账号持久化路径
+	FeishuBindingFile string               `mapstructure:"feishu_binding_file"` // 绑定账号持久化路径
 	Cloudflared       CloudflaredConfig    `mapstructure:"cloudflared"`
 	Access            CloudflareAccessConf `mapstructure:"cloudflare_access"`
 	RateLimit         RateLimitConfig      `mapstructure:"ratelimit"`
@@ -335,9 +334,10 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("api.enabled", true)
 	v.SetDefault("pieqi.enabled", false)
 	v.SetDefault("pieqi.permission_mode", "bypassPermissions")
-	// 免审名单：Claude Code 适配器把 Edit/Write/MultiEdit/NotebookEdit 都映射到 ACP ToolKind
-	// "edit"，Delete→"delete"，Rename/Move→"move"（ACP 协议标准 ToolKind，见 acp-go-sdk types_gen.go）。
-	v.SetDefault("pieqi.auto_approve_tools", []string{"edit", "delete", "move"})
+	// 注：pieqi.auto_approve_tools 已删除（见 Load() 的弃用告警）。免审名单的运行期真相
+	// 是设置页的 auto_approve_l0 / auto_approve_l1（core.Settings.AutoApproveTools），
+	// 由 main.go 直接读 SettingsStore —— 这个配置项此前**只被解析、无人消费**，
+	// 且其默认值里的 delete 属 L3，与"L3 永不放行"的硬边界矛盾。
 	v.SetDefault("pieqi.cleanup_worktrees", true)
 	v.SetDefault("pieqi.hook_timeout", "30m")
 	v.SetDefault("pieqi.hook_tools", []string{"Bash", "Write", "Edit", "NotebookEdit"})
@@ -436,7 +436,15 @@ func Load(configPath string) (*Config, error) {
 		}
 	}
 
-	// 2) qoder 兼容回填：agents.qoder.acp 未显式配置（新节任一字段都不在配置文件里）
+	// 2) pieqi.auto_approve_tools 已删除语义：该字段从未被运行期消费（免审名单一直
+	//    来自设置页的 auto_approve_l0/l1），默认值里的 delete 还属 L3、与硬边界矛盾。
+	//    这里只告警不改行为——用户若指望它生效，必须知道去设置页改。
+	if v.InConfig("pieqi.auto_approve_tools") {
+		cfg.Deprecations = append(cfg.Deprecations,
+			"pieqi.auto_approve_tools 已移除（它从未生效）：免审名单请在设置页用 auto_approve_l0 / auto_approve_l1 开关控制")
+	}
+
+	// 3) qoder 兼容回填：agents.qoder.acp 未显式配置（新节任一字段都不在配置文件里）
 	//    且旧字段是 qoder 信号（agent_type=qodercli 或 acp_spawn_command 非空）时，
 	//    从 pieqi.acp.* 回填，保证老配置迁到新节不丢 spawn 参数。
 	newQoderACPSet := false
