@@ -205,6 +205,85 @@ func hasEvent(events []agent.Event, kind agent.EventKind) bool {
 	return false
 }
 
+// TestSessionPermissionCarriesToolKind 桥发来的 permission_needed 必须**带上 toolKind**。
+//
+// 这条链路此前断在这里：桥发 toolKind:""（恒为空），Go 侧 permission_needed 分支
+// 又根本没读该字段。后果是 pieqi 的 L0/L1 免审名单（按 ToolKind 匹配）永不命中 ——
+// 连 Edit 都要人工点，而且 RiskOfKind("") 兜底成 L2，审批卡一律显示"执行命令"。
+func TestSessionPermissionCarriesToolKind(t *testing.T) {
+	cases := []struct {
+		name     string
+		toolName string
+		kind     string
+		rawInput map[string]any
+		wantKind string
+	}{
+		{"Edit → edit(L1 免审)", "Edit", "edit", map[string]any{"file_path": "a.go"}, "edit"},
+		{"Write → edit", "Write", "edit", map[string]any{"file_path": "a.go"}, "edit"},
+		{"Delete → delete(L3)", "Delete", "delete", map[string]any{"file_path": "a.go"}, "delete"},
+		{"Bash 写命令 → execute", "Bash", "execute", map[string]any{"command": "rm -rf build/"}, "execute"},
+		// 只读降级（ADR-0008）：Bash 的只读形态降为 read(L0) 免审。
+		{"Bash 只读命令 → read", "Bash", "execute", map[string]any{"command": "sed -n '1,35p' api.go"}, "read"},
+		{"Bash 复合命令不降级", "Bash", "execute", map[string]any{"command": "cd x; rm -rf y"}, "execute"},
+		{"Bash 无 command 字段不降级", "Bash", "execute", map[string]any{"foo": "bar"}, "execute"},
+		// 未知工具：空 kind → RiskOfKind 兜底 L2（保守侧，不能猜成 read）
+		{"未知工具 → 空 kind", "SomeNewTool", "", map[string]any{}, ""},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fb := newFakeBridge(t)
+			defer fb.srv.Close()
+			fb.autoComplete = 0 // 手动推事件，不要自动补 turn_end
+			sess := fb.newSession(t)
+			defer sess.Close(context.Background())
+
+			got := make(chan agent.Event, 8)
+			sess.OnEvent(func(ev agent.Event) {
+				if ev.Kind == agent.EventPermissionNeeded {
+					got <- ev
+				}
+			})
+			// Prompt 会阻塞等 turn_end（waitTurn），所以必须在 goroutine 里发；
+			// 本测试只关心 permission_needed 的字段，不关心这一轮是否结束。
+			go func() { _ = sess.Prompt(context.Background(), "hi") }()
+
+			// 等 SSE 连接建立后再推事件，否则事件会丢在订阅之前。
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				fb.mu.Lock()
+				n := len(fb.sessions[sess.ID()].clients)
+				fb.mu.Unlock()
+				if n > 0 {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+
+			fb.pushEvent(sess.ID(), "permission_needed", map[string]any{
+				"kind": "permission_needed", "reqId": "r1", "toolName": c.toolName,
+				"toolKind": c.kind, "toolUseID": "tu1", "rawInput": c.rawInput,
+			})
+
+			select {
+			case ev := <-got:
+				if ev.Permission.ToolKind != c.wantKind {
+					t.Errorf("ToolKind = %q, want %q（丢了它免审名单永不命中）",
+						ev.Permission.ToolKind, c.wantKind)
+				}
+				if ev.Permission.ReqID != "r1" {
+					t.Errorf("ReqID = %q, want r1", ev.Permission.ReqID)
+				}
+				if ev.Permission.ToolTitle != c.toolName {
+					t.Errorf("ToolTitle = %q, want %q", ev.Permission.ToolTitle, c.toolName)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("no permission_needed event dispatched")
+			}
+		})
+	}
+}
+
 func TestSessionPromptDispatchesAndBlocks(t *testing.T) {
 	fb := newFakeBridge(t)
 	defer fb.srv.Close()

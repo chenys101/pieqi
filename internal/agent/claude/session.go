@@ -272,13 +272,20 @@ func (s *session) toAgentEvent(ev bridge.SSEEvent) agent.Event {
 		e.ToolStatus = ev.ToolStatus
 		e.RawOutput = ev.RawOutput
 	case "permission_needed":
-		e.Permission = agent.PermissionRequest{
+		perm := agent.PermissionRequest{
 			ReqID:      ev.ReqID,
 			SessionID:  s.id,
 			ToolCallID: ev.ToolUseID,
 			ToolTitle:  ev.ToolName,
-			RawInput:   ev.RawInput,
+			// ToolKind 必须透传：PermissionWire 的免审名单**按 ToolKind 匹配**，
+			// 漏掉它 L0/L1 永不命中（连 Edit 都弹卡），且 RiskOfKind("") 兜底成 L2
+			// 会让审批卡的风险标注与真实语义脱节。
+			ToolKind: ev.ToolKind,
+			RawInput: ev.RawInput,
 		}
+		// 只读降级（ADR-0008）：Bash 一律是 execute(L2)，但 `sed -n 1p f.go`
+		// 与 `rm -rf build/` 差别巨大。能证明只读的降为 read(L0) 免审。
+		e.Permission = agent.DowngradeReadonlyPermission(perm)
 	case "turn_end":
 		e.Turn = toTurnInfo(ev.Turn)
 		if ev.IsError || (ev.Subtype != "" && ev.Subtype != "success") {

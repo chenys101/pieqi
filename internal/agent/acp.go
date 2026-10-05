@@ -801,7 +801,11 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 		zap.String("kind", toolKindString(params.ToolCall.Kind)),
 		zap.String("options", formatPermissionOptions(opts)),
 	)
-	onPerm(PermissionRequest{
+	// 只读降级（ADR-0008）：qodercli 把所有 shell 调用一律报 execute，于是
+	// `sed -n '1,35p' f.go` 与 `rm -rf build/` 在 pieqi 眼里是同一个 ToolKind，
+	// 都落 L2、都必须人工点一次。这里把**能证明只读**的命令降为 read(L0)，
+	// 命中 L0 免审不再中断。证明不了的一律维持 execute（保守侧）。
+	perm := DowngradeReadonlyPermission(PermissionRequest{
 		ReqID:      reqID,
 		SessionID:  string(params.SessionId),
 		ToolCallID: string(params.ToolCall.ToolCallId),
@@ -811,6 +815,15 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 		RawInput:   rawAnyToJSON(params.ToolCall.RawInput),
 		Options:    opts,
 	})
+	onPerm(perm)
+	if perm.ToolKind != toolKindString(params.ToolCall.Kind) {
+		a.logger.Debug("acp permission kind downgraded (readonly command)",
+			zap.String("req_id", reqID),
+			zap.String("from", toolKindString(params.ToolCall.Kind)),
+			zap.String("to", perm.ToolKind),
+			zap.String("command", commandFromRawInput(perm.RawInput)),
+		)
+	}
 
 	select {
 	case resp := <-ch:
