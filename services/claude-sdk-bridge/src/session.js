@@ -26,6 +26,41 @@ const AUTO_ALLOW_TOOLS = new Set([
   "TodoWrite", "Agent", "Task", "Skill", "KillShell",
 ]);
 
+// Claude Code 工具名 → ACP ToolKind。
+//
+// 为什么必须映射：pieqi 的免审名单（L0/L1 自动放行）与审批卡的风险分级**都**按
+// ToolKind 匹配（见 internal/core/settings_store.go 的 riskLevelKinds）。此前这里
+// 恒发 toolKind:"" —— 而空 kind 经 RiskOfKind 兜底落 L2，后果有两条：
+//   1. L0/L1 免审名单**永不命中**，连 Edit 都要弹卡；
+//   2. 审批卡上一律显示 L2「执行命令」，即使实际是文件编辑（风险标注失真）。
+// 映射后 Edit→edit(L1 免审)、Delete→delete(L3 强制人工)，与 ACP 路径语义对齐。
+//
+// 值必须落在 riskLevelKinds 认识的那几个 kind 里；认不出的写 ""(→L2) 比猜一个
+// 更保守 —— 猜错成 read 等于让写操作静默通过。
+const TOOL_KINDS = {
+  Bash: "execute",
+  PowerShell: "execute",
+  Edit: "edit",
+  Write: "edit",
+  MultiEdit: "edit",
+  NotebookEdit: "edit",
+  Delete: "delete",
+  Move: "move",
+  Rename: "move",
+  Read: "read",
+  Grep: "search",
+  Glob: "search",
+  WebFetch: "fetch",
+  WebSearch: "fetch",
+  Task: "think",
+  Agent: "think",
+};
+
+/** 工具名 → ACP ToolKind；未知工具返回 ""（经 RiskOfKind 兜底为 L2，保守侧）。 */
+export function toolKindOf(toolName) {
+  return TOOL_KINDS[toolName] ?? "";
+}
+
 export class SessionRuntime {
   /**
    * @param {object} opts
@@ -137,7 +172,7 @@ export class SessionRuntime {
             this._emit("tool_start", {
               toolCallId: block.id,
               toolTitle: block.name,
-              toolKind: "",
+              toolKind: toolKindOf(block.name),
               rawInput: block.input ?? null,
             });
           }
@@ -237,6 +272,9 @@ export class SessionRuntime {
       this._emit("permission_needed", {
         reqId: rid,
         toolName,
+        // ToolKind 必须带上：pieqi 侧 PermissionWire 的免审名单按它匹配，
+        // 缺了它 L0/L1 永不命中（Edit 也要弹卡），且卡片风险一律显示成 L2。
+        toolKind: toolKindOf(toolName),
         toolUseID,
         requestId,
         rawInput: input ?? null,
