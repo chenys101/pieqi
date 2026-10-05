@@ -191,11 +191,12 @@ func main() {
 		defaultAgentName = agentNames[0]
 	}
 
-	// 是否进入 session 驱动路径：沿用改造前的判据（claude 走桥，或 qoder 已配置）。
+	// 是否进入 session 驱动路径：沿用改造前的判据（claude 走桥，或有任一 ACP 系 agent 已配置）。
 	// 判据不变是刻意的——本次改动只让「进来之后选哪个 agent」变得可选，不改变
 	// 「哪些配置会进入这条路径」，避免旧配置（use_acp + print）被无声改道。
-	qoderConfigured := cfg.Agents.Qoder.Transport == "acp" && cfg.Agents.Qoder.ACPConfig().AgentType != ""
-	if cfg.Agents.Claude.Transport == "sdk-bridge" || qoderConfigured {
+	// 表本身也是 provider 的注册依据（见下方「多 Agent」接线），两处共用同一判据。
+	acpProviders := agent.ACPProviderConfigFromAgents(cfg.Agents)
+	if cfg.Agents.Claude.Transport == "sdk-bridge" || len(acpProviders.Agents) > 0 {
 		mgr := agent.NewMultiAgentSessionManager(agentNames, defaultAgentName, agent.ManagerConfig{
 			MaxConcurrent: cfg.Pieqi.MaxConcurrentPerProject,
 			// 会话空闲回收阈值：复用旧 acp.idle_timeout（默认 15m），轮间保活上限
@@ -257,12 +258,18 @@ func main() {
 		}
 		claude.Configure(cc)
 	}
-	// qoder：ACP 系 agent 工厂（transport=acp 时注册，业务 agent.Open("qoder") 即用）
-	if qc := agent.ACPProviderConfigFromAgents(cfg.Agents); qc.Qoder.AgentType != "" {
-		qc.Logger = logger
-		agent.ConfigureACPProviders(qc)
-		logger.Info("qoder agent provider configured",
-			zap.String("transport", cfg.Agents.Qoder.Transport))
+	// ACP 系 agent（qoder / dsh）工厂：配置里 transport=acp 的才进表，业务 agent.Open("<名字>") 即用。
+	// 名字与 AvailableAgents 的 Name 同一个串，两处共用 ACPProviderConfigFromAgents 的判据。
+	if len(acpProviders.Agents) > 0 {
+		acpProviders.Logger = logger
+		agent.ConfigureACPProviders(acpProviders)
+		enabled := make([]string, 0, len(acpProviders.Agents))
+		for _, a := range availableAgents {
+			if _, ok := acpProviders.Agents[a.Name]; ok {
+				enabled = append(enabled, a.Name)
+			}
+		}
+		logger.Info("acp agent providers configured", zap.Strings("agents", enabled))
 	}
 
 	// --- Gin ---

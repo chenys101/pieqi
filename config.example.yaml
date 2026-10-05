@@ -99,6 +99,26 @@ agents:
       spawn_command: ["qodercli", "--acp", "-m", "Qwen3.8-Flash"]
       init_timeout: 30s
       idle_timeout: 15m             # 会话空闲回收阈值；<=0 禁用
+  dsh:
+    # 默认留空 = 不注册，agent 选择器里看不到它。要启用改成 acp，并满足两个前提：
+    #   1) 装 CLI：npm install -g @deepseek-ai/dsh（0.x；ACP 是它的 profile：dsh --profile acp）
+    #   2) dsh 侧有可用模型路由：ACP 会话的 provider/model 只取自 dsh `acp` profile 里
+    #      `acp` 这条 entry 的 config（出厂 pin 在 deepseek-official，要 DEEPSEEK_API_KEY；
+    #      改 pin 到别的 provider，如本地网关，就不需要这个 key）。缺密钥时任务会失败，
+    #      错误文案直接来自 dsh：no API key for provider route "deepseek-official"。
+    transport: ""                   # ""(默认,不注册) | acp(dsh --profile acp)
+    acp:
+      agent_type: dsh
+      # 裸名即可：Windows 上 npm 全局装的是 .cmd shim，Go spawn 会永久挂死，
+      # 程序会自动在 node_modules 各候选根里找到 @deepseek-ai/dsh 的 lib/bin.js
+      # 并以 `node <入口> --profile acp` 直启（同 claude-code 绕开 npx 的做法）。
+      # 空数组 = 按 agent_type 取默认；要显式写也支持，例如：
+      # spawn_command: ["dsh", "--profile", "acp"]
+      # 模型不要写在这里：CLI 参数里没有 --model 的位置，路由由 dsh 侧 profile 决定。
+      # 会话内可换模型（ACP session/set_config_option），但前提是 profile 已 pin 出
+      # 一个可用路由 —— 没有 pin 时会话压根没有模型可选（dsh 不回落 agent 默认模型）。
+      init_timeout: 2m              # 首次启动要组装配方/挂插件，实测冷启动 >90s（热启动 1s）
+      idle_timeout: 15m
   # 可用 agent 列表以后端 /api/agents 为唯一事实源；未知名字会被拒（400）。
 
 # ── 鉴权 + Cloudflared 隧道（PRD §8）────────────────────────────────────────

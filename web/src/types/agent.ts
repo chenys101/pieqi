@@ -1,5 +1,5 @@
 // Agent 模型（方案 §22）。
-// 当前后端无独立 Agent API：Agent 目录为静态注册，
+// 目录由后端 GET /api/agents 下发（可用性取决于服务端配置），
 // 在线状态 / 活跃会话由 Task Store 实时派生。
 
 export interface AgentInfo {

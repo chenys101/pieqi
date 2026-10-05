@@ -7,7 +7,7 @@
 企业微信 / 微信      ─┼─→ Pieqi(Go 单二进制) ─→ AgentManager ─→ 多种 agent 传输：
 移动端 PWA (:3000)  ─┘        │                  ├─ claude：sdk-bridge（官方 Agent SDK 常驻桥，默认）
                                │                  ├─ claude：print 回退（claude -p stream-json）
-                               │                  └─ qoder 等：原生 ACP（--acp，JSON-RPC over stdio）
+                               │                  └─ qoder / dsh 等：ACP（JSON-RPC over stdio）
                                ├── 任务调度：worktree 隔离 / 每项目并发上限 / 审批 / 续问
                                └── 安全：飞书单账号绑定 + Cloudflared 隧道 + token / 限流 / 审计
 ```
@@ -21,6 +21,8 @@
   * `claude` → `sdk-bridge`（默认）：常驻 Node 桥服务（`services/claude-sdk-bridge`，:18790）封装官方 Claude Agent SDK，探活失败自动拉起；桥不可用时透明回退 `print`（`claude -p --output-format stream-json`）。
 
   * `qoder` 等 → 原生 ACP（`qodercli --acp`，`coder/acp-go-sdk`）。
+
+  * `dsh` → 同为 ACP，但入口是一个 profile（`dsh --profile acp`，DeepSeek Harness）。默认不注册：需要本机装 `@deepseek-ai/dsh`，且其 `acp` profile 里 pin 了可用模型路由（出厂路由需 `DEEPSEEK_API_KEY`，也可改 pin 到本地网关等免 key 的 provider）；模型由 dsh 侧决定，不在本项目配置里。
 
 * **真流式输出**：内容增量（含思考过程）→ EventBus → WebSocket → PWA 逐字追加渲染。
 
@@ -164,6 +166,8 @@ agents:
       auto_start: true     # 探活失败自动 spawn 桥服务
   qoder:
     transport: acp         # qodercli --acp
+  dsh:
+    transport: ""          # 留空 = 不注册；改成 acp 即接 dsh --profile acp（模型路由在 dsh 侧 profile 里 pin）
 
 pieqi:
   max_concurrent_per_project: 4
@@ -256,6 +260,8 @@ GOOS=windows GOARCH=amd64 go build -o build/pieqi-windows-amd64.exe ./cmd/pieqi
 ## 已知限制
 
 * **qoder 等 ACP agent** 需本机安装对应 CLI（`qodercli` / `codex` 等）并支持 `--acp`。
+
+* **dsh（DeepSeek Harness）** 需 `npm install -g @deepseek-ai/dsh`（ACP 入口是它的 profile：`dsh --profile acp`），并在其 `acp` profile 里 pin 好模型路由（出厂 pin 的 `deepseek-official` 需 `DEEPSEEK_API_KEY`，改 pin 到别的 provider 可以不用 key）。默认不注册（`agents.dsh.transport` 留空）；首次启动要组装配方，握手实测冷启动 >90s，故其 `init_timeout` 默认 2m。
 
 * **tunnel token 不持久化**：服务重启 / 隧道重建后需重新扫码获取（设计使然，避免 token 落盘）。
 

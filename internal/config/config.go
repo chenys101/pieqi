@@ -112,6 +112,7 @@ type ACPConfig struct {
 type AgentsConfig struct {
 	Claude AgentClaudeConfig `mapstructure:"claude"`
 	Qoder  AgentQoderConfig  `mapstructure:"qoder"`
+	Dsh    AgentDshConfig    `mapstructure:"dsh"`
 }
 
 // AgentClaudeConfig claude agent 配置（multi-agent.md §4.2）。
@@ -171,6 +172,37 @@ func (q AgentQoderConfig) ACPConfig() ACPConfig {
 		SpawnCommand: q.ACP.SpawnCommand,
 		InitTimeout:  q.ACP.InitTimeout,
 		IdleTimeout:  q.ACP.IdleTimeout,
+	}
+}
+
+// AgentDshConfig dsh（DeepSeek Harness）agent 配置。
+// transport: "acp"（dsh --profile acp）。**默认留空 = 不注册**：它要求本机装好 dsh 并在
+// 启动环境提供 DEEPSEEK_API_KEY，缺任一项都只会让任务失败，不如不進选择器。
+type AgentDshConfig struct {
+	Transport string       `mapstructure:"transport"`
+	ACP       DshACPConfig `mapstructure:"acp"`
+}
+
+// DshACPConfig dsh 的 ACP 配置（字段与 QoderACPConfig 对应）。
+// 模型不在这里配：dsh 的模型由 ACP 的 session/set_config_option 在会话内选，
+// CLI 层没有 --model 之类的位置（spawn_command 里塞 `-m` 对它无效）。
+type DshACPConfig struct {
+	AgentType    string   `mapstructure:"agent_type"`
+	SpawnCommand []string `mapstructure:"spawn_command"`
+	// InitTimeout 覆盖 initialize/newSession 超时。dsh 首次启动要组装配方、挂载
+	// 插件（本机 Windows 实测冷启动 >90s，热启动 1s 内回 initialize），30s 默认会
+	// 把第一次会话直接判死，故 defaults 放宽到 2m。
+	InitTimeout time.Duration `mapstructure:"init_timeout"`
+	IdleTimeout time.Duration `mapstructure:"idle_timeout"`
+}
+
+// ACPConfig 把 dsh 节转成旧 ACPConfig 结构（喂给 agent.ConfigureACPProviders）。
+func (d AgentDshConfig) ACPConfig() ACPConfig {
+	return ACPConfig{
+		AgentType:    d.ACP.AgentType,
+		SpawnCommand: d.ACP.SpawnCommand,
+		InitTimeout:  d.ACP.InitTimeout,
+		IdleTimeout:  d.ACP.IdleTimeout,
 	}
 }
 
@@ -324,6 +356,11 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("agents.claude.print.permission_mode", "bypassPermissions")
 	v.SetDefault("agents.qoder.transport", "acp")
 	v.SetDefault("agents.qoder.acp.agent_type", "qodercli")
+	// dsh 刻意不设 transport 默认值：空 transport = 不进 agent 选择器（需要用户显式开启，
+	// 理由是它依赖本机 dsh 安装 + DEEPSEEK_API_KEY，见 AgentDshConfig）。
+	v.SetDefault("agents.dsh.acp.agent_type", "dsh")
+	v.SetDefault("agents.dsh.acp.init_timeout", "2m") // 首启动冷启动远慢于 qodercli，见 DshACPConfig.InitTimeout
+	v.SetDefault("agents.dsh.acp.idle_timeout", "15m")
 	v.SetDefault("auth.debug_skip_all_auth", false)
 	v.SetDefault("auth.feishu_binding_file", filepath.Join(DefaultDataRoot(), "feishu_binding.json"))
 	v.SetDefault("auth.cloudflared.binary_path", "cloudflared")

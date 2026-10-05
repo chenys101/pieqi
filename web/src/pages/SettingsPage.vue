@@ -242,6 +242,8 @@ const appVersion = __APP_VERSION__
         />
         <RobotList />
 
+        <!-- 不给每个 agent 挂「在线/离线」：可选项由服务端目录给出，进程是否真能起来
+             只有 open 时才知道，而本行唯一真实的连接状态就是上面的「实时连接」。 -->
         <SettingRow label="Agent 引擎" desc="已接入的 coding agent，以及各自的实时会话数。">
           <span class="text-xs text-text-tertiary">{{ agentStore.catalog.length }} 个</span>
         </SettingRow>
@@ -252,22 +254,24 @@ const appVersion = __APP_VERSION__
             class="flex items-center justify-between gap-2 rounded-md border border-border-subtle bg-background px-3 py-2"
           >
             <div class="min-w-0">
-              <div class="text-[13px] text-text">{{ info.name }}</div>
-              <div class="truncate font-mono text-[11px] text-text-tertiary" :title="info.transport">
-                {{ info.transport }}
+              <div class="flex min-w-0 items-baseline gap-1.5">
+                <span class="text-[13px] text-text">{{ info.name }}</span>
+                <span class="shrink-0 font-mono text-[11px] text-text-tertiary" :title="info.transport">
+                  {{ info.transport }}
+                </span>
+              </div>
+              <div
+                v-if="info.description"
+                class="truncate text-[11px] text-text-tertiary"
+                :title="info.description"
+              >
+                {{ info.description }}
               </div>
             </div>
-            <div class="flex shrink-0 items-center gap-2">
-              <Badge
-                :tone="agentStore.agents.find((s) => s.agentId === info.id)?.online ? 'success' : 'neutral'"
-              >
-                {{ agentStore.agents.find((s) => s.agentId === info.id)?.online ? '在线' : '离线' }}
-              </Badge>
-              <span class="text-[11px] text-text-tertiary">
-                活跃 {{ agentStore.agents.find((s) => s.agentId === info.id)?.activeSessions ?? 0 }} ·
-                总计 {{ agentStore.agents.find((s) => s.agentId === info.id)?.totalSessions ?? 0 }}
-              </span>
-            </div>
+            <span class="shrink-0 text-[11px] text-text-tertiary">
+              活跃 {{ agentStore.agents.find((s) => s.agentId === info.id)?.activeSessions ?? 0 }} ·
+              总计 {{ agentStore.agents.find((s) => s.agentId === info.id)?.totalSessions ?? 0 }}
+            </span>
           </div>
         </div>
 

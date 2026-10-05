@@ -34,7 +34,7 @@ export interface Task {
   /** 项目绝对路径 */
   projectPath: string
   status: TaskStatus
-  /** 执行 Agent（当前后端只有 Claude Code） */
+  /** 执行 Agent 业务名（claude / qoder，取值见 GET /api/agents） */
   agent: string
   /** 会话 id（claude_session_id） */
   sessionId: string

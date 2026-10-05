@@ -149,43 +149,69 @@ func NewACPAgent(cfg config.ACPConfig, logger *zap.Logger) *ACPAgent {
 // buildSpawnCommand 由 ACPConfig 推导 spawn 命令分词。
 // cfg.SpawnCommand 非空则优先用它；否则按 AgentType 取默认。
 func buildSpawnCommand(cfg config.ACPConfig) (string, []string) {
-	if len(cfg.SpawnCommand) > 0 {
-		return cfg.SpawnCommand[0], cfg.SpawnCommand[1:]
-	}
 	name, args := defaultSpawnCommand(cfg.AgentType)
-	// claude-code 默认经 npx 拉起官方 TS 适配器；但 Windows 下 Go spawn npx 的 batch shim
-	// 会永久挂死（零输出，initialize 必超时回退）。这里先尝试直接 node 拉起已安装的
-	// adapter（项目本地 node_modules 或 %APPDATA%\npm 全局），命中即绕开 npx；
-	// 找不到才退回 npx（Unix 上 npx 正常）。config 无需写绝对路径。
-	if name == "npx" && cfg.AgentType == "claude-code" {
-		if p, ok := adapterResolver(); ok {
-			return "node", []string{p}
+	explicit := len(cfg.SpawnCommand) > 0
+	if explicit {
+		name, args = cfg.SpawnCommand[0], cfg.SpawnCommand[1:]
+	}
+	// npm shim → node 直启（原因与判据见 nodeCLIAgent）。claude-code 那条改写会决定
+	// 「用哪个包的入口」，用户既然显式写了命令就绝不替他换包，因此只在默认路径上改写；
+	// dsh 的命令名对应的包是固定的，显式写法（如 [dsh,--profile,acp]）同样安全改写。
+	if entryRel, keepArgs, ok := nodeCLIAgent(cfg.AgentType, name); ok && (keepArgs || !explicit) {
+		// 命中已安装的全局入口就绕开 shim；找不到才按原命令走（Unix 上 npx / 全局 bin 正常）。
+		// config 无需写绝对路径。
+		if entry, ok := nodeCLIResolver(entryRel); ok {
+			if keepArgs {
+				return "node", append([]string{entry}, args...)
+			}
+			return "node", []string{entry}
 		}
 	}
 	return name, args
 }
 
-// adapterResolver 定位 claude-code adapter 入口的可覆盖钩子（测试注入用）；
-// 生产默认 resolveClaudeCodeAdapter。
-var adapterResolver = resolveClaudeCodeAdapter
+// nodeCLIAgent 判断「这个 spawn 命令名其实是 npm 发的 shim，应该换成 node 直启入口」。
+// keepArgs=true 时原参数要保留（dsh 的 --profile acp 是真参数）；false 时整段丢弃
+// （claude-code 的 `-y @scope/pkg@latest` 是 npx 的包选择器，对 node 直启无意义）。
+func nodeCLIAgent(agentType, name string) (entryRel string, keepArgs bool, ok bool) {
+	switch {
+	case agentType == "claude-code" && name == "npx":
+		return filepath.Join("@agentclientprotocol", "claude-agent-acp", "dist", "index.js"), false, true
+	case name == "dsh":
+		return filepath.Join("@deepseek-ai", "dsh", "lib", "bin.js"), true, true
+	}
+	return "", false, false
+}
 
-// resolveClaudeCodeAdapter 定位 @agentclientprotocol/claude-agent-acp 的 dist/index.js。
-// 依次尝试：项目本地 node_modules（npm i -D/--save-dev 安装）、Windows 全局
-// %APPDATA%\npm\node_modules（npm i -g 安装）。返回绝对路径，不依赖进程 cwd。
-func resolveClaudeCodeAdapter() (string, bool) {
-	rel := filepath.Join("@agentclientprotocol", "claude-agent-acp", "dist", "index.js")
-	var candidates []string
+// nodeCLIResolver 定位 npm 全局入口的可覆盖钩子（测试注入用）；生产默认 resolveNodeCLI。
+var nodeCLIResolver = resolveNodeCLI
+
+// resolveNodeCLI 在若干 node_modules 根下找 entryRel 指向的入口文件，返回绝对路径
+// （不依赖进程 cwd 之外的配置）。候选顺序：项目本地 node_modules →
+// %APPDATA%\npm\node_modules（Windows 上 npm 的默认 prefix）→
+// node 可执行文件同级 node_modules → Unix 系统 prefix。
+//
+// 第 3 项不是凑数：托管式 node（volta / scoop / 自定义 prefix）把全局包装在 node
+// 自己的目录旁边，%APPDATA%\npm 压根不存在（本机实测就是这种形态）。
+func resolveNodeCLI(entryRel string) (string, bool) {
+	var roots []string
 	if cwd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(cwd, "node_modules", rel))
+		roots = append(roots, filepath.Join(cwd, "node_modules"))
 	}
 	if appdata := os.Getenv("APPDATA"); appdata != "" {
-		candidates = append(candidates, filepath.Join(appdata, "npm", "node_modules", rel))
+		roots = append(roots, filepath.Join(appdata, "npm", "node_modules"))
 	}
-	for _, p := range candidates {
-		if abs, err := filepath.Abs(p); err == nil {
-			if _, err := os.Stat(abs); err == nil {
-				return abs, true
-			}
+	if nodePath, err := exec.LookPath("node"); err == nil {
+		roots = append(roots, filepath.Join(filepath.Dir(nodePath), "node_modules"))
+	}
+	roots = append(roots, "/usr/local/lib/node_modules", "/usr/lib/node_modules")
+	for _, r := range roots {
+		abs, err := filepath.Abs(filepath.Join(r, entryRel))
+		if err != nil {
+			continue
+		}
+		if st, err := os.Stat(abs); err == nil && !st.IsDir() {
+			return abs, true
 		}
 	}
 	return "", false
@@ -195,6 +221,7 @@ func resolveClaudeCodeAdapter() (string, bool) {
 //   - claude-code：经官方 TS 适配器 @agentclientprotocol/claude-agent-acp（原 @zed-industries/claude-code-acp，
 //     包名已迁移至 @agentclientprotocol 命名空间），由 npx 拉起 Node.js 进程。
 //   - qodercli / codex 等：原生 ACP，直接 spawn 自身 --acp。
+//   - dsh：ACP 是一个 profile，`dsh --profile acp`（等价简写 `dsh acp`）。
 //   - 其他：按 "<agentType> --acp" 兜底。
 func defaultSpawnCommand(agentType string) (string, []string) {
 	switch agentType {
@@ -204,6 +231,8 @@ func defaultSpawnCommand(agentType string) (string, []string) {
 		return "qodercli", []string{"--acp"}
 	case "codex":
 		return "codex", []string{"--acp"}
+	case "dsh":
+		return "dsh", []string{"--profile", "acp"}
 	default:
 		return agentType, []string{"--acp"}
 	}

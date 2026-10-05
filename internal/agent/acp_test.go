@@ -50,7 +50,8 @@ func TestDefaultSpawnCommand(t *testing.T) {
 		{"", "npx", []string{"-y", "@agentclientprotocol/claude-agent-acp@latest"}}, // 空=claude-code 默认
 		{"qodercli", "qodercli", []string{"--acp"}},
 		{"codex", "codex", []string{"--acp"}},
-		{"grok", "grok", []string{"--acp"}}, // 兜底：自身 --acp
+		{"dsh", "dsh", []string{"--profile", "acp"}}, // ACP 是 dsh 的一个 profile，不是 --acp 开关
+		{"grok", "grok", []string{"--acp"}},          // 兜底：自身 --acp
 	}
 	for _, c := range cases {
 		name, args := defaultSpawnCommand(c.agentType)
@@ -104,9 +105,9 @@ func TestBuildSpawnCommand_ResolvesLocalAdapter(t *testing.T) {
 	}
 }
 
-// TestResolveClaudeCodeAdapter_GlobalCandidate 验证 Windows 全局候选路径形态
+// TestResolveNodeCLI_GlobalCandidate 验证 Windows 全局候选路径形态
 // （%APPDATA%\npm\node_modules\...），不依赖全局是否真实安装。
-func TestResolveClaudeCodeAdapter_GlobalCandidate(t *testing.T) {
+func TestResolveNodeCLI_GlobalCandidate(t *testing.T) {
 	oldAppData, had := os.LookupEnv("APPDATA")
 	oldWd, _ := os.Getwd()
 	defer func() {
@@ -122,16 +123,96 @@ func TestResolveClaudeCodeAdapter_GlobalCandidate(t *testing.T) {
 	os.Setenv("APPDATA", tmp)
 	os.Chdir(t.TempDir()) // 本地无 node_modules
 
-	global := filepath.Join(tmp, "npm", "node_modules", "@agentclientprotocol", "claude-agent-acp", "dist", "index.js")
-	os.MkdirAll(filepath.Dir(global), 0755)
-	os.WriteFile(global, []byte("// fake"), 0644)
-
-	p, ok := resolveClaudeCodeAdapter()
-	if !ok {
-		t.Fatal("should resolve global adapter")
+	for _, agentType := range []string{"claude-code", "dsh"} {
+		entryRel, _, ok := nodeCLIAgent(agentType, mustDefaultSpawnName(t, agentType))
+		if !ok {
+			t.Fatalf("agentType=%q 应在 node 直启候选里", agentType)
+		}
+		global := filepath.Join(tmp, "npm", "node_modules", entryRel)
+		if err := os.MkdirAll(filepath.Dir(global), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(global, []byte("// fake"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		p, ok := resolveNodeCLI(entryRel)
+		if !ok {
+			t.Fatalf("agentType=%q 应从全局 node_modules 解析到入口", agentType)
+		}
+		if p != global {
+			t.Fatalf("got %q want %q", p, global)
+		}
 	}
-	if p != global {
-		t.Fatalf("got %q want %q", p, global)
+}
+
+// mustDefaultSpawnName 取某 agent_type 默认命令的可执行名（nodeCLIAgent 判据的输入）。
+func mustDefaultSpawnName(t *testing.T, agentType string) string {
+	t.Helper()
+	name, _ := defaultSpawnCommand(agentType)
+	return name
+}
+
+// TestBuildSpawnCommand_DshNodeEntry 验证 dsh 在装了 npm 全局包时以 node 直启入口拉起
+// （绕开 Windows 的 .cmd shim），且 --profile acp 参数保留；显式写 [dsh,--profile,acp]
+// 时同样改写（对应的包是固定的），但显式写了别的命令名就不动。
+func TestBuildSpawnCommand_DshNodeEntry(t *testing.T) {
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	tmp := t.TempDir()
+	entry := filepath.Join(tmp, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js")
+	if err := os.MkdirAll(filepath.Dir(entry), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entry, []byte("// fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, cfg := range []config.ACPConfig{
+		{AgentType: "dsh"},
+		{AgentType: "dsh", SpawnCommand: []string{"dsh", "--profile", "acp"}},
+	} {
+		name, args := buildSpawnCommand(cfg)
+		if name != "node" {
+			t.Fatalf("cfg=%+v name=%q want node", cfg, name)
+		}
+		want := []string{entry, "--profile", "acp"}
+		if len(args) != len(want) {
+			t.Fatalf("cfg=%+v args=%v want %v", cfg, args, want)
+		}
+		for i := range want {
+			if args[i] != want[i] {
+				t.Fatalf("cfg=%+v args[%d]=%q want %q", cfg, i, args[i], want[i])
+			}
+		}
+	}
+
+	// 用户显式指向别的可执行文件（含写死路径）时绝不改写。
+	name, args := buildSpawnCommand(config.ACPConfig{AgentType: "dsh", SpawnCommand: []string{"/opt/dsh", "--profile", "acp"}})
+	if name != "/opt/dsh" || len(args) != 2 {
+		t.Fatalf("显式路径被改写: name=%q args=%v", name, args)
+	}
+}
+
+// TestBuildSpawnCommand_ExplicitNpxNotRewritten 守住「不替用户换包」：
+// claude-code 的 npx 参数决定装哪个包，显式配置时即使命中 shim 名也不换成全局入口。
+func TestBuildSpawnCommand_ExplicitNpxNotRewritten(t *testing.T) {
+	old := nodeCLIResolver
+	nodeCLIResolver = func(string) (string, bool) { return "/should/not/be/used", true }
+	defer func() { nodeCLIResolver = old }()
+
+	name, args := buildSpawnCommand(config.ACPConfig{
+		AgentType:    "claude-code",
+		SpawnCommand: []string{"npx", "-y", "some-community-fork@next"},
+	})
+	if name != "npx" || args[0] != "-y" || args[1] != "some-community-fork@next" {
+		t.Fatalf("显式 npx 命令被改写: name=%q args=%v", name, args)
 	}
 }
 

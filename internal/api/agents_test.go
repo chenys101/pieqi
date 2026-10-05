@@ -43,6 +43,7 @@ func TestAPI_ListAgents(t *testing.T) {
 		srv.SetAgents([]agent.AgentInfo{
 			{Name: agent.AgentClaude, DisplayName: "Claude Code", Transport: "SDK Bridge"},
 			{Name: agent.AgentQoder, DisplayName: "Qoder CLI", Transport: "ACP"},
+			{Name: agent.AgentDsh, DisplayName: "DeepSeek Harness", Transport: "ACP"},
 		}, agent.AgentClaude)
 
 		w := httptest.NewRecorder()
@@ -56,8 +57,9 @@ func TestAPI_ListAgents(t *testing.T) {
 			Default string            `json:"default"`
 		}
 		json.Unmarshal(w.Body.Bytes(), &resp)
-		if len(resp.Agents) != 2 || resp.Agents[1].Name != agent.AgentQoder {
-			t.Fatalf("agents=%+v, want claude+qoder", resp.Agents)
+		// API 层不按 agent 名特判：后端给几个就下发几个，顺序也原样保留。
+		if len(resp.Agents) != 3 || resp.Agents[2].Name != agent.AgentDsh {
+			t.Fatalf("agents=%+v, want claude+qoder+dsh", resp.Agents)
 		}
 		if resp.Default != agent.AgentClaude {
 			t.Fatalf("default=%q, want claude（需求：默认 Claude Code）", resp.Default)

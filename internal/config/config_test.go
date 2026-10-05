@@ -526,6 +526,31 @@ func TestConfig_ExampleQoderSpawnIsBareName(t *testing.T) {
 	}
 }
 
+// TestConfig_ExampleDshIsOptIn 守卫：dsh 在模板里必须保持「不注册」。
+// 它依赖本机装了 @deepseek-ai/dsh 且其 acp profile pin 了可用模型路由，两者都不由 pieqi 保证；
+// 默认就把一个会失败、且模型不由本项目控制的 agent 放进每个人的选择器是不可接受的。
+// 真要默认开启时，改这条用例的理由得写清楚。
+func TestConfig_ExampleDshIsOptIn(t *testing.T) {
+	cfg, err := Load(exampleConfigPath)
+	if err != nil {
+		t.Fatalf("load example: %v", err)
+	}
+	if cfg.Agents.Dsh.Transport != "" {
+		t.Fatalf("example agents.dsh.transport = %q，want 空（dsh 需显式开启）", cfg.Agents.Dsh.Transport)
+	}
+	if cfg.Agents.Dsh.ACP.AgentType != "dsh" {
+		t.Fatalf("example agents.dsh.acp.agent_type = %q, want dsh", cfg.Agents.Dsh.ACP.AgentType)
+	}
+	// 模板若哪天给出 spawn_command，首元素同样必须是裸名（理由同 qoder 那条守卫）。
+	if cmd := cfg.Agents.Dsh.ACP.SpawnCommand; len(cmd) > 0 && strings.ContainsAny(cmd[0], `/\`) {
+		t.Fatalf("模板 dsh spawn_command[0] = %q 含路径分隔符：请写裸名（解析器会补 node 入口），不要写死机器路径", cmd[0])
+	}
+	// 冷启动实测 >90s，模板不能沿用 30s 默认握手超时。
+	if cfg.Agents.Dsh.ACP.InitTimeout < time.Minute {
+		t.Fatalf("example agents.dsh.acp.init_timeout = %v，dsh 首启动冷启动远慢于此，至少要 1m", cfg.Agents.Dsh.ACP.InitTimeout)
+	}
+}
+
 // TestConfig_AccessDefaults 守卫 Cloudflare Access 的默认值：
 // 必须**默认关闭**且**保留 token 兜底** —— 否则升级后老部署会突然全站 401
 // （Access 没配、token 又被关掉 = 外网无任何凭据通道）。

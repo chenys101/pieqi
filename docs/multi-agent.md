@@ -246,6 +246,27 @@ internal/agent/qoder/
 
 后续 Codex 等：新包 `internal/agent/codex`，同样实现接口即可。
 
+### 6.1 dsh（DeepSeek Harness）实测的 ACP 面
+
+`@deepseek-ai/dsh`（0.x）的 ACP 入口是一个 profile：`dsh --profile acp`（简写 `dsh acp`），
+底层包 `@deepseek-ai/dsh-acp`，`agentInfo.name` 报 `deepseek-harness-acp`。2026-10-05 本机
+Windows 实测：
+
+| 项 | 实测结果 | 对 pieqi 的影响 |
+|---|---|---|
+| `initialize` | 热启动 1s 内返回；**首启动 >90s**（组装配方、挂插件） | `agents.dsh.acp.init_timeout` 默认放宽到 2m，否则第一次会话直接被 30s 判死 |
+| `sessionCapabilities` | `close` / `list` / **`resume`**，**没有 `load`** | 续问走 `ACPAgent.NewSession` 的 `ResumeSession` 分支（现有判据自动选对，无需分叉） |
+| 活跃会话上 `session/resume` | 报错 `session is already active` | 只有进程重启 / 会话已关后才能 resume；同进程内复用仍靠 pieqi 的轮间保活 |
+| `session/request_permission` | 支持，一次性 allow/deny 选项 | 审批卡片链路正常，与 qoder 一致 |
+| `session/new` 返回 `configOptions` | `model` / `reasoning_effort` 是**会话内选项**，改要发 `session/set_config_option` | pieqi 未实现 setConfigOption；模型只能在 dsh 侧配，`spawn_command` 里塞 `-m` 无效 |
+| provider 路由 | 只来自 dsh `acp` profile 里 `acp` 这条 entry 的 pin（出厂 pin `deepseek-official`，需 `DEEPSEEK_API_KEY`）；缺密钥时 `session/prompt` 直接返回 JSON-RPC 错误 `no API key for provider route "deepseek-official"` | 路由归 dsh 侧配置，pieqi 不干预：把该 entry 改 pin 到别的 provider（如本地网关）就无需这个 key。清空 pin **不会**回落到 `agent-default-model`（那是 web / headless 各自读的），会话会彻底没有模型 |
+| stdout | 只承载协议流量，无 banner 污染 | 满足 JSON-RPC over stdio 前提 |
+| 客户端 fs / terminal / plan / elicitation | 文档明确「不支持的界面会被省略或拒绝」 | `acp.go` 目前虚报 `ClientCapabilities.Fs=true` 而实现返回 `ErrNotSupported`；dsh 不据此发调用，暂无影响，但**这是个待修的虚报** |
+
+Windows spawn 形态：npm 全局装的 `dsh` 是 `.cmd` shim，Go 直接 spawn 会永久挂死（同 claude-code
+的 npx 问题）。`internal/agent/acp.go` 的 `nodeCLIAgent` / `resolveNodeCLI` 会把它换成
+`node <node_modules>/@deepseek-ai/dsh/lib/bin.js --profile acp`，配置里只写裸名。
+
 ---
 
 ## 7. Print transport（Claude 内部）
