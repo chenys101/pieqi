@@ -17,6 +17,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -528,6 +529,10 @@ func (pw *PermissionWire) Unwire() {
 // --- IM 通知文案（仿 TaskRunner.notifyWaitingInput 的 approval 分支） ---
 
 // notifyApproval 往 IM 原渠道推送「需要决策」。无 IM 渠道或无 notify 时静默跳过。
+//
+// 文案刻意短：手机上这条要能一眼看完"什么任务、什么操作、多重"，然后直接回 /approve。
+// 风险等级带上（L2/L3 比"需要决策"更能提示该不该细看），但标题行不再重复工具名
+// —— 摘要里通常已有。
 func (pw *PermissionWire) notifyApproval(t *model.Task) {
 	if pw.notify == nil || t == nil || t.OriginChannel == "" || t.OriginChatID == "" || t.CurrentDecision == nil {
 		return
@@ -537,7 +542,11 @@ func (pw *PermissionWire) notifyApproval(t *model.Task) {
 	if summary == "" {
 		summary = t.CurrentDecision.ToolName
 	}
-	text := fmt.Sprintf("⚠️ 任务 #%s 需要决策\n%s\n\n回复 /approve 或 /deny，或打开 PWA 处理", id, summary)
+	risk := t.CurrentDecision.Risk
+	if risk == "" {
+		risk = RiskL2 // 与 RiskOfKind / 前端 riskOf 同一条判据：缺省即 L2
+	}
+	text := fmt.Sprintf("⚠️ 任务 #%s · %s %s\n%s\n\n回复 /approve 或 /deny，或打开 PWA", id, risk, RiskLabel(risk), summary)
 	pw.notify(t, text)
 }
 
@@ -572,11 +581,20 @@ func (pw *PermissionWire) callAdapterDeny(reqID string) error {
 // 文本下面 —— 在这里截断等于让人盲批。长度问题交给前端折叠展示（ApprovalCard/Banner 的
 // "展开全文"），不靠删内容解决。
 //
-// 优先 ToolTitle，次 KindLabel(ToolKind)，再次 RawInput 截断（兜底分支不是要人批的内容，
-// 只是"我们没拿到标题"时的线索，所以给它上限），最后 ToolCallID。
+// 优先级：ToolTitle → 从 RawInput 抽出的人读内容（命令/描述）→ KindLabel → 原始 JSON → ID。
+//
+// **RawInput 不能直接原样倒出来**：那是给机器看的 JSON，用户看到的是
+// `{"command":"$p=\"$env:USERPROFILE\\...\"","description":"Check if task file exists",
+// "justification":"沙箱两次拒绝...","sandbox_permissions":"danger-full-access"}` 这种
+// 转义后的乱码（转义符、字段名、英文说明混在一起，看不到"要执行什么"）。
+// dsh 的 ACP 实现恰好不发 title 也不发 kind，一旦走到兜底分支，卡片上就只剩这串 JSON。
 func buildPermSummary(req agent.PermissionRequest) string {
 	if req.ToolTitle != "" {
 		return req.ToolTitle
+	}
+	// ToolTitle 缺失（dsh 常态）：从 RawInput 里挑人读的内容。
+	if s := summaryFromRawInput(req.RawInput); s != "" {
+		return s
 	}
 	if req.ToolKind != "" {
 		return KindLabel(req.ToolKind)
@@ -593,13 +611,54 @@ func buildPermSummary(req agent.PermissionRequest) string {
 	return req.ToolCallID
 }
 
+// summaryFromRawInput 从工具入参里挑出**给人看**的内容，而不是把 JSON 原样倒出来。
+//
+// 各 agent 的入参形态不同，这里按"信息量从高到低"取第一个非空的已知字段：
+//   - `command`（shell 工具）：直接就是要执行什么，最重要；
+//   - `description`（dsh/claude 的意图说明）：command 缺失时的次选；
+//   - `file_path` / `path`（编辑类工具）：要改哪个文件；
+//   - `pattern` / `query` / `url`：找什么、访问哪里。
+//
+// 拼装规则：取到 command 时若同时有 description，把 description 作为前缀
+// （"检查任务文件是否存在：<命令>"）—— 说明文字比命令原文更能一眼读懂意图。
+// 都不认识则返回空串，由调用方回退到原始 JSON（不认识就不猜）。
+func summaryFromRawInput(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	str := func(k string) string {
+		s, _ := m[k].(string) // 非字符串（数组/对象）一律视作没有
+		return strings.TrimSpace(s)
+	}
+
+	command := str("command")
+	desc := str("description")
+
+	if command != "" {
+		if desc != "" && desc != command {
+			return desc + "：" + command
+		}
+		return command
+	}
+	for _, k := range []string{"description", "file_path", "path", "pattern", "query", "url"} {
+		if v := str(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // permLabelMaxRunes 审批卡标题的长度上限。超过就不如不说 —— 换成人读操作类型。
 const permLabelMaxRunes = 40
 
 // permLabel 审批卡标题：title 是"一行、够短"才用它，否则退化成 kind 的人读标签。
 //
 // 两条路各有得失，这里选"够短就说人话，否则只报类别"：
-//   - claude-code 适配器给的 title 本来就是 "Bash" / "Edit src/a.go" 这种短名 → 原样保留；
+//   - claude-code / dsh 适配器给的可能是 "Bash" / "pwsh" 这种短名 → 原样保留；
 //   - qodercli 给的是整条命令（实测最长 1109 字符，且与摘要栏是同一串文本）→ 只报"执行命令"，
 //     完整命令留给摘要栏（可展开），标题不再重复一遍。
 //

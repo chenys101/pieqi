@@ -233,12 +233,18 @@ func TestWirePermission_RequestTriggersWaitingInput(t *testing.T) {
 		}
 	}
 
-	// IM notify 应被调用一次，文案含「需要决策」与摘要。
+	// IM notify 应被调用一次，文案含任务号、风险等级与摘要。
+	// 文案刻意不再写"需要决策"——IM 那条要能一眼看完"什么任务、什么操作、多重"，
+	// 而任务的等待状态由卡片/PWA 呈现，重复一遍只是占屏。
 	if len(*notifyTexts) == 0 {
 		t.Fatal("IM notify not called")
 	}
-	if !strings.Contains((*notifyTexts)[0], "需要决策") {
-		t.Errorf("notify text=%q, want contain '需要决策'", (*notifyTexts)[0])
+	if !strings.Contains((*notifyTexts)[0], taskID[:8]) {
+		t.Errorf("notify text=%q, want contain task id %q", (*notifyTexts)[0], taskID[:8])
+	}
+	// kind=execute → L2，文案必须标出档位（手机上据此决定要不要细看）。
+	if !strings.Contains((*notifyTexts)[0], "L2") {
+		t.Errorf("notify text=%q, want contain risk level 'L2'", (*notifyTexts)[0])
 	}
 
 	// store 持久化的状态与事件一致。
@@ -631,9 +637,55 @@ func TestWirePermission_BuildPermSummary(t *testing.T) {
 		{"长命令不截断", agent.PermissionRequest{ReqID: "r", ToolTitle: strings.Repeat("a", 500)}, strings.Repeat("a", 500)},
 		{"title only", agent.PermissionRequest{ReqID: "r", ToolTitle: "Write"}, "Write"},
 		{"kind only → 人读标签", agent.PermissionRequest{ReqID: "r", ToolKind: "execute"}, "执行命令"},
+		// 不认识的字段（没有 command/description/...）才退到原始 JSON。
 		{"raw input fallback", agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"cmd":"ls"}`)}, `{"cmd":"ls"}`},
 		{"raw input truncated", agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(strings.Repeat("a", 300))}, strings.Repeat("a", 200) + "…"},
 		{"fallback id", agent.PermissionRequest{ReqID: "r", ToolCallID: "call-9"}, "call-9"},
+
+		// ---- dsh 的现实：title 与 kind 都是空的，只有 RawInput ----
+		// 此前会把这串 JSON 原样倒到卡片上（用户看到的是一堆转义符和字段名）。
+		{
+			"dsh：command + description → 说明前缀 + 命令",
+			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(
+				`{"command":"Get-ChildItem $p","description":"Check if task file exists"}`)},
+			"Check if task file exists：Get-ChildItem $p",
+		},
+		{
+			"dsh：只有 command（不发 description）",
+			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"command":"ls -la /tmp"}`)},
+			"ls -la /tmp",
+		},
+		{
+			"dsh：description 与 command 相同不重复拼",
+			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"command":"ls","description":"ls"}`)},
+			"ls",
+		},
+		{
+			"dsh：编辑类工具按路径",
+			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"file_path":"internal/core/a.go"}`)},
+			"internal/core/a.go",
+		},
+		{
+			"dsh：搜索类工具按 pattern",
+			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"pattern":"func main"}`)},
+			"func main",
+		},
+		{
+			"dsh：description 优先于 file_path",
+			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(
+				`{"description":"读取配置","file_path":"config.yaml"}`)},
+			"读取配置",
+		},
+		{
+			"dsh：字段值不是字符串时忽略（不打印 [object]）",
+			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"command":[1,2],"path":"a.go"}`)},
+			"a.go",
+		},
+		{
+			"dsh：空白字符串视作没有",
+			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"command":"   ","path":"b.go"}`)},
+			"b.go",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -642,6 +694,36 @@ func TestWirePermission_BuildPermSummary(t *testing.T) {
 				t.Errorf("buildPermSummary=%q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// TestBuildPermSummary_DshRealPayload 用 dsh 实际发出的 rawInput 做回归。
+//
+// 取自会话 498eb8de 的 pwsh 工具调用：dsh 的 ACP 实现**不发 title、不发 kind**，
+// 于是 buildPermSummary 一路走到最后的兜底分支。此前卡片上显示的就是这段 JSON
+// （转义符 + 字段名 + 英文说明混在一起，用户根本看不出"要执行什么"）。
+func TestBuildPermSummary_DshRealPayload(t *testing.T) {
+	// 注意：这里刻意保留 PowerShell 的转义原文，模拟真实 payload。
+	raw := `{"command":"$p=\"$env:USERPROFILE\\.pieqi\\tasks\"; Test-Path $p; Get-ChildItem $p -Filter \"*6164e2a2*\" | Select-Object FullName","description":"Check if task file exists","justification":"沙箱两次拒绝授权工作区 ACL","sandbox_permissions":"danger-full-access"}`
+
+	got := buildPermSummary(agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(raw)})
+
+	// 必须露出"要执行什么"，而不是 JSON 结构。
+	if !strings.Contains(got, "Check if task file exists") {
+		t.Errorf("摘要丢了 description：%q", got)
+	}
+	if !strings.Contains(got, "Test-Path $p") {
+		t.Errorf("摘要丢了 command：%q", got)
+	}
+	// 不该出现 JSON 的字段名与结构噪声。
+	for _, bad := range []string{`"command"`, `"sandbox_permissions"`, `\"`, "{\""} {
+		if strings.Contains(got, bad) {
+			t.Errorf("摘要里仍有 JSON 噪声 %q：%q", bad, got)
+		}
+	}
+	// justification 是给审计看的理由，不该顶替正文（它没有 command 具体）。
+	if strings.HasPrefix(got, "沙箱两次拒绝") {
+		t.Errorf("摘要不该以 justification 开头：%q", got)
 	}
 }
 
@@ -817,15 +899,15 @@ func TestWirePermission_ConcurrentQueuePromotes(t *testing.T) {
 		t.Fatalf("last approve reqID=%q, want req-B", rid)
 	}
 
-	// IM 通知应为每张卡一次（A 展示 + B 提升），即 2 条「需要决策」。
+	// IM 通知应为每张卡一次（A 展示 + B 提升），即 2 条审批提醒。
 	needDecisions := 0
 	for _, txt := range *notifyTexts {
-		if strings.Contains(txt, "需要决策") {
+		if strings.Contains(txt, "⚠️") {
 			needDecisions++
 		}
 	}
 	if needDecisions != 2 {
-		t.Errorf("IM '需要决策' notify count=%d, want 2", needDecisions)
+		t.Errorf("IM approval notify count=%d, want 2", needDecisions)
 	}
 }
 

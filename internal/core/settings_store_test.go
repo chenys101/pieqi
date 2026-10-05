@@ -3,6 +3,7 @@ package core
 import (
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,6 +247,46 @@ func TestRiskOfKind(t *testing.T) {
 		if got := RiskOfKind(c.kind); got != c.want {
 			t.Errorf("RiskOfKind(%q) = %s, want %s", c.kind, got, c.want)
 		}
+	}
+}
+
+// TestRiskLabel 风险等级的人读标签：四档都有，未知/空按 L2。
+//
+// 这条标签会出现在 IM 通知里（notifyApproval）。它与前端 RISK_LABELS
+// （web/src/types/approval.ts）必须一致 —— 同一次审批在飞书和 PWA 上
+// 显示成两个不同的档位说明，用户就不知道该信哪个。
+func TestRiskLabel(t *testing.T) {
+	want := map[RiskLevel]string{
+		RiskL0: "只读",
+		RiskL1: "写入",
+		RiskL2: "执行命令",
+		RiskL3: "破坏性",
+	}
+	for lv, w := range want {
+		if got := RiskLabel(lv); got != w {
+			t.Errorf("RiskLabel(%s) = %q, want %q", lv, got, w)
+		}
+	}
+	// 与前端 RISK_LABELS 逐字对齐（前端那份是"完整说法"，这里是 IM 用的简称；
+	// 两边语义必须能对上，所以断言前端文案包含这里的简称）。
+	frontend := map[RiskLevel]string{
+		RiskL0: "只读探测",
+		RiskL1: "写入",
+		RiskL2: "执行命令",
+		RiskL3: "破坏性操作",
+	}
+	for lv, short := range want {
+		if !strings.Contains(frontend[lv], short) {
+			t.Errorf("前端 %s 文案 %q 与后端简称 %q 对不上（同一次审批两处说明必须一致）",
+				lv, frontend[lv], short)
+		}
+	}
+	// 未知/空：与 RiskOfKind 一样倒向 L2。
+	if got := RiskLabel(""); got != want[RiskL2] {
+		t.Errorf("RiskLabel(\"\") = %q, want %q（未知应倒向 L2）", got, want[RiskL2])
+	}
+	if got := RiskLabel("L9"); got != want[RiskL2] {
+		t.Errorf("RiskLabel(\"L9\") = %q, want %q", got, want[RiskL2])
 	}
 }
 

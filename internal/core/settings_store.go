@@ -82,6 +82,23 @@ func KindLabel(kind string) string {
 	return "工具调用"
 }
 
+// riskLabels 风险等级的人读标签。与前端 RISK_LABELS（web/src/types/approval.ts）同源，
+// 两边必须一致 —— IM 文案与卡片上显示的档位说明是同一件事的两处呈现。
+var riskLabels = map[RiskLevel]string{
+	RiskL0: "只读",
+	RiskL1: "写入",
+	RiskL2: "执行命令",
+	RiskL3: "破坏性",
+}
+
+// RiskLabel 由风险等级取人读标签；未知/空一律按 L2 的标签（与 RiskOfKind 同一判据）。
+func RiskLabel(l RiskLevel) string {
+	if s, ok := riskLabels[l]; ok {
+		return s
+	}
+	return riskLabels[RiskL2]
+}
+
 // RiskOfKind 由 ACP ToolKind 反查风险分级。
 //
 // **未知 / 空 kind 一律算 L2**，这不是保守过头的默认值，而是与 `other` 归 L2 同一个判据：

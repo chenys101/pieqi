@@ -36,13 +36,13 @@ const TONE: Record<RiskLevel, { box: string; head: string; badge: string; title:
     box: 'border-border bg-surface',
     head: 'text-text',
     badge: 'bg-elevated text-muted',
-    title: '需要授权',
+    title: '可自动放行',
   },
   L1: {
     box: 'border-info/40 bg-surface',
     head: 'text-info',
     badge: 'bg-info/15 text-info',
-    title: '需要授权',
+    title: '可自动放行',
   },
   L2: {
     box: 'border-warning/40 bg-surface',
@@ -90,7 +90,8 @@ async function act(kind: ApprovalChoice) {
     <div class="flex items-start justify-between gap-2">
       <div class="flex items-center gap-2">
         <span class="text-sm font-medium" :class="tone.head">{{ tone.title }}</span>
-        <!-- 风险徽章：等级 + 它意味着什么。只写等级用户还得猜"L3 是多大" -->
+        <!-- 风险徽章只报"等级 + 它意味着什么"，不重复标题：标题已经是"要不要人工看"，
+             徽章回答的是"这一档有多重"，两者叠一起才算把话说全 -->
         <span class="rounded px-1.5 py-0.5 text-[11px] font-medium" :class="tone.badge">
           {{ risk }} · {{ RISK_LABELS[risk] }}
         </span>
@@ -118,14 +119,14 @@ async function act(kind: ApprovalChoice) {
       class="mt-3 rounded border border-error/40 bg-error/5 px-3 py-2"
     >
       <div class="text-xs font-medium text-error">
-        此操作不可逆，确认{{ pending === 'approve_session' ? '允许并让同类操作在本会话免审' : '允许' }}？
+        {{ pending === 'approve_session' ? '确认允许，并让同类操作本会话免审？' : '此操作不可逆，确认允许？' }}
       </div>
       <div class="mt-0.5 text-[11.5px] text-muted">
         <template v-if="pending === 'approve_session'">
-          批准后 Agent 立即执行，且本任务剩余时间内同类操作不再问你 —— 后面几次发生什么你不会再看到。不确定就先看 Diff。
+          批准后立即执行，且本任务内同类操作不再询问。
         </template>
         <template v-else>
-          批准后 Agent 会立即执行，无法撤回。不确定就先看 Diff 或进会话看上下文。
+          批准后立即执行，无法撤回。
         </template>
       </div>
       <div class="mt-2 flex gap-2">
