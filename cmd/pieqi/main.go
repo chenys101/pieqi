@@ -36,6 +36,12 @@ import (
 )
 
 func main() {
+	// 最早一步：剔除宿主（WorkBuddy 会话）经 NODE_OPTIONS 注入的 shim。
+	// 必须早于任何子进程 spawn —— 环境一旦被继承出去就收不回来；
+	// 且自重启（os.Environ() 派生新进程）靠这一步保证"污染不会跨代累积"。
+	// 详见 internal/core/env_sanitize.go 的文件头注释。
+	strippedNodeOpts := core.SanitizeInheritedNodeOptions()
+
 	// pre-tool-use 子命令：Claude Code PreToolUse hook 回连主进程
 	if len(os.Args) > 1 && os.Args[1] == "pre-tool-use" {
 		runPreToolUse(os.Args[2:])
@@ -72,6 +78,15 @@ func main() {
 	// P5：pieqi.acp.* 旧字段迁移告警（仅显式配置时触发，旧语义仍生效）
 	for _, d := range cfg.Deprecations {
 		logger.Warn("config deprecated field", zap.String("hint", d))
+	}
+
+	// 启动时剔除了宿主注入的 shim 才告警：正常情况下没有（干净启动不打扰），
+	// 一旦出现即说明是从 WorkBuddy 会话里拉起的，日志留痕便于解释
+	// "为什么子进程里的删除行为与终端不一致"。
+	if len(strippedNodeOpts) > 0 {
+		logger.Warn("stripped host-injected NODE_OPTIONS shim",
+			zap.Strings("removed", strippedNodeOpts),
+			zap.String("reason", "会话级 fs 删除闸门 shim 不应继承进 pieqi 及其子进程"))
 	}
 
 	for _, dir := range []string{
