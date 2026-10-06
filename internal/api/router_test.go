@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,10 +64,10 @@ func TestAPI_CreateAndListTasks(t *testing.T) {
 	}
 	var listResp struct {
 		Projects []struct {
-			ProjectID   string         `json:"project_id"`
-			ProjectPath string         `json:"project_path"`
-			Counts      map[string]int `json:"counts"`
-			Tasks       []*model.Task  `json:"tasks"`
+			ProjectID   string               `json:"project_id"`
+			ProjectPath string               `json:"project_path"`
+			Counts      map[string]int       `json:"counts"`
+			Tasks       []*model.TaskSummary `json:"tasks"`
 		} `json:"projects"`
 	}
 	json.Unmarshal(w.Body.Bytes(), &listResp)
@@ -79,6 +80,10 @@ func TestAPI_CreateAndListTasks(t *testing.T) {
 	}
 	if g.Counts["pending"] != 1 {
 		t.Fatalf("counts=%+v", g.Counts)
+	}
+	// 回归：列表**不得**下发事件流（11MB 载荷的根因，见 model.TaskSummary）
+	if body := w.Body.String(); strings.Contains(body, `"events"`) {
+		t.Fatalf("列表响应不应包含 events 字段: %.300s", body)
 	}
 	_ = store
 }

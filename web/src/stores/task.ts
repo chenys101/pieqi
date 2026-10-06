@@ -134,6 +134,13 @@ export const useTaskStore = defineStore('task', {
       this.removeTask(id)
     },
 
+    /**
+     * 按 id 重新拉取任务元数据。
+     *
+     * ⚠️ 这里**只**更新任务元数据，不碰会话事件流（events 属 sessionStore）。
+     * 详情页要的是"状态 + 时间线"一起刷新，必须走 SessionPage 的 loadDetail
+     * （它同时同步两个 store），否则会出现"状态已更新、时间线还是旧的"。
+     */
     async refreshTask(id: string) {
       const task = await api.getTask(id)
       this.upsertTask(task)

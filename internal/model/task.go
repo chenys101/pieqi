@@ -136,6 +136,44 @@ type DiffStat struct {
 	CapturedAt time.Time `json:"captured_at"`
 }
 
+// TaskSummary 列表/快照用的**轻量**任务视图：除事件流外与 Task 同构。
+//
+// 为什么要单独一个类型：`GET /api/tasks` 原先直接序列化 []*Task，把每个任务的
+// **完整 events** 都塞进列表响应。实测（2026-10-06，24 个任务）单次列表
+// **11.25 MB / 300ms+**，且随事件累积线性劣化 —— 这就是"列表越来越慢"的根因；
+// WS 快照同样用它，重连时要先推 11MB，前端解析期间订阅缓冲必然溢出。
+//
+// 事件流是**详情页**才需要的重载荷，应走 GET /api/tasks/{id} 按需拉取。
+// 列表只需要"有没有新事件"这一位信息，故以 EventCount/NextEventSeq 代替。
+//
+// 用内嵌 *Task 而非复制字段：字段有 25 个，复制会立刻产生漂移
+// （新增字段忘了同步 = 前端静默拿到 undefined）。内嵌 + 遮蔽 Events 让
+// 「加字段」自动生效，只有事件流被显式替换。
+type TaskSummary struct {
+	*Task
+	// Events 遮蔽内嵌的同名字段（omitempty + nil 即不下发）。
+	Events []TaskEvent `json:"events,omitempty"`
+	// EventCount 事件总数，供列表显示"进度"而不必传全文。
+	EventCount int `json:"event_count"`
+}
+
+// NewTaskSummary 由 Task 构造轻量视图。t 为 nil 时返回 nil。
+func NewTaskSummary(t *Task) *TaskSummary {
+	if t == nil {
+		return nil
+	}
+	return &TaskSummary{Task: t, EventCount: len(t.Events)}
+}
+
+// NewTaskSummaries 批量构造。
+func NewTaskSummaries(ts []*Task) []*TaskSummary {
+	out := make([]*TaskSummary, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, NewTaskSummary(t))
+	}
+	return out
+}
+
 // Task 一次在 Git Worktree 中运行的编码任务。
 type Task struct {
 	ID     string     `json:"id"` // uuid

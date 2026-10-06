@@ -9,6 +9,9 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '@/stores/task'
+import { useSessionStore } from '@/stores/session'
+import * as api from '@/services/api/tasks'
+import { adaptTask } from '@/services/api/client'
 import { useSession } from '@/composables/useSession'
 import { useResponsive } from '@/composables/useResponsive'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
@@ -21,6 +24,7 @@ import Button from '@/components/ui/Button.vue'
 const route = useRoute()
 const router = useRouter()
 const taskStore = useTaskStore()
+const sessionStore = useSessionStore()
 const { isMobile, isWide } = useResponsive()
 const fbPanel = useFeedbackPanelStore()
 
@@ -59,7 +63,13 @@ function openFeedback() {
   feedbackOpen.value = true
 }
 
-// 冷启动兜底：WS 快照未到时按 id 拉详情（含全量 events）
+// 详情加载：WS 快照 / 列表只给**轻量视图**（不含 events），所以进入详情页时
+// 必须按 id 拉一次完整详情来填充时间线。
+//
+// ⚠️ 判据是「本地是否已有该会话的事件流」，**不是**「任务是否已在列表里」。
+// 早期实现只要 taskStore.byId(id) 命中就跳过拉取 —— 而列表/快照现在必然命中，
+// 于是详情页永远拿不到 events：表现是「追加了一次会话，但没展示追加内容」。
+// 拉取本身很轻（单任务 300KB 级），且 syncFromTask 是幂等替换 + 去重。
 watch(
   taskId,
   (id) => {
@@ -67,17 +77,33 @@ watch(
     // 换任务回到时间线：停在「变更反馈」里换到一个新任务，看到的是上一任务的语境残留
     mobilePane.value = 'timeline'
     if (!id) return
-    if (taskStore.byId(id)) {
+    const hasEvents = sessionStore.events(id).length > 0
+    if (taskStore.byId(id) && hasEvents) {
       probed.value = true
       return
     }
-    taskStore
-      .refreshTask(id)
-      .catch(() => {})
-      .finally(() => (probed.value = true))
+    void loadDetail(id)
   },
   { immediate: true },
 )
+
+/**
+ * 拉取任务完整详情（含事件流）并按 id 同步进 store。
+ *
+ * 统一走这个函数而不是直接调 taskStore.refreshTask：会话事件流由 sessionStore 持有，
+ * 只刷新 taskStore 会让任务状态更新、时间线却还是旧的（两处状态各自为政）。
+ */
+async function loadDetail(id: string) {
+  try {
+    const dto = await api.getTaskDto(id)
+    taskStore.upsertTask(adaptTask(dto))
+    sessionStore.syncFromTask(dto)
+  } catch {
+    // 拉取失败：保持现状，由 probed 决定是否显示"任务不存在"
+  } finally {
+    probed.value = true
+  }
+}
 
 /** 决策请求期间的忙态：三个动作共用同一段收尾，各写一份 try/finally 才会漏掉一个 */
 async function runDecision(fn: () => Promise<void>) {

@@ -77,3 +77,60 @@ func TestEventBus_SlowSubscriberDropsNotBlocks(t *testing.T) {
 		t.Fatalf("got %d, want >=2", got)
 	}
 }
+
+// 回归（2026-10-06「详情不刷新、输入框一直不可编辑」）：
+// 丢弃必须**留痕**。早期实现静默 default 丢弃，订阅者永久落后却无从自知，
+// 被丢掉的那条恰好是 task_completed → 前端卡在 running 视图。
+func TestEventBus_DropIsObservable(t *testing.T) {
+	bus := NewEventBus()
+	sub := bus.Subscribe(1)
+	defer bus.Unsubscribe(sub)
+
+	// 第一个进缓冲，其余溢出被丢弃
+	bus.Publish(Event{Type: "task_delta", TaskID: "t"})
+	bus.Publish(Event{Type: "task_completed", TaskID: "t"})
+
+	if !sub.Dropped() {
+		t.Fatal("溢出后 Dropped() 应为 true —— 消费者无从得知丢过事件")
+	}
+	if !sub.TakeDropped() {
+		t.Fatal("TakeDropped() 应报告并清除标记")
+	}
+	// 已消费：不重复报告（否则每轮都重同步，变成周期性全量推送）
+	if sub.TakeDropped() {
+		t.Fatal("TakeDropped() 消费后不应重复返回 true")
+	}
+}
+
+// 缓冲够用时不得误报丢弃（否则 WS 会周期性无谓重发快照）。
+func TestEventBus_NoDropWhenBuffered(t *testing.T) {
+	bus := NewEventBus()
+	sub := bus.Subscribe(4)
+	defer bus.Unsubscribe(sub)
+
+	bus.Publish(Event{Type: "task_updated", TaskID: "t"})
+
+	if sub.TakeDropped() {
+		t.Fatal("未溢出却报告丢弃")
+	}
+}
+
+// 丢弃只影响落后的那个订阅者，不得牵连跟得上的订阅者。
+func TestEventBus_DropIsPerSubscriber(t *testing.T) {
+	bus := NewEventBus()
+	slow := bus.Subscribe(1)
+	fast := bus.Subscribe(64)
+	defer bus.Unsubscribe(slow)
+	defer bus.Unsubscribe(fast)
+
+	for i := 0; i < 5; i++ {
+		bus.Publish(Event{Type: "task_delta", TaskID: "t"})
+	}
+
+	if !slow.TakeDropped() {
+		t.Fatal("慢订阅者应报告丢弃")
+	}
+	if fast.TakeDropped() {
+		t.Fatal("快订阅者不应报告丢弃")
+	}
+}

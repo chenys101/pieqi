@@ -4,6 +4,7 @@
 import type {
   WsMessageDto,
   TaskDto,
+  TaskSummaryDto,
   TaskEventDto,
 } from '@/types/api'
 import type { AgentEvent, AgentEventType, AgentDelta, RewindPayload } from '@/types/event'
@@ -13,7 +14,7 @@ import { persistentEventId } from '@/utils/event'
 
 /** 归一化后的实时消息（dispatcher 的输入） */
 export type RealtimeMessage =
-  | { type: 'snapshot'; tasks: Task[]; dtos: TaskDto[] }
+  | { type: 'snapshot'; tasks: Task[]; dtos: TaskSummaryDto[] }
   | { type: 'task_upserted'; task: Task; dto: TaskDto }
   | { type: 'task_deleted'; taskId: string }
   | { type: 'delta'; delta: AgentDelta }

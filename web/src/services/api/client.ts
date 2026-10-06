@@ -2,7 +2,7 @@
 // base URL / JSON / 错误 / 鉴权头 / 超时，全部在此收敛。
 // 组件与 Store 禁止直接 fetch（方案 §33）。
 
-import type { TaskDto } from '@/types/api'
+import type { TaskDto, TaskSummaryDto } from '@/types/api'
 import { truncateTitle } from '@/utils/format'
 import type { Task } from '@/types/task'
 
@@ -164,8 +164,14 @@ export async function requestBlob(path: string): Promise<{ blob: Blob; filename:
 // 新任务页真正的默认值取自 GET /api/agents 的 `default`；旧任务 DTO 无 agent 字段时用它兜底。
 export const DEFAULT_AGENT = 'claude'
 
-/** 后端 DTO → 前端领域模型：字段命名 / 兜底逻辑收敛在此 */
-export function adaptTask(dto: TaskDto): Task {
+/**
+ * 后端 DTO → 前端领域模型：字段命名 / 兜底逻辑收敛在此。
+ *
+ * 参数放宽到 TaskDto | TaskSummaryDto：列表/快照给的是**轻量视图**（无 events），
+ * 而本函数只读元数据字段、从不读 events，所以两者都能适配。
+ * 事件流由 sessionStore 经 normalizeEvents 单独处理。
+ */
+export function adaptTask(dto: TaskDto | TaskSummaryDto): Task {
   return {
     id: dto.id,
     title: dto.title || truncateTitle(dto.prompt),

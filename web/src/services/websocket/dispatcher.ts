@@ -15,7 +15,9 @@ export function dispatch(msg: RealtimeMessage, t: DispatchTargets): void {
   switch (msg.type) {
     case 'snapshot':
       t.taskStore.applySnapshot(msg.tasks)
-      // 快照含全量 events：逐任务同步会话事件流（带去重，重连重复推送安全）
+      // 快照是**轻量视图**（无 events）：只同步会话元信息，
+      // 时间线由详情页按需拉取（syncFromTask 遇 undefined events 会保留本地事件流）。
+      // 该消息同时承担"丢弃事件后的重同步"，与首帧同路径。
       t.sessionStore.syncSessions(msg.dtos)
       return
     case 'task_upserted':

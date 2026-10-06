@@ -36,6 +36,32 @@ describe('SessionStore', () => {
     expect(s.deduper('t1').has('t1:1')).toBe(true)
   })
 
+  // 回归（2026-10-06「追加会话但没展示追加内容」）：
+  // WS snapshot / GET /api/tasks 下发的是轻量视图（无 events 字段）。
+  // 早期实现无条件 `eventsBySession[id] = normalizeEvents(dto.events)`，
+  // undefined 会变成空数组 → 已渲染的时间线被清空。
+  it('syncFromTask：轻量视图（无 events）不得清空已加载的时间线', () => {
+    const s = useSessionStore()
+    s.syncFromTask(dto())
+    expect(s.events('t1')).toHaveLength(2)
+
+    const summary = { ...dto(), status: 'completed' as const }
+    delete (summary as Partial<TaskDto>).events
+    s.syncFromTask(summary)
+
+    // 事件流保留（不能被 undefined 冲成空）
+    expect(s.events('t1')).toHaveLength(2)
+    // 但元信息要更新 —— 这正是"状态实时刷新"的来源
+    expect(s.session('t1')?.status).toBe('completed')
+  })
+
+  it('syncFromTask：显式空数组是「后端说没有事件」，应清空', () => {
+    const s = useSessionStore()
+    s.syncFromTask(dto())
+    s.syncFromTask(dto({ events: [] }))
+    expect(s.events('t1')).toHaveLength(0)
+  })
+
   it('applyDelta：同类型末事件追加；首次正文清除思考占位', () => {
     const s = useSessionStore()
     // events 只含用户消息（无正文），首条 text 增量应清除思考占位

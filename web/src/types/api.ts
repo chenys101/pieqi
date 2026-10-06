@@ -107,7 +107,19 @@ export interface TaskGroupDto {
   project_id: string
   project_path: string
   counts: Record<string, number>
-  tasks: TaskDto[]
+  tasks: TaskSummaryDto[]
+}
+
+/**
+ * 列表/快照的轻量任务视图（后端 model.TaskSummary）。
+ *
+ * events **不下发** —— 事件流只在 GET /api/tasks/:id 里给。
+ * 故这里的 events 恒为 undefined，代码不能依赖它来渲染时间线，
+ * 要用 event_count 判断"有没有新事件"再按需拉详情。
+ */
+export interface TaskSummaryDto extends Omit<TaskDto, 'events'> {
+  /** 事件总数（替代事件全文，供列表显示进度/判断是否有新增） */
+  event_count: number
 }
 
 /** POST /api/tasks/:id/intervene 请求体 */
@@ -121,7 +133,14 @@ export interface InterveneRequestDto {
 /** WebSocket 消息（EventBus 转发 + snapshot） */
 export interface WsSnapshotDto {
   type: 'snapshot'
-  tasks: TaskDto[]
+  /**
+   * 快照为轻量视图（无 events）。
+   *
+   * 它同时承担「丢弃事件后的重同步」职责：订阅缓冲溢出时后端会**再发一条
+   * snapshot**（见 event_bus.go 的 dropped 标记）。前端对 snapshot 的处理是
+   * 全量替换 + 去重，所以补拉与首帧走同一条路径，不会出现两套行为不一致。
+   */
+  tasks: TaskSummaryDto[]
 }
 
 /** task_completed 是后端 completed 终态的专用类型，载荷与 task_updated 相同 */

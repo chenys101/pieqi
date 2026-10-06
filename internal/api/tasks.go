@@ -118,7 +118,8 @@ func (s *Server) listTasks(c *gin.Context) {
 			groups[key] = g
 			order = append(order, key)
 		}
-		g.Tasks = append(g.Tasks, t)
+		// 列表只给轻量视图：事件流是详情页的重载荷（见 model.TaskSummary）
+		g.Tasks = append(g.Tasks, model.NewTaskSummary(t))
 		g.count(t.Status)
 	}
 	out := make([]*taskGroup, 0, len(order))
@@ -129,10 +130,10 @@ func (s *Server) listTasks(c *gin.Context) {
 }
 
 type taskGroup struct {
-	ProjectID   string         `json:"project_id"`
-	ProjectPath string         `json:"project_path"`
-	Counts      map[string]int `json:"counts"`
-	Tasks       []*model.Task  `json:"tasks"`
+	ProjectID   string               `json:"project_id"`
+	ProjectPath string               `json:"project_path"`
+	Counts      map[string]int       `json:"counts"`
+	Tasks       []*model.TaskSummary `json:"tasks"`
 }
 
 func (g *taskGroup) count(st model.TaskStatus) {

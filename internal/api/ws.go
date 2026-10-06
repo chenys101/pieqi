@@ -8,6 +8,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/gin-gonic/gin"
+
+	"pieqi/internal/model"
 )
 
 // wsPingInterval 心跳 ping 间隔。包级变量以便测试缩短（回归测试验证 ping 后事件仍送达）。
@@ -49,14 +51,13 @@ func (s *Server) handleWS(c *gin.Context) {
 	}()
 
 	// 1. 发当前任务快照
-	snapshot := gin.H{
-		"type":  "snapshot",
-		"tasks": s.store.List(),
-	}
-	if data, err := json.Marshal(snapshot); err == nil {
-		if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
-			return
-		}
+	//
+	// ⚠️ 快照只带**轻量视图**（无 events）：早期实现用 s.store.List() 推全量，
+	// 实测 24 个任务达 11MB —— 而快照是在订阅之后**阻塞写**的第一条消息，
+	// 前端解析这 11MB 期间订阅缓冲（64）必然溢出，恰好在重连那一刻把
+	// 终态事件丢掉（见 event_bus.go 的说明）。事件流改为前端按需拉详情。
+	if err := s.writeSnapshot(ctx, conn); err != nil {
+		return
 	}
 
 	// 2. 转发事件
@@ -78,6 +79,16 @@ func (s *Server) handleWS(c *gin.Context) {
 			if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
 				return
 			}
+		case <-resyncTick():
+			// 订阅缓冲曾满 → 有事件被丢弃，本连接已不可信。
+			// 必须显式告知前端重拉，否则它会永久停在过期视图上
+			// （历史 bug：终态 task_completed 被丢 → 详情不刷新、输入框一直禁用）。
+			if !sub.TakeDropped() {
+				continue
+			}
+			if err := s.writeSnapshot(ctx, conn); err != nil {
+				return
+			}
 		case <-time.After(wsPingInterval):
 			// 心跳 ping：探测静默死连接（TCP 假死）。带 3s 超时兜底——
 			// 若客户端不回 pong，超时即关闭连接交给前端重连，绝不阻塞写循环。
@@ -90,6 +101,28 @@ func (s *Server) handleWS(c *gin.Context) {
 		}
 	}
 }
+
+// writeSnapshot 下发一次全量状态快照。
+//
+// 用途有二：连接建立时的首帧；**丢弃事件后的重同步**（见 Publish 的 dropped 标记）。
+// 重同步直接复用同一条 snapshot 消息 —— 前端对 snapshot 的处理本来就是"全量替换 + 去重"，
+// 不需要为补拉再造一套协议，也就不会出现两条路径行为不一致。
+func (s *Server) writeSnapshot(ctx context.Context, conn *websocket.Conn) error {
+	snapshot := gin.H{
+		"type":  "snapshot",
+		"tasks": model.NewTaskSummaries(s.store.List()),
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return conn.Write(ctx, websocket.MessageText, data)
+}
+
+// wsResyncInterval 丢弃检查间隔。包级变量以便测试缩短。
+var wsResyncInterval = 500 * time.Millisecond
+
+func resyncTick() <-chan time.Time { return time.After(wsResyncInterval) }
 
 // 静默引用 http 以备未来扩展
 var _ = http.StatusOK

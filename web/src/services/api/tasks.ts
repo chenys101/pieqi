@@ -6,13 +6,19 @@ import type { Task, TaskGroup, TaskStatus } from '@/types/task'
 import { groupKey } from '@/utils/format'
 import { timestamp } from '@/utils/date'
 
-/** GET /api/tasks → 项目分组（保持后端顺序，组内按活跃时间倒序） */
+/**
+ * GET /api/tasks → 项目分组（保持后端顺序，组内按活跃时间倒序）
+ *
+ * 后端返回的是轻量视图（TaskSummaryDto，**不含 events**）——
+ * 列表只需元数据，事件流按需由 getTaskDto 拉取。
+ */
 export async function getTasks(): Promise<{ tasks: Task[]; groups: TaskGroup[] }> {
   const data = await request<{ projects: TaskGroupDto[] }>('/tasks')
   const tasks: Task[] = []
   const groupMap = new Map<string, TaskGroup>()
 
   for (const g of data.projects ?? []) {
+    // 轻量 DTO 缺 events 字段，adaptTask 只读元数据，可直接适配
     const adapted = (g.tasks ?? []).map(adaptTask)
     // 组内按 updated_at 倒序：最近活跃的排最前（与 V1 行为一致）
     adapted.sort((a, b) => timestamp(b.updatedAt) - timestamp(a.updatedAt))

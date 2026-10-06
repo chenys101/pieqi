@@ -33,29 +33,38 @@ type Event struct {
 }
 
 // EventBus 任务事件的 fan-out。订阅者慢时不阻塞发布者（丢弃积压）。
+//
+// ⚠️ 丢弃**必须留痕**：早期实现在缓冲满时静默 `default:` 丢弃，订阅者从此
+// 永久落后且无从自知。生产表现（2026-10-06）：重连瞬间服务端要先推全量快照，
+// 前端解析期间订阅者必然满 —— 恰好把那次 `task_completed` 丢掉，于是
+// 「详情不刷新、输入框一直不可编辑，刷新一下才对」，而磁盘上任务早已完成。
+//
+// 现在丢弃会置位订阅者的 dropped 标记，消费者据此重新同步（见 TakeDropped）。
 type EventBus struct {
 	mu          sync.RWMutex
-	subscribers map[uint64]chan Event
+	subscribers map[uint64]*Subscription
 	nextID      uint64
 }
 
 // NewEventBus 创建事件总线。
 func NewEventBus() *EventBus {
-	return &EventBus{subscribers: make(map[uint64]chan Event)}
+	return &EventBus{subscribers: make(map[uint64]*Subscription)}
 }
 
 // Subscribe 订阅事件，返回订阅句柄与接收 channel。
-// buf 为 channel 缓冲大小；缓冲满时后续事件被丢弃。
+// buf 为 channel 缓冲大小；缓冲满时后续事件被丢弃，但会在订阅句柄上留下
+// dropped 标记（消费者可用 TakeDropped 发现并重新同步）。
 func (b *EventBus) Subscribe(buf int) *Subscription {
 	if buf <= 0 {
 		buf = 32
 	}
 	id := atomic.AddUint64(&b.nextID, 1)
 	ch := make(chan Event, buf)
+	s := &Subscription{id: id, ch: ch}
 	b.mu.Lock()
-	b.subscribers[id] = ch
+	b.subscribers[id] = s
 	b.mu.Unlock()
-	return &Subscription{id: id, ch: ch}
+	return s
 }
 
 // Unsubscribe 取消订阅。
@@ -69,15 +78,17 @@ func (b *EventBus) Unsubscribe(s *Subscription) {
 	close(s.ch)
 }
 
-// Publish 向所有订阅者广播事件。非阻塞：缓冲满则丢弃该订阅者的事件。
+// Publish 向所有订阅者广播事件。非阻塞：缓冲满则丢弃该订阅者的事件，
+// 并在该订阅者上置 dropped 标记（供其自行重同步）。
 func (b *EventBus) Publish(e Event) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	for _, ch := range b.subscribers {
+	for _, s := range b.subscribers {
 		select {
-		case ch <- e:
+		case s.ch <- e:
 		default:
-			// 订阅者落后，丢弃以防拖慢发布者
+			// 订阅者落后，丢弃以防拖慢发布者。置位标记，绝不静默。
+			s.dropped.Store(true)
 		}
 	}
 }
@@ -86,7 +97,20 @@ func (b *EventBus) Publish(e Event) {
 type Subscription struct {
 	id uint64
 	ch chan Event
+	// dropped 由 Publish 在丢弃事件时置位（原子）；TakeDropped 读取并清除。
+	dropped atomic.Bool
 }
 
 // Chan 返回事件接收 channel。
 func (s *Subscription) Chan() <-chan Event { return s.ch }
+
+// TakeDropped 报告自上次调用以来是否发生过丢弃，并清除标记。
+//
+// 消费者（WS 转发循环）应定期或在静默间隙调用；返回 true 时必须重新同步
+// 全量状态，否则会永久停留在过期视图上。
+func (s *Subscription) TakeDropped() bool {
+	return s.dropped.Swap(false)
+}
+
+// Dropped 只读探测，不消费标记（供监控/测试使用）。
+func (s *Subscription) Dropped() bool { return s.dropped.Load() }

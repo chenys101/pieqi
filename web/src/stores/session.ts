@@ -5,7 +5,7 @@
 import { defineStore } from 'pinia'
 import type { AgentSession } from '@/types/session'
 import type { AgentEvent, AgentDelta } from '@/types/event'
-import type { TaskDto } from '@/types/api'
+import type { TaskDto, TaskSummaryDto } from '@/types/api'
 import type { TaskStatus } from '@/types/task'
 import { isTerminalStatus } from '@/types/task'
 import { normalizeEvents } from '@/services/websocket/normalizer'
@@ -65,16 +65,22 @@ export const useSessionStore = defineStore('session', {
       return this.dedupers[taskId]
     },
 
-    /** snapshot：批量同步会话 */
-    syncSessions(dtos: TaskDto[]) {
+    /** snapshot：批量同步会话（轻量视图：只有元信息，不含 events） */
+    syncSessions(dtos: (TaskDto | TaskSummaryDto)[]) {
       for (const dto of dtos) this.syncFromTask(dto)
     },
 
     /**
      * task_updated / task_created / 单任务详情：同步会话元信息 + 全量事件。
      * events 为后端持久化真相（已含此前推送的增量），直接替换并登记去重。
+     *
+     * ⚠️ **events 缺失（undefined）时必须保留本地事件流**，不能替换成空数组。
+     * 列表快照（WS snapshot / GET /api/tasks）下发的是轻量视图，本来就不含 events；
+     * 早期实现无条件 `= events`，会把已渲染的时间线清空 —— 表现正是
+     * 「追加了一次会话，但没展示追加内容」。只有真的带了 events 才覆盖，
+     * 空数组是「后端明确说没有事件」，与 undefined（没带）语义不同。
      */
-    syncFromTask(dto: TaskDto) {
+    syncFromTask(dto: TaskDto | TaskSummaryDto) {
       this.sessions[dto.id] = {
         id: dto.id,
         taskId: dto.id,
@@ -84,9 +90,13 @@ export const useSessionStore = defineStore('session', {
         startedAt: dto.started_at,
         endedAt: dto.finished_at,
       }
-      const events = normalizeEvents(dto.id, dto.events)
-      this.eventsBySession[dto.id] = events
-      this.deduper(dto.id).addAll(events)
+      // 用 'events' in dto 而非 dto.events 做类型收窄：TaskSummaryDto 上根本没有
+      // 这个属性（Omit 掉了），直接访问过不了 TS 检查。
+      if ('events' in dto && dto.events) {
+        const events = normalizeEvents(dto.id, dto.events)
+        this.eventsBySession[dto.id] = events
+        this.deduper(dto.id).addAll(events)
+      }
 
       // 终态 / 需决策：清除思考占位（此时是请求决策而非思考）
       if (isTerminalStatus(dto.status) || dto.status === 'waiting_input') {
