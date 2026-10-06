@@ -8,8 +8,23 @@ web/node_modules/
 # TS 增量编译缓存
 *.tsbuildinfo
 
+# 自重启的交付落点：agent 把新二进制放这里，服务自己搬走并重启
+# （见 internal/core/selfrestart.go 的 stagingPath 说明）。/bin/ 已覆盖它，
+# 这条留着是为了让"这个路径是有约定的"在 .gitignore 里也能被看见。
+bin/pieqi.new
+bin/pieqi.new.exe
+
 # 测试产物
 internal/core/data/
+
+# 探针程序的编译产物（probe_* 源码要入库当证据，exe 不入库）
+/probe_*.exe
+
+# 隔离验证实例（自迭代验证用：独立端口/home/staging，含二进制与运行时数据）
+# 见 .verify-isolated/README.md；一次性产物，绝不入库
+/.verify-isolated/
+# 工兵（一次性验证任务）的 task id 暂存
+/.sapper*.txt
 
 # Installed skills (via npx skills)
 .agents/
