@@ -155,3 +155,21 @@ func (tr *TaskRunner) noteQueued(taskID string, ahead int) {
 	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventStatus,
 		Text: fmt.Sprintf("已排队：前面还有 %d 轮，轮到本条会自动继续", ahead)})
 }
+
+// noteResuming 续问冷启动时给用户一条可见回执。
+//
+// 为什么需要：intervene 对终态续问是**乐观返回 202** 的（internal/api/tasks.go 投递进
+// 队列就回 resumed:true），真正耗时的 agent spawn 落在后台。续问要复用上下文就必须新
+// spawn 一个进程，冷启动开销完全在这段静默里 —— 2026-10-06 实测 dsh 隔夜续问
+// spawn→initialize 用了 79s（同机热会话只要 1.9s）。这段时间既无 delta 也无 status，
+// 前端只会显示"消息已发出、内容一直转圈"，用户据此判定"无法续话"。
+//
+// cold=true（无活会话，需重新 spawn）才提示：热会话复用几乎瞬时，多一条噪音反而碍眼。
+// 与 noteQueued 同一取舍——只有真的会让用户等待的路径才发回执。
+func (tr *TaskRunner) noteResuming(taskID string, cold bool) {
+	if !cold {
+		return
+	}
+	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventStatus,
+		Text: "正在恢复会话…（冷启动需重建上下文，首次响应可能要等数十秒）"})
+}

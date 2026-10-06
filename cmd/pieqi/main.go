@@ -85,7 +85,36 @@ func main() {
 	}
 
 	// --- 核心组件 ---
-	store, err := core.NewTaskStore(filepath.Join(dataRoot, "tasks"))
+	//
+	// 自重启交接：先解析上一轮留下的交接单，判定"重启到底成没成"。
+	// **必须在 NewTaskStore 之前**——load() 要靠这份判定决定被打断的会话是
+	// 标 failed（意外）还是保留 running 待自动接续（计划内）。execPath 在这里
+	// 先取，因为它同时是判定依据（新二进制摘要）和 hook 回连路径。
+	execPath, err := os.Executable()
+	if err != nil {
+		logger.Fatal("get executable path", zap.Error(err))
+	}
+	execPath, _ = filepath.Abs(execPath)
+
+	restartOutcome := core.ResolveRestartHandoff(dataRoot, execPath)
+	var interruptedIDs []string
+	if restartOutcome.WasSelfRestart {
+		logger.Info("self-restart handoff found",
+			zap.Bool("succeeded", restartOutcome.Succeeded),
+			zap.String("reason", restartOutcome.Reason))
+	}
+	if restartOutcome.Succeeded && restartOutcome.Journal != nil {
+		interruptedIDs = restartOutcome.Journal.AffectedTaskIDs
+		logger.Info("self-restart succeeded; tasks to auto-resume",
+			zap.Int("count", len(interruptedIDs)))
+	} else if restartOutcome.WasSelfRestart {
+		// 判定失败：不接续（见 ResumeInterrupted 注释），但仍要让这些任务
+		// 落到 failed 而不是永远 running —— 传空列表即走原有的"重启打断"分支。
+		logger.Warn("self-restart did not succeed; interrupted tasks stay failed",
+			zap.String("reason", restartOutcome.Reason))
+	}
+
+	store, err := core.NewTaskStore(filepath.Join(dataRoot, "tasks"), interruptedIDs...)
 	if err != nil {
 		logger.Fatal("init task store", zap.Error(err))
 	}
@@ -100,12 +129,7 @@ func main() {
 	skills := core.NewSkillScanner(logger, cfg.Pieqi.SkillsDirs)
 	commands := core.NewCommandScanner(logger, nil)
 
-	// pieqi 可执行文件绝对路径（PreToolUse hook 子进程回连用）
-	execPath, err := os.Executable()
-	if err != nil {
-		logger.Fatal("get executable path", zap.Error(err))
-	}
-	execPath, _ = filepath.Abs(execPath)
+	// pieqi 可执行文件绝对路径已在上面取过（PreToolUse hook 子进程回连 + 自重启判定共用）。
 
 	hookTimeoutSec := int(cfg.Pieqi.HookTimeout / time.Second)
 
@@ -417,6 +441,39 @@ func main() {
 		apiServer.SetBotStore(botStore)
 		apiServer.SetSettingsStore(settingsStore)
 		apiServer.SetLogDir(logDir)
+		// 自重启：让服务能换掉自己的二进制并重新起来（远程自迭代的最后一环）。
+		//
+		// 为什么必须由 pieqi 自己做：工作区里跑的 agent 会话持受限令牌（Windows
+		// 上是 Low 完整性），它起的任何子进程都继承该令牌 —— 写不了 ~/.pieqi、
+		// 也管不了工作区外的进程。而 pieqi 自身以正常身份跑在工作区外，天生有
+		// 这些权限。于是"agent 改完代码怎么重启服务"的答案是：交给服务自己。
+		//
+		// 分工：agent 把编译产物丢进**项目工作区**的约定路径（它写得到），
+		// pieqi 负责搬到自己的位置并接管端口（它才有权限）。
+		//
+		// 交付目录取配置里的项目根，**不能取 os.Getwd()** —— 常驻服务从
+		// <dataRoot>/bin 启动，cwd 是那里而不是项目目录；取 cwd 会让交付落点
+		// 跑回沙箱外，正好是 agent 写不到的地方（实测踩过）。
+		//
+		// 编排在后台 goroutine 里跑（先回 202 再退出），见 core.SelfRestart.RestartAndExit。
+		stageDir := resolveStagingDir(cfg)
+		selfRestart := core.NewSelfRestart(execPath, dataRoot, stageDir, func(msg string, kv ...any) {
+			logger.Info(msg, zap.Any("detail", kv))
+		})
+		logger.Info("self-restart staging dir resolved", zap.String("dir", stageDir))
+		// 交接单要记的"被打断的会话"由 runner 提供：只有它知道哪些任务真的
+		// 挂在本进程上（running / 等 approval）。running 中的 ACP 会话与
+		// claude 子进程都随本进程 exit 一起死，所以这就是受影响的全集。
+		selfRestart.SetAffectedFunc(runner.LiveTaskIDs)
+		apiServer.SetSelfRestart(selfRestart.HasStaged, func(initiator string) {
+			// 身份必须在**请求被受理的当下**记下：此刻发起者那一轮还活着；
+			// 等 RestartAndExit 内部推进到落交接单时，它早已随 agent 子进程
+			// 消失、状态也不再是 running —— 那时任何"现取"都找不到它。
+			selfRestart.SetInitiator(initiator)
+			// 端口在这里自己算，而不是捕获后面的 addr —— 那个变量在本次闭包之后
+			// 才声明，闭包里读它虽然能编译，但依赖声明顺序会让这段很脆。
+			selfRestart.RestartAndExit(fmt.Sprintf(":%d", cfg.Server.Port), os.Exit)
+		}, selfRestart.StagingHint)
 		// 机器人记录增删后重建运行中的实例（删除一台必须真的让它停止收发）。
 		// 钩子是 func()（HTTP 处理流程不宜携带渠道内部错误）；重建失败只记日志，
 		// 不阻塞 bots 接口返回 —— 记录已经落盘，下次重建会再试。
@@ -461,9 +518,50 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	logger.Info("pieqi starting", zap.String("addr", addr), zap.String("mode", cfg.Server.Mode))
+
+	// 自重启接续：判定成功时才动手（见上面 restartOutcome 的取值逻辑）。
+	//
+	// 放在 r.Run 之前、goroutine 里起：接续本身要 spawn agent 并 session/load
+	// 重建上下文（每个数十秒），绝不能阻塞端口监听 —— 否则 waitForListener
+	// 在旧进程侧会超时，旧进程据此以为"新实例没起来"而拒绝退出，重启就假失败了。
+	// 先起 goroutine 再 Run，正是为了保证监听的尽早就绪。
+	if len(interruptedIDs) > 0 {
+		ids := interruptedIDs
+		ver := ""
+		initiator := ""
+		if restartOutcome.Journal != nil {
+			ver = restartOutcome.Journal.StagedSHA256
+			initiator = restartOutcome.Journal.InitiatorTaskID
+		}
+		if initiator != "" {
+			logger.Info("self-restart: resuming tasks including the initiator",
+				zap.String("initiator", initiator), zap.Int("total", len(ids)))
+		}
+		go runner.ResumeInterruptedWithInitiator(ids, ver, initiator)
+	}
+
 	if err := r.Run(addr); err != nil {
 		logger.Fatal("server", zap.Error(err))
 	}
+}
+
+// resolveStagingDir 解析自重启的交付目录（agent 侧可写的目录）。
+//
+// 为什么要显式配置而不是"猜一个"：交付目录必须是 **agent 进程写得到**的地方，
+// 而那取决于沙箱策略（工作区可写、~/.pieqi 不可写），服务自己无从推断 ——
+// 用 os.Getwd() 猜更是错的（常驻服务从 <dataRoot>/bin 启动，cwd 不是项目目录）。
+// 猜错的后果是静默的：落点跑到写不进去的地方，agent 只会看到一个
+// "staged:false"，然后以为是功能坏了。所以宁可要求显式配置。
+//
+// 回退顺序：配置 → 当前工作目录（开发态直接 `go run ./cmd/pieqi` 时 cwd 就是仓库）。
+func resolveStagingDir(cfg *config.Config) string {
+	if d := strings.TrimSpace(cfg.Pieqi.SelfUpdateDir); d != "" {
+		return d
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return ""
 }
 
 // loadLarkChannelConfig 从凭据配置文件（~/.pieqi/lark_credentials.json）加载

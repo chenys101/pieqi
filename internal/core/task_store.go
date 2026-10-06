@@ -27,10 +27,26 @@ type TaskStore struct {
 	// eventRetention 单任务事件保留上限（0 = 全部保留，见 AppendEvent）。
 	// 与 tasks 共用 mu：它在 Update 的 mutator 内被读取。
 	eventRetention int
+	// interruptedByRestart 是「因计划内自重启而被打断、待自动接续」的会话 id 集合。
+	//
+	// 与"进程崩了"必须区分（这正是本次事故的根因）：崩了是意外，标 failed 合理；
+	// 自重启是**调用方主动发起**的计划内动作，把它当故障会让用户看到一批
+	// 莫名其妙的 failed，还得人工 resume。由 SetInterruptedByRestart 在
+	// store 构造后、服务开始服务前注入（见 main 的接线顺序）。
+	interruptedByRestart map[string]bool
 }
 
 // NewTaskStore 创建并从磁盘恢复任务索引。
-func NewTaskStore(tasksDir string) (*TaskStore, error) {
+//
+// interrupted 是「因计划内自重启而被打断、待自动接续」的会话 id（可空）。
+// 它必须**在 load 之前**就位：load 是唯一决定这些任务是变成 failed 还是
+// 保留待接续的地方，晚一步注入就没机会干预了。因此由调用方在构造时传入，
+// 而不是提供事后 Setter（见 main 里 ResolveRestartHandoff 的取值顺序）。
+//
+// 变参而非显式第二参数：调用点绝大多数是测试里的 NewTaskStore(dir)，
+// 它们与"自重启接续"毫无关系；为了一个只在生产启动路径用到的参数去改
+// 三十多处测试，只会让噪音淹没真实改动。生产侧显式传 interruptedIDs。
+func NewTaskStore(tasksDir string, interrupted ...string) (*TaskStore, error) {
 	if err := os.MkdirAll(tasksDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir tasks dir: %w", err)
 	}
@@ -38,10 +54,23 @@ func NewTaskStore(tasksDir string) (*TaskStore, error) {
 		tasksDir: tasksDir,
 		tasks:    make(map[string]*model.Task),
 	}
+	if len(interrupted) > 0 {
+		s.interruptedByRestart = make(map[string]bool, len(interrupted))
+		for _, id := range interrupted {
+			s.interruptedByRestart[id] = true
+		}
+	}
 	if err := s.load(); err != nil {
 		return nil, fmt.Errorf("load tasks: %w", err)
 	}
 	return s, nil
+}
+
+// InterruptedByRestart 报告该任务是否因计划内自重启被打断而保留了可接续状态。
+func (s *TaskStore) InterruptedByRestart(id string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.interruptedByRestart[id]
 }
 
 // Create 新建一个 pending 任务并持久化。
@@ -265,6 +294,17 @@ func (s *TaskStore) load() error {
 		// - waiting_input(approval, 路径 A)：进程挂在 hook channel，channel 已丢无法恢复，标 failed。
 		// - waiting_input(choice, 路径 B)：进程本就 end_turn 退出（合法持久态），保留 waiting_input，
 		//   用户隔天仍可选项触发 Resume 续跑。
+		//
+		// 例外（本次自重启事故的修复）：若这张任务是**计划内自重启**打断的
+		// （id 在 interruptedByRestart 里），就**保留 running**，交由启动流程
+		// 自动 resume（见 TaskRunner.ResumeInterrupted）。
+		// 依据：自重启是调用方主动发起的动作，不是故障。按故障处理会让用户
+		// 看到一批莫名的 failed 并被迫人工 resume —— 那正是"老是中断"的体感来源。
+		// 保留 running 也符合既有语义：Resume() 明确接受 running（排队续跑）。
+		if s.interruptedByRestart[t.ID] {
+			s.tasks[t.ID] = &t
+			continue
+		}
 		if t.Status == model.TaskRunning {
 			t.Status = model.TaskFailed
 			if t.Error == "" {

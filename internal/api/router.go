@@ -43,7 +43,6 @@ type Server struct {
 	larkRegState      *larkRegState
 	larkRegCredPath   string
 	larkConfigApplier larkConfigApplier // wired by SetLarkConfigApplier; nil-safe
-
 	// 机器人绑定记录（复数，D1 定案）。wired by SetBotStore; nil-safe
 	// （未接线时 /api/bots 返回空列表 / 503）。
 	bots *core.BotStore
@@ -61,6 +60,15 @@ type Server struct {
 	// wired by SetLogDir; 空 = 未接线（导出端点返回 503）。
 	logDir    string
 	startedAt time.Time
+
+	// 自重启（换二进制 + 重新拉起自己）。wired by SetSelfRestart; nil-safe
+	// （未接线时 /api/admin/restart 返回 501）。
+	//
+	// 存在的理由：pieqi 的用法就是远程自迭代，agent 改完代码要能自己重启验证；
+	// 而工作区里的 agent 会话持受限令牌，做不了这件事 —— 只有 pieqi 自己能做。
+	hasStaged   hasStagedFunc
+	selfRestart restartFunc
+	stagingHint stagingHintFunc
 
 	// 可被任务选择的 agent 目录（新任务页选择器）。wired by SetAgents。
 	// 未接线（nil）时降级为「只有 claude 可选」——这正是本字段上线前的实际行为，
@@ -289,6 +297,25 @@ func (s *Server) Register(r gin.IRouter) {
 	// 诊断日志导出：打包最近 7 天日志（+ meta）为 zip。
 	// 日志可能含项目路径 / 任务标题，故与 /api 主组同套鉴权。
 	api.GET("/diagnostics/export", s.exportDiagnostics)
+
+	// 自重启：换掉自己的二进制并以新版本重新起来（远程自迭代的最后一环）。
+	//
+	// **仅内网**，与 /api/auth/bind 同档。理由：它等价于本机任意代码执行 ——
+	// 能把任意二进制装上并以服务身份常驻，拿到它就等于拿到这台机器。
+	// 因此即使 token 与身份都有效，外网请求也一律拒绝（BindOpGateMiddleware 的
+	// 语义正是"特权本地操作，外网永远不行"）。
+	//
+	// 未接线 auth 时（legacy 测试 / 本地 dev）退化为 api 组自身的鉴权，
+	// 与其它端点一致，不额外放宽。
+	if s.auth != nil {
+		adminGrp := r.Group("/api/admin",
+			corsMiddleware(corsAll, corsOrigins), s.auth.BindOpGateMiddleware())
+		adminGrp.GET("/restart", s.getRestartStatus)
+		adminGrp.POST("/restart", s.postRestart)
+	} else {
+		api.GET("/admin/restart", s.getRestartStatus)
+		api.POST("/admin/restart", s.postRestart)
+	}
 }
 
 // listSkills 扫描 Claude skills 目录，返回 skill 胶囊列表（REQ-04/05）。

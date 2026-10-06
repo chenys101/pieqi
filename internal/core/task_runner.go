@@ -369,6 +369,11 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 		if tr.agentMgr.Adapter(taskID) == nil && t.ACPSessionID == "" && t.ClaudeSessionID == "" {
 			return fmt.Errorf("task missing session, cannot resume")
 		}
+		// 冷启动回执（本函数返回前，见 noteResuming）：无活会话 = 要重新 spawn agent 并
+		// session/load 重建上下文，实测可静默数十秒（2026-10-06：dsh 隔夜续问 spawn→
+		// initialize 耗时 79s）。intervene 是乐观 202，这段耗时若不落事件，界面就是
+		// "消息发出去了但永远转圈"，会被读成"无法续话"。
+		tr.noteResuming(taskID, tr.agentMgr.Adapter(taskID) == nil)
 		// 排队提交（turn_queue.go）：上一轮还没跑完时排在它后面，而不是同时打进同一会话
 		// （并发第二个 Run 会被 AgentManager 拒掉，老代码据此 failTask 把任务打死）。
 		tr.noteQueued(taskID, tr.submitTurn(taskID, func(cur *model.Task) {
@@ -384,10 +389,45 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 	if t.ClaudeSessionID == "" {
 		return fmt.Errorf("task missing session, cannot resume")
 	}
+	// print 路径同样要 spawn 一个新进程 claude --resume 续上下文，冷启动照样静默，
+	// 回执口径与 ACP 路径一致（见上面 noteResuming）。
+	tr.noteResuming(taskID, true)
 	tr.noteQueued(taskID, tr.submitTurn(taskID, func(cur *model.Task) {
 		tr.run(context.Background(), cur, text)
 	}))
 	return nil
+}
+
+// LiveTaskIDs 返回此刻挂在本进程上、会被重启打断的会话 id。
+//
+// 用于自重启交接单（见 restart_journal.go）：进程一 exit，这些会话的 agent
+// 子进程与 ACP 连接全部随之中断，新进程需要据此把它们自动接回来。
+//
+// 判据是"子进程真的挂在本进程上"：
+//   - running：正有一轮在跑，必然有子进程/连接。
+//   - waiting_input(approval, 路径 A)：agent 进程活着挂在 hook channel 上。
+//   - waiting_input(choice, 路径 B)：agent 已 end_turn 退出，进程本就没了 ——
+//     它是**合法持久态**（隔天仍可继续选），重启对它无损，不该算被打断，
+//     更不该被自动 resume（那会替用户"选"一个还没做的决定）。
+func (tr *TaskRunner) LiveTaskIDs() []string {
+	if tr.store == nil {
+		return nil
+	}
+	var ids []string
+	for _, t := range tr.store.List() {
+		if t == nil {
+			continue
+		}
+		switch t.Status {
+		case model.TaskRunning:
+			ids = append(ids, t.ID)
+		case model.TaskWaitingInput:
+			if t.CurrentDecision == nil || t.CurrentDecision.Kind != model.DecisionKindChoice {
+				ids = append(ids, t.ID)
+			}
+		}
+	}
+	return ids
 }
 
 // GenerateTitleAsync 异步生成任务的一句话标题（大模型摘要）。
@@ -395,6 +435,96 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 // 失败静默保留前端启发式标题（titleText 智能截断），不影响主流程。
 func (tr *TaskRunner) GenerateTitleAsync(taskID string) {
 	go tr.generateTitle(taskID)
+}
+
+// ResumeInterrupted 自动接续一批「被计划内自重启打断」的会话。
+//
+// 为什么需要它：自重启会换掉整个进程，挂在本进程上的 ACP/子进程全死。老行为是
+// 一律标 failed 等人工 resume —— 用户看到的是"会话老是中断"，而已。既然重启是
+// **调用方主动发起**的计划内动作，服务就有义务把它接回来。
+//
+// 时机：必须在 resolveRestartHandoff 判定「重启成功」之后调用。判定失败的
+// （新二进制没换上）不接续 —— 那些会话的上下文可能连同旧版本一起处于未知状态，
+// 让它们停在原状交给人工处理更诚实。
+//
+// prompt 用固定文案而非用户原文：这轮不是用户发起的，而是服务自愈。文案里带上
+// 重启事实与版本，让 agent（尤其是发起重启的自迭代会话）能读到"重启已完成"
+// 这个它本来无法同步获取的信号。
+//
+// 逐个 goroutine 起，不串行等待：冷启动 resume 每个要数十秒（实测 dsh 79s），
+// 串行会让最后一个会话等上几分钟。每个任务自身的 turn 队列保证不并发撞同一会话。
+func (tr *TaskRunner) ResumeInterrupted(taskIDs []string, version string) {
+	tr.ResumeInterruptedWithInitiator(taskIDs, version, "")
+}
+
+// ResumeInterruptedWithInitiator 是 ResumeInterrupted 的完整版，额外知道
+// "哪个会话发起了这次重启"。
+//
+// 为什么发起者需要一段**不同**的 prompt：它是唯一一个"自己触发了这个动作、
+// 却无法知道结果"的角色 —— 它发出 POST 后进程就换了，那个响应永远不会到达。
+// 用通用文案（"请继续完成你原本的任务"）会让它倾向于**再试一次**，而重试的
+// 后果是把新进程也杀掉，形成重启循环。所以对发起者必须显式给出三件事：
+// 重启成了、别再来一次、你看到的新进程就是你要的那个版本。
+//
+// initiatorID 为空（人类 curl 重启 / 无法识别）时全部走通用文案。
+func (tr *TaskRunner) ResumeInterruptedWithInitiator(taskIDs []string, version, initiatorID string) {
+	for _, id := range taskIDs {
+		t, ok := tr.store.Get(id)
+		if !ok || t == nil {
+			continue
+		}
+		// 只在"确实被中断、需要接续"的状态上动手。用户可能在重启间隙
+		// 已经手动处理过（cancel 掉），那种情况不覆盖用户的决定。
+		if t.Status != model.TaskRunning && t.Status != model.TaskWaitingInput {
+			continue
+		}
+		tr.appendEvent(id, model.TaskEvent{Type: model.EventStatus,
+			Text: "服务已自重启完成（版本 " + shortSHA(version) + "），正在自动接续本会话…"})
+		prompt := genericResumePrompt(version)
+		if id == initiatorID {
+			prompt = initiatorResumePrompt(version)
+		}
+		if err := tr.Resume(id, prompt); err != nil {
+			tr.logger.Warn("resume interrupted task failed",
+				zap.String("task", id), zap.Error(err))
+			// 接续失败不静默：把它标成 failed 并说明原因，用户至少知道
+			// 这条会话需要人工介入，而不是永远停在 running 转圈。
+			tr.failTask(id, "自重启后自动接续失败："+err.Error())
+		}
+	}
+}
+
+// genericResumePrompt 是给**被重启波及的旁观会话**的接续文案。
+//
+// 这类会话没有触发重启，它只是受害者；文案只需讲清"服务换版本了、
+// 你那轮被中断了、继续干活"。
+func genericResumePrompt(version string) string {
+	return "服务已于刚才完成自重启并以新版本（" + shortSHA(version) + "）恢复运行，" +
+		"你上一轮的执行因进程更替而中断。请继续完成你原本的任务；" +
+		"如果你此前正是在验证这次重启，现在重启已经成功，请据实收尾。"
+}
+
+// initiatorResumePrompt 是给**发起这次重启的会话**的接续文案。
+//
+// 为什么它必须与通用文案不同：发起者是唯一一个"自己触发了这个动作、
+// 却永远拿不到响应"的角色 —— 它发出的 POST 还没返回，旧进程就随它退出了。
+// 用通用文案会让它倾向于**重试一次**，而重试的后果是把刚起来的新进程
+// 也杀掉，形成重启循环（这是本功能最危险的失败模式）。
+//
+// 所以这里给的是**可核对的事实**而非命令：新版本号是什么、为什么那个请求
+// 不会返回（预期而非失败）、要确认状态该改用哪个只读接口。让它自己就能
+// 判断"事情已经成了"，而不必靠猜。
+func initiatorResumePrompt(version string) string {
+	v := shortSHA(version)
+	return "**这次自重启是你自己发起的，它已经成功。**" +
+		"当前服务正运行新版本（" + v + "），你之前发出的那个 " +
+		"POST /api/admin/restart 请求不会返回（旧进程正是随它退出的），" +
+		"这是预期行为，不是失败。\n\n" +
+		"**请不要再次调用重启接口** —— 那会杀掉刚刚起来的这个新进程，" +
+		"形成无意义的重启循环。\n\n" +
+		"要确认状态，请改用 GET /api/admin/restart 查询（它不会触发重启）。" +
+		"然后继续完成你原本的任务；若你的任务正是验证这次重启，" +
+		"现在重启已经成功，请据实收尾并总结。"
 }
 
 func (tr *TaskRunner) generateTitle(taskID string) {
@@ -684,7 +814,10 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	if tr.agentMgr.Adapter(task.ID) != nil {
 		return false // 复用活会话（wires 已注册），无回退
 	}
-	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom, Agent: task.Agent}
+	// TaskID 必须带上：它经 SessionConfig 一路传到 ACP spawn，成为子进程的
+	// PIEQI_TASK_ID。这是"会话能标识自己"的唯一途径，也是自重启后能把发起者
+	// 接回来的前提（见 core.RestartJournal.InitiatorTaskID）。
+	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom, Agent: task.Agent, TaskID: task.ID}
 	if resumeFrom != "" {
 		tr.logger.Debug("agent session open (resume)",
 			zap.String("task", task.ID), zap.String("agent", task.Agent),

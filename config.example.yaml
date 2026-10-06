@@ -60,6 +60,14 @@ pieqi:
   max_concurrent_per_project: 4      # 每项目并发上限
   base_branch: main                  # worktree 基准分支（按你仓库的主分支改：main / master）
   bots_dir: ""                       # IM 机器人绑定记录目录；空 = ~/.pieqi/bots
+  # 自重启的交付落点：agent 把编译好的新二进制放到 <dir>/pieqi.new[.exe]，
+  # 再调 POST /api/admin/restart，服务就用它替换自身并重启。
+  #
+  # 必须是 **agent 进程写得到**的目录 —— 通常就是你的项目工作区（沙箱允许 agent
+  # 写工作区，不允许它写 ~/.pieqi）。**不要填服务自己的运行目录**（~/.pieqi/bin）：
+  # 那正是 agent 写不到的地方，填了这个功能就白搭。
+  # 留空 = 用进程当前工作目录（源码态 `go run ./cmd/pieqi` 时即仓库根）。
+  self_update_dir: ""
   # ⚠️ 以下 acp 节已弃用（P5 迁移到 agents.*）。显式配置会触发告警。
   #    保留在此仅为从旧配置迁移时对照，**新配置请直接改 agents 节**。
   # acp:

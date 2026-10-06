@@ -91,7 +91,14 @@ type PieqiConfig struct {
 	MaxConcurrentPerProject int           `mapstructure:"max_concurrent_per_project"` // 每项目并发上限，默认 4
 	BaseBranch              string        `mapstructure:"base_branch"`                // worktree 基准分支，默认 "main"
 	BotsDir                 string        `mapstructure:"bots_dir"`                   // IM 机器人绑定记录目录；空 = ~/.pieqi/bots
-	ACP                     ACPConfig     `mapstructure:"acp"`                        // ACP 协议配置（Phase 2 引入；use_acp=false 时走 Phase 1 PrintAgent 路径）
+	// SelfUpdateDir 是自重启的**交付落点**：agent 把编译好的新二进制放到
+	// <dir>/pieqi.new[.exe]，再调 POST /api/admin/restart，服务会用它替换自身并重启。
+	//
+	// 必须是 **agent 进程写得到的目录**（通常就是项目工作区）。不要把服务自己的
+	// 运行目录（~/.pieqi/bin）填进来：那正是 agent 因沙箱写不到的地方，填了就白搭。
+	// 空 = 关闭该功能（端点返回 409 并提示未配置）。
+	SelfUpdateDir string `mapstructure:"self_update_dir"`
+	ACP           ACPConfig `mapstructure:"acp"` // ACP 协议配置（Phase 2 引入；use_acp=false 时走 Phase 1 PrintAgent 路径）
 }
 
 // ACPConfig ACP 协议（Agent Client Protocol）相关配置。

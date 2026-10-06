@@ -97,7 +97,9 @@ type OpenParams struct {
 	Agent      string // "claude" / "qoder"（业务只认 agent 名）
 	Cwd        string
 	ResumeFrom string // 续问：复用已有会话上下文
-	// Metadata 预留：taskId 等
+	// TaskID 透传给 SessionConfig.TaskID —— 注入 PIEQI_TASK_ID 的**唯一**来源。
+	// 空 = 非任务场景（如标题生成），此时不注入环境变量。
+	TaskID string
 }
 
 // SessionProvider 创建 AgentSession 的工厂（按 agent 名注册）。

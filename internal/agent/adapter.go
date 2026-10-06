@@ -51,6 +51,19 @@ type SessionConfig struct {
 	//               首次 SendPrompt 走 --resume <ResumeFrom>。若 claude 报 "No conversation found"，
 	//               SendPrompt 返回 ErrNoConversation（调用方可据此回退为新会话重跑）。
 	ResumeFrom string
+	// TaskID 是拥有本会话的任务 id（空 = 非任务场景，如标题生成）。
+	//
+	// 它的唯一用途是**身份**：ACP 子进程启动时以 PIEQI_TASK_ID 注入环境变量，
+	// 于是 agent 里跑的 shell 能把这个 id 带进它发起的 HTTP 请求（例如调
+	// POST /api/admin/restart 时）。服务据此知道"是哪个会话在请求重启我"，
+	// 从而在自重启后把它接回来（见 core.RestartJournal.InitiatorTaskID）。
+	//
+	// 为什么用环境变量而不是 HTTP 头/查询参数：
+	//   - agent 无法可靠地知道自己的 taskID，除非服务告诉它；环境变量由服务
+	//     在 spawn 时注入，agent 只是**继承**，不必理解 pieqi 的数据模型。
+	//   - 头/参数由调用方任意填写，而这里的可信度恰恰来自"只有本进程 spawn 的
+	//     子进程才拿得到"——天然不可伪造，不需要额外鉴权或校验。
+	TaskID string
 }
 
 // PermissionOption 一个权限选项（映射 acp.PermissionOption）。

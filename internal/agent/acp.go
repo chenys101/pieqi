@@ -50,6 +50,11 @@ type ACPAgent struct {
 	cmdName string
 	cmdArgs []string
 
+	// taskID 是拥有本会话的任务 id（SessionConfig.TaskID 存入）。
+	// spawn 时以 PIEQI_TASK_ID 注入子进程环境，供 agent 内 shell 标识自身来源；
+	// 空值表示非任务场景，此时不注入。见 SessionConfig.TaskID 的说明。
+	taskID string
+
 	// binPath 是实际 exec 的路径：由 cmdName 经 spawnNameResolver 解析而来
 	// （裸名补查常见安装落点，见 resolveSpawnName）。解析不到时等于 cmdName，
 	// 让 exec 报出标准错误。cmdName 保持"配置里写的原样"，供诊断/测试断言。
@@ -377,6 +382,13 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 	}
 	cmd := exec.CommandContext(a.lifeCtx, binPath, a.cmdArgs...)
 	cmd.Stderr = newLineCollector(a.logger, "acp agent stderr")
+	// 把"我是替哪个任务在跑"注入子进程环境。这不是可选装饰：agent 里执行的
+	// shell 正是靠读它才能在自己发起的 HTTP 请求里带上 taskId（当前唯一消费者
+	// 是 POST /api/admin/restart —— 服务要据此知道该把哪个会话接回来）。
+	// 见 SessionConfig.TaskID 的完整理由。空值不注入，保持环境干净。
+	if a.taskID != "" {
+		cmd.Env = append(os.Environ(), "PIEQI_TASK_ID="+a.taskID)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -431,9 +443,13 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 	}
 	// 存下 agent 声明的能力，供 NewSession 决定续问走 session/load 还是 session/resume。
 	a.agentCaps = initResp.AgentCapabilities
+	// agent_caps 必须打进日志：续问走 load 还是 resume 完全由它决定，
+	// 而这两条路径对"会话能否被接回"的结论截然不同。不打印它，出问题时
+	// 只能靠翻协议流量反推（见 docs/adr 里"重启接回"那节的排查纪要）。
 	a.logger.Debug("acp initialized",
 		zap.Any("protocol_version", initResp.ProtocolVersion),
-		zap.Any("agent_info", initResp.AgentInfo))
+		zap.Any("agent_info", initResp.AgentInfo),
+		zap.Bool("load_session", a.agentCaps.LoadSession))
 	return nil
 }
 
@@ -479,6 +495,10 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 	if cfg.Cwd == "" {
 		return "", errors.New("acp: NewSession requires Cwd")
 	}
+	// 身份必须在 ensureStarted（真正 spawn）之前落定 —— spawn 只发生一次，
+	// 而环境变量只在那一刻注入。续问路径走的是同一个已存在进程，不会重新
+	// inject，所以这里赋值对两条路径都成立（同一任务的 id 不会变）。
+	a.taskID = cfg.TaskID
 	if err := a.ensureStarted(ctx); err != nil {
 		return "", err
 	}

@@ -372,6 +372,68 @@ func TestTaskRunner_ACP_QueuedTurnSkippedOnDeletedTask(t *testing.T) {
 
 // --- 小工具 ---
 
+// TestTaskRunner_ACP_ResumeColdStartHasReceipt 终态续问冷启动（无活会话，需重新 spawn
+// agent 并 session/load 重建上下文）时必须先落一条可见的 status 回执。
+//
+// 回归的是 2026-10-06 的线上缺陷：intervene 对终态续问乐观返回 202（投递进队列即回
+// resumed:true），真正的 spawn 开销完全落在后台。实测 dsh 隔夜续问 spawn→initialize
+// 耗时 79s（同机热会话 1.9s），这段静默里既无 delta 也无 status，界面上就是"消息发出去了
+// 但永远转圈"，被用户读成"无法续话"。
+func TestTaskRunner_ACP_ResumeColdStartHasReceipt(t *testing.T) {
+	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hello"}, false)
+	task := createACPTestTask(t, store)
+
+	// 首轮跑到终态：completed 后 runACPTurn 保活会话（adapter 仍在册）。
+	tr.Start(context.Background(), task)
+	waitRunACPDone(t, store, task.ID)
+	if got := getTaskStatus(t, store, task.ID); got != model.TaskCompleted {
+		t.Fatalf("首轮 status=%s, want completed", got)
+	}
+
+	// 构造"隔夜冷续问"：会话已被回收（adapter 摘除），只剩持久化的 session id 可 resume。
+	// 这正是线上场景——空闲回收器收掉进程后，续问必须重新 spawn。
+	_ = tr.agentMgr.Close(task.ID)
+	waitFor(t, 2*time.Second, "adapter gone", func() bool { return fake.adapter(task.ID) == nil })
+
+	if err := tr.Resume(task.ID, "冷续问"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	// 关键断言：Resume 返回时（即 API 回 202 的那一刻）回执必须已经落库，
+	// 否则用户在那个时间点上看到的就是一片空白。
+	if !hasEvent(t, store, task.ID, model.EventStatus, "正在恢复会话") {
+		t.Fatalf("冷续问必须先落可见回执，events=%+v", getTask(t, store, task.ID).Events)
+	}
+
+	waitFor(t, 30*time.Second, "queue drained", func() bool {
+		return tr.turnQueueFor(task.ID).idle()
+	})
+}
+
+// TestTaskRunner_ACP_ResumeWarmSessionNoReceipt 热会话复用（adapter 仍活，不重新 spawn、
+// 不 LoadSession）几乎瞬时，不应产生"正在恢复会话"噪音 —— 与 noteQueued 同一取舍：
+// 只有真的会让用户等待的路径才发回执。
+func TestTaskRunner_ACP_ResumeWarmSessionNoReceipt(t *testing.T) {
+	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hello"}, false)
+	task := createACPTestTask(t, store)
+
+	tr.Start(context.Background(), task)
+	waitRunACPDone(t, store, task.ID)
+
+	if fake.adapter(task.ID) == nil {
+		t.Fatalf("前提不成立：保活语义下 adapter 应仍在册（热会话）")
+	}
+	if err := tr.Resume(task.ID, "热续问"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if hasEvent(t, store, task.ID, model.EventStatus, "正在恢复会话") {
+		t.Fatalf("热会话复用不应有冷启动回执（噪音）")
+	}
+
+	waitFor(t, 30*time.Second, "queue drained", func() bool {
+		return tr.turnQueueFor(task.ID).idle()
+	})
+}
+
 // getTaskStatus 读状态（仅在无并发写时调用）。
 func getTaskStatus(t *testing.T, store *TaskStore, taskID string) model.TaskStatus {
 	t.Helper()
