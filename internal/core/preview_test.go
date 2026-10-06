@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -119,4 +120,78 @@ func TestPreviewEnv_StripsSecrets(t *testing.T) {
 			t.Errorf("secret leaked into preview env: %s", kv)
 		}
 	}
+}
+
+// Windows 关键回归：本机 PATH 实际写作 "Path"，匹配若大小写敏感会整条丢弃
+// （npm/node 全找不到）；且 TEMP/SystemRoot 等 Windows 基础变量此前不在白名单里。
+func TestFilterPreviewEnv_WindowsCaseInsensitive(t *testing.T) {
+	in := []string{
+		`Path=C:\Windows\system32;C:\node`,
+		`TEMP=C:\Users\x\AppData\Local\Temp`,
+		`SystemRoot=C:\Windows`,
+		`PATHEXT=.COM;.EXE`,
+		`ComSpec=C:\Windows\system32\cmd.exe`,
+		`NODE_ENV=production`,
+		`TUNNEL_TOKEN=secret`,
+		`npm_token=secret2`,
+		`PIEQI_HOME=C:\x`,
+		`bridge_port=1`,
+		`UNRELATED=drop`,
+	}
+	out := filterPreviewEnv(in)
+
+	if !envHasKey(out, "PATH") {
+		t.Fatal("Windows 形态的 Path 被丢弃（大小写敏感匹配回归）")
+	}
+	for _, k := range []string{"TEMP", "SYSTEMROOT", "PATHEXT", "COMSPEC", "NODE_ENV"} {
+		if !envHasKey(out, k) {
+			t.Errorf("应保留 %s，实际被丢弃", k)
+		}
+	}
+	for _, k := range []string{"TUNNEL_TOKEN", "NPM_TOKEN", "PIEQI_HOME", "BRIDGE_PORT", "UNRELATED"} {
+		if envHasKey(out, k) {
+			t.Errorf("%s 不应出现在 preview 环境里", k)
+		}
+	}
+}
+
+// 环境里完全没有 PATH 时才补兜底项。
+func TestFilterPreviewEnv_NoPathFallback(t *testing.T) {
+	out := filterPreviewEnv([]string{"NODE_ENV=dev"})
+	if !envHasKey(out, "PATH") {
+		t.Fatal("无 PATH 时应兜底补一条，否则 dev server 找不到可执行文件")
+	}
+}
+
+// Unix 形态不得被 Windows 补丁改坏。
+func TestFilterPreviewEnv_UnixStillWorks(t *testing.T) {
+	out := filterPreviewEnv([]string{
+		`PATH=/usr/local/bin:/usr/bin`,
+		`HOME=/root`,
+		`TMPDIR=/tmp`,
+		`XDG_CONFIG_HOME=/root/.config`,
+		`TUNNEL_TOKEN=secret`,
+	})
+	for _, k := range []string{"PATH", "HOME", "TMPDIR", "XDG_CONFIG_HOME"} {
+		if !envHasKey(out, k) {
+			t.Errorf("Unix 形态应保留 %s", k)
+		}
+	}
+	if envHasKey(out, "TUNNEL_TOKEN") {
+		t.Error("TUNNEL_TOKEN 泄漏")
+	}
+}
+
+// envHasKey 在一份 "K=V" 快照里按大小写不敏感查找 key。
+func envHasKey(environ []string, key string) bool {
+	for _, kv := range environ {
+		k := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			k = kv[:i]
+		}
+		if strings.EqualFold(k, key) {
+			return true
+		}
+	}
+	return false
 }

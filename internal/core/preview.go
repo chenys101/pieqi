@@ -587,26 +587,82 @@ func drainChan(ch <-chan int) {
 // previewEnv 构造 preview 子进程环境：
 // 继承白名单基础变量，剔除 token 相关（防 dev server 代码读到隧道凭据）。
 func previewEnv() []string {
-	keepPrefix := []string{"PATH", "HOME", "USER", "LANG", "LC_", "TERM", "SHELL", "TMPDIR", "XDG_", "NODE_", "NPM_"}
+	return filterPreviewEnv(os.Environ())
+}
+
+// previewKeepPrefix 白名单前缀。必须按平台差异配齐，否则 preview 里的 dev server 会「半残」：
+//   - Windows 环境变量名**不区分大小写**，且本机 PATH 实际写作 "Path" ——
+//     照 Unix 习惯做大小写敏感匹配会整条丢掉 PATH，npm/node 直接找不到；
+//   - TMPDIR/HOME 在 Windows 上根本不存在，缺 TEMP/SystemRoot 时 npm 写临时文件、
+//     部分系统 API 也会失败。
+//
+// 故匹配统一走大小写不敏感，并同时收录两平台基础变量（互不冲突：Unix 上 Windows 项自然缺席）。
+var previewKeepPrefix = []string{
+	// 跨平台
+	"PATH", "HOME", "USER", "LANG", "LC_", "TERM", "SHELL", "TMPDIR", "TMP", "TEMP", "XDG_",
+	"NODE_", "NPM_",
+	// Windows 必需
+	"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA",
+	"USERPROFILE", "USERDOMAIN", "COMPUTERNAME", "PROGRAMDATA", "PROGRAMFILES",
+	"NUMBER_OF_PROCESSORS", "PROCESSOR_",
+}
+
+// 凭据类特征（隧道 token / Pieqi 内部变量 / 桥接变量），同样大小写不敏感匹配。
+var (
+	previewDropSubstr = []string{"TOKEN"}
+	previewDropPrefix = []string{"PIEQI_", "BRIDGE_"}
+)
+
+// filterPreviewEnv 按白名单过滤一份环境变量快照，抽出为纯函数以便单测覆盖
+// Windows 的 "Path" 大小写形态（os.Environ() 的真实形态在 CI 上不可控）。
+func filterPreviewEnv(environ []string) []string {
 	var out []string
-	for _, kv := range os.Environ() {
+	hasPath := false
+	for _, kv := range environ {
 		key := kv
 		if i := strings.IndexByte(kv, '='); i >= 0 {
 			key = kv[:i]
 		}
-		// 剔除凭据类变量：隧道 token / Pieqi 内部变量
-		if strings.Contains(key, "TOKEN") || strings.HasPrefix(key, "PIEQI_") || strings.HasPrefix(key, "BRIDGE_") {
+		if containsAnyFold(key, previewDropSubstr) || hasAnyPrefixFold(key, previewDropPrefix) {
 			continue
 		}
-		for _, p := range keepPrefix {
-			if key == p || strings.HasPrefix(key, p) {
+		for _, p := range previewKeepPrefix {
+			if hasPrefixFold(key, p) {
 				out = append(out, kv)
+				if strings.EqualFold(key, "PATH") {
+					hasPath = true
+				}
 				break
 			}
 		}
 	}
-	if len(out) == 0 {
+	// 兜底：环境里确实没有 PATH（极少见）时补一条，保证 dev server 至少能解析可执行文件。
+	if !hasPath {
 		out = append(out, "PATH="+os.Getenv("PATH"))
 	}
 	return out
+}
+
+// hasPrefixFold 大小写不敏感的前缀匹配（环境变量名都是 ASCII，EqualFold 足够）。
+func hasPrefixFold(s, prefix string) bool {
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+func hasAnyPrefixFold(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if hasPrefixFold(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAnyFold(s string, subs []string) bool {
+	up := strings.ToUpper(s)
+	for _, sub := range subs {
+		if strings.Contains(up, sub) {
+			return true
+		}
+	}
+	return false
 }
