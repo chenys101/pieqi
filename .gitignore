@@ -13,6 +13,10 @@ web/node_modules/
 # 这条留着是为了让"这个路径是有约定的"在 .gitignore 里也能被看见。
 bin/pieqi.new
 bin/pieqi.new.exe
+# 实际交付落点由 pieqi.self_update_dir 配置（本机是 /selfupdate/），上面的
+# bin/pieqi.new* 只是未配置时的回退。两处都要忽略，否则暂存的几十 MB 二进制
+# 会一直把工作区弄脏、并有被误提交的风险。
+/selfupdate/
 
 # 测试产物
 internal/core/data/
