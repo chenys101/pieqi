@@ -208,7 +208,7 @@ func probeAgentModels(ctx context.Context, agentName string) (ModelCatalog, erro
 	probeCtx, cancel := context.WithTimeout(ctx, modelCatalogProbe)
 	defer cancel()
 	if _, err := a.NewSession(probeCtx, SessionConfig{Cwd: probeDir}); err != nil {
-		return cat, err
+		return cat, explainProbeErr(err)
 	}
 	cat = a.Models()
 	cat.Agent = agentName
@@ -216,4 +216,21 @@ func probeAgentModels(ctx context.Context, agentName string) (ModelCatalog, erro
 		return cat, errors.New("agent 未下发可选模型清单（不支持会话内选模型？）")
 	}
 	return cat, nil
+}
+
+// explainProbeErr 给已知的「配置类」失败补上可操作提示。
+//
+// 为什么值得特判：`has no configured model` 的根因**不在 pieqi**，而在 agent 的
+// profile 配置（如 ~/.dsh/profiles/acp/cordis.patch.yml 的 `- id: acp`.model）——
+// 上游把模型下架/改名后，那份清单会变，而 pin 没跟着改，于是建会话直接失败。
+// 原始错误只给出失效的 id，不说是哪份配置、更不说怎么修；2026-10-07 就因此
+// 从外网只能看到一个语焉不详的失败，排查成本不低。
+func explainProbeErr(err error) error {
+	if err == nil || !strings.Contains(err.Error(), "has no configured model") {
+		return err
+	}
+	return fmt.Errorf("%w —— 这是 **agent 侧的模型配置失效**（不是 pieqi 故障）：profile 里 "+
+		"`- id: acp` 的 model 已不在 `llm-pi-ai` 的 models 清单中，上游下架/改名模型时会这样。"+
+		"修法：改 ~/.dsh/profiles/acp/cordis.patch.yml 的该行，再用 "+
+		"`dsh --profile acp --dump-config` 校验（清单的权威来源是网关 GET /v1/models）", err)
 }

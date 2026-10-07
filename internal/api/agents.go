@@ -74,10 +74,14 @@ func (s *Server) listAgents(c *gin.Context) {
 // 拿一次就要起一个 agent 进程。放这里 = 只有"用户真的选中了某个 agent"才付这份代价，
 // 且 agent 包内做了 10 分钟缓存（见 agent.ListAgentModels）。
 //
-// 三种"没有清单"的情形都返回 200 + 空 models，不算错误路径：
+// 两种"没有清单"的情形返回 200 + 空 models，不算错误路径：
 //   - 该 agent 不支持会话内选模型（如 claude 的桥）→ error 为空，前端隐藏下拉框；
-//   - 探测失败（进程起不来 / 未登录）→ error 带上原因，前端可作提示但不拦创建；
-//   - 探测成功但 agent 没下发清单 → 同第一类。
+//   - 探测成功但 agent 没下发清单 → 同上。
+//
+// 探测**失败**（进程起不来 / 未登录 / profile 的模型 pin 失效）返回 **502** + error：
+// 那是服务端/配置故障，必须让外网与监控一眼看出来。曾一律返回 200 —— 2026-10-07 的
+// 「模型清单漂移」故障（pin 指向已下架的模型）在外部看起来就是 200，只能靠人读 body
+// 才发现，徒增排查成本。
 //
 // 只有"agent 名不在可选目录里"才是 400（与 POST /api/tasks 的校验口径一致）。
 func (s *Server) listAgentModels(c *gin.Context) {
@@ -93,6 +97,8 @@ func (s *Server) listAgentModels(c *gin.Context) {
 	}
 	if err != nil {
 		resp["error"] = err.Error()
+		c.JSON(http.StatusBadGateway, resp)
+		return
 	}
 	c.JSON(http.StatusOK, resp)
 }
