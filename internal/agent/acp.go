@@ -100,23 +100,25 @@ type ACPAgent struct {
 	// 为什么需要它：审批判定（DowngradeReadonlyPermission → 只读降级 / 风险分级）
 	// 读的是 PermissionRequest.RawInput，但**只有部分 agent 会在 RequestPermission
 	// 里带上它** —— qoder/claude 会带，dsh 不带（实测 dsh 12/12 条的 title/kind/rawInput
-	// 全空）。而 dsh 在**先一步**的 session/update 里已经把 tool_call 的 RawInput
-	// 发过来了（实测 1347 条 tool_use 里 773 条含 command），两边用同一个 toolCallId 关联。
+	// 全空）。而 dsh 在 session/update 里发过 tool_call 的 RawInput
+	// （实测 1347 条 tool_use 里 773 条含 command），两边用同一个 toolCallId 关联。
 	//
-	// 「先一步」是协议保证，不是运气：
-	//   1. dsh 侧 https://…/dsh-acp/lib/index.js 的 approval/request 处理器在发
-	//      requestPermission 之前会 await record.drainUpdates()（= outputTail 链），
-	//      而 tool/call 事件正串在那条链上；
-	//   2. pieqi 用的 acp-go-sdk 有**通知屏障**：handleResponse 给每个响应带上
-	//      notificationWatermark，调用方 waitNotificationsUpTo 会阻塞到"该响应之前
-	//      入队的通知全部处理完毕"（见 connection_notification_barrier_test.go）。
-	// 所以 RequestPermission 回调执行时，对应的 ToolCall 一定已经处理过 ——
-	// 这里**不需要超时等待**，查不到就是真的没有（此时维持保守判级，不猜）。
+	// ⚠️ **顺序不保证，必须等**（2026-10-07 实测修正，见 toolInputWait 注释）：
+	// dsh 侧确实在发 requestPermission 前 `await drainUpdates()`，acp-go-sdk 也确实有
+	// "通知屏障"（响应带 notificationWatermark，调用方等它排空）—— 但这两条保证的都是
+	// **协议线上的顺序**（dsh 先发完 update 再发请求），**不等于 pieqi 侧两个回调的
+	// 处理完成顺序**：SessionUpdate（写索引）与 RequestPermission（读索引）在 pieqi
+	// 内部是并发的。实测本会话 12:39:37 那次 push 的审批就**跑赢了**它自己的 tool_call
+	// （tool_use 事件 seq 1661 确实存在、command 也在，但审批那一刻索引还是空的）。
+	// ⇒ 读索引必须带**有界等待**，见 toolInputWait。
 	//
 	// 增长边界：一个会话内的工具调用量级是百~千（实测最大任务 1347 条），
 	// 每条几十字节~几KB，随会话销毁一并释放（见 Close），不做逐出。
 	toolInputsMu sync.Mutex
 	toolInputs   map[string]json.RawMessage
+	// toolInputCond 在写入新入参时广播，唤醒正在等待该 id 的审批方。
+	// 与 toolInputs 共用 toolInputsMu（sync.Cond 的约定：等待与判定在同一把锁下）。
+	toolInputCond *sync.Cond
 
 	// closeOnce 守护 Close 的幂等；doneOnce 守护 a.done 的关闭。
 	// 两者分离，避免 Close 内调 markDone 时重入同一个 Once 导致死锁。
@@ -172,6 +174,16 @@ func NewACPAgent(cfg config.ACPConfig, logger *zap.Logger) *ACPAgent {
 		toolInputs:   make(map[string]json.RawMessage),
 		lifeCtx:      lifeCtx,
 		lifeCancel:   lifeCancel,
+	}
+}
+
+// initToolInputCond 惰性初始化条件变量（需在 toolInputsMu 上）。
+//
+// 惰性而非构造器里直接建：NewACPAgent 的返回值字面量里加不上
+// sync.NewCond(&a.toolInputsMu)（自引用），且单测会直接 new(ACPAgent) 绕开构造器。
+func (a *ACPAgent) initToolInputCond() {
+	if a.toolInputCond == nil {
+		a.toolInputCond = sync.NewCond(&a.toolInputsMu)
 	}
 }
 
@@ -721,8 +733,13 @@ func (a *ACPAgent) Close(ctx context.Context) error {
 		// 释放工具入参记忆表：进程已结束，留着只是内存（一个会话可达上千条）。
 		// 置 nil 而非清空 map —— 与构造器对称，且让"已关闭"这件事对后续查询
 		// 表现为查不到（toolInput 对 nil map 读是安全的）。
+		// **广播唤醒**可能还在 toolInputWait 上等的审批方，否则它们要干等到
+		// 300ms 超时（虽然不影响正确性，但会让关闭变慢、且日志里全是超时告警）。
 		a.toolInputsMu.Lock()
 		a.toolInputs = nil
+		if a.toolInputCond != nil {
+			a.toolInputCond.Broadcast()
+		}
 		a.toolInputsMu.Unlock()
 		a.markDone()
 		// 释放自持 lifeCtx（最后一步）：若上面优雅等待超时且进程仍在，此处经 CommandContext
@@ -770,6 +787,14 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		rawIn := rawAnyToJSON(u.ToolCall.RawInput)
 		// 记下入参供审批时补齐命令原文（见 toolInputs 注释）。
 		a.rememberToolInput(toolCallID, rawIn)
+		// 「收到了什么」必须可观测：审批回填失败时，靠这条日志能立刻区分
+		// "tool_call 压根没来" vs "来了但晚了"。
+		if len(rawIn) > 0 {
+			a.logger.Debug("acp tool call input remembered",
+				zap.String("tool_call_id", toolCallID),
+				zap.Int("bytes", len(rawIn)),
+			)
+		}
 		a.cbMu.RLock()
 		fn := a.onToolCall
 		a.cbMu.RUnlock()
@@ -824,6 +849,8 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 // 命令原文抹掉 —— 那时审批恰好排在 update 之后，就会拿不到命令。
 //
 // toolCallId 为空时同样丢弃：没有键就无法关联，存了也永远查不到。
+//
+// 写入后**广播**唤醒可能正在等这个 id 的审批方（见 toolInputWait）。
 func (a *ACPAgent) rememberToolInput(toolCallID string, raw json.RawMessage) {
 	if toolCallID == "" || len(raw) == 0 {
 		return
@@ -834,10 +861,14 @@ func (a *ACPAgent) rememberToolInput(toolCallID string, raw json.RawMessage) {
 		a.toolInputs = make(map[string]json.RawMessage)
 	}
 	a.toolInputs[toolCallID] = raw
+	a.initToolInputCond()
+	a.toolInputCond.Broadcast()
 }
 
 // toolInput 查一个 toolCallId 的入参。第二个返回值为 false 表示"没记过"——
 // 调用方据此维持保守判级，**不要**把它当成"这条命令没有副作用"。
+//
+// 本函数**只看当下**，不等待；需要等待请用 toolInputWait。
 func (a *ACPAgent) toolInput(toolCallID string) (json.RawMessage, bool) {
 	if toolCallID == "" {
 		return nil, false
@@ -849,6 +880,75 @@ func (a *ACPAgent) toolInput(toolCallID string) (json.RawMessage, bool) {
 		return nil, false
 	}
 	return raw, true
+}
+
+// toolInputWaitTimeout 审批侧等待 tool_call 入参的上限。
+//
+// 取值理由：dsh 侧 `drainUpdates()` + acp-go-sdk 的通知屏障已把差距压到
+// "同一批数据的两个回调"级别（实测都是同秒内），正常应在毫秒级到达。
+// 300ms 足够覆盖调度抖动，又短到用户察觉不到（审批卡本来就要人反应几秒）。
+//
+// ⚠️ 超时**不是失败**，而是"退回保守判级"：命令取不到 ⇒ 维持 execute/L2 ⇒
+// 仍然弹卡让人判断。宁可多问一次，也不猜。
+const toolInputWaitTimeout = 300 * time.Millisecond
+
+// toolInputWait 查 toolCallId 的入参，**没到就等一小会儿**（见 toolInputWaitTimeout）。
+//
+// 为什么必须等：SessionUpdate（写索引）与 RequestPermission（读索引）在 pieqi
+// 内部是并发的。协议层的顺序保证（dsh 的 drainUpdates、SDK 的通知屏障）只覆盖
+// "线上先发完 update 再发请求"，**不覆盖 pieqi 两个回调的处理完成顺序**。
+// 实测（2026-10-07 12:39:37）审批就曾跑赢自己的 tool_call，导致卡片上没有命令原文。
+//
+// 实现用 sync.Cond 而非轮询/sleep：
+//   - 写入方（rememberToolInput）在拿到入参时 Broadcast，等待方立刻醒来 ——
+//     命中时**零延迟**，不会像固定 sleep 那样每次都白等；
+//   - 超时用 time.AfterFunc 定时 Broadcast（Cond 没有原生超时），
+//     醒来后重新判断条件即可。
+//
+// 返回 false 表示"等到超时也没来" —— 调用方维持保守判级。
+func (a *ACPAgent) toolInputWait(toolCallID string) (json.RawMessage, bool) {
+	if toolCallID == "" {
+		return nil, false
+	}
+	a.toolInputsMu.Lock()
+
+	// 快路径：已经在索引里（绝大多数情况）。
+	if raw, ok := a.toolInputs[toolCallID]; ok && len(raw) > 0 {
+		a.toolInputsMu.Unlock()
+		return raw, true
+	}
+
+	a.initToolInputCond()
+	deadline := time.Now().Add(toolInputWaitTimeout)
+	// 定时广播：Cond 无原生超时，用 AfterFunc 在到点时唤醒去重新判断。
+	timer := time.AfterFunc(toolInputWaitTimeout, func() {
+		a.toolInputsMu.Lock()
+		if a.toolInputCond != nil {
+			a.toolInputCond.Broadcast()
+		}
+		a.toolInputsMu.Unlock()
+	})
+	defer timer.Stop()
+
+	for {
+		raw, ok := a.toolInputs[toolCallID]
+		if ok && len(raw) > 0 {
+			a.toolInputsMu.Unlock()
+			return raw, true
+		}
+		// 已关闭（Close 把 toolInputs 置 nil）：不会再有新入参了，立刻返回。
+		// 缺这条判断的话，等待方会一路 Wait 到超时 —— 不影响正确性，
+		// 但会让关闭路径白等 300ms，且日志里多出误导性的超时告警。
+		if a.toolInputs == nil {
+			a.toolInputsMu.Unlock()
+			return nil, false
+		}
+		if !time.Now().Before(deadline) {
+			a.toolInputsMu.Unlock()
+			return nil, false // 超时：等不到了，退回保守判级
+		}
+		a.toolInputCond.Wait() // 等 Broadcast（新入参到达 或 超时唤醒）
+	}
 }
 
 // RequestPermission 处理 agent 的权限请求（M3 启用；M1 无回调时自动放行）。
@@ -902,15 +1002,28 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 	// 命令原文的来源有两条，顺序不能反：
 	//   1. 请求自带（qoder/claude 会把工具入参放进 RequestPermission）；
 	//   2. 请求没带时，回查本会话记下的 tool_call 入参（**dsh 走这条**：
-	//      它不发 title/kind/rawInput，但先一步的 session/update 里发过 RawInput）。
-	// 回查的前提是协议层的顺序保证（见 toolInputs 注释），故此查询**不需要等待**：
-	// 查不到就是真的没有，维持保守判级，不猜、不 sleep。
+	//      它不发 title/kind/rawInput，但 session/update 里发过 RawInput）。
+	// 回查是**有界等待**（toolInputWait，上限 300ms）：SessionUpdate 与
+	// RequestPermission 在 pieqi 内部并发，实测审批可能跑赢自己的 tool_call
+	// （2026-10-07 12:39:37 的 push 就是这样，卡片上没有命令）。
+	// 等不到就维持保守判级 —— 仍然弹卡，但不猜。
 	rawInput := rawAnyToJSON(params.ToolCall.RawInput)
 	backfilled := false
 	if len(rawInput) == 0 {
-		if remembered, ok := a.toolInput(reqID); ok {
+		if remembered, ok := a.toolInputWait(reqID); ok {
 			rawInput = remembered
 			backfilled = true
+		} else {
+			// 取不到命令原文 ⇒ 卡片上只有工具名，人无法判断批的是什么。
+			// 这条 Warn 是**可观测性**的关键：没有它，"为什么这张卡没命令"
+			// 只能靠翻协议流量反推。带上 tool/title 便于定位是哪个 agent 的哪种调用。
+			a.logger.Warn("acp permission has no command text (waited, then gave up)",
+				zap.String("req_id", reqID),
+				zap.String("agent", a.cfg.AgentType),
+				zap.String("tool", title),
+				zap.String("kind", toolKindString(params.ToolCall.Kind)),
+				zap.Duration("waited", toolInputWaitTimeout),
+			)
 		}
 	}
 	perm := PermissionRequest{
