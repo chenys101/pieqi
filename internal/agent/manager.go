@@ -301,7 +301,11 @@ func (m *AgentManager) DefaultAgent() string {
 // Run 对已 Open 的 task 发送一轮 prompt。同一 task 同时只允许一个 Run（并发第二个返回
 // ErrSessionBusy，调用方应排队而非判死，见 ErrSessionBusy 注释）。
 // 内部为该轮派生 cancelable ctx，Cancel/Close 经它中断 SendPrompt。
-func (m *AgentManager) Run(ctx context.Context, taskID, prompt string) error {
+//
+// model 是本轮要用的模型（空 = 不改，沿用会话当前路由）。只有实现 TurnModelSetter 的
+// adapter（ACP 系）会消费它；其余 adapter 静默忽略。必须在 SendPrompt **之前**落定 ——
+// ACP 侧该轮的路由是在 prompt 入口被定住的，晚设无效。
+func (m *AgentManager) Run(ctx context.Context, taskID, prompt, turnModel string) error {
 	m.mu.Lock()
 	sess, ok := m.sessions[taskID]
 	m.mu.Unlock()
@@ -320,6 +324,9 @@ func (m *AgentManager) Run(ctx context.Context, taskID, prompt string) error {
 	sess.running = true
 	sess.runMu.Unlock()
 
+	if setter, ok := sess.adapter.(TurnModelSetter); ok {
+		setter.SetTurnModel(turnModel)
+	}
 	err := sess.adapter.SendPrompt(runCtx, sess.sessionID, prompt)
 
 	sess.runMu.Lock()

@@ -105,7 +105,7 @@ func (f *fakeAgentRunner) SessionID(taskID string) string {
 	return ""
 }
 
-func (f *fakeAgentRunner) Run(ctx context.Context, taskID, prompt string) error {
+func (f *fakeAgentRunner) Run(ctx context.Context, taskID, prompt, turnModel string) error {
 	f.mu.Lock()
 	a := f.adapters[taskID]
 	f.runN++
@@ -806,7 +806,7 @@ func TestTaskRunner_ACP_Resume(t *testing.T) {
 
 	// Resume 续问：保活复用同一会话，不重新 Open（openCount 保持 1），Run 调第二次。
 	runBefore := fake.runCount()
-	if err := tr.Resume(task.ID, "more"); err != nil {
+	if err := tr.Resume(task.ID, "more", ""); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	waitFor(t, 2*time.Second, "second turn finish", func() bool {
@@ -883,7 +883,7 @@ func TestRunACP_Resume_PassesACPSessionID(t *testing.T) {
 		t.Fatalf("adapter should be gone after reap")
 	}
 
-	if err := tr.Resume(task.ID, "more"); err != nil {
+	if err := tr.Resume(task.ID, "more", ""); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	// 续问 re-open 走 open 路径：等第二次 Open 登记 + 轮次终态。
@@ -923,7 +923,7 @@ func TestRunACP_Resume_SessionLost(t *testing.T) {
 	fake.setOpenErr(errors.New("acp: load session acp-real-sid: session not found"))
 	closeBefore := fake.closeCount()
 	openBefore := fake.openCount()
-	if err := tr.Resume(task.ID, "more"); err != nil {
+	if err := tr.Resume(task.ID, "more", ""); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 

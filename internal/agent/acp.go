@@ -97,6 +97,22 @@ type ACPAgent struct {
 	// 续问走 session/load（LoadSession=true）还是 session/resume。
 	agentCaps acp.AgentCapabilities
 
+	// turnMu/turnModel 是**本轮**要用的模型（"发提示词时选"那条路）。
+	//
+	// 与 SessionConfig.Model（会话首轮，建会话时定一次）分开：这个每轮都能换。取值同样是
+	// agent 下发的不透明选择值，原样放进 ACP prompt 请求的 _meta，由 agent 侧解析并落到该轮。
+	// 空串 = 不改，沿用会话当前路由（此时不往 _meta 写 model 键）。
+	turnMu    sync.Mutex
+	turnModel string
+
+	// catalogMu/modelCatalog 是 agent 最近一次建/续会话时下发的可选模型清单。
+	//
+	// 从哪来：**不是**响应的 configOptions（改造过的 dsh-acp 把它隐藏了，恒空），
+	// 而是响应 _meta["pieqi/configOptions"]（见 forks/dsh-acp 的 A3）。
+	// 用途：GET /api/agents/:name/models 的一次性探测（见 model_catalog.go）。
+	catalogMu    sync.Mutex
+	modelCatalog ModelCatalog
+
 	startOnce sync.Once
 	startErr  error
 	started   bool
@@ -596,37 +612,104 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 		// 优先 session/load（agent 声明 LoadSession 能力时），否则 session/resume。
 		// 两者都要求 Cwd；load 还要求 McpServers 非 nil（已由 toACPMcpServers 保证）。
 		//
-		// 两条路径的响应都可能带 configOptions，本实现不使用（不做会话内选模型）。
 		// dsh 实测只实现 resume（caps 无 load）。
+		//
+		// Meta 同样带上本任务的模型：改造过的 agent 会把它当作"会话没有历史路由时的兜底"
+		// （agent 自己记的上次路由优先，见 forks/dsh-acp 的 selectionFor）。原生 agent 忽略。
+		// 响应的 configOptions 本实现不使用（不做 configOptions 驱动的会话内选模型）。
 		if a.agentCaps.LoadSession {
-			if _, err := a.conn.LoadSession(sessCtx, acp.LoadSessionRequest{
+			resp, err := a.conn.LoadSession(sessCtx, acp.LoadSessionRequest{
 				Cwd:        cfg.Cwd,
 				SessionId:  sid,
 				McpServers: mcpServers,
-			}); err != nil {
+				Meta:       modelMeta(cfg.Model),
+			})
+			if err != nil {
 				return "", fmt.Errorf("acp: load session %s: %w", cfg.ResumeFrom, err)
 			}
+			a.rememberCatalog(resp.Meta)
 		} else {
-			if _, err := a.conn.ResumeSession(sessCtx, acp.ResumeSessionRequest{
+			resp, err := a.conn.ResumeSession(sessCtx, acp.ResumeSessionRequest{
 				Cwd:        cfg.Cwd,
 				SessionId:  sid,
 				McpServers: mcpServers,
-			}); err != nil {
+				Meta:       modelMeta(cfg.Model),
+			})
+			if err != nil {
 				return "", fmt.Errorf("acp: resume session %s: %w", cfg.ResumeFrom, err)
 			}
+			a.rememberCatalog(resp.Meta)
 		}
 		return string(sid), nil
 	}
 
 	// 新建会话路径（原逻辑）
+	// Meta 带上本任务的模型：ACP 协议没有"建会话指定模型"的字段，走标准 _meta 扩展位
+	// 传给改造过的 agent（见 agent.TurnModelSetter / forks/dsh-acp）。原生 agent 忽略它。
 	resp, err := a.conn.NewSession(sessCtx, acp.NewSessionRequest{
 		Cwd:        cfg.Cwd,
 		McpServers: toACPMcpServers(cfg.MCP),
+		Meta:       modelMeta(cfg.Model),
 	})
 	if err != nil {
 		return "", fmt.Errorf("acp: new session: %w", err)
 	}
+	// 清单在 _meta 里（configOptions 被 fork 隐藏了），顺手记下供探测接口读。
+	a.rememberCatalog(resp.Meta)
 	return string(resp.SessionId), nil
+}
+
+// SetTurnModel 设定下一轮 prompt 使用的模型（空串 = 不改）。实现 agent.TurnModelSetter。
+//
+// 只对支持 _meta 模型通道的 agent（本仓库 fork 的 dsh-acp）有意义；原生 agent 会忽略 _meta。
+// 为什么由调用方在每轮 Run 前设置而不是挂在 SendPrompt 参数上：见 TurnModelSetter 的说明。
+func (a *ACPAgent) SetTurnModel(model string) {
+	a.turnMu.Lock()
+	a.turnModel = model
+	a.turnMu.Unlock()
+}
+
+// takeTurnModel 取走本轮模型选择（取后即清）。清空是必要的：用户没选模型的下一轮
+// 必须回到"不指定"（沿用会话当前路由），否则会把上一轮的选择一直糊下去。
+func (a *ACPAgent) takeTurnModel() string {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	model := a.turnModel
+	a.turnModel = ""
+	return model
+}
+
+// modelMeta 构造 ACP 请求的 _meta，把模型选择经标准扩展位传给 agent。
+//
+// 值用 ACP 原生的不透明选择值（与 GET /api/agents/:name/models 下发的一致），
+// agent 侧无需为 pieqi 另开协议字段。空串返回 nil —— 不带 _meta 即"不指定"。
+func modelMeta(model string) map[string]any {
+	if model == "" {
+		return nil
+	}
+	return map[string]any{"model": model}
+}
+
+// rememberCatalog 记下响应 _meta 里的可选模型清单。
+// 空清单**不覆盖**已记的：agent 若不下发（或本次是原生 agent），别把上次拿到的弄丢。
+func (a *ACPAgent) rememberCatalog(meta map[string]any) {
+	cat := ExtractModelCatalog(catalogOptionsFromMeta(meta))
+	if len(cat.Options) == 0 {
+		return
+	}
+	a.catalogMu.Lock()
+	a.modelCatalog = cat
+	a.catalogMu.Unlock()
+}
+
+// Models 返回本 agent 最近一次协商拿到的可选模型清单（可能为空 = 未下发/不支持）。
+// 返回深拷，调用方改不到内部状态。
+func (a *ACPAgent) Models() ModelCatalog {
+	a.catalogMu.Lock()
+	defer a.catalogMu.Unlock()
+	cat := a.modelCatalog
+	cat.Options = append([]ModelOption(nil), cat.Options...)
+	return cat
 }
 
 // RealSessionID 返回会话的真实 session ID（用于持久化与续问）。
@@ -643,10 +726,14 @@ func (a *ACPAgent) SendPrompt(ctx context.Context, sessionID, prompt string) err
 }
 
 // promptOnce 发一轮 prompt，不做任何重试。
+//
+// Meta 里带**本轮**指定的模型（"发提示词时选"）：取后即清，未指定则不带 _meta，
+// 会话沿用当前路由。原生 agent 会忽略 _meta。
 func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, prompt string) error {
 	if _, err := a.conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: acp.SessionId(sessionID),
 		Prompt:    []acp.ContentBlock{acp.TextBlock(prompt)},
+		Meta:      modelMeta(a.takeTurnModel()),
 	}); err != nil {
 		return fmt.Errorf("acp: prompt: %w", err)
 	}

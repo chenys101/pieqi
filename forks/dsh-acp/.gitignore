@@ -1,0 +1,5 @@
+# 探针的临时工作目录（probe-config.mjs 每次运行都会用）
+.probe-cwd/
+
+# install.mjs 每次安装前留的 runtime 快照（本机取证用，不是源码）
+backups/

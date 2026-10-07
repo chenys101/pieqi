@@ -215,7 +215,7 @@ func TestTaskRunner_ACP_ConcurrentResume_Serialized(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = tr.Resume(task.ID, fmt.Sprintf("q%d", i))
+			errs[i] = tr.Resume(task.ID, fmt.Sprintf("q%d", i), "")
 		}(i)
 	}
 	wg.Wait()
@@ -287,7 +287,7 @@ func TestTaskRunner_ACP_ResumeDuringRunningQueues(t *testing.T) {
 	}
 
 	// 首轮在跑时提交续问：必须被接受（排队），不再返回 "not resumable: running"。
-	if err := tr.Resume(task.ID, "while-running"); err != nil {
+	if err := tr.Resume(task.ID, "while-running", ""); err != nil {
 		t.Fatalf("Resume during running rejected: %v（应当排队而不是拒绝）", err)
 	}
 	if n := tr.turnQueueFor(task.ID).pendingCount(); n != 1 {
@@ -325,7 +325,7 @@ func TestTaskRunner_ACP_SessionBusyNotFatal(t *testing.T) {
 
 	// 下一次 Run 返回会话忙；退避后重试应成功。
 	fake.setBusyN(1)
-	if err := tr.Resume(task.ID, "after-busy"); err != nil {
+	if err := tr.Resume(task.ID, "after-busy", ""); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	waitFor(t, 5*time.Second, "busy retry turn finished", func() bool {
@@ -353,7 +353,7 @@ func TestTaskRunner_ACP_QueuedTurnSkippedOnDeletedTask(t *testing.T) {
 	runsBefore := fake.runCount()
 
 	// 首轮在跑时提交续问（排队），随后删任务。
-	if err := tr.Resume(task.ID, "queued-then-deleted"); err != nil {
+	if err := tr.Resume(task.ID, "queued-then-deleted", ""); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	if err := tr.store.Delete(task.ID); err != nil {
@@ -395,7 +395,7 @@ func TestTaskRunner_ACP_ResumeColdStartHasReceipt(t *testing.T) {
 	_ = tr.agentMgr.Close(task.ID)
 	waitFor(t, 2*time.Second, "adapter gone", func() bool { return fake.adapter(task.ID) == nil })
 
-	if err := tr.Resume(task.ID, "冷续问"); err != nil {
+	if err := tr.Resume(task.ID, "冷续问", ""); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	// 关键断言：Resume 返回时（即 API 回 202 的那一刻）回执必须已经落库，
@@ -422,7 +422,7 @@ func TestTaskRunner_ACP_ResumeWarmSessionNoReceipt(t *testing.T) {
 	if fake.adapter(task.ID) == nil {
 		t.Fatalf("前提不成立：保活语义下 adapter 应仍在册（热会话）")
 	}
-	if err := tr.Resume(task.ID, "热续问"); err != nil {
+	if err := tr.Resume(task.ID, "热续问", ""); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	if hasEvent(t, store, task.ID, model.EventStatus, "正在恢复会话") {

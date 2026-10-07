@@ -66,3 +66,43 @@ func (s *Server) listAgents(c *gin.Context) {
 		"default": s.effectiveDefaultAgent(),
 	})
 }
+
+// listAgentModels GET /api/agents/:name/models：该 agent 当前可选的模型清单。
+//
+// 为什么单独一个接口、而不是塞进 GET /api/agents：取清单的代价服务端**不能**替所有
+// agent 预付 —— 清单只有 agent 自己知道（改造过的 dsh-acp 放在 session/new 响应的
+// _meta 里，见 agent.ListAgentModels），拿一次就要起一个 agent 进程。放这里 =
+// 只有"用户真的选中了某个 agent"才付这份代价，且 agent 包内做了 10 分钟缓存。
+//
+// 两种"没有清单"的情形返回 200 + 空 models，不算错误路径（前端据此隐藏下拉框）：
+//   - 该 agent 不支持外部指定模型（如 claude 的桥、未改造的 agent）→ error 为空；
+//   - agent 支持但本次没下发清单。
+//
+// 探测**失败**（进程起不来 / 未登录 / profile 的模型配置失效）返回 **502** + error：
+// 那是服务端/配置故障，必须让外网与监控一眼看出来。曾一律返回 200 —— 2026-10-07 的
+// 「模型清单漂移」故障（pin 指向已下架的模型）在外部看起来就是 200，只能靠人读 body
+// 才发现，徒增排查成本。
+//
+// 只有"agent 名不在可选目录里"才是 400（与 POST /api/tasks 的校验口径一致）。
+func (s *Server) listAgentModels(c *gin.Context) {
+	name := c.Param("name")
+	if _, err := s.resolveAgent(name); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	cat, err := agent.ListAgentModels(c.Request.Context(), name)
+	models := cat.Options
+	if models == nil {
+		models = []agent.ModelOption{} // 空清单给 [] 而不是 null，前端少一个分支
+	}
+	resp := gin.H{"agent": name, "models": models}
+	if cat.Current != "" {
+		resp["current"] = cat.Current
+	}
+	if err != nil {
+		resp["error"] = err.Error()
+		c.JSON(http.StatusBadGateway, resp)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}

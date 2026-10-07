@@ -171,13 +171,57 @@ describe('InterveneInput', () => {
     await type(host, '补充一句')
     expect(send().disabled).toBe(false)
     send().click()
-    expect(onSend).toHaveBeenCalledWith('补充一句')
+    // 第二个参数是本轮模型：没选 = 空串 = 沿用会话当前路由
+    expect(onSend).toHaveBeenCalledWith('补充一句', '')
   })
 
   it('canSend=false 时不可发送（决策横幅未就绪）', async () => {
     const { host } = mount(InterveneInput, { canCancel: false, canSend: false })
     await type(host, '文字')
     expect((host.querySelector('button[aria-label="发送"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  // ---- 本轮模型选择器：只在"下一发送真会走 Resume"时出现 ----
+  // agent 下发的是**不透明串**（dsh 是 JSON.stringify([provider,model])），前端只搬运。
+  const MODELS = [
+    { value: '["magpie","workbuddy/x"]', name: 'X', group: 'magpie' },
+    { value: '["magpie","workbuddy/y"]', name: 'Y', group: 'magpie', description: '更强但更贵' },
+  ]
+
+  it('续问态给出「本轮模型」选择器，默认沿用当前，清单按分组渲染', () => {
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
+    const sel = host.querySelector('select[aria-label="本轮模型"]') as HTMLSelectElement
+    expect(sel).not.toBeNull()
+    expect(sel.value).toBe('') // 默认不改变现状
+    expect([...sel.querySelectorAll('optgroup')].map((g) => g.getAttribute('label'))).toEqual(['magpie'])
+    expect([...sel.querySelectorAll('option')].map((o) => o.value)).toEqual([
+      '',
+      '["magpie","workbuddy/x"]',
+      '["magpie","workbuddy/y"]',
+    ])
+  })
+
+  it('选中模型后 emit 的第二个参数就是那个不透明串（原样搬运，不解析）', async () => {
+    const onSend = vi.fn()
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS, onSend })
+    const sel = host.querySelector('select[aria-label="本轮模型"]') as HTMLSelectElement
+    sel.value = MODELS[1].value
+    sel.dispatchEvent(new Event('change'))
+    await nextTick()
+
+    await type(host, '换模型跑')
+    ;(host.querySelector('button[aria-label="发送"]') as HTMLButtonElement).click()
+    expect(onSend).toHaveBeenCalledWith('换模型跑', MODELS[1].value)
+  })
+
+  it('该 agent 没有清单 → 不摆选择器（不选模型必须仍能续问）', () => {
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: [] })
+    expect(host.querySelector('select[aria-label="本轮模型"]')).toBeNull()
+  })
+
+  it('运行中不摆选择器：那一态的后端路径根本不看这个字段', () => {
+    const { host } = mount(InterveneInput, { canCancel: true, canSend: false, models: MODELS })
+    expect(host.querySelector('select[aria-label="本轮模型"]')).toBeNull()
   })
 })
 

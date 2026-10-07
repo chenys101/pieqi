@@ -9,7 +9,8 @@
 
 import { defineStore } from 'pinia'
 import type { AgentInfo, AgentStats } from '@/types/agent'
-import { getAgents } from '@/services/api/agents'
+import { getAgents, getAgentModels } from '@/services/api/agents'
+import type { AgentModelDto } from '@/types/api'
 import { useTaskStore } from './task'
 import { useSessionStore } from './session'
 
@@ -30,6 +31,17 @@ export const useAgentStore = defineStore('agent', {
     defaultAgentId: '',
     /** 目录是否已从服务端成功加载（失败时保持兜底，不必反复重试） */
     loaded: false,
+    /**
+     * 各 agent 的可选模型清单（agentId → models）。**按需加载**：只有用户真正需要
+     * 某个 agent 的清单（新任务页选中它、或在会话页续问）才去拉 —— 服务端取清单要起
+     * 一次 agent 进程，预取整个目录会把这份代价乘以 agent 数。
+     * 空数组 = 已加载过且该 agent 没有可选模型（据此隐藏下拉框，不再重复请求）。
+     */
+    modelsByAgent: {} as Record<string, AgentModelDto[]>,
+    /** 每个 agent 的模型清单是否已尝试加载过（含"支持但为空"的结果） */
+    modelsLoaded: {} as Record<string, boolean>,
+    /** 正在拉取清单的 agent（下拉框显示加载中） */
+    modelsLoading: {} as Record<string, boolean>,
   }),
 
   getters: {
@@ -55,6 +67,14 @@ export const useAgentStore = defineStore('agent', {
     byId(state) {
       return (id: string): AgentInfo | undefined => state.catalog.find((a) => a.id === id)
     },
+    /**
+     * 某 agent 的可选模型（未加载过返回空数组）。
+     * 空数组是"没有可选模型"的统一表示：未加载 / 加载中 / 该 agent 不支持 ——
+     * 三种情形前端行为一致（不显示下拉框），故不额外区分。
+     */
+    modelsOf(state) {
+      return (id: string): AgentModelDto[] => state.modelsByAgent[id] ?? []
+    },
   },
 
   actions: {
@@ -76,6 +96,29 @@ export const useAgentStore = defineStore('agent', {
         this.loaded = true
       } catch {
         // 静默保持兜底：目录拉不到不该拦住「新建任务」这条主流程
+      }
+    },
+
+    /**
+     * 拉取某 agent 的可选模型清单（幂等：试过一次就不再试）。
+     *
+     * 失败**不写** modelsLoaded，下次选中时还能再试 —— 服务端探测失败可能只是
+     * 一次冷启超时（agent 进程首次拉起要几秒），把它当永久结论会让下拉框一直空着。
+     * 失败也不抛：选模型是**可选**能力，拿不到就退回"用 agent 默认"，
+     * 不该挡住创建任务/续问这条主流程（同 loadCatalog 的取舍）。
+     */
+    async loadModels(agentId: string) {
+      if (!agentId) return
+      if (this.modelsLoaded[agentId] || this.modelsLoading[agentId]) return
+      this.modelsLoading = { ...this.modelsLoading, [agentId]: true }
+      try {
+        const res = await getAgentModels(agentId)
+        this.modelsByAgent = { ...this.modelsByAgent, [agentId]: res.models ?? [] }
+        this.modelsLoaded = { ...this.modelsLoaded, [agentId]: true }
+      } catch {
+        // 保持未加载：下次再试
+      } finally {
+        this.modelsLoading = { ...this.modelsLoading, [agentId]: false }
       }
     },
   },

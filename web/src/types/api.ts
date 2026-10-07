@@ -55,6 +55,11 @@ export interface TaskDto {
   source: string
   /** 本任务使用的 agent 名（claude / qoder）。旧任务无该字段 → 适配层兜底为默认 agent */
   agent?: string
+  /**
+   * 本任务使用的模型（**不透明选择值**，见 GET /api/agents/{agent}/models）。
+   * 旧任务/未指定模型时不下发 → 由 agent 自己的默认决定。
+   */
+  model?: string
   project_id: string
   project_path: string
   worktree_path: string
@@ -128,6 +133,14 @@ export interface InterveneRequestDto {
   decision_id?: string
   choice?: 'approve' | 'approve_session' | 'deny'
   text?: string
+  /**
+   * 本轮要用的模型（**不透明选择值**，见 GET /api/agents/{agent}/models）。
+   * 空 = 沿用会话当前路由。
+   *
+   * 只对 append_prompt 且在**续问路径**（终态 Resume / choice 续问）生效——
+   * 那才是"起新一轮"。运行中 append_prompt 只是往当前轮注入 stdin，后端不看这个字段。
+   */
+  model?: string
 }
 
 /** WebSocket 消息（EventBus 转发 + snapshot） */
@@ -555,4 +568,31 @@ export interface AgentsResponseDto {
   agents: AgentDto[]
   /** 服务端默认 agent（新任务页选择器初始选中项） */
   default: string
+}
+
+/**
+ * GET /api/agents/:name/models 响应。
+ *
+ * 200 + models 非空：该 agent 提供了可选模型清单，前端展示下拉框。
+ * 200 + models 为空：这个 agent 不支持外部指定模型（如 claude 的桥、未改造的 ACP agent），
+ *   或它支持但本次没下发清单 —— 前端**隐藏**下拉框，不拦创建任务（不选 = 用 agent 自己的默认）。
+ * 502 + error：**探测失败**（进程起不来 / 未登录 / profile 的模型配置失效）。
+ *   这是服务端配置故障，前端只提示、不拦创建 —— 不选模型照样能跑，只是用不了"换模型"这个能力。
+ */
+export interface AgentModelsResponseDto {
+  agent: string
+  /** 该 agent 当前生效的选择值（未开过会话时缺省） */
+  current?: string
+  models: AgentModelDto[]
+  /** 探测失败原因（仅在 502 时有值） */
+  error?: string
+}
+
+/** 一个可选的模型。value 是**不透明串**，必须原样回传，前端不得解析或拼接。 */
+export interface AgentModelDto {
+  value: string
+  name: string
+  /** 分组名（如 dsh 的 magpie / deepseek-official） */
+  group?: string
+  description?: string
 }

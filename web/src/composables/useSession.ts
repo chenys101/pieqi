@@ -39,12 +39,16 @@ export function useSession(taskId: Ref<string>) {
   /**
    * 追加 prompt：运行中 → stdin 注入；终态 → Resume 续问。
    * 成功后乐观插入用户气泡 + 思考占位（方案 §36）。
+   *
+   * model（可选）是**本轮**要用的模型（不透明选择值，见 GET /api/agents/{agent}/models）。
+   * 空 = 沿用会话当前路由。只对续问（Resume 起新一轮）有意义 —— 后端在纯 stdin 注入的
+   * 路径上不看它，故 UI 也只在可续问时给出这个选择器（见 InterveneInput）。
    */
-  async function submitPrompt(text: string) {
+  async function submitPrompt(text: string, model?: string) {
     const id = taskId.value
     if (!text.trim()) return
     try {
-      await tasksApi.intervene(id, { kind: 'append_prompt', text: text.trim() })
+      await tasksApi.intervene(id, { kind: 'append_prompt', text: text.trim(), model: model || undefined })
       sessionStore.appendLocalUserMessage(id, text.trim())
       sessionStore.setThinking(id, true)
       forceScroll.value = id

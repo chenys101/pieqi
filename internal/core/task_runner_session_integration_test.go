@@ -220,7 +220,7 @@ func TestRunACPSessionManagerIntegration(t *testing.T) {
 
 	// 2. 冷续问：关掉原桥会话（模拟 reaper/重启回收），凭 resume id 重建上下文。
 	_ = mgr.Close(t1.ID) // 释放并发槽 + 杀 t1 首轮 claude 子进程
-	if err := tr.Resume(t1.ID, "刚才让你记住的词是什么？直接回复那个词。"); err != nil {
+	if err := tr.Resume(t1.ID, "刚才让你记住的词是什么？直接回复那个词。", ""); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	// t1 首轮已是 completed，waitTaskStatus(completed) 会立即返回——须等 turn2 的输出真正落地。

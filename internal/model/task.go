@@ -180,7 +180,18 @@ type Task struct {
 	Source TaskSource `json:"source"`
 	// Agent 本任务使用的 agent 名（"claude" / "qoder"），由新建任务时用户选择。
 	// 空串 = 旧任务（本字段上线前创建），按默认 agent 处理 —— 语义等同于显式 "claude"。
-	Agent           string      `json:"agent,omitempty"`
+	Agent string `json:"agent,omitempty"`
+	// Model 本任务使用的模型（空 = 用 agent 自己的默认）。取值是 agent 下发的
+	// **不透明选择值**（如 `["magpie","group/auto-deepseek-v4-1-flash"]`），来自
+	// GET /api/agents/{name}/models —— 前端下拉选，原样存、原样经 ACP 请求 _meta 传给
+	// agent，不做解析。
+	//
+	// 为什么不能只存展示名：同一个串就是 agent 认的选路标识，自己拼会被判为未知模型
+	// （建会话直接失败）。跨 agent 无意义 —— 换 agent 就等于换一套清单，故随 agent 一起改。
+	//
+	// 注意这里存的是**首轮**的模型；会话续问时用户还可以在发提示词时另选一个（按轮生效，
+	// 不落库，见 api.interveneReq.Model）。
+	Model           string      `json:"model,omitempty"`
 	ProjectID       string      `json:"project_id"`
 	ProjectPath     string      `json:"project_path"`             // repo root，REQ-01 分组依据
 	WorktreePath    string      `json:"worktree_path"`            // worktree 建好后填

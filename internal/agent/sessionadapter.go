@@ -69,7 +69,7 @@ func (a *sessionBackedAdapter) NewSession(ctx context.Context, cfg SessionConfig
 	}
 	a.mu.Unlock()
 
-	sess, err := a.open(ctx, OpenParams{Agent: a.name, Cwd: cfg.Cwd, ResumeFrom: cfg.ResumeFrom, TaskID: cfg.TaskID})
+	sess, err := a.open(ctx, OpenParams{Agent: a.name, Cwd: cfg.Cwd, ResumeFrom: cfg.ResumeFrom, TaskID: cfg.TaskID, Model: cfg.Model})
 	if err != nil {
 		return "", err
 	}
@@ -110,6 +110,17 @@ func (a *sessionBackedAdapter) SendPrompt(ctx context.Context, sessionID, prompt
 		return errors.New("session adapter: SendPrompt before NewSession")
 	}
 	return sess.Prompt(ctx, prompt)
+}
+
+// SetTurnModel 把本轮模型选择下传给底层会话（仅支持该能力的会话，即 ACP 系）。
+// 与 ResumeID 同一模式：向上透传一个可选能力，不支持就当没发生。
+func (a *sessionBackedAdapter) SetTurnModel(model string) {
+	a.mu.Lock()
+	sess := a.sess
+	a.mu.Unlock()
+	if setter, ok := sess.(interface{ SetTurnModel(string) }); ok {
+		setter.SetTurnModel(model)
+	}
 }
 
 func (a *sessionBackedAdapter) OnContentDelta(fn ContentDeltaFunc) {

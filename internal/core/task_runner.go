@@ -94,7 +94,9 @@ type liveProc struct {
 // 生产由 *agent.AgentManager 实现；测试注入 fake。方法签名须与 *agent.AgentManager 完全一致。
 type agentRunner interface {
 	Open(ctx context.Context, taskID, projectID string, cfg agent.SessionConfig) (agent.AgentAdapter, bool, error)
-	Run(ctx context.Context, taskID, prompt string) error
+	// Run 发一轮 prompt；model 是**本轮**要用的模型（空 = 沿用会话当前路由）。
+	// 只有支持 TurnModelSetter 的 adapter（ACP 系）会消费它，其余静默忽略。
+	Run(ctx context.Context, taskID, prompt, turnModel string) error
 	Cancel(ctx context.Context, taskID string) error
 	Close(taskID string) error
 	Adapter(taskID string) agent.AgentAdapter
@@ -333,7 +335,10 @@ func (tr *TaskRunner) Start(ctx context.Context, task *model.Task) {
 // **也接受 running**（方案②排队）：提交的轮次排进该 task 的串行队列（turn_queue.go），
 // 等当前轮收尾后再跑。重复提交/连发两条因此不再报错、更不再互撞把任务打死 —— 只要
 // 队列还在，任何并发提交都只有"排队"一种结果，不看时序。
-func (tr *TaskRunner) Resume(taskID, text string) error {
+//
+// model 是本轮要用的模型（不透明选择值，空 = 沿用会话当前路由）。它是**按轮**的，
+// 只影响这一轮，不落库 —— 用户可以在会话里逐条消息换模型（"发送提示词时选择模型"）。
+func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
 	t, ok := tr.store.Get(taskID)
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
@@ -377,7 +382,7 @@ func (tr *TaskRunner) Resume(taskID, text string) error {
 		// 排队提交（turn_queue.go）：上一轮还没跑完时排在它后面，而不是同时打进同一会话
 		// （并发第二个 Run 会被 AgentManager 拒掉，老代码据此 failTask 把任务打死）。
 		tr.noteQueued(taskID, tr.submitTurn(taskID, func(cur *model.Task) {
-			tr.runACP(context.Background(), cur, text)
+			tr.runACP(context.Background(), cur, text, turnModel)
 		}))
 		return nil
 	}
@@ -484,7 +489,7 @@ func (tr *TaskRunner) ResumeInterruptedWithInitiator(taskIDs []string, version, 
 		if id == initiatorID {
 			prompt = initiatorResumePrompt(version)
 		}
-		if err := tr.Resume(id, prompt); err != nil {
+		if err := tr.Resume(id, prompt, ""); err != nil {
 			tr.logger.Warn("resume interrupted task failed",
 				zap.String("task", id), zap.Error(err))
 			// 接续失败不静默：把它标成 failed 并说明原因，用户至少知道
@@ -598,7 +603,7 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 	// ACP 路径（Task 4.4）：useACP 且已注入 AgentManager 时走 AgentManager 驱动。
 	// 放在 projectSem 之前——ACP 的并发上限由 AgentManager 自己的 sem 管，不能重复 acquire。
 	if tr.useACP && tr.agentMgr != nil {
-		tr.runACP(parentCtx, task, resumePrompt)
+		tr.runACP(parentCtx, task, resumePrompt, "")
 		return
 	}
 	sem := tr.projectSem(task.ProjectID)
@@ -748,7 +753,8 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 // Wire* 连接器注册回调 -> AgentManager.Run -> 据 result 完成/失败 -> defer Close+Unwire。
 // 保留 transition/appendEvent/notify/generateTitle 等 Phase 1 状态机逻辑；仅把 agent 驱动
 // 部分从 claude -p 子进程换成 AgentManager（ACP / Print 透明切换）。
-func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resumePrompt string) {
+// model 是本轮要用的模型（不透明选择值，空 = 沿用会话当前路由）。见 Resume 的说明。
+func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resumePrompt, turnModel string) {
 	project := &model.Project{ID: task.ProjectID, RepoPath: task.ProjectPath, BaseBranch: tr.baseBranch}
 	if task.WorktreePath == "" {
 		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
@@ -785,7 +791,7 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		if adapterDead(a) {
 			_ = tr.agentMgr.Close(task.ID)
 		} else {
-			tr.runACPTurn(ctx, task, prompt, true)
+			tr.runACPTurn(ctx, task, prompt, true, turnModel)
 			return
 		}
 	}
@@ -801,7 +807,7 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		return // Open 失败已 surface（failTask / 续问 status + forceFailTask）
 	}
 	// ACP 路径保活（轮末不关，由空闲回收/取消/删任务/关停关）；PrintAgent 回退一次性（轮末关）
-	tr.runACPTurn(ctx, task, prompt, !fellBack)
+	tr.runACPTurn(ctx, task, prompt, !fellBack, turnModel)
 }
 
 // ensureACPSession 为 task 建立 agent 会话：Open（spawn/握手/LoadSession）+ 注册 wires +
@@ -817,7 +823,10 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	// TaskID 必须带上：它经 SessionConfig 一路传到 ACP spawn，成为子进程的
 	// PIEQI_TASK_ID。这是"会话能标识自己"的唯一途径，也是自重启后能把发起者
 	// 接回来的前提（见 core.RestartJournal.InitiatorTaskID）。
-	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom, Agent: task.Agent, TaskID: task.ID}
+	// Model 一并带上（task.Model = 建任务时选的模型）：Open/NewSession 时经 ACP 请求
+	// 的 _meta 落到会话上。会话已有历史路由时以历史为准（agent 自己记的更准），
+	// 故这里是"该任务想要的模型"的兜底。按轮换模型走 Run 的参数，不经过这里。
+	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom, Agent: task.Agent, TaskID: task.ID, Model: task.Model}
 	if resumeFrom != "" {
 		tr.logger.Debug("agent session open (resume)",
 			zap.String("task", task.ID), zap.String("agent", task.Agent),
@@ -916,9 +925,9 @@ func (tr *TaskRunner) refreshResumeID(taskID string) {
 // 不做 LoadSession/重新 spawn，也不产生新的 claude 进程去抢会话锁）；会话由空闲回收器
 // （AgentManager reaper）/Cancel/删任务/服务器关停负责关闭。
 // keepAlive=false（PrintAgent 回退）：轮末关会话并 unwire（一次性进程语义）。
-func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt string, keepAlive bool) {
+func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt string, keepAlive bool, turnModel string) {
 	tr.setRunning(task.ID)
-	runErr := tr.runAgentTurn(ctx, task.ID, prompt)
+	runErr := tr.runAgentTurn(ctx, task.ID, prompt, turnModel)
 
 	// 桥路径：turn_end 后才带出 SDK resume id，轮末回写 ACPSessionID（续问用）。
 	// 若 adapter 是带 ResumeID() 的会话（sessionBackedAdapter），id 非空时覆盖旧值。
@@ -944,7 +953,7 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 			_ = tr.agentMgr.Close(task.ID)
 			fellBack := tr.ensureACPSession(ctx, task, "") // resumeFrom="" → 全新会话
 			if tr.agentMgr.Adapter(task.ID) != nil {
-				tr.runACPTurn(ctx, task, prompt, !fellBack)
+				tr.runACPTurn(ctx, task, prompt, !fellBack, turnModel)
 			}
 			return
 		}
@@ -985,9 +994,10 @@ const (
 
 // runAgentTurn 跑一轮 SendPrompt。会话忙（同 task 已有轮次在跑）时退避重试：
 // 把"并发提交"当等待信号，而不是任务失败。
-func (tr *TaskRunner) runAgentTurn(ctx context.Context, taskID, prompt string) error {
+// model 是本轮要用的模型（空 = 沿用会话当前路由）。
+func (tr *TaskRunner) runAgentTurn(ctx context.Context, taskID, prompt, turnModel string) error {
 	for attempt := 0; ; attempt++ {
-		err := tr.agentMgr.Run(ctx, taskID, prompt)
+		err := tr.agentMgr.Run(ctx, taskID, prompt, turnModel)
 		if !errors.Is(err, agent.ErrSessionBusy) {
 			return err
 		}

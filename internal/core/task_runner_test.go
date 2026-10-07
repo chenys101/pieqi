@@ -615,7 +615,7 @@ func TestTaskRunner_ResumeChoiceWaitingInput(t *testing.T) {
 	})
 
 	// Resume 应成功（进程不在 running map，choice kind 允许）
-	if err := tr.Resume(task.ID, "A"); err != nil {
+	if err := tr.Resume(task.ID, "A", ""); err != nil {
 		t.Fatalf("Resume choice waiting_input failed: %v", err)
 	}
 }
@@ -635,7 +635,7 @@ func TestTaskRunner_ResumeApprovalWaitingInputRejected(t *testing.T) {
 		return true
 	})
 
-	if err := tr.Resume(task.ID, "approve"); err == nil {
+	if err := tr.Resume(task.ID, "approve", ""); err == nil {
 		t.Fatal("Resume approval waiting_input should fail")
 	}
 }

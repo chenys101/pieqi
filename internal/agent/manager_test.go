@@ -469,7 +469,7 @@ func TestManagerRun_Success(t *testing.T) {
 	if _, _, err := m.Open(ctx, "task-1", "proj-1", SessionConfig{Cwd: "/tmp"}); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := m.Run(ctx, "task-1", "hello"); err != nil {
+	if err := m.Run(ctx, "task-1", "hello", ""); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if got := fa.sendPromptCount(); got != 1 {
@@ -484,7 +484,7 @@ func TestManagerRun_Success(t *testing.T) {
 // TestManagerRun_UnknownTask 校验 Run 未知 taskID 返回错误。
 func TestManagerRun_UnknownTask(t *testing.T) {
 	m := NewAgentManager(ManagerConfig{}, nil)
-	if err := m.Run(context.Background(), "nope", "hi"); err == nil {
+	if err := m.Run(context.Background(), "nope", "hi", ""); err == nil {
 		t.Fatal("Run unknown task returned nil, want error")
 	}
 }
@@ -504,7 +504,7 @@ func TestManagerRun_ConcurrentReject(t *testing.T) {
 	}
 
 	runDone := make(chan error, 2)
-	go func() { runDone <- m.Run(ctx, "task-1", "hello") }()
+	go func() { runDone <- m.Run(ctx, "task-1", "hello", "") }()
 
 	// 等第一个 Run 已进入 SendPrompt（此时 running=true 已设置）
 	select {
@@ -514,7 +514,7 @@ func TestManagerRun_ConcurrentReject(t *testing.T) {
 	}
 
 	// 第二个并发 Run：应被拒绝
-	if err := m.Run(ctx, "task-1", "again"); err == nil || !strings.Contains(err.Error(), "already running") {
+	if err := m.Run(ctx, "task-1", "again", ""); err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("second Run err=%v, want 'already running'", err)
 	}
 
@@ -544,7 +544,7 @@ func TestManagerCancel(t *testing.T) {
 	}
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- m.Run(ctx, "task-1", "hello") }()
+	go func() { runDone <- m.Run(ctx, "task-1", "hello", "") }()
 
 	select {
 	case <-fa.sendPromptStarted:
@@ -733,7 +733,7 @@ func TestManagerReaper_SkipsRunningSession(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	runDone := make(chan error, 1)
-	go func() { runDone <- m.Run(context.Background(), "task-1", "hi") }()
+	go func() { runDone <- m.Run(context.Background(), "task-1", "hi", "") }()
 	select {
 	case <-fa.sendPromptStarted:
 	case <-time.After(time.Second):

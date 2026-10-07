@@ -36,6 +36,14 @@ export interface Task {
   status: TaskStatus
   /** 执行 Agent 业务名（claude / qoder，取值见 GET /api/agents） */
   agent: string
+  /**
+   * 本任务**首轮**选用的模型（**不透明选择值**，见 GET /api/agents/{agent}/models）。
+   * 空串 = 未指定，由 agent 自己的默认决定。
+   *
+   * 是否命中「续问这一轮换模型」是**按轮**的，不落库（见 InterveneRequestDto.model），
+   * 所以这里只反映建任务时选的那个。
+   */
+  model: string
   /** 会话 id（claude_session_id） */
   sessionId: string
   /** 当前待决策（waiting_input 时存在） */

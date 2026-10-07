@@ -21,6 +21,7 @@ function task(over: Partial<Task> = {}): Task {
     projectPath: 'G:/ws/erp',
     status: 'running',
     agent: 'claude',
+    model: '',
     sessionId: 's1',
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:01:00Z',

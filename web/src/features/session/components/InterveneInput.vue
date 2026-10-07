@@ -6,27 +6,68 @@
 // 与 SessionHeader / SessionTimeline 的正文左边界**同一条线** —— 之前输入条独立留
 // px-3，正文在 max-w-3xl 里居中，两者在宽屏下是错开的。
 // PC 与移动端是同一套 DOM（不做 md: 分支），按钮位置在两端一致。
+//
+// 模型选择器（本轮模型）：只在**续问**这一态出现，理由见 showModelPicker。
 import { computed, ref } from 'vue'
 import PromptInput from './PromptInput.vue'
+import Select from '@/components/ui/Select.vue'
+import type { AgentModelDto } from '@/types/api'
 
 const props = defineProps<{
   canCancel: boolean
   canSend: boolean
   /** 提交在途（防重） */
   busy?: boolean
+  /** 该任务 agent 的可选模型（空 = 不支持选模型 → 不显示选择器） */
+  models?: AgentModelDto[]
+  /** 模型清单在途（选择器位置显示加载中） */
+  modelsLoading?: boolean
 }>()
-const emit = defineEmits<{ send: [text: string]; cancel: [] }>()
+const emit = defineEmits<{ send: [text: string, model: string]; cancel: [] }>()
 
 const text = ref('')
 const submitting = ref(false)
 
+// 本轮模型：空 = 沿用会话当前路由（不是"agent 默认"——续问是复用已有会话，
+// agent 侧记着上一次的选择，这里留空才是不改变现状）。取值同样是不透明串，原样回传。
+const model = ref('')
+
 const sendDisabled = computed(() => !text.value.trim() || !props.canSend || submitting.value)
+
+const catalog = computed(() => props.models ?? [])
+
+/**
+ * 选择器只在**真的会被采纳**时出现。
+ *
+ * 后端只在续问路径（Resume 起新一轮）读这个字段；运行中的 append_prompt 是往当前轮
+ * 注入 stdin，带了也不生效。所以判据是"下一发送会走 Resume"——那恰好是 !canCancel
+ * （运行中/等待中这里显示的是中止按钮，输入框本身是禁用的）。
+ * 摆一个不生效的下拉框比不摆更糟：用户会以为自己换了模型。
+ */
+const showModelPicker = computed(() => props.canSend && !props.canCancel)
+
+/** 按分组整理（dsh 按 provider 分组；无分组信息时平铺） */
+const modelGroups = computed(() => {
+  const out: { name: string; options: { value: string; name: string }[] }[] = []
+  for (const m of catalog.value) {
+    const name = m.group || ''
+    let g = out.find((x) => x.name === name)
+    if (!g) {
+      g = { name, options: [] }
+      out.push(g)
+    }
+    g.options.push({ value: m.value, name: m.name })
+  }
+  return out
+})
+
+const selectedHint = computed(() => catalog.value.find((m) => m.value === model.value)?.description || '')
 
 async function onSend() {
   if (sendDisabled.value) return
   submitting.value = true
   try {
-    emit('send', text.value.trim())
+    emit('send', text.value.trim(), model.value)
     text.value = ''
   } finally {
     submitting.value = false
@@ -37,6 +78,33 @@ async function onSend() {
 <template>
   <div class="border-t border-border bg-surface/80 px-3 py-2.5 backdrop-blur md:px-4" data-testid="composer-bar">
     <div class="mx-auto w-full max-w-3xl" data-testid="composer-inner">
+      <!-- 本轮模型：与输入框同宽同左边界（放在同一个 max-w-3xl 容器里），
+           不新起一栏 —— 它是输入条的一部分，不是页面上的第二块面板 -->
+      <div
+        v-if="showModelPicker && (catalog.length || modelsLoading)"
+        class="mb-1.5 flex min-w-0 items-center gap-2 px-1"
+        data-testid="turn-model-field"
+      >
+        <span class="shrink-0 text-xs text-muted">模型</span>
+        <p v-if="!catalog.length" class="text-xs text-muted">正在读取可选模型…</p>
+        <template v-else>
+          <Select v-model="model" class="max-w-[14rem]" aria-label="本轮模型" data-testid="turn-model-select">
+            <option value="">沿用当前</option>
+            <template v-for="g in modelGroups" :key="g.name">
+              <optgroup v-if="g.name" :label="g.name">
+                <option v-for="m in g.options" :key="m.value" :value="m.value">{{ m.name }}</option>
+              </optgroup>
+              <template v-else>
+                <option v-for="m in g.options" :key="m.value" :value="m.value">{{ m.name }}</option>
+              </template>
+            </template>
+          </Select>
+          <span class="min-w-0 flex-1 truncate text-xs text-muted" :title="selectedHint || undefined">
+            {{ selectedHint || '不选则沿用会话当前模型' }}
+          </span>
+        </template>
+      </div>
+
       <PromptInput
         v-model="text"
         :rows="2"

@@ -10,6 +10,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '@/stores/task'
 import { useSessionStore } from '@/stores/session'
+import { useAgentStore } from '@/stores/agent'
 import * as api from '@/services/api/tasks'
 import { adaptTask } from '@/services/api/client'
 import { useSession } from '@/composables/useSession'
@@ -25,12 +26,28 @@ const route = useRoute()
 const router = useRouter()
 const taskStore = useTaskStore()
 const sessionStore = useSessionStore()
+const agentStore = useAgentStore()
 const { isMobile, isWide } = useResponsive()
 const fbPanel = useFeedbackPanelStore()
 
 const taskId = computed(() => route.params.id as string)
 const { task, canCancel, canSendPrompt, submitPrompt, cancel, approve, approveSession, deny, consumeForceScroll } =
   useSession(taskId)
+
+/**
+ * 续问可选的模型：按任务自己的 agent 拉清单（store 内幂等 + 失败可重试）。
+ * 拉不到就是空数组 → 组件隐藏选择器，续问照常走"沿用当前模型"。
+ * 这里不关心探测失败的原因：换模型是可选能力，不该在会话页弹错误。
+ */
+watch(
+  () => task.value?.agent,
+  (a) => {
+    if (a) void agentStore.loadModels(a)
+  },
+  { immediate: true },
+)
+const turnModels = computed(() => agentStore.modelsOf(task.value?.agent || ''))
+const turnModelsLoading = computed(() => !!agentStore.modelsLoading[task.value?.agent || ''])
 
 /** 决策横幅：waiting_input 且带 decision 时展示 */
 const decision = computed(() => (task.value?.status === 'waiting_input' ? task.value.decision : undefined))
@@ -186,6 +203,8 @@ async function doRemove() {
           <InterveneInput
             :can-cancel="canCancel"
             :can-send="canSendPrompt || !!decision"
+            :models="turnModels"
+            :models-loading="turnModelsLoading"
             @send="submitPrompt"
             @cancel="cancel"
           />

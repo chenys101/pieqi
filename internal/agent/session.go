@@ -100,6 +100,9 @@ type OpenParams struct {
 	// TaskID 透传给 SessionConfig.TaskID —— 注入 PIEQI_TASK_ID 的**唯一**来源。
 	// 空 = 非任务场景（如标题生成），此时不注入环境变量。
 	TaskID string
+	// Model 透传给 SessionConfig.Model —— 本次会话首轮要用的模型（不透明选择值，
+	// 空 = 用 agent 自己的默认）。语义与取值见 SessionConfig.Model。
+	Model string
 }
 
 // SessionProvider 创建 AgentSession 的工厂（按 agent 名注册）。
@@ -172,6 +175,14 @@ func (s *sessionAdapter) ID() string { return s.adapter.RealSessionID(s.sessionI
 // Prompt 发送一轮 prompt（阻塞到该轮结束）。
 func (s *sessionAdapter) Prompt(ctx context.Context, text string) error {
 	return s.adapter.SendPrompt(ctx, s.sessionID, text)
+}
+
+// SetTurnModel 把本轮模型选择转交给底层 adapter（仅实现了 TurnModelSetter 的会生效，
+// 即 ACP 系；claude 桥/print 静默忽略）。见 TurnModelSetter 的说明。
+func (s *sessionAdapter) SetTurnModel(model string) {
+	if setter, ok := s.adapter.(TurnModelSetter); ok {
+		setter.SetTurnModel(model)
+	}
 }
 
 // Cancel 取消当前轮。

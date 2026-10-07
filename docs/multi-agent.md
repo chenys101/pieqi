@@ -258,14 +258,47 @@ Windows 实测：
 | `sessionCapabilities` | `close` / `list` / **`resume`**，**没有 `load`** | 续问走 `ACPAgent.NewSession` 的 `ResumeSession` 分支（现有判据自动选对，无需分叉） |
 | 活跃会话上 `session/resume` | 报错 `session is already active` | 只有进程重启 / 会话已关后才能 resume；同进程内复用仍靠 pieqi 的轮间保活 |
 | `session/request_permission` | 支持，一次性 allow/deny 选项 | 审批卡片链路正常，与 qoder 一致 |
-| `session/new` 返回 `configOptions` | `model` / `reasoning_effort` 是**会话内选项**，改要发 `session/set_config_option` | pieqi 未实现 setConfigOption；模型只能在 dsh 侧配，`spawn_command` 里塞 `-m` 无效 |
-| provider 路由 | 只来自 dsh `acp` profile 里 `acp` 这条 entry 的 pin（出厂 pin `deepseek-official`，需 `DEEPSEEK_API_KEY`）；缺密钥时 `session/prompt` 直接返回 JSON-RPC 错误 `no API key for provider route "deepseek-official"` | 路由归 dsh 侧配置，pieqi 不干预：把该 entry 改 pin 到别的 provider（如本地网关）就无需这个 key。清空 pin **不会**回落到 `agent-default-model`（那是 web / headless 各自读的），会话会彻底没有模型 |
+| `session/new` 返回 `configOptions` | `model` / `reasoning_effort` 是**会话内选项**，改要发 `session/set_config_option` | 原生 dsh-acp 会下发；本仓库 fork 后**恒为空**（见 6.2），清单改走响应 `_meta`。pieqi 已实现 `setConfigOption`：建会话 / 续问都能指定模型 |
+| provider 路由 | 原生只来自 dsh `acp` profile 里 `acp` 这条 entry 的 pin（出厂 pin `deepseek-official`，需 `DEEPSEEK_API_KEY`）；pin **缺失或写错**时 `session/new` 直接失败 | 路由归 dsh 侧配置，pieqi 不干预。fork 后 pin 缺失会**回落到 `agent-default-model`**；写错（指向已下架的模型）仍会失败，`explainProbeErr` 会给可操作提示 |
 | stdout | 只承载协议流量，无 banner 污染 | 满足 JSON-RPC over stdio 前提 |
 | 客户端 fs / terminal / plan / elicitation | 文档明确「不支持的界面会被省略或拒绝」 | `acp.go` 目前虚报 `ClientCapabilities.Fs=true` 而实现返回 `ErrNotSupported`；dsh 不据此发调用，暂无影响，但**这是个待修的虚报** |
 
 Windows spawn 形态：npm 全局装的 `dsh` 是 `.cmd` shim，Go 直接 spawn 会永久挂死（同 claude-code
 的 npx 问题）。`internal/agent/acp.go` 的 `nodeCLIAgent` / `resolveNodeCLI` 会把它换成
 `node <node_modules>/@deepseek-ai/dsh/lib/bin.js --profile acp`，配置里只写裸名。
+
+### 6.2 本地 fork：配置可缺失 + 模型可外部指定
+
+上游 dsh-acp 的模型路由只有「建会话那一刻的静态 pin」一个入口：`session/new` 不认模型参数，
+`session/set_config_option` 又只接受**已经下发给客户端**的选项。于是「建会话指定」「每轮换模型」
+都无处落脚，pin 缺失还会让 `selected` 悬空、会话彻底没模型。
+
+本仓库维护了一份 fork（`forks/dsh-acp`，`node install.mjs` 装进 `~/.dsh-runtime`），走
+ACP 请求的 `_meta` 扩展位把模型传进去 —— 不改协议字段，原生 agent 忽略 `_meta`，行为不变。
+同时把 `configOptions` 对通用客户端隐藏，真实清单改挂响应
+`_meta["pieqi/configOptions"]`，pieqi 侧 `internal/agent/model_catalog.go` 读同一个键。
+
+三条能力：
+
+| 能力 | 触发方式 |
+|---|---|
+| 配置缺失兜底 | `- id: acp` 的 provider/model 缺失 → 用 `- id: agent-default-model` |
+| 建会话指定 | `session/new` / `session/resume` 带 `_meta.model` |
+| 每轮换模型 | `session/prompt` 带 `_meta.model`（该轮生效，不落库） |
+
+⚠️ 「缺失」**不是**「删掉 `- id: acp` 那一行」：`@deepseek-ai/dsh-acp-app` bundle 自带
+`provider: deepseek-official`，删掉只会让 bundle 的值生效（需 `DEEPSEEK_API_KEY`，本机没有 ⇒
+第一轮 prompt 报 `no API key for provider route`）。要表达不指定必须显式写空：
+
+```yaml
+- id: acp
+  config:
+    provider: !!js undefined
+    model: !!js undefined
+```
+
+改动清单、`_meta` 契约、重打/还原与探针用法见 `forks/dsh-acp/FORK.md`；
+pieqi 侧对应 `internal/agent/{acp,adapter,model_catalog}.go`。
 
 ---
 

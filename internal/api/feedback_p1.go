@@ -227,7 +227,8 @@ func (s *Server) postContinue(c *gin.Context) {
 	}
 	prompt := core.EvidencePrompt(req.Instruction, evidence, checks)
 
-	if err := s.runner.Resume(task.ID, prompt); err != nil {
+	// 证据续问不指定模型：沿用会话当前路由（要换模型用户在会话里逐条消息选）。
+	if err := s.runner.Resume(task.ID, prompt, ""); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}

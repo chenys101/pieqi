@@ -64,6 +64,27 @@ type SessionConfig struct {
 	//   - 头/参数由调用方任意填写，而这里的可信度恰恰来自"只有本进程 spawn 的
 	//     子进程才拿得到"——天然不可伪造，不需要额外鉴权或校验。
 	TaskID string
+	// Model 打开会话时指定的模型（空 = 用 agent 自己的默认/pin）。
+	//
+	// 取值必须是 agent 下发的**不透明选择值**（ACP 的 SessionConfigValueId），例如 dsh 的
+	// `["magpie","group/auto-deepseek-v4-1-flash"]` —— 从 GET /api/agents/{name}/models
+	// 拿到后原样回传，**不要自己拼**（拼错的下场是建会话直接失败）。
+	//
+	// 只有支持外部指定模型的 agent（本仓库 fork 过的 dsh-acp）认它；其余 agent 传了无人消费。
+	// 服务端不做「值必须在清单里」的入参校验：校验要么触发一次探测（起 agent 进程，把
+	// 请求拖到秒级），要么依赖可能过期的缓存 —— 错的取值会在建会话时**明确报错**，
+	// 失败是响亮的，不会静默跑错。
+	Model string
+}
+
+// TurnModelSetter 由支持「按轮指定模型」的 adapter 实现（当前仅 ACP 系会话）。
+//
+// 与 ResumeID 一样是**可选**能力：没实现就忽略，其它 agent 不受影响。之所以不复用
+// SendPrompt 的参数：模型是"这一轮用哪个"，而 SendPrompt 是通用接口，为它加参数会波及
+// claude/print 等全部实现与测试替身；这里是 ACP 专有的增强，用可选接口把它圈住更稳。
+type TurnModelSetter interface {
+	// SetTurnModel 设定**下一轮** prompt 要用的模型（空串 = 不改，沿用会话当前路由）。
+	SetTurnModel(model string)
 }
 
 // PermissionOption 一个权限选项（映射 acp.PermissionOption）。
