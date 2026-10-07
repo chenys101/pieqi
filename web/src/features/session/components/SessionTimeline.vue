@@ -5,6 +5,10 @@
 // R3 Turn 分组（AC-R3-01~06）：边界从事件流的 user_message 派生（与后端
 // StartEventSeq 同源，见 groupTurns.ts 头注释）；TurnInfo 只做头部增强。
 // 旧任务无 user_message → groups 为空 → 平铺兜底（AC-R3-04）。
+//
+// 详情页 UI 优化 · 需求 1：**一轮结束后自动收起"过程"，但提示词与结果始终可见**。
+// 分类与时机见下方 PROCESS_TYPES / autoFolded 两处注释 —— 判据放在本组件而不是
+// groupTurns（那是纯分组逻辑，不带"何时折叠"的 UI 语义）。
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type { Ref } from 'vue'
 import { useSessionStore } from '@/stores/session'
@@ -12,8 +16,10 @@ import { useTaskStore } from '@/stores/task'
 import { useFeedbackBundleStore } from '@/stores/feedbackBundle'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
 import { useTimelineScroll } from '@/composables/useSession'
+import { isTerminalStatus } from '@/types/task'
 import { groupEventsByTurn, countUserMessages } from '../groupTurns'
-import type { TurnRailItem } from '../groupTurns'
+import type { TurnGroup, TurnRailItem } from '../groupTurns'
+import type { AgentEvent, AgentEventType } from '@/types/event'
 import TimelineEventView from '@/features/timeline/components/TimelineEventView.vue'
 import ThinkingBadge from '@/features/timeline/components/ThinkingBadge.vue'
 import TextBubble from '@/features/timeline/components/TextBubble.vue'
@@ -73,6 +79,80 @@ function toggleFold(turn: number) {
   else next.add(turn)
   folded.value = next
 }
+
+// ---- 需求 1：一轮完成后自动折叠"过程" ----
+
+/**
+ * **过程**类事件 = 这一轮"怎么做的"：思考、工具调用与结果。
+ * 其余（user_message = 提示词、text_delta = 结果正文、status / completed / error /
+ * rewind）都留在可见区 —— 折叠的是过程，不是这一轮的交代。
+ */
+const PROCESS_TYPES: ReadonlySet<AgentEventType> = new Set(['thinking_delta', 'tool_call', 'tool_result'])
+const isProcess = (e: AgentEvent) => PROCESS_TYPES.has(e.type)
+
+/** 该轮的过程事件条数（折叠态头部要报给用户"收起了 N 条工具调用"） */
+function processCount(g: TurnGroup): number {
+  return g.events.reduce((n, e) => (isProcess(e) ? n + 1 : n), 0)
+}
+
+/**
+ * 该轮（去掉开头的提示词气泡后）是否以**正文**收尾。
+ *
+ * 这是区分"本轮已经交付了结果"与"正文只是过场、后面还有工具调用"的关键：
+ * agent 常见的节奏是 [正文"我来看看…"] [工具调用] [正文=最终结果]，按
+ * "组内有 text_delta 就展开"会把前一轮的过场正文误当成结果，于是收不起来。
+ */
+function endsWithText(g: TurnGroup): boolean {
+  const tail = g.turn > 0 ? g.events.filter((e) => e.type !== 'user_message') : []
+  return tail.at(-1)?.type === 'text_delta'
+}
+
+/**
+ * 该轮是否"已交出结果"（= 该自动折叠）。
+ *
+ * 两个来源缺一不可：
+ *   1. 用户已发下一轮（存在更大的 turn）→ 前一轮必然结束，哪怕它只是被中止
+ *      （事件流里没有 completed，但用户已经翻篇了）；
+ *   2. 任务进终态且这一轮以正文收尾 → 最后一轮也收起来。
+ * 只看 (2) 会让「连问几轮」的过程全部摊开，只看 (1) 则最后一轮永远不折。
+ */
+function hasProduced(g: TurnGroup): boolean {
+  return (groups.value.at(-1)?.turn ?? 0) > g.turn || (!!task.value && isTerminalStatus(task.value.status) && endsWithText(g))
+}
+
+/**
+ * 已经**自动**折叠过的 Turn 号（单调集合）。
+ *
+ * 它守的是一条纪律：**用户手动展开后，不许再被自动折叠吞回去**。
+ * 折叠只由"这一轮首次变成已完成"触发一次 —— 之后 `folded` 完全归用户，
+ * 否则每次事件追加（流式正文、下一轮的 delta）都会把用户刚展开的 Turn 再折上，
+ * 表现就是"点了没反应"。手动折叠不需要记账（folded 本身就是用户意图）。
+ */
+const autoFolded = ref(new Set<number>())
+
+watch(
+  [groups, () => task.value?.status],
+  () => {
+    const nextFolded = new Set(folded.value)
+    const nextAuto = new Set(autoFolded.value)
+    let changed = false
+    for (const g of groups.value) {
+      // turn 0 是前导区（首条提示词之前的系统事件），没有"提示词 + 结果"可留，不参与
+      if (g.turn === 0 || nextAuto.has(g.turn) || !hasProduced(g)) continue
+      // 只有真的收起了东西才记"已自动折叠"：全是正文的一轮标记它，反而会
+      // 让用户之后手动折叠再展开时，被这个已置位的标记挡住（无法再自动折）
+      if (processCount(g) === 0) continue
+      nextAuto.add(g.turn)
+      if (!nextFolded.has(g.turn)) nextFolded.add(g.turn)
+      changed = true
+    }
+    if (changed) {
+      folded.value = nextFolded
+      autoFolded.value = nextAuto
+    }
+  },
+  { immediate: true, deep: true },
+)
 
 const { el, onScroll, scrollToEnd } = useTimelineScroll(
   events as unknown as Ref<unknown[]>,
@@ -195,7 +275,9 @@ watch(railTurns, () => {
                   <span class="text-error ml-1">-{{ g.info.summary.deletions }}</span>
                   <span class="ml-2">{{ g.info.summary.files }} 个文件</span>
                 </span>
-                <span v-if="folded.has(g.turn)" class="shrink-0">{{ g.events.length }} 条已收起</span>
+                <!-- 折叠态：只报"过程"的条数（需求 1）—— 该轮文案与结果仍在正文里可见，
+                     这里说「5 条已收起」会让人以为整轮都没了 -->
+                <span v-if="folded.has(g.turn)" class="shrink-0">{{ processCount(g) }} 条过程已收起</span>
               </button>
               <button
                 v-if="g.info"
@@ -206,8 +288,20 @@ watch(railTurns, () => {
                 查看本轮变更
               </button>
             </div>
-            <template v-if="g.turn === 0 || !folded.has(g.turn)">
-              <TimelineEventView v-for="event in g.events" :key="event.id" :event="event" />
+            <!--
+              折叠只作用在"过程"事件上（需求 1）：该轮的 user_message（提示词）与
+              text_delta（结果）永远渲染。折叠时过程事件**保留在 DOM 里**用 hidden 藏起来，
+              而不是 v-if 摘掉 —— 它们自带展开态且是局部的，重建代价大于隐藏，
+              而且 hidden 不参与布局，视觉上与摘除等价。
+            -->
+            <template v-for="event in g.events" :key="event.id">
+              <TimelineEventView
+                v-if="!(folded.has(g.turn) && isProcess(event))"
+                :event="event"
+              />
+              <div v-else hidden :data-testid="`turn-process-hidden-${g.turn}`">
+                <TimelineEventView :event="event" />
+              </div>
             </template>
           </section>
         </template>

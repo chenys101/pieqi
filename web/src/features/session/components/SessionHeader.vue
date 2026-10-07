@@ -1,12 +1,17 @@
 <script setup lang="ts">
 // Session Header：返回 / 标题 / 状态 / 元信息 / 操作
 //
-// **compact（移动端）只留一行**：返回 + 标题 + 状态 + 中止 + 反馈图标。
+// **compact（移动端）只留一行**：返回 + 标题 + 状态 + 反馈图标。
 // 这一行是滚不走的常驻 chrome，每省一行都是真的还给时间线，所以：
 //   - #id / 项目 / 时间不显示（手机上横向空间本来就紧，id 又没有可操作性）；
 //   - 删除不放在这里 —— 移动端删任务的入口是任务列表页，详情页不该有一个不可恢复的动作常驻；
 //   - 反馈入口从文字按钮换成图标，把宽度让给标题。
 // 例外是 error：任务为什么失败在别处看不到，所以只有它值得再多占一行。
+//
+// **「中止」不在这里**（详情页 UI 优化 · 需求 2）：它与输入框内右下角那枚 ■ 是同一个
+// 动作（都 emit cancel → taskStore.cancelTask），顶部再挂一个就是同一件事给两个入口，
+// 且顶部那个在手机上还紧挨着「返回」，误触成本高。中止的唯一入口 = 输入框内那枚按钮
+// （InterveneInput 的 canCancel 双态按钮），它就在拇指区、且与发送同位。
 import { useRouter } from 'vue-router'
 import StatusBadge from '@/components/task/StatusBadge.vue'
 import Button from '@/components/ui/Button.vue'
@@ -17,6 +22,11 @@ import { shortId } from '@/utils/format'
 withDefaults(
   defineProps<{
     task: Task
+    /**
+     * 任务是否运行中（可中止）。**本组件不再消费它** —— 中止入口已收归输入框
+     * （见文件头注释）；保留 props 是为了不动调用方的接线与既有测试契约，
+     * 也让「这个任务此刻可不可中止」这件事在头部仍是可读的。
+     */
     canCancel: boolean
     /**
      * 是否显示「反馈」按钮。**宽屏不需要** —— 它有常驻贴边条，
@@ -30,6 +40,10 @@ withDefaults(
   }>(),
   { showFeedback: true, compact: false, feedbackActive: false },
 )
+/**
+ * 唯一真的会被 emit 的是 remove / feedback —— `cancel` 仍声明着（调用方与既有测试
+ * 按它接线），但本组件已不再 emit 它（中止入口收归输入框，见文件头注释）。
+ */
 const emit = defineEmits<{ cancel: []; remove: []; feedback: [] }>()
 const router = useRouter()
 
@@ -91,7 +105,7 @@ function goBack() {
         </svg>
       </button>
       <Button v-else-if="showFeedback" variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
-      <Button v-if="canCancel" variant="ghost" size="sm" @click="emit('cancel')">中止</Button>
+      <!-- 中止按钮**不在这里**：与输入框内那枚 ■ 重叠（详情页 UI 优化 · 需求 2） -->
       <!-- 删除只在非移动端常驻：不可恢复的动作不该出现在拇指最容易碰到的地方 -->
       <Button v-if="!compact" variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
     </div>

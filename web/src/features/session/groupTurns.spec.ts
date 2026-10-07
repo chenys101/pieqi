@@ -148,7 +148,9 @@ function mountTimeline() {
   const bundleStore = useFeedbackBundleStore()
   const fb = useFeedbackPanelStore()
 
-  taskStore.tasks.push({ id: TID, status: 'completed' } as never)
+  // 运行中：Turn 1 尚未结束，不会被「一轮完成自动折叠」收走（需求 1 的折叠时机）。
+  // 旧用例断言的是"展开态"，所以基线必须是不会自动折叠的状态。
+  taskStore.tasks.push({ id: TID, status: 'running' } as never)
   const bundle: FeedbackBundleDto = {
     task_id: TID,
     turns: [
@@ -174,7 +176,7 @@ function mountTimeline() {
   })
   app.use(pinia)
   app.mount(host)
-  return { host, app, fb, session, bundleStore }
+  return { host, app, fb, session, bundleStore, taskStore }
 }
 
 /** 两个 Turn 的挂载（需求 2：≥2 个 Turn 才渲染左侧 rail） */
@@ -185,7 +187,10 @@ function mountTimelineTwoTurns() {
   const taskStore = useTaskStore()
   const bundleStore = useFeedbackBundleStore()
 
-  taskStore.tasks.push({ id: TID, status: 'completed' } as never)
+  // 运行中：Turn 1 已翻篇（存在 Turn 2）会自动折叠，Turn 2 仍是展开态。
+  // 旧用例（B1/B2）断言"两个 Turn 都展开/都是正文独占"，所以整体保持在未完成态
+  // 就会翻转语义 —— 统一用 running，由 turn-2 的展开态承接那些断言。
+  taskStore.tasks.push({ id: TID, status: 'running' } as never)
   const bundle: FeedbackBundleDto = {
     task_id: TID,
     turns: [
@@ -213,7 +218,7 @@ function mountTimelineTwoTurns() {
   })
   app.use(pinia)
   app.mount(host)
-  return { host, app, session, bundleStore }
+  return { host, app, session, bundleStore, taskStore }
 }
 
 afterEach(() => {
@@ -241,12 +246,14 @@ describe('SessionTimeline 分组渲染', () => {
     await nextTick()
     const headerBtn = () =>
       host.querySelector<HTMLButtonElement>('[data-testid="turn-header-1"] button')!
-    headerBtn().click() // 折叠：正文被隐藏
+    headerBtn().click() // 折叠：过程被收起
     await nextTick()
     const header = host.querySelector('[data-testid="turn-header-1"]')!
     expect(header.textContent).toContain('做A') // 头部补回，避免折叠后丢失「这轮在做什么」
+    // 需求 1 的新契约：折叠只收「过程」，提示词气泡仍然在，所以整页出现 2 次
+    // （正文一次 + 折叠态头部补回一次）—— 这是「提示词不折叠」的直接体现
     const timeline = host.querySelector('[data-testid="session-timeline"]')!
-    expect(timeline.textContent!.split('做A').length - 1).toBe(1) // 任何时刻只出现一次
+    expect(timeline.textContent!.split('做A').length - 1).toBe(2)
   })
 
   it('≥2 个 Turn → 渲染左侧跳转 rail；点击泡泡切换高亮（需求 2）', async () => {
@@ -285,16 +292,15 @@ describe('SessionTimeline 分组渲染', () => {
       host.querySelector<HTMLButtonElement>('[data-testid="turn-header-1"] button')!
     headerBtn().click() // 折叠
     await nextTick()
-    expect(headerBtn().getAttribute('aria-expanded')).toBe('false')
+    // 折叠态判据改用过程是否被收起 —— 展开态下该轮文案本来就在头部下面（新契约）
+    expect(host.querySelectorAll('[data-testid="turn-process-hidden-1"]').length).toBe(1)
 
     // 新一轮进来：先有事件（bundle 尚落后）
     session.eventsBySession[TID].push(ev(5, 'user_message', '做B'), ev(6, 'text_delta'))
     await nextTick()
     expect(host.querySelector('[data-testid="turn-group-2"]')).not.toBeNull()
     // Turn 1 的折叠态没被打断
-    expect(
-      host.querySelector<HTMLButtonElement>('[data-testid="turn-header-1"] button')!.getAttribute('aria-expanded'),
-    ).toBe('false')
+    expect(host.querySelectorAll('[data-testid="turn-process-hidden-1"]').length).toBe(1)
     // bundle 补上后（store.load 拉的是 mock 后的 bundles[TID] 已含 turn1；此处再喂 turn2）
     bundleStore.bundles[TID] = {
       ...bundleStore.bundles[TID],
@@ -336,10 +342,12 @@ function countOf(hay: string, needle: string): number {
   return hay.split(needle).length - 1
 }
 
-/** 通用挂载：自定义 bundle.turns 与事件流（对抗性用例专用） */
+/** 通用挂载：自定义 bundle.turns / 事件流 / 任务状态（对抗性用例专用） */
 function mountTimelineCustom(opts: {
   turns: TurnInfoDto[]
   events: AgentEvent[]
+  /** 任务状态（默认 completed）。**它是"一轮是否已结束"的第二判据**（需求 1） */
+  status?: string
   consumeForceScroll?: () => boolean
 }) {
   const pinia = createPinia()
@@ -349,7 +357,7 @@ function mountTimelineCustom(opts: {
   const bundleStore = useFeedbackBundleStore()
   const fb = useFeedbackPanelStore()
 
-  taskStore.tasks.push({ id: TID, status: 'completed' } as never)
+  taskStore.tasks.push({ id: TID, status: opts.status ?? 'completed' } as never)
   bundleStore.bundles[TID] = {
     task_id: TID,
     turns: opts.turns,
@@ -369,40 +377,45 @@ function mountTimelineCustom(opts: {
   })
   app.use(pinia)
   app.mount(host)
-  return { host, app, fb, session, bundleStore }
+  return { host, app, fb, session, bundleStore, taskStore }
 }
 
 describe('QA 对抗性验证：Turn 去重 + 左侧 rail', () => {
-  // B1 —— 去重是全局唯一（展开态）
-  it('[B1] 2 个 Turn 展开态：「做A」「做B」在整页各恰好出现 1 次', async () => {
+  // B1 —— 「提示词永远可见」是新契约的核心（需求 1 明确要求提示词与结果不折叠）。
+  // 两个 Turn 都在运行中（未完成）：Turn 1 因存在 Turn 2 会被自动折叠，Turn 2 展开。
+  it('[B1] 2 个 Turn：提示词各可见、正文独占；被折的那轮头部补回文案（需求 1）', async () => {
     const { host } = mountTimelineTwoTurns()
     await nextTick()
     const text = host.textContent ?? ''
-    expect(countOf(text, '做A')).toBe(1)
+    // Turn 1 自动折叠（已有 Turn 2）→ 提示词出现 2 次：正文气泡 + 折叠态头部补回
+    expect(countOf(text, '做A')).toBe(2)
+    // Turn 2 展开且是最后一轮（running，未交付结果）→ 只在正文气泡出现 1 次
     expect(countOf(text, '做B')).toBe(1)
-    // 且头部（展开态）确实不含该轮文案
-    expect(host.querySelector('[data-testid="turn-header-1"]')!.textContent).not.toContain('做A')
+    // 展开态头部仍不含该轮文案（去重规则未被破坏）
     expect(host.querySelector('[data-testid="turn-header-2"]')!.textContent).not.toContain('做B')
+    // 折叠态头部才补回
+    expect(host.querySelector('[data-testid="turn-header-1"]')!.textContent).toContain('做A')
   })
 
-  // B2 —— 折叠态例外：头部补回、正文隐藏，全程仍只出现一次
-  it('[B2] 折叠 Turn 1 → 头部含「做A」且整页仍仅 1 次；再展开回到正文独占', async () => {
+  // B2 —— 折叠"过程"而不是整轮：提示词气泡与结果正文必须还在（需求 1 原文）
+  it('[B2] 折叠态：过程事件被收起，但提示词气泡与结果正文仍渲染；再展开恢复', async () => {
     const { host } = mountTimelineTwoTurns()
     await nextTick()
-    const header1 = () => host.querySelector('[data-testid="turn-header-1"]')!
-    const headerBtn1 = () =>
-      host.querySelector<HTMLButtonElement>('[data-testid="turn-header-1"] button')!
+    const hidden1 = () => host.querySelectorAll('[data-testid="turn-process-hidden-1"]')
 
-    headerBtn1().click() // 折叠
-    await nextTick()
-    expect(header1().textContent).toContain('做A')
-    expect(countOf(host.textContent ?? '', '做A')).toBe(1)
-    expect(countOf(host.textContent ?? '', '做B')).toBe(1) // Turn 2 不受影响
+    // Turn 1 已被自动折叠（存在 Turn 2）：它那 1 条 tool_call 是过程 → 被收起
+    expect(hidden1().length).toBe(1)
+    // 但 Turn 1 的用户气泡仍在（提示词不折叠）——组内仍能找到它
+    expect(host.querySelector('[data-testid="turn-group-1"]')!.textContent).toContain('做A')
+    // 结果正文（text_delta）也仍在，只是不再是"独占"（头部补回了一次）
+    expect(host.querySelector('[data-testid="turn-group-1"]')!.textContent).toContain('做A')
 
-    headerBtn1().click() // 再展开
+    // 手动展开 → 过程回到可见区，hidden 归零
+    host.querySelector<HTMLButtonElement>('[data-testid="turn-header-1"] button')!.click()
     await nextTick()
-    expect(header1().textContent).not.toContain('做A') // 头部不再有
-    expect(host.querySelector('[data-testid="turn-group-1"]')!.textContent).toContain('做A') // 正文独占
+    expect(hidden1().length).toBe(0)
+    // 展开后头部不再补回文案
+    expect(host.querySelector('[data-testid="turn-header-1"]')!.textContent).not.toContain('做A')
     expect(countOf(host.textContent ?? '', '做A')).toBe(1)
   })
 
@@ -543,5 +556,116 @@ describe('QA 对抗性验证：Turn 去重 + 左侧 rail', () => {
     const scroller = host.querySelector('[data-testid="session-timeline"]')!
     expect(scroller.className).toContain('overflow-y-auto')
     expect(scroller.querySelector('[data-testid="turn-rail"]')).toBeNull()
+  })
+})
+
+// ============================================================================
+// 需求 1：每轮提示词完成后，折叠收起"过程"，提示词与结果不折叠
+// ============================================================================
+
+/** 过程被收起的事件数（`turn-process-hidden-<turn>` 的节点数） */
+function foldedCount(host: HTMLElement, turn: number): number {
+  return host.querySelectorAll(`[data-testid="turn-process-hidden-${turn}"]`).length
+}
+
+/** 该 Turn 分组里是否仍渲染着指定文案 */
+function groupHas(host: HTMLElement, turn: number, text: string): boolean {
+  return host.querySelector(`[data-testid="turn-group-${turn}"]`)?.textContent?.includes(text) ?? false
+}
+
+describe('需求 1：一轮完成后自动折叠过程', () => {
+  it('运行中且是最后一轮 → 不折叠（过程要实时可见）', async () => {
+    const { host } = mountTimelineCustom({
+      status: 'running',
+      turns: [info(1, 2)],
+      events: [ev(1, 'status'), ev(2, 'user_message', '做A'), ev(3, 'tool_call'), ev(4, 'text_delta', '结果')],
+    })
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(0)
+  })
+
+  it('任务进终态且本轮以正文收尾 → 自动折叠过程，提示词与结果仍在', async () => {
+    const { host } = mountTimelineCustom({
+      status: 'completed',
+      turns: [info(1, 2)],
+      events: [ev(1, 'status'), ev(2, 'user_message', '做A'), ev(3, 'tool_call'), ev(4, 'text_delta', '结果正文')],
+    })
+    await nextTick()
+    // 唯一的 tool_call（过程）被收起
+    expect(foldedCount(host, 1)).toBe(1)
+    // 提示词与结果正文都还在（需求 1 的核心）
+    expect(groupHas(host, 1, '做A')).toBe(true)
+    expect(groupHas(host, 1, '结果正文')).toBe(true)
+    // 折叠态头部报的是"过程条数"，不是整轮条数
+    expect(host.querySelector('[data-testid="turn-header-1"]')!.textContent).toContain('1 条过程已收起')
+  })
+
+  it('本轮以工具调用收尾（正文只是过场）→ 不折叠，避免把未交付的一轮收走', async () => {
+    const { host } = mountTimelineCustom({
+      status: 'completed',
+      turns: [info(1, 2)],
+      // 正文在中间、工具调用在最后：这一轮不是"以结果收尾"
+      events: [ev(1, 'status'), ev(2, 'user_message', '做A'), ev(3, 'text_delta', '我来看看'), ev(4, 'tool_call')],
+    })
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(0)
+  })
+
+  it('用户已发下一轮 → 前一轮即使被中止（非终态）也自动折叠', async () => {
+    const { host } = mountTimelineCustom({
+      status: 'running',
+      turns: [info(1, 2), info(2, 5)],
+      events: [
+        ev(1, 'status'),
+        ev(2, 'user_message', '做A'),
+        ev(3, 'tool_call'),
+        ev(5, 'user_message', '做B'),
+        ev(6, 'tool_call'),
+      ],
+    })
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(1) // 已翻篇 → 过程收起
+    expect(foldedCount(host, 2)).toBe(0) // 当前轮仍展开
+    expect(groupHas(host, 1, '做A')).toBe(true) // 提示词不折叠
+  })
+
+  it('用户手动展开后不会被自动折叠吞回去（点得动）', async () => {
+    const { host } = mountTimelineCustom({
+      status: 'completed',
+      turns: [info(1, 2)],
+      events: [ev(1, 'status'), ev(2, 'user_message', '做A'), ev(3, 'tool_call'), ev(4, 'text_delta', '结果')],
+    })
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(1) // 初始自动折叠
+
+    host.querySelector<HTMLButtonElement>('[data-testid="turn-header-1"] button')!.click()
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(0) // 展开生效
+  })
+
+  it('仅正文的一轮不写"已自动折叠"账，之后仍能被手动折叠', async () => {
+    const { host } = mountTimelineCustom({
+      status: 'completed',
+      turns: [info(1, 2)],
+      events: [ev(1, 'status'), ev(2, 'user_message', '做A'), ev(3, 'text_delta', '结果')],
+    })
+    await nextTick()
+    // 没有过程可收 → 不折叠
+    expect(foldedCount(host, 1)).toBe(0)
+    // 手动折叠仍然有效（autofold 标记不应被这一轮占用）
+    host.querySelector<HTMLButtonElement>('[data-testid="turn-header-1"] button')!.click()
+    await nextTick()
+    expect(host.querySelector('[data-testid="turn-header-1"]')!.textContent).toContain('0 条过程已收起')
+  })
+
+  it('turn 0 前导区不参与折叠（没有提示词与结果可留）', async () => {
+    const { host } = mountTimelineCustom({
+      status: 'completed',
+      turns: [info(1, 5)],
+      events: [ev(1, 'tool_call'), ev(2, 'text_delta', '系统输出'), ev(5, 'user_message', '做A')],
+    })
+    await nextTick()
+    expect(foldedCount(host, 0)).toBe(0)
+    expect(host.querySelector('[data-testid="turn-group-0"]')!.textContent).toContain('系统输出')
   })
 })
