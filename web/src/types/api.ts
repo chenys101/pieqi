@@ -55,11 +55,6 @@ export interface TaskDto {
   source: string
   /** 本任务使用的 agent 名（claude / qoder）。旧任务无该字段 → 适配层兜底为默认 agent */
   agent?: string
-  /**
-   * 本任务使用的模型（**不透明选择值**，见 GET /api/agents/{agent}/models）。
-   * 旧任务/未指定模型时不下发 → 由 agent 自己的默认决定。
-   */
-  model?: string
   project_id: string
   project_path: string
   worktree_path: string
@@ -560,29 +555,4 @@ export interface AgentsResponseDto {
   agents: AgentDto[]
   /** 服务端默认 agent（新任务页选择器初始选中项） */
   default: string
-}
-
-/**
- * GET /api/agents/:name/models 响应。
- *
- * models 为空有三种情形（都返回 200，不是错误）：该 agent 不支持会话内选模型
- * （如 claude 的桥）、探测失败（此时 error 有值）、agent 没下发清单。
- * 前端据此**隐藏**模型下拉框，不拦创建 —— 不选模型 = 用 agent 自己的默认。
- */
-export interface AgentModelsResponseDto {
-  agent: string
-  /** 该 agent 当前生效的选择值（未开过会话时缺省） */
-  current?: string
-  models: AgentModelDto[]
-  /** 探测失败原因（可选，仅用于提示；模型清单拉不到不该拦住建任务） */
-  error?: string
-}
-
-/** 一个可选的模型。value 是**不透明串**，必须原样回传，前端不得解析或拼接。 */
-export interface AgentModelDto {
-  value: string
-  name: string
-  /** 分组名（如 dsh 的 magpie / deepseek-official） */
-  group?: string
-  description?: string
 }

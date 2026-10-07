@@ -158,7 +158,7 @@ func AvailableAgents(a config.AgentsConfig) []AgentInfo {
 // cfg.AgentType 由 acpConfigFor 保证非空，这里不再猜测具体厂商。
 func openACPSession(ctx context.Context, cfg config.ACPConfig, p OpenParams) (AgentSession, error) {
 	adapter := NewACPAgent(cfg, acpProviderCfg.Logger)
-	sid, err := adapter.NewSession(ctx, SessionConfig{Cwd: p.Cwd, ResumeFrom: p.ResumeFrom, TaskID: p.TaskID, Model: p.Model})
+	sid, err := adapter.NewSession(ctx, SessionConfig{Cwd: p.Cwd, ResumeFrom: p.ResumeFrom, TaskID: p.TaskID})
 	if err != nil {
 		return nil, err
 	}

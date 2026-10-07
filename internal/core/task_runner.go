@@ -817,9 +817,7 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	// TaskID 必须带上：它经 SessionConfig 一路传到 ACP spawn，成为子进程的
 	// PIEQI_TASK_ID。这是"会话能标识自己"的唯一途径，也是自重启后能把发起者
 	// 接回来的前提（见 core.RestartJournal.InitiatorTaskID）。
-	// Model 同样逐轮透传（不只首轮）：agent 恢复会话时用的是它自己记的"上次请求路由"，
-	// 与本任务的选择未必一致（换过模型、或上一轮被限流自动切过桶），必须每轮显式落一次。
-	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom, Agent: task.Agent, TaskID: task.ID, Model: task.Model}
+	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom, Agent: task.Agent, TaskID: task.ID}
 	if resumeFrom != "" {
 		tr.logger.Debug("agent session open (resume)",
 			zap.String("task", task.ID), zap.String("agent", task.Agent),

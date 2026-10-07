@@ -54,15 +54,11 @@ export async function getTaskDto(id: string): Promise<TaskDto> {
  *
  * agent 为 agent 业务名（claude / qoder，见 GET /api/agents）；空串 = 后端默认（Claude Code）。
  * 后端会校验：未在可选目录里的 agent 直接 400，不会静默换成别的 agent。
- *
- * model 为模型选择值（见 GET /api/agents/{agent}/models）；空串 = 用 agent 自己的默认。
- * ⚠️ 它是**不透明串**，必须原样取自清单、原样回传，前端不得解析或拼接 ——
- * 自己拼的取值会让 agent 在建会话时报未知模型（任务直接失败）。
  */
-export async function createTask(projectPath: string, prompt: string, agent?: string, model?: string): Promise<TaskDto> {
+export async function createTask(projectPath: string, prompt: string, agent?: string): Promise<TaskDto> {
   return request<TaskDto>('/tasks', {
     method: 'POST',
-    body: { project_path: projectPath, prompt, agent: agent || undefined, model: model || undefined },
+    body: { project_path: projectPath, prompt, agent: agent || undefined },
   })
 }
 

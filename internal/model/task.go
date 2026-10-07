@@ -181,17 +181,6 @@ type Task struct {
 	// Agent 本任务使用的 agent 名（"claude" / "qoder"），由新建任务时用户选择。
 	// 空串 = 旧任务（本字段上线前创建），按默认 agent 处理 —— 语义等同于显式 "claude"。
 	Agent           string      `json:"agent,omitempty"`
-	// Model 本任务要使用的模型（空 = 用 agent 自己的默认）。取值是 agent 下发的
-	// **不透明选择值**（如 dsh 的 `["magpie","workbuddy/glm-5.3-flash"]`），
-	// 来自 GET /api/agents/{name}/models —— 前端下拉框选，原样存原样传，不做解析。
-	//
-	// 为什么不能只存展示名：这个串同时是 ACP session/set_config_option 的 value，
-	// 自己拼会被 agent 判为未知模型（建会话直接失败）。跨 agent 无意义 ——
-	// 换 agent 就等于换一套清单，故随 agent 一起改。
-	//
-	// 注意：这里存的是**请求**的模型。上游限流时 ACP 层会自动切桶，跑完的可能是
-	// 清单里的另一个（切换会打进服务日志）。
-	Model string `json:"model,omitempty"`
 	ProjectID       string      `json:"project_id"`
 	ProjectPath     string      `json:"project_path"`             // repo root，REQ-01 分组依据
 	WorktreePath    string      `json:"worktree_path"`            // worktree 建好后填

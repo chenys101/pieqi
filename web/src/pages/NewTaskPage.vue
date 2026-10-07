@@ -30,48 +30,10 @@ const creating = ref(false)
 // 初始值来自服务端目录的 default（后端保证是 claude），目录拉不到时由 store 兜底。
 const agent = ref('')
 
-// 模型：取值是 agent 下发的**不透明串**（如 dsh 的 ["magpie","workbuddy/glm-5.3-flash"]）。
-// 空串 = 用 agent 自己的默认（不指定）。前端只做"原样搬运"，不解析、不拼接 ——
-// 自己拼的取值会被 agent 判为未知模型，任务直接失败。
-const model = ref('')
-
 const projects = computed(() => taskStore.recentProjects)
 
 /** 当前选中的 agent 目录项（展示 transport / 说明用） */
 const selectedAgent = computed(() => agentStore.byId(agent.value))
-
-/** 当前 agent 的可选模型（未加载/不支持时为空数组 → 不显示下拉框） */
-const models = computed(() => agentStore.modelsOf(agent.value))
-const modelsLoading = computed(() => !!agentStore.modelsLoading[agent.value])
-
-/** 按分组整理模型（dsh 按 provider 分组；无分组信息时归入无名组，直接平铺渲染） */
-const modelGroups = computed(() => {
-  const out: { name: string; options: { value: string; name: string }[] }[] = []
-  for (const m of models.value) {
-    const name = m.group || ''
-    let g = out.find((x) => x.name === name)
-    if (!g) {
-      g = { name, options: [] }
-      out.push(g)
-    }
-    g.options.push({ value: m.value, name: m.name })
-  }
-  return out
-})
-
-/** 选中模型的说明（仅直接选中的那个有；"Agent 默认"没有） */
-const selectedModelHint = computed(() => models.value.find((m) => m.value === model.value)?.description || '')
-
-// 换 agent 就是换一整套模型清单 ⇒ 已选模型必然失效，必须清空再按需拉新清单。
-// 用 immediate 覆盖"进页面时目录后到"的情况（agent 由 0 → 默认值 也会触发）。
-watch(
-  agent,
-  (a) => {
-    model.value = ''
-    agentStore.loadModels(a)
-  },
-  { immediate: true },
-)
 
 onMounted(async () => {
   // 目录就绪后再落默认值：先渲染再选中的顺序能避免"选择器空着闪一下"
@@ -122,7 +84,7 @@ async function submit() {
   }
   creating.value = true
   try {
-    const task = await taskStore.createTask(path, prompt.value.trim(), agent.value || undefined, model.value || undefined)
+    const task = await taskStore.createTask(path, prompt.value.trim(), agent.value || undefined)
     sessionStore.setThinking(task.id, true)
     router.push(`/sessions/${task.id}`)
   } catch (err) {
@@ -186,28 +148,6 @@ async function submit() {
             <!-- 选中项的说明随选择变化：换 agent 是"换执行者"，用户需要知道换了什么 -->
             <p class="mt-1.5 text-xs text-muted">
               {{ selectedAgent?.description || '选择由哪个 coding agent 执行本任务' }}
-            </p>
-          </div>
-          <!-- 模型：只在 agent 真的提供了清单时出现（claude 的桥没有，dsh 有）。
-               清单由 agent 自己下发（后端按需探测 + 缓存），前端不维护第二份。 -->
-          <div v-if="models.length || modelsLoading" class="rounded-lg border border-border bg-surface p-3" data-testid="model-field">
-            <div class="mb-1.5 text-xs font-medium text-muted">模型</div>
-            <!-- 首次拉清单要在服务端起一次 agent 进程（秒级），必须给出反馈，
-                 否则用户只会觉得"卡了一下然后什么都没有" -->
-            <p v-if="!models.length" class="text-xs text-muted">正在读取该 Agent 的可选模型…</p>
-            <Select v-else v-model="model" aria-label="模型" data-testid="model-select">
-              <option value="">Agent 默认</option>
-              <template v-for="g in modelGroups" :key="g.name">
-                <optgroup v-if="g.name" :label="g.name">
-                  <option v-for="m in g.options" :key="m.value" :value="m.value">{{ m.name }}</option>
-                </optgroup>
-                <template v-else>
-                  <option v-for="m in g.options" :key="m.value" :value="m.value">{{ m.name }}</option>
-                </template>
-              </template>
-            </Select>
-            <p v-if="models.length" class="mt-1.5 text-xs text-muted">
-              {{ selectedModelHint || '不选则用该 Agent 的默认模型；额度按模型独立计，某个模型被限流时会自动切到清单里别的模型重试。' }}
             </p>
           </div>
           <p class="px-1 text-xs text-muted">选择项目与 Agent 后，在下方描述要做什么，创建后进入会话。</p>

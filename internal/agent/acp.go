@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"pieqi/internal/config"
@@ -147,21 +146,6 @@ type ACPAgent struct {
 	// 两者分离，避免 Close 内调 markDone 时重入同一个 Once 导致死锁。
 	closeOnce sync.Once
 	doneOnce  sync.Once
-
-	// modelMu 守护 modelCatalog：会话协商（new/load/resume 响应、以及
-	// set_config_option 的回执）里下发的可选模型清单，取到就存，供
-	// Models()（上层取清单）与限流切桶（retryWithOtherModels）读。
-	// 不用 atomic.Pointer：读时要深拷切片，本来就得上锁。
-	modelMu      sync.Mutex
-	modelCatalog ModelCatalog
-
-	// toolCalls 是**累计**工具调用计数（ToolCall + ToolCallUpdate 都算一次更新）。
-	//
-	// 唯一用途：限流重试前的安全闸门 —— 整轮里一旦模型已经动过手（跑过命令、
-	// 改过文件），重发同一 prompt 会让副作用翻倍，此时宁可失败也不重试。
-	// 计数是累计的，所以调用方必须**轮首取快照、比较增量**（多轮保活会让累计值
-	// 一直非零，直接判 >0 会把第 2 轮起的重试全禁掉）。
-	toolCalls atomic.Int64
 }
 
 // 编译期断言：ACPAgent 同时实现 AgentAdapter 与 acp.Client。
@@ -173,13 +157,12 @@ var (
 // acpConn 抽象 ACP 客户端连接（*acp.ClientSideConnection 的方法子集），让 ACPAgent.NewSession
 // 的 load/resume 路径可单测：生产由 *acp.ClientSideConnection 实现，测试注入 fake。
 // 仅收录 ACPAgent 实际调用的方法（Initialize/NewSession/LoadSession/ResumeSession/
-// SetSessionConfigOption/Prompt/Cancel/CloseSession/Done/SetLogger）。
+// Prompt/Cancel/CloseSession/Done/SetLogger）。
 type acpConn interface {
 	Initialize(ctx context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error)
 	NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error)
 	LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error)
 	ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error)
-	SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error)
 	Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error)
 	Cancel(ctx context.Context, params acp.CancelNotification) error
 	CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error)
@@ -613,30 +596,26 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 		// 优先 session/load（agent 声明 LoadSession 能力时），否则 session/resume。
 		// 两者都要求 Cwd；load 还要求 McpServers 非 nil（已由 toACPMcpServers 保证）。
 		//
-		// 两条路径的响应都可能带 configOptions（模型清单），必须接住：续问时
-		// 清单是"这轮能不能切模型"的唯一来源。dsh 实测只实现 resume（caps 无 load）。
+		// 两条路径的响应都可能带 configOptions，本实现不使用（不做会话内选模型）。
+		// dsh 实测只实现 resume（caps 无 load）。
 		if a.agentCaps.LoadSession {
-			resp, err := a.conn.LoadSession(sessCtx, acp.LoadSessionRequest{
+			if _, err := a.conn.LoadSession(sessCtx, acp.LoadSessionRequest{
 				Cwd:        cfg.Cwd,
 				SessionId:  sid,
 				McpServers: mcpServers,
-			})
-			if err != nil {
+			}); err != nil {
 				return "", fmt.Errorf("acp: load session %s: %w", cfg.ResumeFrom, err)
 			}
-			a.rememberConfigOptions(resp.ConfigOptions)
 		} else {
-			resp, err := a.conn.ResumeSession(sessCtx, acp.ResumeSessionRequest{
+			if _, err := a.conn.ResumeSession(sessCtx, acp.ResumeSessionRequest{
 				Cwd:        cfg.Cwd,
 				SessionId:  sid,
 				McpServers: mcpServers,
-			})
-			if err != nil {
+			}); err != nil {
 				return "", fmt.Errorf("acp: resume session %s: %w", cfg.ResumeFrom, err)
 			}
-			a.rememberConfigOptions(resp.ConfigOptions)
 		}
-		return a.applyModel(ctx, sessCtx, string(sid), cfg.Model)
+		return string(sid), nil
 	}
 
 	// 新建会话路径（原逻辑）
@@ -647,81 +626,7 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 	if err != nil {
 		return "", fmt.Errorf("acp: new session: %w", err)
 	}
-	a.rememberConfigOptions(resp.ConfigOptions)
-	return a.applyModel(ctx, sessCtx, string(resp.SessionId), cfg.Model)
-}
-
-// applyModel 把任务指定的模型落到会话上（model 为空 = 用 agent 自己的默认/pin）。
-//
-// 为什么续问路径也要落一次：agent 恢复会话时用的是**它自己记的"最后一次请求路由"**
-// （dsh 实测：从会话日志的 request/header 恢复）。那是"上次跑过的"，不等于"这次要的"——
-// 任务换了模型、或上一轮因限流被切过桶，都必须显式重设，否则静默跑回旧模型。
-//
-// 设不上就**直接失败**（不静默退回默认模型）：用户明确选了模型却跑了别的，比报错糟糕
-// 得多——同 resolveAgent 的取舍。失败时关掉会话，避免留一个"半配置"的进程。
-func (a *ACPAgent) applyModel(ctx context.Context, sessCtx context.Context, sid, model string) (string, error) {
-	if model == "" {
-		return sid, nil
-	}
-	if err := a.SetModel(sessCtx, sid, model); err != nil {
-		a.Close(ctx)
-		return "", fmt.Errorf("acp: apply model: %w", err)
-	}
-	a.logger.Info("acp session model applied",
-		zap.String("session", sid), zap.String("model", model))
-	return sid, nil
-}
-
-// rememberConfigOptions 记下本次协商下发的可选模型清单。
-// 空清单**不覆盖**已记的：agent 若不支持会话级选模型就不会下发，
-// 用空覆盖会把上一轮拿到的清单弄丢（限流切桶随之失效）。
-func (a *ACPAgent) rememberConfigOptions(opts []acp.SessionConfigOption) {
-	cat := ExtractModelCatalog(opts)
-	if len(cat.Options) == 0 {
-		return
-	}
-	a.modelMu.Lock()
-	a.modelCatalog = cat
-	a.modelMu.Unlock()
-}
-
-// Models 返回本 agent 最近一次协商拿到的可选模型清单（可能为空 = 不支持会话内选模型）。
-// 返回深拷，调用方改不到内部状态。
-func (a *ACPAgent) Models() ModelCatalog {
-	a.modelMu.Lock()
-	defer a.modelMu.Unlock()
-	cat := a.modelCatalog
-	cat.Options = append([]ModelOption(nil), cat.Options...)
-	return cat
-}
-
-// SetModel 在会话内切换模型（ACP session/set_config_option，configId="model"）。
-//
-// value 必须是 Models() 里原样给出的不透明串（dsh 的格式是
-// `JSON.stringify([provider,model])`，如 `["magpie","workbuddy/glm-5.3-flash"]`），
-// 自己拼串会被 agent 判为未知模型而报错——这正是 2026-10-07 那次
-// "改了模型还是不行" 的真因（把 -ai 加到 glm 上）。
-//
-// 实测要点（2026-10-07）：① set 立即对本会话生效、是**会话级**的，不动 profile 的
-// 静态 pin；② 但**光 set 不提问不会落盘**——agent 把路由写进会话日志是在真正发请求时，
-// 所以"设了模型却没跑过就退出"的会话，恢复回来仍是旧型号。
-func (a *ACPAgent) SetModel(ctx context.Context, sessionID, value string) error {
-	if !a.started {
-		return errors.New("acp: SetModel before Start")
-	}
-	resp, err := a.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
-		ValueId: &acp.SetSessionConfigOptionValueId{
-			SessionId: acp.SessionId(sessionID),
-			ConfigId:  acp.SessionConfigId(ModelConfigID),
-			Value:     acp.SessionConfigValueId(value),
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("acp: set config option %s: %w", ModelConfigID, err)
-	}
-	// 回执里的 configOptions 是权威结果（含新的 currentValue），用它刷新缓存。
-	a.rememberConfigOptions(resp.ConfigOptions)
-	return nil
+	return string(resp.SessionId), nil
 }
 
 // RealSessionID 返回会话的真实 session ID（用于持久化与续问）。
@@ -730,21 +635,11 @@ func (a *ACPAgent) RealSessionID(sessionID string) string { return sessionID }
 
 // SendPrompt 发送一轮 prompt，阻塞到 agent 结束该轮（PromptResponse 返回）。
 // 期间 agent 推送的 AgentMessageChunk/AgentThoughtChunk 经 SessionUpdate 回调到达 OnContentDelta。
-//
-// 上游限流（429）时会在同一会话内自动切到别的模型重试一次（见 retryWithOtherModels）：
-// 额度是**按模型分桶的 token 窗口**（实测 2026-10-07：同一时刻 glm 连打 12k token 全 200、
-// deepseek 连打 4 次全 429），换桶能立刻继续干活，不必等窗口重置。
 func (a *ACPAgent) SendPrompt(ctx context.Context, sessionID, prompt string) error {
 	if !a.started {
 		return errors.New("acp: SendPrompt before Start")
 	}
-	// 轮首取工具计数快照：本轮的"动过手没有"只能靠增量判（累计值会跨轮非零）。
-	toolsBefore := a.toolCalls.Load()
-	err := a.promptOnce(ctx, sessionID, prompt)
-	if err == nil || !IsRateLimitError(err) {
-		return err
-	}
-	return a.retryWithOtherModels(ctx, sessionID, prompt, toolsBefore, err)
+	return a.promptOnce(ctx, sessionID, prompt)
 }
 
 // promptOnce 发一轮 prompt，不做任何重试。
@@ -756,63 +651,6 @@ func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, prompt string) err
 		return fmt.Errorf("acp: prompt: %w", err)
 	}
 	return nil
-}
-
-// retryWithOtherModels 上游限流时在同一会话内换模型重试。
-//
-// 为什么放在这一层：模型清单是**会话级**的（ACP 只在 new/load/resume 的响应里下发，
-// 没有独立的"列模型"方法），切换动作（session/set_config_option）也只有本层能发；
-// 上层既看不到清单也发不了切换，放上去只能靠配置硬编码复制一份清单。
-//
-// 安全边界（重要）：**只在整轮还没产生任何工具调用时才重试**。
-// 一旦模型已经动过手（跑过命令、改过文件），重发同一 prompt 会让副作用翻倍 ——
-// 那种情况下宁可把这轮判失败，也不能装作没事再来一遍。`toolsBefore` 是轮首快照，
-// 每次重试前都比一次增量。
-//
-// 尝试顺序 = 清单里除当前值之外的其余选项，试到成功或试完；每次切换都 Warn 记一笔
-// （模型被静默换掉必须可查——否则用户会以为跑的是自己选的那个）。
-func (a *ACPAgent) retryWithOtherModels(ctx context.Context, sessionID, prompt string, toolsBefore int64, firstErr error) error {
-	if a.toolCalls.Load() != toolsBefore {
-		a.logger.Warn("acp prompt rate limited; not retrying (turn already used tools)",
-			zap.String("session", sessionID))
-		return firstErr
-	}
-	cat := a.Models()
-	if len(cat.Options) < 2 {
-		// 没有别的桶可切（清单只有一个模型 / agent 不支持选模型）：原样上报限流错误。
-		return firstErr
-	}
-	from := cat.Current
-	last := firstErr
-	for _, opt := range cat.Options {
-		if opt.Value == from {
-			continue // 跳过刚刚被限流的那个
-		}
-		if err := a.SetModel(ctx, sessionID, opt.Value); err != nil {
-			a.logger.Warn("acp rate-limit failover: switch model failed",
-				zap.String("session", sessionID), zap.String("model", opt.Name), zap.Error(err))
-			continue
-		}
-		err := a.promptOnce(ctx, sessionID, prompt)
-		if err == nil {
-			a.logger.Warn("acp rate limited; switched model and retried successfully",
-				zap.String("session", sessionID),
-				zap.String("from", from), zap.String("to", opt.Value))
-			return nil
-		}
-		if !IsRateLimitError(err) {
-			// 换了桶还是别的错（如上下文超限）：就此打住，把真实错误报上去，
-			// 继续换下去只会掩盖问题。
-			return err
-		}
-		a.logger.Warn("acp rate-limit failover: candidate also limited",
-			zap.String("session", sessionID), zap.String("model", opt.Value))
-		last = err
-		if a.toolCalls.Load() != toolsBefore {
-			return last // 这一轮已经动过手了，停
-		}
-	}
-	return last
 }
 
 // OnContentDelta 注册内容增量回调。
@@ -1001,9 +839,6 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		}
 	case u.ToolCall != nil:
 		// 新工具调用开始（M3 映射 EventToolUse）
-		// 计数用于限流重试的安全闸门：本函数被调用就说明模型已经动手了
-		// （发起工具调用/给出状态更新都算）。见 toolCalls 字段注释。
-		a.toolCalls.Add(1)
 		toolCallID := string(u.ToolCall.ToolCallId)
 		rawIn := rawAnyToJSON(u.ToolCall.RawInput)
 		// 注意类型差异：ToolCall.Title 是 string，而 ToolCallUpdate.Title 是
@@ -1035,7 +870,6 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		}
 	case u.ToolCallUpdate != nil:
 		// 工具调用状态变更（M3 映射 EventToolResult）
-		a.toolCalls.Add(1)
 		toolCallID := string(u.ToolCallUpdate.ToolCallId)
 		rawIn := rawAnyToJSON(u.ToolCallUpdate.RawInput)
 		updTitle := ""
