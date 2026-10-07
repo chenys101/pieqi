@@ -87,6 +87,13 @@ type PermissionRequest struct {
 	Options    []PermissionOption
 }
 
+// Command 取该请求对应的 shell 命令原文；取不到返回空串。
+//
+// 供审批侧（风险分级/只读降级）与测试读取命令。取不到（无入参、非 JSON、
+// 无 command 字段）一律返回空串 —— 语义是"没有可信的命令文本"，
+// 调用方必须据此走保守判级，**不要**当作"这条命令无副作用"。
+func (r PermissionRequest) Command() string { return commandFromRawInput(r.RawInput) }
+
 // PermissionResponse 审批响应。
 // 对齐 ACP RequestPermissionOutcome 的两种变体：
 //   - Selected=true  → outcome=selected，OptionID 为选中的 optionId

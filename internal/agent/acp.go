@@ -95,6 +95,29 @@ type ACPAgent struct {
 	permMu       sync.Mutex
 	pendingPerms map[string]chan PermissionResponse
 
+	// toolInputs 是 toolCallId -> 工具入参（RawInput）的记忆表，专为**审批时补齐命令原文**。
+	//
+	// 为什么需要它：审批判定（DowngradeReadonlyPermission → 只读降级 / 风险分级）
+	// 读的是 PermissionRequest.RawInput，但**只有部分 agent 会在 RequestPermission
+	// 里带上它** —— qoder/claude 会带，dsh 不带（实测 dsh 12/12 条的 title/kind/rawInput
+	// 全空）。而 dsh 在**先一步**的 session/update 里已经把 tool_call 的 RawInput
+	// 发过来了（实测 1347 条 tool_use 里 773 条含 command），两边用同一个 toolCallId 关联。
+	//
+	// 「先一步」是协议保证，不是运气：
+	//   1. dsh 侧 https://…/dsh-acp/lib/index.js 的 approval/request 处理器在发
+	//      requestPermission 之前会 await record.drainUpdates()（= outputTail 链），
+	//      而 tool/call 事件正串在那条链上；
+	//   2. pieqi 用的 acp-go-sdk 有**通知屏障**：handleResponse 给每个响应带上
+	//      notificationWatermark，调用方 waitNotificationsUpTo 会阻塞到"该响应之前
+	//      入队的通知全部处理完毕"（见 connection_notification_barrier_test.go）。
+	// 所以 RequestPermission 回调执行时，对应的 ToolCall 一定已经处理过 ——
+	// 这里**不需要超时等待**，查不到就是真的没有（此时维持保守判级，不猜）。
+	//
+	// 增长边界：一个会话内的工具调用量级是百~千（实测最大任务 1347 条），
+	// 每条几十字节~几KB，随会话销毁一并释放（见 Close），不做逐出。
+	toolInputsMu sync.Mutex
+	toolInputs   map[string]json.RawMessage
+
 	// closeOnce 守护 Close 的幂等；doneOnce 守护 a.done 的关闭。
 	// 两者分离，避免 Close 内调 markDone 时重入同一个 Once 导致死锁。
 	closeOnce sync.Once
@@ -146,6 +169,7 @@ func NewACPAgent(cfg config.ACPConfig, logger *zap.Logger) *ACPAgent {
 		binPath:      spawnNameResolver(name),
 		done:         make(chan struct{}),
 		pendingPerms: make(map[string]chan PermissionResponse),
+		toolInputs:   make(map[string]json.RawMessage),
 		lifeCtx:      lifeCtx,
 		lifeCancel:   lifeCancel,
 	}
@@ -694,6 +718,12 @@ func (a *ACPAgent) Close(ctx context.Context) error {
 			delete(a.pendingPerms, id)
 		}
 		a.permMu.Unlock()
+		// 释放工具入参记忆表：进程已结束，留着只是内存（一个会话可达上千条）。
+		// 置 nil 而非清空 map —— 与构造器对称，且让"已关闭"这件事对后续查询
+		// 表现为查不到（toolInput 对 nil map 读是安全的）。
+		a.toolInputsMu.Lock()
+		a.toolInputs = nil
+		a.toolInputsMu.Unlock()
 		a.markDone()
 		// 释放自持 lifeCtx（最后一步）：若上面优雅等待超时且进程仍在，此处经 CommandContext
 		// 兜底强杀。cancel 幂等，重复 Close / 启动失败路径重复调用均安全。
@@ -736,27 +766,36 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		}
 	case u.ToolCall != nil:
 		// 新工具调用开始（M3 映射 EventToolUse）
+		toolCallID := string(u.ToolCall.ToolCallId)
+		rawIn := rawAnyToJSON(u.ToolCall.RawInput)
+		// 记下入参供审批时补齐命令原文（见 toolInputs 注释）。
+		a.rememberToolInput(toolCallID, rawIn)
 		a.cbMu.RLock()
 		fn := a.onToolCall
 		a.cbMu.RUnlock()
 		if fn != nil {
 			fn(ToolCallUpdateInfo{
-				SessionID: sid, ToolCallID: string(u.ToolCall.ToolCallId),
+				SessionID: sid, ToolCallID: toolCallID,
 				Title: u.ToolCall.Title, Status: string(u.ToolCall.Status),
 				Kind: string(u.ToolCall.Kind), IsNew: true,
 				// 工具入参/输出（RawOutput 在开始事件里通常为空，留 nil 即可）。
-				RawInput:  rawAnyToJSON(u.ToolCall.RawInput),
+				RawInput:  rawIn,
 				RawOutput: rawAnyToJSON(u.ToolCall.RawOutput),
 			})
 		}
 	case u.ToolCallUpdate != nil:
 		// 工具调用状态变更（M3 映射 EventToolResult）
+		toolCallID := string(u.ToolCallUpdate.ToolCallId)
+		rawIn := rawAnyToJSON(u.ToolCallUpdate.RawInput)
+		// 状态变更里也常带 RawInput（部分 agent 只在 update 里给入参，如 dsh 的
+		// pwsh 调用）；同样记下。空值不覆盖已有记录，见 rememberToolInput。
+		a.rememberToolInput(toolCallID, rawIn)
 		a.cbMu.RLock()
 		fn := a.onToolCall
 		a.cbMu.RUnlock()
 		if fn != nil {
 			info := ToolCallUpdateInfo{
-				SessionID: sid, ToolCallID: string(u.ToolCallUpdate.ToolCallId),
+				SessionID: sid, ToolCallID: toolCallID,
 				IsNew: false,
 			}
 			if u.ToolCallUpdate.Title != nil {
@@ -769,13 +808,47 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 				info.Kind = string(*u.ToolCallUpdate.Kind)
 			}
 			// 工具入参/输出（RawOutput 在 completed/failed 时承载结果，→ EventToolResult.Result）。
-			info.RawInput = rawAnyToJSON(u.ToolCallUpdate.RawInput)
+			info.RawInput = rawIn
 			info.RawOutput = rawAnyToJSON(u.ToolCallUpdate.RawOutput)
 			fn(info)
 		}
 	}
 	// 其他更新类型（Plan/UserMessageChunk/UsageUpdate 等）M1 暂不处理，留给后续里程碑。
 	return nil
+}
+
+// rememberToolInput 记下一次工具调用的入参，供后续审批补齐命令原文（见 toolInputs）。
+//
+// **空入参不覆盖已有记录**：同一个 toolCallId 会先来 ToolCall（带完整入参）再来
+// 若干 ToolCallUpdate（多数只带状态，RawInput 为空）。若用空值覆盖，就会把先到的
+// 命令原文抹掉 —— 那时审批恰好排在 update 之后，就会拿不到命令。
+//
+// toolCallId 为空时同样丢弃：没有键就无法关联，存了也永远查不到。
+func (a *ACPAgent) rememberToolInput(toolCallID string, raw json.RawMessage) {
+	if toolCallID == "" || len(raw) == 0 {
+		return
+	}
+	a.toolInputsMu.Lock()
+	defer a.toolInputsMu.Unlock()
+	if a.toolInputs == nil { // 兜底：未经构造器直接 new(ACPAgent) 的单测
+		a.toolInputs = make(map[string]json.RawMessage)
+	}
+	a.toolInputs[toolCallID] = raw
+}
+
+// toolInput 查一个 toolCallId 的入参。第二个返回值为 false 表示"没记过"——
+// 调用方据此维持保守判级，**不要**把它当成"这条命令没有副作用"。
+func (a *ACPAgent) toolInput(toolCallID string) (json.RawMessage, bool) {
+	if toolCallID == "" {
+		return nil, false
+	}
+	a.toolInputsMu.Lock()
+	defer a.toolInputsMu.Unlock()
+	raw, ok := a.toolInputs[toolCallID]
+	if !ok || len(raw) == 0 {
+		return nil, false
+	}
+	return raw, true
 }
 
 // RequestPermission 处理 agent 的权限请求（M3 启用；M1 无回调时自动放行）。
@@ -825,20 +898,53 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 	// `sed -n '1,35p' f.go` 与 `rm -rf build/` 在 pieqi 眼里是同一个 ToolKind，
 	// 都落 L2、都必须人工点一次。这里把**能证明只读**的命令降为 read(L0)，
 	// 命中 L0 免审不再中断。证明不了的一律维持 execute（保守侧）。
-	perm := DowngradeReadonlyPermission(PermissionRequest{
+	//
+	// 命令原文的来源有两条，顺序不能反：
+	//   1. 请求自带（qoder/claude 会把工具入参放进 RequestPermission）；
+	//   2. 请求没带时，回查本会话记下的 tool_call 入参（**dsh 走这条**：
+	//      它不发 title/kind/rawInput，但先一步的 session/update 里发过 RawInput）。
+	// 回查的前提是协议层的顺序保证（见 toolInputs 注释），故此查询**不需要等待**：
+	// 查不到就是真的没有，维持保守判级，不猜、不 sleep。
+	rawInput := rawAnyToJSON(params.ToolCall.RawInput)
+	backfilled := false
+	if len(rawInput) == 0 {
+		if remembered, ok := a.toolInput(reqID); ok {
+			rawInput = remembered
+			backfilled = true
+		}
+	}
+	perm := PermissionRequest{
 		ReqID:      reqID,
 		SessionID:  string(params.SessionId),
 		ToolCallID: string(params.ToolCall.ToolCallId),
 		ToolTitle:  title,
 		ToolKind:   toolKindString(params.ToolCall.Kind),
 		Status:     toolCallStatusString(params.ToolCall.Status),
-		RawInput:   rawAnyToJSON(params.ToolCall.RawInput),
+		RawInput:   rawInput,
 		Options:    opts,
-	})
+	}
+	// 第一步：按**工具名**修正 agent 报错的 kind（toolkind_map.go）。
+	// dsh 把一切写死成 other(L2)，read/grep/edit 因此全要人工点；
+	// 这一步把它们纠正回真实语义。claude 报得准，不动它。
+	byName := applyToolKindFix(perm, a.cfg.AgentType)
+	// 第二步：按**命令原文**做只读降级（ADR-0008）。
+	// 必须在第一步之后 —— 降级只认 execute，dsh 的 other 若没先被纠正，
+	// 这一步会直接 return，名字修正就白做了（顺序见 toolkind_map.go 的说明）。
+	perm = DowngradeReadonlyPermission(byName)
+	if backfilled {
+		// 回填成功的证据：没有这条日志，就无法区分"dsh 补上了命令原文"
+		// 与"本来就没命令、维持保守判级"——审批行为会变得无法解释。
+		a.logger.Debug("acp permission rawInput backfilled from tool call",
+			zap.String("req_id", reqID),
+			zap.String("command", commandFromRawInput(rawInput)),
+		)
+	}
 	onPerm(perm)
 	if perm.ToolKind != toolKindString(params.ToolCall.Kind) {
-		a.logger.Debug("acp permission kind downgraded (readonly command)",
+		a.logger.Debug("acp permission kind adjusted",
 			zap.String("req_id", reqID),
+			zap.String("agent", a.cfg.AgentType),
+			zap.String("tool", title),
 			zap.String("from", toolKindString(params.ToolCall.Kind)),
 			zap.String("to", perm.ToolKind),
 			zap.String("command", commandFromRawInput(perm.RawInput)),
