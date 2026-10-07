@@ -167,15 +167,20 @@ async function doRemove() {
 
           <SessionTimeline :task-id="task.id" :consume-force-scroll="consumeForceScroll" />
 
-          <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20） -->
-          <div v-if="decision" class="mx-auto w-full max-w-3xl px-3 pb-2 md:px-4">
-            <ApprovalBanner
-              :decision="decision"
-              :loading="approvalBusy"
-              @approve="onApprove"
-              @approve-session="onApproveSession"
-              @deny="onDeny"
-            />
+          <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20）
+               shrink-0 必需：横幅里的审批摘要展开后可能很高，不加它会被 flex 压缩
+               （内容被裁、按钮被挤走）；同时给它限高 + 内部滚动，
+               保证「批准/拒绝」与下方输入框始终留在可视区。 -->
+          <div v-if="decision" class="mx-auto w-full max-w-3xl shrink-0 px-3 pb-2 md:px-4">
+            <div class="max-h-[45vh] overflow-y-auto overscroll-contain">
+              <ApprovalBanner
+                :decision="decision"
+                :loading="approvalBusy"
+                @approve="onApprove"
+                @approve-session="onApproveSession"
+                @deny="onDeny"
+              />
+            </div>
           </div>
 
           <InterveneInput
