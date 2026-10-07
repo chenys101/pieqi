@@ -28,7 +28,7 @@ func TestToolInputWait_LateArrivalIsPickedUp(t *testing.T) {
 	// 100ms 后才写入（模拟 tool_call 晚于审批到达），远小于 300ms 上限。
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		a.rememberToolInput("tc-late", []byte(want))
+		a.rememberToolInput("tc-late", "", []byte(want))
 	}()
 
 	start := time.Now()
@@ -38,8 +38,8 @@ func TestToolInputWait_LateArrivalIsPickedUp(t *testing.T) {
 	if !ok {
 		t.Fatal("tool_call 在等待窗口内到达，toolInputWait 应拿到它（这正是本次修复的靶心）")
 	}
-	if string(raw) != want {
-		t.Fatalf("raw=%s want %s", raw, want)
+	if string(raw.RawInput) != want {
+		t.Fatalf("raw=%s want %s", raw.RawInput, want)
 	}
 	// 必须是"被唤醒"而不是"睡满 300ms 再撞上" —— 否则等于每次都白等。
 	if elapsed > 250*time.Millisecond {
@@ -52,14 +52,14 @@ func TestToolInputWait_LateArrivalIsPickedUp(t *testing.T) {
 // 这是绝大多数情况（含 qoder/claude），必须不引入任何可感知延迟。
 func TestToolInputWait_FastPathNoDelay(t *testing.T) {
 	a := NewACPAgent(config.ACPConfig{AgentType: "dsh"}, nil)
-	a.rememberToolInput("tc-1", []byte(`{"command":"ls"}`))
+	a.rememberToolInput("tc-1", "", []byte(`{"command":"ls"}`))
 
 	start := time.Now()
 	raw, ok := a.toolInputWait("tc-1")
 	elapsed := time.Since(start)
 
-	if !ok || string(raw) != `{"command":"ls"}` {
-		t.Fatalf("ok=%v raw=%s", ok, raw)
+	if !ok || string(raw.RawInput) != `{"command":"ls"}` {
+		t.Fatalf("ok=%v raw=%s", ok, raw.RawInput)
 	}
 	if elapsed > 50*time.Millisecond {
 		t.Errorf("快路径耗时 %v，应接近 0", elapsed)
@@ -77,7 +77,7 @@ func TestToolInputWait_TimesOutReturnsFalse(t *testing.T) {
 	elapsed := time.Since(start)
 
 	if ok {
-		t.Fatalf("不该拿到入参，got %s", raw)
+		t.Fatalf("不该拿到入参，got %s", raw.RawInput)
 	}
 	if elapsed < toolInputWaitTimeout {
 		t.Errorf("耗时 %v 短于超时 %v —— 应等满窗口再放弃", elapsed, toolInputWaitTimeout)

@@ -21,6 +21,13 @@ type createTaskReq struct {
 	// Agent 可选的 agent 名（见 GET /api/agents）。空 = 服务端默认（Claude Code）。
 	// 取值为 agent 业务名（claude / qoder），不是前端展示名。
 	Agent string `json:"agent"`
+	// Model 可选的模型（见 GET /api/agents/{agent}/models）。空 = 用 agent 自己的默认。
+	// 取值是 agent 下发的**不透明选择值**，必须原样回传，前端不得自行拼接。
+	//
+	// 不做「值必须在清单里」的入参校验：校验要么触发一次探测（起 agent 进程，把
+	// POST 拖到秒级）、要么依赖可能过期的缓存。两者都不值当 —— 错的取值会让会话
+	// 打开时**明确报错**（agent 报未知模型），失败是响亮的，不会静默跑错。
+	Model string `json:"model"`
 }
 
 func (s *Server) createTask(c *gin.Context) {
@@ -63,6 +70,7 @@ func (s *Server) createTask(c *gin.Context) {
 	task, err := s.store.Create(&model.Task{
 		Source:       model.SourceHTTP,
 		Agent:        agentName,
+		Model:        strings.TrimSpace(req.Model),
 		ProjectID:    projectID,
 		ProjectPath:  projectPath,
 		WorktreePath: worktreePath,

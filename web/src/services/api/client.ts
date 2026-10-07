@@ -181,6 +181,8 @@ export function adaptTask(dto: TaskDto | TaskSummaryDto): Task {
     status: dto.status,
     // 后端 agent 业务名（claude / qoder）；旧任务无该字段 → 默认 agent
     agent: dto.agent || DEFAULT_AGENT,
+    // 模型选择值（不透明串）；旧任务/未指定 → 空串（由 agent 默认决定）
+    model: dto.model || '',
     sessionId: dto.claude_session_id || dto.acp_session_id || dto.id,
     decision: dto.current_decision
       ? {

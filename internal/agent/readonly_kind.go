@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -130,7 +131,17 @@ func isDiscardTarget(rest string) bool {
 // splitSegments 按命令边界切段。切分是朴素的（不处理引号内的分隔符），
 // 但偏保守方向是安全的：引号里的 `;` 会被误当分隔符，切出的"段"多半
 // 不是合法只读命令 → 拒绝降级（少放行，不是多放行）。
+//
+// ⚠️ 但有一类"保守"是**有害**的：多行 here-string。实测 2026-10-07 15:03，
+// 我自己那条 `git add …; $msg = @'…多行提交信息…'@; git commit -m $msg`
+// 被切成几十段，其中大段是中文散文（提交信息本身），没有一段命中白名单
+// ⇒ 整条判成 execute(L2) 弹卡 —— 而 `git add`/`git commit` 本该是 L1 免审。
+// 这个形态是**日常**（写多行提交信息就是这么写的），不是边缘情况。
+//
+// 故先剥掉 here-string 与引号串的**内容**（它们是数据、不是命令），再切段。
+// 剥掉是安全的：留下的仍是"命令骨架"，判定只会更准，不会更宽。
 func splitSegments(cmd string) []string {
+	cmd = stripDataLiterals(cmd)
 	segs := []string{cmd}
 	for _, sep := range separators {
 		var next []string
@@ -141,6 +152,43 @@ func splitSegments(cmd string) []string {
 	}
 	return segs
 }
+
+// stripDataLiterals 把 here-string 与引号串的内容替换成占位符，只留命令骨架。
+//
+// 处理三种形态（PowerShell 为 dsh 的主要 shell，Bash 亦覆盖）：
+//   - PowerShell here-string：@'…'@ 与 @"…"@（**必须整体跨行匹配**，否则内容会被当命令）；
+//   - 单/双引号串：'…' 与 "…"（同样跨行）；
+//   - 反引号串：`…`（**不剥** —— 它是命令替换，剥掉会把"执行另一条命令"藏起来，
+//     那正是 hasUnsafeRedirection 要拦的）。
+//
+// 未闭合的引号/here-string：**原样返回**（不剥）。因为"未闭合"说明我们对结构的
+// 理解是错的，此时任何裁剪都可能把真正的命令裁掉 —— 保守侧是不动它、让它照旧
+// 落 L2 弹卡。
+func stripDataLiterals(cmd string) string {
+	out := cmd
+
+	// ① PowerShell here-string：@'...'@ / @"..."@（非贪婪、跨行）
+	out = hereStringRe.ReplaceAllString(out, "@''@")
+	// ② 普通引号串（跨行，非贪婪）。先双后单，避免嵌套引号时互相吃掉。
+	out = doubleQuotedRe.ReplaceAllString(out, "\"\"")
+	out = singleQuotedRe.ReplaceAllString(out, "''")
+
+	return out
+}
+
+// 正则说明（都带 (?s) 让 . 跨行、非贪婪避免吞掉后续命令）：
+//
+//	here-string : @' 一直到 '@（或 @" 到 "@），整体换成 @''@
+//	双引号串     : 从 " 到最近的 "（要求长度 ≥1，避免把空串 "" 反复替换）
+//	单引号串     : 从 ' 到最近的 '
+//
+// 用正则而非手写状态机：本函数的产物只用于**判定**，不用于执行 ——
+// 判错的方向由调用方兜底（判不出来就维持 L2 弹卡）。
+var (
+	hereStringRe   = regexp.MustCompile(`(?s)@'.*?'@|@".*?"@`)
+	doubleQuotedRe = regexp.MustCompile(`(?s)"[^"]*"`)
+	singleQuotedRe = regexp.MustCompile(`(?s)'[^']*'`)
+)
 
 // isReadonlySegment 单段是否只读：命令名在白名单里且无该命令的写标志。
 func isReadonlySegment(seg string) bool {

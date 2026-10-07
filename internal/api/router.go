@@ -180,6 +180,9 @@ func (s *Server) Register(r gin.IRouter) {
 	}
 	{
 		api.GET("/agents", s.listAgents) // 新任务页 agent 选择器的可选列表
+		// 某 agent 的可选模型清单（新任务页模型下拉）。代价是起一次 agent 进程，
+		// 故按需拉取 + agent 包内缓存，不并进 /agents 让所有 agent 一起付。
+		api.GET("/agents/:name/models", s.listAgentModels)
 		api.GET("/tasks", s.listTasks)
 		api.GET("/tasks/:id", s.getTask)
 		api.POST("/tasks", s.createTask)

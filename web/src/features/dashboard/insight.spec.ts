@@ -21,6 +21,7 @@ function t(over: Partial<Task> = {}): Task {
     projectPath: 'G:/ws/demo',
     status: 'completed',
     agent: 'claude',
+    model: '',
     sessionId: 's',
     createdAt: new Date(BASE).toISOString(),
     updatedAt: new Date(BASE).toISOString(),

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"pieqi/internal/config"
@@ -114,11 +115,16 @@ type ACPAgent struct {
 
 	// toolInputs 是 toolCallId -> 工具入参（RawInput）的记忆表，专为**审批时补齐命令原文**。
 	//
-	// 为什么需要它：审批判定（DowngradeReadonlyPermission → 只读降级 / 风险分级）
-	// 读的是 PermissionRequest.RawInput，但**只有部分 agent 会在 RequestPermission
-	// 里带上它** —— qoder/claude 会带，dsh 不带（实测 dsh 12/12 条的 title/kind/rawInput
-	// 全空）。而 dsh 在 session/update 里发过 tool_call 的 RawInput
-	// （实测 1347 条 tool_use 里 773 条含 command），两边用同一个 toolCallId 关联。
+	// 为什么需要它：审批判定要读**工具名**与**命令原文**，但 dsh 的
+	// RequestPermission **两者都不带**（实测 title/kind/rawInput 全空）；
+	// 而它在 session/update 里发过 tool_call 的 title（= 工具名，如 "pwsh"）
+	// 与 rawInput（含 command），两边用同一个 toolCallId 关联。
+	//
+	// ⚠️ 工具名（title）与命令原文（rawInput）**必须一起缓存**：
+	// 分级链的第一道门 applyToolKindFix 是**按工具名**查表的
+	// （pwsh → execute），拿不到名字就整条链失效 —— 实测 2026-10-07 15:03
+	// 我自己那两条 `git add; git commit`（本该 L1 免审）就是因为 title 为空
+	// 而落到 L2 弹卡的。
 	//
 	// ⚠️ **顺序不保证，必须等**（2026-10-07 实测修正，见 toolInputWait 注释）：
 	// dsh 侧确实在发 requestPermission 前 `await drainUpdates()`，acp-go-sdk 也确实有
@@ -132,7 +138,7 @@ type ACPAgent struct {
 	// 增长边界：一个会话内的工具调用量级是百~千（实测最大任务 1347 条），
 	// 每条几十字节~几KB，随会话销毁一并释放（见 Close），不做逐出。
 	toolInputsMu sync.Mutex
-	toolInputs   map[string]json.RawMessage
+	toolInputs   map[string]toolCallMemo
 	// toolInputCond 在写入新入参时广播，唤醒正在等待该 id 的审批方。
 	// 与 toolInputs 共用 toolInputsMu（sync.Cond 的约定：等待与判定在同一把锁下）。
 	toolInputCond *sync.Cond
@@ -141,6 +147,21 @@ type ACPAgent struct {
 	// 两者分离，避免 Close 内调 markDone 时重入同一个 Once 导致死锁。
 	closeOnce sync.Once
 	doneOnce  sync.Once
+
+	// modelMu 守护 modelCatalog：会话协商（new/load/resume 响应、以及
+	// set_config_option 的回执）里下发的可选模型清单，取到就存，供
+	// Models()（上层取清单）与限流切桶（retryWithOtherModels）读。
+	// 不用 atomic.Pointer：读时要深拷切片，本来就得上锁。
+	modelMu      sync.Mutex
+	modelCatalog ModelCatalog
+
+	// toolCalls 是**累计**工具调用计数（ToolCall + ToolCallUpdate 都算一次更新）。
+	//
+	// 唯一用途：限流重试前的安全闸门 —— 整轮里一旦模型已经动过手（跑过命令、
+	// 改过文件），重发同一 prompt 会让副作用翻倍，此时宁可失败也不重试。
+	// 计数是累计的，所以调用方必须**轮首取快照、比较增量**（多轮保活会让累计值
+	// 一直非零，直接判 >0 会把第 2 轮起的重试全禁掉）。
+	toolCalls atomic.Int64
 }
 
 // 编译期断言：ACPAgent 同时实现 AgentAdapter 与 acp.Client。
@@ -151,13 +172,14 @@ var (
 
 // acpConn 抽象 ACP 客户端连接（*acp.ClientSideConnection 的方法子集），让 ACPAgent.NewSession
 // 的 load/resume 路径可单测：生产由 *acp.ClientSideConnection 实现，测试注入 fake。
-// 仅收录 ACPAgent 实际调用的方法（Initialize/NewSession/LoadSession/ResumeSession/Prompt/
-// Cancel/CloseSession/Done/SetLogger）。
+// 仅收录 ACPAgent 实际调用的方法（Initialize/NewSession/LoadSession/ResumeSession/
+// SetSessionConfigOption/Prompt/Cancel/CloseSession/Done/SetLogger）。
 type acpConn interface {
 	Initialize(ctx context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error)
 	NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error)
 	LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error)
 	ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error)
+	SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error)
 	Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error)
 	Cancel(ctx context.Context, params acp.CancelNotification) error
 	CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error)
@@ -188,7 +210,7 @@ func NewACPAgent(cfg config.ACPConfig, logger *zap.Logger) *ACPAgent {
 		binPath:      spawnNameResolver(name),
 		done:         make(chan struct{}),
 		pendingPerms: make(map[string]chan PermissionResponse),
-		toolInputs:   make(map[string]json.RawMessage),
+		toolInputs:   make(map[string]toolCallMemo),
 		lifeCtx:      lifeCtx,
 		lifeCancel:   lifeCancel,
 	}
@@ -590,24 +612,31 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 		mcpServers := toACPMcpServers(cfg.MCP)
 		// 优先 session/load（agent 声明 LoadSession 能力时），否则 session/resume。
 		// 两者都要求 Cwd；load 还要求 McpServers 非 nil（已由 toACPMcpServers 保证）。
+		//
+		// 两条路径的响应都可能带 configOptions（模型清单），必须接住：续问时
+		// 清单是"这轮能不能切模型"的唯一来源。dsh 实测只实现 resume（caps 无 load）。
 		if a.agentCaps.LoadSession {
-			if _, err := a.conn.LoadSession(sessCtx, acp.LoadSessionRequest{
+			resp, err := a.conn.LoadSession(sessCtx, acp.LoadSessionRequest{
 				Cwd:        cfg.Cwd,
 				SessionId:  sid,
 				McpServers: mcpServers,
-			}); err != nil {
+			})
+			if err != nil {
 				return "", fmt.Errorf("acp: load session %s: %w", cfg.ResumeFrom, err)
 			}
+			a.rememberConfigOptions(resp.ConfigOptions)
 		} else {
-			if _, err := a.conn.ResumeSession(sessCtx, acp.ResumeSessionRequest{
+			resp, err := a.conn.ResumeSession(sessCtx, acp.ResumeSessionRequest{
 				Cwd:        cfg.Cwd,
 				SessionId:  sid,
 				McpServers: mcpServers,
-			}); err != nil {
+			})
+			if err != nil {
 				return "", fmt.Errorf("acp: resume session %s: %w", cfg.ResumeFrom, err)
 			}
+			a.rememberConfigOptions(resp.ConfigOptions)
 		}
-		return cfg.ResumeFrom, nil
+		return a.applyModel(ctx, sessCtx, string(sid), cfg.Model)
 	}
 
 	// 新建会话路径（原逻辑）
@@ -618,7 +647,81 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 	if err != nil {
 		return "", fmt.Errorf("acp: new session: %w", err)
 	}
-	return string(resp.SessionId), nil
+	a.rememberConfigOptions(resp.ConfigOptions)
+	return a.applyModel(ctx, sessCtx, string(resp.SessionId), cfg.Model)
+}
+
+// applyModel 把任务指定的模型落到会话上（model 为空 = 用 agent 自己的默认/pin）。
+//
+// 为什么续问路径也要落一次：agent 恢复会话时用的是**它自己记的"最后一次请求路由"**
+// （dsh 实测：从会话日志的 request/header 恢复）。那是"上次跑过的"，不等于"这次要的"——
+// 任务换了模型、或上一轮因限流被切过桶，都必须显式重设，否则静默跑回旧模型。
+//
+// 设不上就**直接失败**（不静默退回默认模型）：用户明确选了模型却跑了别的，比报错糟糕
+// 得多——同 resolveAgent 的取舍。失败时关掉会话，避免留一个"半配置"的进程。
+func (a *ACPAgent) applyModel(ctx context.Context, sessCtx context.Context, sid, model string) (string, error) {
+	if model == "" {
+		return sid, nil
+	}
+	if err := a.SetModel(sessCtx, sid, model); err != nil {
+		a.Close(ctx)
+		return "", fmt.Errorf("acp: apply model: %w", err)
+	}
+	a.logger.Info("acp session model applied",
+		zap.String("session", sid), zap.String("model", model))
+	return sid, nil
+}
+
+// rememberConfigOptions 记下本次协商下发的可选模型清单。
+// 空清单**不覆盖**已记的：agent 若不支持会话级选模型就不会下发，
+// 用空覆盖会把上一轮拿到的清单弄丢（限流切桶随之失效）。
+func (a *ACPAgent) rememberConfigOptions(opts []acp.SessionConfigOption) {
+	cat := ExtractModelCatalog(opts)
+	if len(cat.Options) == 0 {
+		return
+	}
+	a.modelMu.Lock()
+	a.modelCatalog = cat
+	a.modelMu.Unlock()
+}
+
+// Models 返回本 agent 最近一次协商拿到的可选模型清单（可能为空 = 不支持会话内选模型）。
+// 返回深拷，调用方改不到内部状态。
+func (a *ACPAgent) Models() ModelCatalog {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	cat := a.modelCatalog
+	cat.Options = append([]ModelOption(nil), cat.Options...)
+	return cat
+}
+
+// SetModel 在会话内切换模型（ACP session/set_config_option，configId="model"）。
+//
+// value 必须是 Models() 里原样给出的不透明串（dsh 的格式是
+// `JSON.stringify([provider,model])`，如 `["magpie","workbuddy/glm-5.3-flash"]`），
+// 自己拼串会被 agent 判为未知模型而报错——这正是 2026-10-07 那次
+// "改了模型还是不行" 的真因（把 -ai 加到 glm 上）。
+//
+// 实测要点（2026-10-07）：① set 立即对本会话生效、是**会话级**的，不动 profile 的
+// 静态 pin；② 但**光 set 不提问不会落盘**——agent 把路由写进会话日志是在真正发请求时，
+// 所以"设了模型却没跑过就退出"的会话，恢复回来仍是旧型号。
+func (a *ACPAgent) SetModel(ctx context.Context, sessionID, value string) error {
+	if !a.started {
+		return errors.New("acp: SetModel before Start")
+	}
+	resp, err := a.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: acp.SessionId(sessionID),
+			ConfigId:  acp.SessionConfigId(ModelConfigID),
+			Value:     acp.SessionConfigValueId(value),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("acp: set config option %s: %w", ModelConfigID, err)
+	}
+	// 回执里的 configOptions 是权威结果（含新的 currentValue），用它刷新缓存。
+	a.rememberConfigOptions(resp.ConfigOptions)
+	return nil
 }
 
 // RealSessionID 返回会话的真实 session ID（用于持久化与续问）。
@@ -627,10 +730,25 @@ func (a *ACPAgent) RealSessionID(sessionID string) string { return sessionID }
 
 // SendPrompt 发送一轮 prompt，阻塞到 agent 结束该轮（PromptResponse 返回）。
 // 期间 agent 推送的 AgentMessageChunk/AgentThoughtChunk 经 SessionUpdate 回调到达 OnContentDelta。
+//
+// 上游限流（429）时会在同一会话内自动切到别的模型重试一次（见 retryWithOtherModels）：
+// 额度是**按模型分桶的 token 窗口**（实测 2026-10-07：同一时刻 glm 连打 12k token 全 200、
+// deepseek 连打 4 次全 429），换桶能立刻继续干活，不必等窗口重置。
 func (a *ACPAgent) SendPrompt(ctx context.Context, sessionID, prompt string) error {
 	if !a.started {
 		return errors.New("acp: SendPrompt before Start")
 	}
+	// 轮首取工具计数快照：本轮的"动过手没有"只能靠增量判（累计值会跨轮非零）。
+	toolsBefore := a.toolCalls.Load()
+	err := a.promptOnce(ctx, sessionID, prompt)
+	if err == nil || !IsRateLimitError(err) {
+		return err
+	}
+	return a.retryWithOtherModels(ctx, sessionID, prompt, toolsBefore, err)
+}
+
+// promptOnce 发一轮 prompt，不做任何重试。
+func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, prompt string) error {
 	if _, err := a.conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: acp.SessionId(sessionID),
 		Prompt:    []acp.ContentBlock{acp.TextBlock(prompt)},
@@ -638,6 +756,63 @@ func (a *ACPAgent) SendPrompt(ctx context.Context, sessionID, prompt string) err
 		return fmt.Errorf("acp: prompt: %w", err)
 	}
 	return nil
+}
+
+// retryWithOtherModels 上游限流时在同一会话内换模型重试。
+//
+// 为什么放在这一层：模型清单是**会话级**的（ACP 只在 new/load/resume 的响应里下发，
+// 没有独立的"列模型"方法），切换动作（session/set_config_option）也只有本层能发；
+// 上层既看不到清单也发不了切换，放上去只能靠配置硬编码复制一份清单。
+//
+// 安全边界（重要）：**只在整轮还没产生任何工具调用时才重试**。
+// 一旦模型已经动过手（跑过命令、改过文件），重发同一 prompt 会让副作用翻倍 ——
+// 那种情况下宁可把这轮判失败，也不能装作没事再来一遍。`toolsBefore` 是轮首快照，
+// 每次重试前都比一次增量。
+//
+// 尝试顺序 = 清单里除当前值之外的其余选项，试到成功或试完；每次切换都 Warn 记一笔
+// （模型被静默换掉必须可查——否则用户会以为跑的是自己选的那个）。
+func (a *ACPAgent) retryWithOtherModels(ctx context.Context, sessionID, prompt string, toolsBefore int64, firstErr error) error {
+	if a.toolCalls.Load() != toolsBefore {
+		a.logger.Warn("acp prompt rate limited; not retrying (turn already used tools)",
+			zap.String("session", sessionID))
+		return firstErr
+	}
+	cat := a.Models()
+	if len(cat.Options) < 2 {
+		// 没有别的桶可切（清单只有一个模型 / agent 不支持选模型）：原样上报限流错误。
+		return firstErr
+	}
+	from := cat.Current
+	last := firstErr
+	for _, opt := range cat.Options {
+		if opt.Value == from {
+			continue // 跳过刚刚被限流的那个
+		}
+		if err := a.SetModel(ctx, sessionID, opt.Value); err != nil {
+			a.logger.Warn("acp rate-limit failover: switch model failed",
+				zap.String("session", sessionID), zap.String("model", opt.Name), zap.Error(err))
+			continue
+		}
+		err := a.promptOnce(ctx, sessionID, prompt)
+		if err == nil {
+			a.logger.Warn("acp rate limited; switched model and retried successfully",
+				zap.String("session", sessionID),
+				zap.String("from", from), zap.String("to", opt.Value))
+			return nil
+		}
+		if !IsRateLimitError(err) {
+			// 换了桶还是别的错（如上下文超限）：就此打住，把真实错误报上去，
+			// 继续换下去只会掩盖问题。
+			return err
+		}
+		a.logger.Warn("acp rate-limit failover: candidate also limited",
+			zap.String("session", sessionID), zap.String("model", opt.Value))
+		last = err
+		if a.toolCalls.Load() != toolsBefore {
+			return last // 这一轮已经动过手了，停
+		}
+	}
+	return last
 }
 
 // OnContentDelta 注册内容增量回调。
@@ -826,15 +1001,22 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		}
 	case u.ToolCall != nil:
 		// 新工具调用开始（M3 映射 EventToolUse）
+		// 计数用于限流重试的安全闸门：本函数被调用就说明模型已经动手了
+		// （发起工具调用/给出状态更新都算）。见 toolCalls 字段注释。
+		a.toolCalls.Add(1)
 		toolCallID := string(u.ToolCall.ToolCallId)
 		rawIn := rawAnyToJSON(u.ToolCall.RawInput)
-		// 记下入参供审批时补齐命令原文（见 toolInputs 注释）。
-		a.rememberToolInput(toolCallID, rawIn)
+		// 注意类型差异：ToolCall.Title 是 string，而 ToolCallUpdate.Title 是
+		// *string（SDK 两处不一致），故取值写法不同，别照抄。
+		title := u.ToolCall.Title
+		// 记下**工具名 + 入参**供审批时补齐（见 toolInputs 注释）。
+		a.rememberToolInput(toolCallID, title, rawIn)
 		// 「收到了什么」必须可观测：审批回填失败时，靠这条日志能立刻区分
-		// "tool_call 压根没来" vs "来了但晚了"。
-		if len(rawIn) > 0 {
-			a.logger.Debug("acp tool call input remembered",
+		// "tool_call 压根没来" vs "来了但晚了"，以及"没记到工具名"。
+		if title != "" || len(rawIn) > 0 {
+			a.logger.Debug("acp tool call remembered",
 				zap.String("tool_call_id", toolCallID),
+				zap.String("title", title),
 				zap.Int("bytes", len(rawIn)),
 			)
 		}
@@ -853,11 +1035,16 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		}
 	case u.ToolCallUpdate != nil:
 		// 工具调用状态变更（M3 映射 EventToolResult）
+		a.toolCalls.Add(1)
 		toolCallID := string(u.ToolCallUpdate.ToolCallId)
 		rawIn := rawAnyToJSON(u.ToolCallUpdate.RawInput)
-		// 状态变更里也常带 RawInput（部分 agent 只在 update 里给入参，如 dsh 的
+		updTitle := ""
+		if u.ToolCallUpdate.Title != nil {
+			updTitle = *u.ToolCallUpdate.Title
+		}
+		// 状态变更里也常带 RawInput/Title（部分 agent 只在 update 里给，如 dsh 的
 		// pwsh 调用）；同样记下。空值不覆盖已有记录，见 rememberToolInput。
-		a.rememberToolInput(toolCallID, rawIn)
+		a.rememberToolInput(toolCallID, updTitle, rawIn)
 		a.cbMu.RLock()
 		fn := a.onToolCall
 		a.cbMu.RUnlock()
@@ -885,44 +1072,68 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 	return nil
 }
 
-// rememberToolInput 记下一次工具调用的入参，供后续审批补齐命令原文（见 toolInputs）。
+// toolCallMemo 一次 tool_call 记住的东西：工具名 + 入参。
+//
+// 两者必须一起存：审批请求里 dsh **两样都不发**，而分级链的第一道门
+// （applyToolKindFix）按工具名查表、第二道门（DowngradeReadonlyPermission）
+// 按命令原文判定 —— 少任何一样，整条链就退化成"一律 L2 弹卡"。
+type toolCallMemo struct {
+	// Title 是工具名（dsh 的 tool_call.title = event.data.name，如 "pwsh"）。
+	Title string
+	// RawInput 是工具入参 JSON（含 shell 命令的 command 字段）。
+	RawInput json.RawMessage
+}
+
+// rememberToolInput 记下一次工具调用的**工具名与入参**，供后续审批补齐。
 //
 // **空入参不覆盖已有记录**：同一个 toolCallId 会先来 ToolCall（带完整入参）再来
 // 若干 ToolCallUpdate（多数只带状态，RawInput 为空）。若用空值覆盖，就会把先到的
 // 命令原文抹掉 —— 那时审批恰好排在 update 之后，就会拿不到命令。
+// Title 同理：空 title 不覆盖已记下的名字。
 //
 // toolCallId 为空时同样丢弃：没有键就无法关联，存了也永远查不到。
 //
 // 写入后**广播**唤醒可能正在等这个 id 的审批方（见 toolInputWait）。
-func (a *ACPAgent) rememberToolInput(toolCallID string, raw json.RawMessage) {
-	if toolCallID == "" || len(raw) == 0 {
+func (a *ACPAgent) rememberToolInput(toolCallID, title string, raw json.RawMessage) {
+	if toolCallID == "" {
 		return
+	}
+	title = strings.TrimSpace(title)
+	if title == "" && len(raw) == 0 {
+		return // 两样都空：没什么可记的，也别无谓地唤醒等待方
 	}
 	a.toolInputsMu.Lock()
 	defer a.toolInputsMu.Unlock()
 	if a.toolInputs == nil { // 兜底：未经构造器直接 new(ACPAgent) 的单测
-		a.toolInputs = make(map[string]json.RawMessage)
+		a.toolInputs = make(map[string]toolCallMemo)
 	}
-	a.toolInputs[toolCallID] = raw
+	memo := a.toolInputs[toolCallID]
+	if title != "" {
+		memo.Title = title
+	}
+	if len(raw) > 0 {
+		memo.RawInput = raw
+	}
+	a.toolInputs[toolCallID] = memo
 	a.initToolInputCond()
 	a.toolInputCond.Broadcast()
 }
 
-// toolInput 查一个 toolCallId 的入参。第二个返回值为 false 表示"没记过"——
+// toolInput 查一个 toolCallId 记录的工具名与入参。第二个返回值为 false 表示"没记过"——
 // 调用方据此维持保守判级，**不要**把它当成"这条命令没有副作用"。
 //
 // 本函数**只看当下**，不等待；需要等待请用 toolInputWait。
-func (a *ACPAgent) toolInput(toolCallID string) (json.RawMessage, bool) {
+func (a *ACPAgent) toolInput(toolCallID string) (toolCallMemo, bool) {
 	if toolCallID == "" {
-		return nil, false
+		return toolCallMemo{}, false
 	}
 	a.toolInputsMu.Lock()
 	defer a.toolInputsMu.Unlock()
-	raw, ok := a.toolInputs[toolCallID]
-	if !ok || len(raw) == 0 {
-		return nil, false
+	memo, ok := a.toolInputs[toolCallID]
+	if !ok || (memo.Title == "" && len(memo.RawInput) == 0) {
+		return toolCallMemo{}, false
 	}
-	return raw, true
+	return memo, true
 }
 
 // toolInputWaitTimeout 审批侧等待 tool_call 入参的上限。
@@ -935,7 +1146,7 @@ func (a *ACPAgent) toolInput(toolCallID string) (json.RawMessage, bool) {
 // 仍然弹卡让人判断。宁可多问一次，也不猜。
 const toolInputWaitTimeout = 300 * time.Millisecond
 
-// toolInputWait 查 toolCallId 的入参，**没到就等一小会儿**（见 toolInputWaitTimeout）。
+// toolInputWait 查 toolCallId 记下的工具名与入参，**没到就等一小会儿**（见 toolInputWaitTimeout）。
 //
 // 为什么必须等：SessionUpdate（写索引）与 RequestPermission（读索引）在 pieqi
 // 内部是并发的。协议层的顺序保证（dsh 的 drainUpdates、SDK 的通知屏障）只覆盖
@@ -949,16 +1160,16 @@ const toolInputWaitTimeout = 300 * time.Millisecond
 //     醒来后重新判断条件即可。
 //
 // 返回 false 表示"等到超时也没来" —— 调用方维持保守判级。
-func (a *ACPAgent) toolInputWait(toolCallID string) (json.RawMessage, bool) {
+func (a *ACPAgent) toolInputWait(toolCallID string) (toolCallMemo, bool) {
 	if toolCallID == "" {
-		return nil, false
+		return toolCallMemo{}, false
 	}
 	a.toolInputsMu.Lock()
 
 	// 快路径：已经在索引里（绝大多数情况）。
-	if raw, ok := a.toolInputs[toolCallID]; ok && len(raw) > 0 {
+	if memo, ok := a.toolInputs[toolCallID]; ok && (memo.Title != "" || len(memo.RawInput) > 0) {
 		a.toolInputsMu.Unlock()
-		return raw, true
+		return memo, true
 	}
 
 	a.initToolInputCond()
@@ -974,21 +1185,21 @@ func (a *ACPAgent) toolInputWait(toolCallID string) (json.RawMessage, bool) {
 	defer timer.Stop()
 
 	for {
-		raw, ok := a.toolInputs[toolCallID]
-		if ok && len(raw) > 0 {
+		memo, ok := a.toolInputs[toolCallID]
+		if ok && (memo.Title != "" || len(memo.RawInput) > 0) {
 			a.toolInputsMu.Unlock()
-			return raw, true
+			return memo, true
 		}
 		// 已关闭（Close 把 toolInputs 置 nil）：不会再有新入参了，立刻返回。
 		// 缺这条判断的话，等待方会一路 Wait 到超时 —— 不影响正确性，
 		// 但会让关闭路径白等 300ms，且日志里多出误导性的超时告警。
 		if a.toolInputs == nil {
 			a.toolInputsMu.Unlock()
-			return nil, false
+			return toolCallMemo{}, false
 		}
 		if !time.Now().Before(deadline) {
 			a.toolInputsMu.Unlock()
-			return nil, false // 超时：等不到了，退回保守判级
+			return toolCallMemo{}, false // 超时：等不到了，退回保守判级
 		}
 		a.toolInputCond.Wait() // 等 Broadcast（新入参到达 或 超时唤醒）
 	}
@@ -1042,25 +1253,36 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 	// 都落 L2、都必须人工点一次。这里把**能证明只读**的命令降为 read(L0)，
 	// 命中 L0 免审不再中断。证明不了的一律维持 execute（保守侧）。
 	//
-	// 命令原文的来源有两条，顺序不能反：
-	//   1. 请求自带（qoder/claude 会把工具入参放进 RequestPermission）；
-	//   2. 请求没带时，回查本会话记下的 tool_call 入参（**dsh 走这条**：
-	//      它不发 title/kind/rawInput，但 session/update 里发过 RawInput）。
+	// 审批链要两样东西，**都**可能缺（dsh 两样都不发）：
+	//   - tool（工具名）：applyToolKindFix 按它查表（pwsh → execute）；
+	//   - rawInput（命令原文）：DowngradeReadonlyPermission 按它判档。
+	// 来源有两条，顺序不能反：
+	//   1. 请求自带（qoder/claude 会把工具名与入参放进 RequestPermission）；
+	//   2. 请求没带时，回查本会话记下的 tool_call 记录（**dsh 走这条**）。
 	// 回查是**有界等待**（toolInputWait，上限 300ms）：SessionUpdate 与
 	// RequestPermission 在 pieqi 内部并发，实测审批可能跑赢自己的 tool_call
 	// （2026-10-07 12:39:37 的 push 就是这样，卡片上没有命令）。
 	// 等不到就维持保守判级 —— 仍然弹卡，但不猜。
 	rawInput := rawAnyToJSON(params.ToolCall.RawInput)
-	backfilled := false
-	if len(rawInput) == 0 {
-		if remembered, ok := a.toolInputWait(reqID); ok {
-			rawInput = remembered
-			backfilled = true
+	backfilledInput, backfilledTitle := false, false
+	if len(rawInput) == 0 || strings.TrimSpace(title) == "" {
+		if memo, ok := a.toolInputWait(reqID); ok {
+			if len(rawInput) == 0 && len(memo.RawInput) > 0 {
+				rawInput = memo.RawInput
+				backfilledInput = true
+			}
+			// ★ 工具名同样必须回填：拿不到它就查不到映射表，
+			// 分级链第一道门直接失效（实测 2026-10-07 15:03：我自己那两条
+			// `git add; git commit` 本该 L1 免审，因 title 为空而落 L2 弹卡）。
+			if strings.TrimSpace(title) == "" && memo.Title != "" {
+				title = memo.Title
+				backfilledTitle = true
+			}
 		} else {
-			// 取不到命令原文 ⇒ 卡片上只有工具名，人无法判断批的是什么。
-			// 这条 Warn 是**可观测性**的关键：没有它，"为什么这张卡没命令"
-			// 只能靠翻协议流量反推。带上 tool/title 便于定位是哪个 agent 的哪种调用。
-			a.logger.Warn("acp permission has no command text (waited, then gave up)",
+			// 两样都没等到 ⇒ 卡片上既没工具名也没命令，人无法判断批的是什么。
+			// 这条 Warn 是**可观测性**的关键：没有它，"为什么这张卡没信息"
+			// 只能靠翻协议流量反推。
+			a.logger.Warn("acp permission has no tool/command text (waited, then gave up)",
 				zap.String("req_id", reqID),
 				zap.String("agent", a.cfg.AgentType),
 				zap.String("tool", title),
@@ -1087,11 +1309,13 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 	// 必须在第一步之后 —— 降级只认 execute，dsh 的 other 若没先被纠正，
 	// 这一步会直接 return，名字修正就白做了（顺序见 toolkind_map.go 的说明）。
 	perm = DowngradeReadonlyPermission(byName)
-	if backfilled {
-		// 回填成功的证据：没有这条日志，就无法区分"dsh 补上了命令原文"
-		// 与"本来就没命令、维持保守判级"——审批行为会变得无法解释。
-		a.logger.Debug("acp permission rawInput backfilled from tool call",
+	if backfilledInput || backfilledTitle {
+		// 回填成功的证据：没有这条日志，就无法区分"dsh 补上了工具名/命令"
+		// 与"本来就没有、维持保守判级"——审批行为会变得无法解释。
+		a.logger.Debug("acp permission backfilled from tool call",
 			zap.String("req_id", reqID),
+			zap.Bool("title", backfilledTitle),
+			zap.Bool("raw_input", backfilledInput),
 			zap.String("command", commandFromRawInput(rawInput)),
 		)
 	}

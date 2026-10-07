@@ -36,6 +36,14 @@ export interface Task {
   status: TaskStatus
   /** 执行 Agent 业务名（claude / qoder，取值见 GET /api/agents） */
   agent: string
+  /**
+   * 本任务选用的模型（**不透明选择值**，见 GET /api/agents/{agent}/models）。
+   * 空串 = 未指定，由 agent 自己的默认决定。
+   *
+   * 注意：上游限流时后端会自动切到清单里的另一个模型重试，故这里存的是**请求**的模型，
+   * 实际跑完的可能是别的（切换会打进服务日志）。
+   */
+  model: string
   /** 会话 id（claude_session_id） */
   sessionId: string
   /** 当前待决策（waiting_input 时存在） */

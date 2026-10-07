@@ -64,6 +64,19 @@ type SessionConfig struct {
 	//   - 头/参数由调用方任意填写，而这里的可信度恰恰来自"只有本进程 spawn 的
 	//     子进程才拿得到"——天然不可伪造，不需要额外鉴权或校验。
 	TaskID string
+	// Model 本任务要使用的模型（空 = 用 agent 自己的默认/pin）。
+	//
+	// 取值必须是 agent 下发的**不透明选择值**（ACP 的 SessionConfigValueId），例如 dsh 的
+	// `["magpie","workbuddy/glm-5.3-flash"]` —— 从 GET /api/agents/{name}/models 拿到后
+	// 原样回传，**不要自己拼**（拼错的下场是建会话直接失败，见 model_catalog.go 文件头）。
+	//
+	// 只有支持会话级配置的 agent（ACP 系）认这个字段；不支持的 agent 传了也无人消费。
+	// 设不上会**直接失败**，不静默退回默认模型 —— 用户明确选了模型却跑了别的，
+	// 比报错糟糕得多（同 api.resolveAgent 的取舍）。
+	//
+	// 续问路径同样要传：agent 恢复会话时用的是它自己记的"上次请求路由"，与本任务的
+	// 选择未必一致（换过模型、或上一轮被限流切过桶），必须每次显式落一次。
+	Model string
 }
 
 // PermissionOption 一个权限选项（映射 acp.PermissionOption）。

@@ -69,7 +69,7 @@ func (a *sessionBackedAdapter) NewSession(ctx context.Context, cfg SessionConfig
 	}
 	a.mu.Unlock()
 
-	sess, err := a.open(ctx, OpenParams{Agent: a.name, Cwd: cfg.Cwd, ResumeFrom: cfg.ResumeFrom, TaskID: cfg.TaskID})
+	sess, err := a.open(ctx, OpenParams{Agent: a.name, Cwd: cfg.Cwd, ResumeFrom: cfg.ResumeFrom, TaskID: cfg.TaskID, Model: cfg.Model})
 	if err != nil {
 		return "", err
 	}

@@ -310,7 +310,7 @@ func TestRememberToolInput_UpdateCarriesInput(t *testing.T) {
 // （没有键就无法关联，存了也永远查不到，只会让 map 无界增长）。
 func TestRememberToolInput_EmptyIDIgnored(t *testing.T) {
 	a := NewACPAgent(config.ACPConfig{AgentType: "dsh"}, nil)
-	a.rememberToolInput("", []byte(`{"command":"x"}`))
+	a.rememberToolInput("", "", []byte(`{"command":"x"}`))
 
 	if _, ok := a.toolInput(""); ok {
 		t.Fatal("空 toolCallId 不该被记录")

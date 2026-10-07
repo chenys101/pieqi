@@ -66,3 +66,33 @@ func (s *Server) listAgents(c *gin.Context) {
 		"default": s.effectiveDefaultAgent(),
 	})
 }
+
+// listAgentModels GET /api/agents/:name/models：该 agent 当前可选的模型清单。
+//
+// 为什么要单独一个接口、而不是塞进 GET /api/agents：取清单的代价与服务端**不能**替
+// 所有 agent 预先付 —— 清单只有 agent 自己知道（ACP 只在 session/new 的响应里下发），
+// 拿一次就要起一个 agent 进程。放这里 = 只有"用户真的选中了某个 agent"才付这份代价，
+// 且 agent 包内做了 10 分钟缓存（见 agent.ListAgentModels）。
+//
+// 三种"没有清单"的情形都返回 200 + 空 models，不算错误路径：
+//   - 该 agent 不支持会话内选模型（如 claude 的桥）→ error 为空，前端隐藏下拉框；
+//   - 探测失败（进程起不来 / 未登录）→ error 带上原因，前端可作提示但不拦创建；
+//   - 探测成功但 agent 没下发清单 → 同第一类。
+//
+// 只有"agent 名不在可选目录里"才是 400（与 POST /api/tasks 的校验口径一致）。
+func (s *Server) listAgentModels(c *gin.Context) {
+	name := c.Param("name")
+	if _, err := s.resolveAgent(name); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	cat, err := agent.ListAgentModels(c.Request.Context(), name)
+	resp := gin.H{"agent": name, "models": cat.Options}
+	if cat.Current != "" {
+		resp["current"] = cat.Current
+	}
+	if err != nil {
+		resp["error"] = err.Error()
+	}
+	c.JSON(http.StatusOK, resp)
+}

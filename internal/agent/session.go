@@ -100,6 +100,9 @@ type OpenParams struct {
 	// TaskID 透传给 SessionConfig.TaskID —— 注入 PIEQI_TASK_ID 的**唯一**来源。
 	// 空 = 非任务场景（如标题生成），此时不注入环境变量。
 	TaskID string
+	// Model 透传给 SessionConfig.Model —— 本任务要使用的模型（不透明选择值，空 = 默认）。
+	// 取值来源与语义见 SessionConfig.Model。
+	Model string
 }
 
 // SessionProvider 创建 AgentSession 的工厂（按 agent 名注册）。
