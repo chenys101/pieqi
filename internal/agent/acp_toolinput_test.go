@@ -109,26 +109,32 @@ func TestPermission_RawInputBackfilledFromToolCall(t *testing.T) {
 }
 
 // TestPermission_BackfillDrivesReadonlyDowngrade 端到端语义：
-// 回填之后 ADR-0008 的只读降级才真的生效（execute → read），
-// 这才是"dsh 的命令不再白弹卡"的直接判据。
+// 回填之后命令分档才真的生效，这才是"dsh 的命令不再白弹卡"的直接判据。
 //
-// ⚠️ 两个前提，缺一不可：
-//   1. `DowngradeReadonlyPermission` 只在 **ToolKind == "execute"** 时工作
-//      （readonly_kind.go:246）。dsh 实测发的 kind 是**空串**，见
-//      TestPermission_EmptyKindStillBlocksDowngrade；
-//   2. 命令本身要命中 `readonlyCommands` 白名单。**`git` 目前不在白名单里** ——
-//      所以本用例用 `ls`（已在白名单）验证"回填 → 降级"这条链路，
-//      git 的分档是下一步的事（扩 readonlyCommands / 单独的子命令分档表）。
+// ⚠️ 前提：`DowngradeReadonlyPermission` 只在 **ToolKind == "execute"** 时工作。
+// dsh 的 pwsh 经名字修正后正是 execute（见 toolkind_map.go），所以链路能走通。
+//
+// 本用例覆盖两条判据的协作：
+//   - git 段走 gitKindFor 分档（read/edit/execute/delete 四档）；
+//   - 非 git 段走 ADR-0008 的只读白名单（read or execute 二值）。
 func TestPermission_BackfillDrivesReadonlyDowngrade(t *testing.T) {
 	cases := []struct {
 		name     string
 		command  string
 		wantKind string
 	}{
+		// 非 git：只读白名单
 		{"白名单只读命令降级为 read", "ls -la", "read"},
 		{"白名单命令带写标志则不降级", "find . -delete", "execute"},
-		{"白名单外的命令维持 execute", "git status --porcelain", "execute"},
+		{"白名单外的命令维持 execute", "npm run build", "execute"},
 		{"复合命令含写操作则不降级", "ls -la; rm -rf build/", "execute"},
+		// git 分档（本步新增）
+		{"git 只读子命令降级为 read", "git status --porcelain", "read"},
+		{"git 本地可逆写归 edit(L1)", "git add -A", "edit"},
+		{"git 影响远端维持 execute", "git push origin main", "execute"},
+		{"git 破坏性不降级", "git reset --hard HEAD~1", "execute"},
+		{"git 只读与只读复合仍是 read", "git log --oneline | head -5", "read"},
+		{"git 只读混写则整条不降级", "git status; rm -rf build/", "execute"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

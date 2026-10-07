@@ -238,10 +238,154 @@ func DowngradeReadonlyToolKind(kind, command string) string {
 	return "read"
 }
 
-// DowngradeReadonlyPermission 对一条权限请求应用只读降级，返回（可能被改写的）请求副本。
+// ClassifyShellCommand 由一条 shell 命令求它**最严**的档位 kind。
+//
+// 与 DowngradeReadonlyToolKind（二值：read or execute）的分工：
+// 这里返回四档（read/edit/execute/delete），用于 git 这类"同一条命令
+// 里存在多个档位"的场景 —— 例如 `git status` 该免审，而 `git push` 必须弹卡，
+// 二值判断无法区分。
+//
+// 判定规则（**取整条命令里最严的那一段**）：
+//   - 含写向重定向 / 命令替换 ⇒ 直接 execute（不确定，交人工）；
+//   - 逐段：git 段用 gitKindFor 求档位；非 git 段用只读白名单判定
+//     （只读 → read；否则 → execute）；
+//   - 全程取最高档（read < edit < execute < delete）。
+//
+// 第二返回值 false 表示"无法给出可信档位"（空命令、含不安全重定向等），
+// 调用方应维持原 kind（execute/L2 弹卡）。
+//
+// ⚠️ 本函数只做**分类**，不决定放行。放行仍由 PermissionWire.tryAutoApprove
+// 按 kind 走免审名单 —— 与 ADR-0008"降级发生在分类阶段、不是放行阶段"一致。
+func ClassifyShellCommand(command string) (string, bool) {
+	cmd := strings.TrimSpace(command)
+	if cmd == "" {
+		return "", false
+	}
+	if hasUnsafeRedirection(cmd) {
+		// 写向重定向/命令替换：任意一段都可能是写操作，不猜。
+		return "", false
+	}
+
+	worst := "read"
+	seenAny := false
+	for _, seg := range splitSegments(cmd) {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		seenAny = true
+
+		kind := segmentKind(seg)
+		worst = worseKind(worst, kind)
+
+		// 已经到最严就别再看了（delete 是上限）。
+		if worst == "delete" {
+			return worst, true
+		}
+	}
+	if !seenAny {
+		return "", false
+	}
+	return worst, true
+}
+
+// segmentKind 单段的档位：git 段走 git 分档表，其余走只读白名单。
+//
+// 非 git 段只有两种结果：能证明只读 → read，否则 → execute（保守）。
+// 这是刻意的：非 git 命令（npm/docker/curl…）没有"本地可逆"的通用判据，
+// 硬造一个档位只会扩大放行面。
+func segmentKind(seg string) string {
+	words := strings.Fields(seg)
+	if len(words) == 0 {
+		return "execute"
+	}
+	// 跳过 wrapper 前缀（command/env/sudo/nice/time）后看真正的命令名，
+	// 与 isReadonlySegment 的 wrapper 处理保持一致。
+	i := 0
+	for i < len(words) {
+		w := words[i]
+		if strings.HasPrefix(w, "/dev/null") {
+			i++
+			continue
+		}
+		if strings.Contains(w, "=") && !strings.HasPrefix(w, "-") {
+			i++ // VAR=val 前缀
+			continue
+		}
+		if _, ok := commandWrappers[baseCommandName(w)]; ok {
+			i++
+			continue
+		}
+		break
+	}
+	if i >= len(words) {
+		return "execute"
+	}
+
+	name := baseCommandName(words[i])
+	if name == "git" {
+		// 从真正的命令名处**重新拼接**再交给 gitKindFor：它的入参约定是
+		// "首词必须是 git"，而这里已剥掉了 wrapper/赋值前缀
+		// （`sudo git status` 若整段传进去，words[0] 是 sudo，首词检查会失败）。
+		cmdFromGit := strings.Join(words[i:], " ")
+		if kind, ok := gitKindFor(cmdFromGit); ok {
+			return kind
+		}
+		// 不认识的 git 动作：保守 L2。
+		return "execute"
+	}
+	if isReadonlySegment(seg) {
+		return "read"
+	}
+	return "execute"
+}
+
+// kindSeverity 档位的严苛程度（数字越大越严），用于取"最严的一段"。
+var kindSeverity = map[string]int{
+	"read":        0,
+	"edit":        1,
+	"move":        1, // 同为 L1
+	"think":       0, // L0
+	"search":      0, // L0
+	"fetch":       0, // L0
+	"execute":     2,
+	"other":       2,
+	"switch_mode": 2,
+	"delete":      3,
+}
+
+// worseKind 取两个档位里更严的那个（未知档位按最严处理，保守侧）。
+func worseKind(a, b string) string {
+	sa, oka := kindSeverity[a]
+	sb, okb := kindSeverity[b]
+	if !oka {
+		return a // 不认识的档位：不擅自替换成别的
+	}
+	if !okb {
+		return b
+	}
+	if sb > sa {
+		return b
+	}
+	return a
+}
+
+// DowngradeReadonlyPermission 对一条权限请求应用命令分档，返回（可能被改写的）请求副本。
 //
 // 命令文本取自 RawInput 的 command 字段（ACP 的 ShellExecute rawInput 形态）；
 // 取不到就原样返回 —— 没有可信的命令文本就不降级。
+//
+// 两条判据，顺序与理由：
+//  1. **git 分档**（ClassifyShellCommand）：能区分 read/edit/execute/delete 四档，
+//     处理 `git status`（免审）与 `git push`（弹卡）这类同前缀不同性质的命令。
+//  2. **只读降级**（DowngradeReadonlyToolKind，ADR-0008）：二值兜底，
+//     覆盖 `ls`/`sed -n`/`grep` 等非 git 的只读命令。
+//
+// 为什么先 1 后 2：ClassifyShellCommand 更**细**，能给出 edit（L1 免审）这样的档位；
+// 而 2 只会给 read 或维持 execute。反过来先跑 2 的话，一条 `git add .`
+// 既不在只读白名单（维持 execute），也就永远拿不到它应得的 L1。
+//
+// 安全取向：两条都"证明不了就维持原 kind"（execute/L2 弹卡）。
 func DowngradeReadonlyPermission(req PermissionRequest) PermissionRequest {
 	if req.ToolKind != "execute" {
 		return req
@@ -250,6 +394,19 @@ func DowngradeReadonlyPermission(req PermissionRequest) PermissionRequest {
 	if cmd == "" {
 		return req
 	}
+
+	// ① git 分档（更细）
+	if kind, ok := ClassifyShellCommand(cmd); ok {
+		if kindSeverity[kind] < kindSeverity["execute"] {
+			// 只往**更宽**的方向改（execute → read/edit）；不把 execute 升成 delete
+			// —— 升档是"更严"，会改变前端卡片的显示强度，那是另一件事（且
+			// ClassifyShellCommand 对含重定向等不确定情况本就返回 false）。
+			req.ToolKind = kind
+		}
+		return req
+	}
+
+	// ② 只读降级兜底（含重定向/无法分档的情况）
 	if out := DowngradeReadonlyToolKind(req.ToolKind, cmd); out != req.ToolKind {
 		req.ToolKind = out
 	}
