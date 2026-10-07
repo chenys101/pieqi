@@ -55,6 +55,23 @@ type ACPAgent struct {
 	// 空值表示非任务场景，此时不注入。见 SessionConfig.TaskID 的说明。
 	taskID string
 
+	// workDir 是子进程的工作目录（= 任务的项目/worktree 目录），
+	// 在 NewSession 里于 spawn 之前落定，Start 时作为 cmd.Dir。
+	//
+	// 为什么必须设它（2026-10-07 修的 bug）：dsh 的沙箱配置是
+	// `workspaceRoot: !!js process.cwd()` —— 它把**自己的 cwd** 当作"工作区"，
+	// 工作区内的写入不需要审批、工作区外的要。而 pieqi 自身跑在 `~/.pieqi/bin`
+	// （工作区之外，见「坑 5」），若不显式设 cmd.Dir，dsh 会**继承那个 cwd**，
+	// 于是"工作区"变成了 ~/.pieqi/bin —— 结果 agent 在项目目录里
+	// `go build`、`npm run build`、写文件全被当成越界，每次都要人工审批。
+	//
+	// 设成项目目录后：项目内自由读写，项目外（别的盘、~/.pieqi 等）照旧审批，
+	// 沙箱边界仍然有效 —— 修的是"工作区指错了"，不是放宽限制。
+	//
+	// 多项目天然正确：AgentManager 按任务建会话，每个会话一个 ACPAgent 实例，
+	// workDir 各随其任务的项目走（换任务即换工作区）。
+	workDir string
+
 	// binPath 是实际 exec 的路径：由 cmdName 经 spawnNameResolver 解析而来
 	// （裸名补查常见安装落点，见 resolveSpawnName）。解析不到时等于 cmdName，
 	// 让 exec 报出标准错误。cmdName 保持"配置里写的原样"，供诊断/测试断言。
@@ -185,6 +202,24 @@ func (a *ACPAgent) initToolInputCond() {
 	if a.toolInputCond == nil {
 		a.toolInputCond = sync.NewCond(&a.toolInputsMu)
 	}
+}
+
+// acpWorkDir 校验并返回可用的子进程工作目录；不可用时返回空串（由调用方跳过 cmd.Dir）。
+//
+// 返回空串的两种情况，都**不能**设 cmd.Dir：
+//   - 未配置（非任务场景，如标题生成）；
+//   - 目录不存在或不是目录 —— exec.Cmd 对不存在的 Dir 会在 Start 时报错
+//     （"chdir ...: no such file or directory"），那会让整个会话起不来。
+//     这里宁可不设（退回继承 pieqi 的 cwd、即旧行为），也不要让 spawn 失败。
+func acpWorkDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return ""
+	}
+	return dir
 }
 
 // buildSpawnCommand 由 ACPConfig 推导 spawn 命令分词。
@@ -417,6 +452,11 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 			zap.String("configured", a.cmdName), zap.String("resolved", binPath))
 	}
 	cmd := exec.CommandContext(a.lifeCtx, binPath, a.cmdArgs...)
+	// 子进程的工作目录 = 任务的项目目录（见 acpWorkDir）。
+	// 必须在 Start 之前设，且目录必须存在，否则 exec 直接失败。
+	if dir := acpWorkDir(a.workDir); dir != "" {
+		cmd.Dir = dir
+	}
 	cmd.Stderr = newLineCollector(a.logger, "acp agent stderr")
 	// 把"我是替哪个任务在跑"注入子进程环境。这不是可选装饰：agent 里执行的
 	// shell 正是靠读它才能在自己发起的 HTTP 请求里带上 taskId（当前唯一消费者
@@ -535,6 +575,9 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 	// 而环境变量只在那一刻注入。续问路径走的是同一个已存在进程，不会重新
 	// inject，所以这里赋值对两条路径都成立（同一任务的 id 不会变）。
 	a.taskID = cfg.TaskID
+	// 工作目录同样必须在 spawn 前落定：它决定子进程的 cwd，
+	// 也就是 dsh 沙箱眼里的 workspaceRoot（见 acpWorkDir 的完整说明）。
+	a.workDir = cfg.Cwd
 	if err := a.ensureStarted(ctx); err != nil {
 		return "", err
 	}
