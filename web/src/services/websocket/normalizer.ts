@@ -7,7 +7,7 @@ import type {
   TaskSummaryDto,
   TaskEventDto,
 } from '@/types/api'
-import type { AgentEvent, AgentEventType, AgentDelta, RewindPayload } from '@/types/event'
+import type { AgentEvent, AgentEventType, AgentDelta, RewindPayload, ModelSwitchPayload } from '@/types/event'
 import type { Task } from '@/types/task'
 import { adaptTask } from '@/services/api/client'
 import { persistentEventId } from '@/utils/event'
@@ -59,6 +59,7 @@ const EVENT_TYPE_MAP: Record<TaskEventDto['type'], AgentEventType> = {
   tool_result: 'tool_result',
   status: 'status',
   rewind: 'rewind',
+  model_switch: 'model_switch',
 }
 
 /** rewind 事件的 input 载荷（后端 rewindEventPayload） */
@@ -78,6 +79,25 @@ function adaptRewindInput(raw: unknown): RewindPayload | undefined {
     restored: Array.isArray(input.restored) ? input.restored : [],
     previewStopped: !!input.preview_stopped,
   }
+}
+
+/** model_switch 事件的 input 载荷（后端 model.ModelSwitchPayload） */
+interface ModelSwitchInput {
+  from?: string
+  to?: string
+}
+
+/**
+ * 校验并提取 model_switch input 载荷；不合法返回 undefined（降级为纯文本展示）。
+ *
+ * `to` 缺失即视为不合法：切换事件没有目标模型就说明不了"换到了什么"，
+ * 与其渲染一条含糊的记录，不如退回后端写好的 Text。
+ */
+function adaptModelSwitchInput(raw: unknown): ModelSwitchPayload | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const input = raw as ModelSwitchInput
+  if (typeof input.to !== 'string') return undefined
+  return { from: typeof input.from === 'string' ? input.from : '', to: input.to }
 }
 
 /**
@@ -107,6 +127,8 @@ export function normalizeEvents(taskId: string, events: TaskEventDto[] | undefin
         isError: ev.is_error,
         // rewind 事件：结构化载荷（to_turn / restored / preview_stopped）
         rewind: ev.type === 'rewind' ? adaptRewindInput(ev.input) : undefined,
+        // model_switch 事件：结构化载荷（from / to 均为不透明选择值）
+        modelSwitch: ev.type === 'model_switch' ? adaptModelSwitchInput(ev.input) : undefined,
       },
     }
   })

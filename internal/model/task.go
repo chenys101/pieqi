@@ -101,14 +101,27 @@ type Intervention struct {
 type TaskEventType string
 
 const (
-	EventText       TaskEventType = "text"        // claude 的文本输出(思考/回答)
-	EventUser       TaskEventType = "user"        // 用户提交的 prompt/续问（前端渲染为右对齐气泡）
-	EventThinking   TaskEventType = "thinking"    // claude 的 thinking 块(推理过程)
-	EventToolUse    TaskEventType = "tool_use"    // claude 发起的工具调用
-	EventToolResult TaskEventType = "tool_result" // 工具执行结果
-	EventStatus     TaskEventType = "status"      // 状态变更(进入 waiting_input 等)
-	EventRewind     TaskEventType = "rewind"      // 用户回退代码（Feedback P0）：Input 载结构化载荷，Text 放人读摘要
+	EventText        TaskEventType = "text"         // claude 的文本输出(思考/回答)
+	EventUser        TaskEventType = "user"         // 用户提交的 prompt/续问（前端渲染为右对齐气泡）
+	EventThinking    TaskEventType = "thinking"     // claude 的 thinking 块(推理过程)
+	EventToolUse     TaskEventType = "tool_use"     // claude 发起的工具调用
+	EventToolResult  TaskEventType = "tool_result"  // 工具执行结果
+	EventStatus      TaskEventType = "status"       // 状态变更(进入 waiting_input 等)
+	EventRewind      TaskEventType = "rewind"       // 用户回退代码（Feedback P0）：Input 载结构化载荷，Text 放人读摘要
+	EventModelSwitch TaskEventType = "model_switch" // 会话内切换模型：Input 载 {from,to}，Text 放人读摘要
 )
+
+// ModelSwitchPayload 是 EventModelSwitch 的 Input 结构化载荷。
+//
+// From/To 都是 agent 下发的**不透明选择值**（如 ["magpie","workbuddy/glm-5.3-flash"]），
+// 原样存取 —— 前端要显示人读名时拿它去比对 GET /api/agents/{agent}/models 的清单，
+// **不要**在这里解析或拼串（拼出来的值 agent 认不出，见 model_catalog.go 顶部）。
+//
+// From 为空表示"此前用的是 agent 自己的默认路由"，不是"切到默认"。
+type ModelSwitchPayload struct {
+	From string `json:"from,omitempty"`
+	To   string `json:"to"`
+}
 
 // TaskEvent 执行流中的一个事件,按时间顺序追加到 Task.Events。
 // 前端详情视图按 Seq 顺序渲染,实时展示 claude code 执行过程。

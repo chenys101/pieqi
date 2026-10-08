@@ -336,12 +336,19 @@ func (tr *TaskRunner) Start(ctx context.Context, task *model.Task) {
 // 等当前轮收尾后再跑。重复提交/连发两条因此不再报错、更不再互撞把任务打死 —— 只要
 // 队列还在，任何并发提交都只有"排队"一种结果，不看时序。
 //
-// model 是本轮要用的模型（不透明选择值，空 = 沿用会话当前路由）。它是**按轮**的，
-// 只影响这一轮，不落库 —— 用户可以在会话里逐条消息换模型（"发送提示词时选择模型"）。
+// model 是本轮要用的模型（不透明选择值）。空 = 沿用**会话当前路由**（t.Model，
+// 即 POST /api/tasks/:id/model 设过的那个）；它本身是**按轮**的覆盖，只影响这一轮、
+// 不落库 —— 用户可以在会话里逐条消息换模型（"发送提示词时选择模型"）。
 func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
 	t, ok := tr.store.Get(taskID)
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
+	}
+	// per-turn 没指定就回落到会话当前路由 —— 否则会话级切换（model_switch.go 改了
+	// t.Model）对续问这一轮完全没有作用：空串一路传到 ACP 就是"什么都不设"，
+	// agent 继续用它自己记住的旧路由，界面显示已切换而实际没换。
+	if turnModel == "" {
+		turnModel = t.Model
 	}
 	// 路径 B 的 choice waiting_input 也可 resume；路径 A 的 approval waiting_input 不行
 	// （那是在等一个决策，不是等一轮新输入）。

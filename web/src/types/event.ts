@@ -13,6 +13,7 @@ export type AgentEventType =
   | 'tool_result' // 工具结果
   | 'status' // 状态变更
   | 'rewind' // 用户回退代码（Feedback P0）
+  | 'model_switch' // 会话内切换模型（留痕，后端 model_switch.go）
   | 'completed' // 会话完成
   | 'error' // 错误
 
@@ -21,6 +22,19 @@ export interface RewindPayload {
   toTurn: number
   restored: string[]
   previewStopped: boolean
+}
+
+/**
+ * model_switch 事件的结构化载荷（后端 input 字段归一化产物）。
+ *
+ * from/to 都是 agent 下发的**不透明选择值**，前端只用于比对清单换人读名，
+ * **不得解析或拼接**（后端 model_catalog.go 有同样的纪律与原因）。
+ */
+export interface ModelSwitchPayload {
+  /** 此前用的模型；空串 = 此前用 agent 默认路由 */
+  from: string
+  /** 切换到的模型；空串 = 交还 agent 默认路由 */
+  to: string
 }
 
 export interface AgentEventPayload {
@@ -32,6 +46,8 @@ export interface AgentEventPayload {
   isError?: boolean
   /** 仅 rewind 事件填充 */
   rewind?: RewindPayload
+  /** 仅 model_switch 事件填充 */
+  modelSwitch?: ModelSwitchPayload
 }
 
 export interface AgentEvent {

@@ -23,10 +23,14 @@ const emit = defineEmits<{ 'update:modelValue': [value: string]; submit: [] }>()
 
 const appStore = useAppStore()
 
-// 动作按钮（发送/中止/创建）嵌在输入框内部右下角（PC 与移动端同一套结构）。
+// 动作按钮（发送/中止/创建/模型选择器）嵌在输入框内部右下角（PC 与移动端同一套结构）。
 // 只有真传了 #actions 才让出底部空间，否则空一块 padding 会让输入框显得松垮。
+// #lead 是同一行的**左侧**插槽（模型选择器）：与 #actions 共用一行，
+// 所以只要 lead 或 actions 任一存在就要让出底部 padding。
 const slots = useSlots()
 const hasActions = computed(() => !!slots.actions)
+const hasLead = computed(() => !!slots.lead)
+const hasFooter = computed(() => hasActions.value || hasLead.value)
 
 // 只声明用得到的那一项：Textarea 通过 defineExpose 交出内部 textarea
 const taRef = ref<{ el: HTMLTextAreaElement | null } | null>(null)
@@ -161,18 +165,21 @@ watch(matches, (m) => {
       :disabled="disabled"
       :resizable="false"
       :aria-label="ariaLabel"
-      :class="hasActions ? 'pb-12' : undefined"
+      :class="hasFooter ? 'pb-11' : undefined"
       @update:model-value="onInput"
       @keydown="onKeydown"
       @blur="onBlur"
     />
-    <!-- 右下角动作区：整条 pointer-events-none，只有按钮本身可点，
-         让出的底部 padding 仍然能点进 textarea -->
+    <!-- 底部动作行：整条 pointer-events-none，只有插槽内容本身可点，
+         让出的底部 padding 仍然能点进 textarea。
+         justify-between：模型选择器在左、发送/中止在右，两者同处一行。 -->
     <div
-      v-if="hasActions"
-      class="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center justify-end gap-1.5 px-2 pb-2"
+      v-if="hasFooter"
+      class="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center gap-1.5 px-2 pb-2"
+      :class="hasLead ? 'justify-between' : 'justify-end'"
       data-testid="composer-actions"
     >
+      <slot name="lead" />
       <slot name="actions" />
     </div>
     <!-- 斜杠补全菜单（贴输入框上方） -->

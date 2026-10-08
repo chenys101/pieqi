@@ -94,6 +94,20 @@ export async function intervene(taskId: string, p: IntervenePayload): Promise<vo
   await request(`/tasks/${encodeURIComponent(taskId)}/intervene`, { method: 'POST', body })
 }
 
+/**
+ * POST /api/tasks/:id/model：会话内切换模型（落库 + 时间线留痕）。
+ *
+ * model 是 agent 下发的**不透明串**，原样回传（空串 = 交还 agent 默认路由）。
+ * 与 intervene 的 per-turn model 分工：那个只影响下一轮且不落库，这个改会话默认路由
+ * 并在时间线上留一条 model_switch 记录。
+ *
+ * 运行中会返回 409（这一轮的模型已定死）—— 调用方要把这个错误显示出来，
+ * 而不是静默失败让人以为已经切换。
+ */
+export async function setTaskModel(taskId: string, model: string): Promise<void> {
+  await request(`/tasks/${encodeURIComponent(taskId)}/model`, { method: 'POST', body: { model } })
+}
+
 /** POST /api/tasks/:id/cancel */
 export async function cancelTask(taskId: string): Promise<void> {
   await request(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST', body: {} })

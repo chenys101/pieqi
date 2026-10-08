@@ -96,6 +96,39 @@ describe('normalizeEvents', () => {
     expect(ev.payload.text).toBe('再跑一次')
   })
 
+  it('model_switch：归一为独立类型并取出 from/to（不透明串原样透传）', () => {
+    const [ev] = normalizeEvents('t1', [
+      {
+        seq: 1,
+        type: 'model_switch',
+        text: '模型切换：X → Y',
+        input: { from: '["magpie","a"]', to: '["magpie","b"]' },
+        at: '2026-01-01T00:00:00Z',
+      },
+    ])
+    expect(ev.type).toBe('model_switch')
+    // 前端只拿它去比对清单换人读名，绝不解析/重组这个串
+    expect(ev.payload.modelSwitch).toEqual({ from: '["magpie","a"]', to: '["magpie","b"]' })
+    // 人读摘要是后端写好的，载荷缺失时兜底显示
+    expect(ev.payload.text).toBe('模型切换：X → Y')
+  })
+
+  it('model_switch：from 缺失（此前用 agent 默认）补空串，不当成非法载荷', () => {
+    const [ev] = normalizeEvents('t1', [
+      { seq: 1, type: 'model_switch', input: { to: '["magpie","b"]' }, at: '2026-01-01T00:00:00Z' },
+    ])
+    expect(ev.payload.modelSwitch).toEqual({ from: '', to: '["magpie","b"]' })
+  })
+
+  it('model_switch：to 缺失即载荷非法 → 降级为纯文本（不编造"换到了什么"）', () => {
+    const [ev] = normalizeEvents('t1', [
+      { seq: 1, type: 'model_switch', text: '模型切换：X → Y', input: { from: 'a' }, at: '2026-01-01T00:00:00Z' },
+    ])
+    expect(ev.type).toBe('model_switch')
+    expect(ev.payload.modelSwitch).toBeUndefined()
+    expect(ev.payload.text).toBe('模型切换：X → Y')
+  })
+
   it('空 events 返回空数组', () => {
     expect(normalizeEvents('t1', undefined)).toEqual([])
     expect(normalizeEvents('t1', [])).toEqual([])

@@ -187,6 +187,9 @@ func (s *Server) Register(r gin.IRouter) {
 		api.GET("/tasks/:id", s.getTask)
 		api.POST("/tasks", s.createTask)
 		api.POST("/tasks/:id/intervene", s.intervene)
+		// 会话内切换模型：落库 + 追加一条 model_switch 事件（时间线上的切换记录）。
+		// 与 intervene 的 per-turn model 分工见 model_switch.go 顶部。
+		api.POST("/tasks/:id/model", s.setTaskModel)
 		api.POST("/tasks/:id/cancel", s.cancelTask)
 		api.DELETE("/tasks/:id", s.deleteTask)
 		// Feedback P0（p0-design.md §5）：总览 / Diff / Rewind / Preview

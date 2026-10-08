@@ -8,6 +8,7 @@ import ThinkingBlock from './ThinkingBlock.vue'
 import ToolCard from './ToolCard.vue'
 import ToolResultCard from './ToolResultCard.vue'
 import RewindCard from '@/features/feedback/components/RewindCard.vue'
+import ModelSwitchNote from './ModelSwitchNote.vue'
 
 defineProps<{ event: AgentEvent }>()
 </script>
@@ -35,6 +36,8 @@ defineProps<{ event: AgentEvent }>()
   </div>
   <!-- 用户回退代码（Feedback P0）：黄色卡片，时间线留痕 -->
   <RewindCard v-else-if="event.type === 'rewind'" :event="event" />
+  <!-- 会话内切换模型：灰色单行留痕（不抢戏，但可回溯"这一轮跑在哪个模型上"） -->
+  <ModelSwitchNote v-else-if="event.type === 'model_switch'" :event="event" />
   <div
     v-else-if="event.type === 'error'"
     class="event-enter rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-sm text-error"

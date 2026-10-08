@@ -171,8 +171,9 @@ describe('InterveneInput', () => {
     await type(host, '补充一句')
     expect(send().disabled).toBe(false)
     send().click()
-    // 第二个参数是本轮模型：没选 = 空串 = 沿用会话当前路由
-    expect(onSend).toHaveBeenCalledWith('补充一句', '')
+    // 模型已改为**会话级切换**（独立 emit），send 只带文本 ——
+    // 「这一轮用哪个模型」不再随发送走，见 ModelSwitchNote 的注释
+    expect(onSend).toHaveBeenCalledWith('补充一句')
   })
 
   it('canSend=false 时不可发送（决策横幅未就绪）', async () => {
@@ -181,48 +182,132 @@ describe('InterveneInput', () => {
     expect((host.querySelector('button[aria-label="发送"]') as HTMLButtonElement).disabled).toBe(true)
   })
 
-  // ---- 本轮模型选择器：只在"下一发送真会走 Resume"时出现 ----
-  // agent 下发的是**不透明串**（dsh 是 JSON.stringify([provider,model])），前端只搬运。
-  const MODELS = [
-    { value: '["magpie","workbuddy/x"]', name: 'X', group: 'magpie' },
-    { value: '["magpie","workbuddy/y"]', name: 'Y', group: 'magpie', description: '更强但更贵' },
-  ]
+// ---- 模型选择器：嵌在输入框内，自下而上弹层，会话级切换 ----
+// agent 下发的是**不透明串**（dsh 是 JSON.stringify([provider,model])），前端只搬运。
+const MODELS = [
+  { value: '["magpie","workbuddy/x"]', name: 'X', group: 'magpie' },
+  { value: '["magpie","workbuddy/y"]', name: 'Y', group: 'magpie', description: '更强但更贵' },
+]
 
-  it('续问态给出「本轮模型」选择器，默认沿用当前，清单按分组渲染', () => {
-    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
-    const sel = host.querySelector('select[aria-label="本轮模型"]') as HTMLSelectElement
-    expect(sel).not.toBeNull()
-    expect(sel.value).toBe('') // 默认不改变现状
-    expect([...sel.querySelectorAll('optgroup')].map((g) => g.getAttribute('label'))).toEqual(['magpie'])
-    expect([...sel.querySelectorAll('option')].map((o) => o.value)).toEqual([
-      '',
-      '["magpie","workbuddy/x"]',
-      '["magpie","workbuddy/y"]',
-    ])
+/** 打开弹层（点触发器） */
+async function openPicker(host: HTMLElement) {
+  ;(host.querySelector('[data-testid="model-picker-trigger"]') as HTMLButtonElement).click()
+  await nextTick()
+}
+const pickerPopup = (host: HTMLElement) => host.querySelector('[data-testid="model-picker-popup"]')
+
+it('选择器嵌在输入框内、与发送按钮同一行（#lead 插槽）', async () => {
+  const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
+  const trigger = host.querySelector('[data-testid="model-picker-trigger"]')!
+  const send = host.querySelector('button[aria-label="发送"]')!
+  // 结构判据：与发送按钮共用 PromptInput 的底部动作行 —— 即"嵌在框内"
+  expect(trigger.closest('[data-testid="composer-actions"]')).toBe(send.closest('[data-testid="composer-actions"]'))
+  // 有 lead 时该行必须两端对齐，否则模型选择器会被 justify-end 推到右边和发送按钮挤一起
+  const row = host.querySelector('[data-testid="composer-actions"]')!
+  expect(row.className).toContain('justify-between')
+  // 整行 pointer-events-none，所以触发器要自己把事件打开，否则点不动
+  expect(trigger.closest('[data-testid="model-picker"]')!.className).toContain('pointer-events-auto')
+})
+
+it('触发器显示会话当前模型的人读名（不是不透明串）', () => {
+  const { host } = mount(InterveneInput, {
+    canCancel: false,
+    canSend: true,
+    models: MODELS,
+    currentModel: MODELS[0].value,
   })
+  const trigger = host.querySelector('[data-testid="model-picker-trigger"]')!
+  expect(trigger.textContent).toContain('X')
+  expect(trigger.textContent).not.toContain('magpie')
+  expect(trigger.getAttribute('aria-label')).toContain('X')
+})
 
-  it('选中模型后 emit 的第二个参数就是那个不透明串（原样搬运，不解析）', async () => {
-    const onSend = vi.fn()
-    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS, onSend })
-    const sel = host.querySelector('select[aria-label="本轮模型"]') as HTMLSelectElement
-    sel.value = MODELS[1].value
-    sel.dispatchEvent(new Event('change'))
-    await nextTick()
+it('弹层自下而上弹出（bottom-full）且贴着输入框上沿', async () => {
+  const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
+  expect(pickerPopup(host)).toBeNull()
+  await openPicker(host)
+  const popup = pickerPopup(host)!
+  expect(popup.className).toContain('bottom-full') // 向上展开，不是向下
+  expect(popup.className).toContain('mb-1') // 与触发器之间留缝
+})
 
-    await type(host, '换模型跑')
-    ;(host.querySelector('button[aria-label="发送"]') as HTMLButtonElement).click()
-    expect(onSend).toHaveBeenCalledWith('换模型跑', MODELS[1].value)
+it('移动端：限高 60dvh + 内部滚动 + 底部安全区内边距 + 每项 44px 命中区', async () => {
+  const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
+  await openPicker(host)
+  const list = pickerPopup(host)!.querySelector('[role="listbox"]') as HTMLElement
+  // ① 小屏上不能盖满整屏：限高后内部滚动
+  expect(list.className).toContain('max-h-[min(60dvh,20rem)]')
+  expect(list.className).toContain('overflow-y-auto')
+  expect(list.className).toContain('overscroll-contain') // 滚到底不带动背后的时间线
+  // ② iPhone 底部横条 / Home 指示器不压住最后一项
+  expect(list.className).toContain('pb-[env(safe-area-inset-bottom)]')
+  // ③ 触控最小命中区 44px
+  for (const opt of pickerPopup(host)!.querySelectorAll('[role="option"]'))
+    expect(opt.className, '选项触控区不足 44px').toContain('min-h-11')
+})
+
+it('清单按分组渲染；选中某项 emit 的是那个不透明串（原样搬运，不解析）', async () => {
+  const onSwitch = vi.fn()
+  const { host } = mount(InterveneInput, {
+    canCancel: false,
+    canSend: true,
+    models: MODELS,
+    onSwitchModel: onSwitch,
   })
+  await openPicker(host)
+  expect(pickerPopup(host)!.textContent).toContain('magpie') // 分组标题
+  expect(pickerPopup(host)!.textContent).toContain('更强但更贵') // 选项说明
 
-  it('该 agent 没有清单 → 不摆选择器（不选模型必须仍能续问）', () => {
-    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: [] })
-    expect(host.querySelector('select[aria-label="本轮模型"]')).toBeNull()
-  })
+  const opt = [...pickerPopup(host)!.querySelectorAll('[role="option"]')].find(
+    (o) => o.textContent!.includes('Y'),
+  ) as HTMLButtonElement
+  opt.click()
+  await nextTick()
+  expect(onSwitch).toHaveBeenCalledWith(MODELS[1].value)
+  // 选中即关闭弹层（点完还杵着会挡住继续看时间线）
+  expect(pickerPopup(host)).toBeNull()
+})
 
-  it('运行中不摆选择器：那一态的后端路径根本不看这个字段', () => {
-    const { host } = mount(InterveneInput, { canCancel: true, canSend: false, models: MODELS })
-    expect(host.querySelector('select[aria-label="本轮模型"]')).toBeNull()
+it('「Agent 默认」= 清空选择（emit 空串，交还 agent 路由）', async () => {
+  const onSwitch = vi.fn()
+  const { host } = mount(InterveneInput, {
+    canCancel: false,
+    canSend: true,
+    models: MODELS,
+    currentModel: MODELS[0].value,
+    onSwitchModel: onSwitch,
   })
+  await openPicker(host)
+  ;(host.querySelector('[data-testid="model-picker-default"]') as HTMLButtonElement).click()
+  await nextTick()
+  expect(onSwitch).toHaveBeenCalledWith('')
+})
+
+it('该 agent 没有清单：触发器仍在，弹层里说明原因（不是静默消失）', async () => {
+  const { host } = mount(InterveneInput, {
+    canCancel: false,
+    canSend: true,
+    models: [],
+    modelsLoaded: true,
+  })
+  // 触发器必须还在：整个藏起来会让用户以为功能不存在
+  expect(host.querySelector('[data-testid="model-picker-trigger"]')).not.toBeNull()
+  await openPicker(host)
+  expect(host.querySelector('[data-testid="model-picker-empty"]')!.textContent).toContain('不提供可选模型')
+  // 弹层外另有一句说明（弹层关着时它才有出处）
+  expect(host.querySelector('[data-testid="composer-model-unsupported"]')).not.toBeNull()
+})
+
+it('运行中禁用切换（这一轮的模型已定死），不摆一个按了没用的开关', () => {
+  const { host } = mount(InterveneInput, {
+    canCancel: true,
+    canSend: false,
+    models: MODELS,
+    switchDisabled: true,
+  })
+  const trigger = host.querySelector('[data-testid="model-picker-trigger"]') as HTMLButtonElement
+  expect(trigger.disabled).toBe(true)
+})
 })
 
 /** 带 #actions 的 PromptInput（动作按钮嵌在输入框内右下角） */
@@ -232,6 +317,19 @@ const WithActions = defineComponent({
       PromptInput,
       { modelValue: 'x' },
       { actions: () => h('button', { class: 'pointer-events-auto', 'aria-label': '创建任务' }, '飞') },
+    ),
+})
+
+/** 带 #lead 的 PromptInput（模型选择器嵌在输入框内左下角，与动作按钮同一行） */
+const WithLead = defineComponent({
+  render: () =>
+    h(
+      PromptInput,
+      { modelValue: 'x' },
+      {
+        lead: () => h('button', { class: 'pointer-events-auto', 'data-testid': 'lead-btn' }, '模'),
+        actions: () => h('button', { class: 'pointer-events-auto', 'aria-label': '发送' }, '飞'),
+      },
     ),
 })
 
@@ -248,8 +346,19 @@ describe('输入框内嵌动作按钮（PC 与移动端同一套 DOM）', () => 
   })
 
   it('有动作区时 textarea 让出底部空间，没有则不留空 padding', () => {
-    expect(ta(mount(WithActions).host).className).toContain('pb-12')
+    expect(ta(mount(WithActions).host).className).toContain('pb-11')
     expect(ta(mount(PromptInput, { modelValue: '' }).host).className).not.toContain('pb-')
+  })
+
+  it('只有 #lead（模型选择器）时也让出底部空间，且该行两端对齐', () => {
+    const { host } = mount(WithLead)
+    expect(ta(host).className).toContain('pb-11')
+    const row = host.querySelector('[data-testid="composer-actions"]')!
+    expect(row.className).toContain('justify-between')
+    // 结构判据：lead 与 actions 同处一行
+    const lead = host.querySelector('[data-testid="lead-btn"]')!
+    expect(lead.parentElement).toBe(row)
+    expect(row.children.length).toBe(2)
   })
 
   it('详情页发送按钮同样嵌在框内（与新建任务页一致，不按断点分两套）', () => {

@@ -7,6 +7,7 @@ import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Select from '@/components/ui/Select.vue'
 import PromptInput from '@/features/session/components/PromptInput.vue'
+import ModelPicker from '@/features/session/components/ModelPicker.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useTaskStore } from '@/stores/task'
 import { useSessionStore } from '@/stores/session'
@@ -40,26 +41,15 @@ const projects = computed(() => taskStore.recentProjects)
 /** 当前选中的 agent 目录项（展示 transport / 说明用） */
 const selectedAgent = computed(() => agentStore.byId(agent.value))
 
-/** 当前 agent 的可选模型（未加载/不支持时为空数组 → 不显示下拉框） */
+/** 当前 agent 的可选模型（未加载/不支持时为空数组） */
 const models = computed(() => agentStore.modelsOf(agent.value))
-const modelsLoading = computed(() => !!agentStore.modelsLoading[agent.value])
+/**
+ * 清单已尝试加载过（含"支持但为空"）。
+ * 用来区分「还在读」与「确实没有」—— 否则会先闪一句"不支持选择模型"再冒出下拉框。
+ */
+const modelsLoaded = computed(() => !!agentStore.modelsLoaded[agent.value])
 
-/** 按分组整理模型（dsh 按 provider 分组；无分组信息时归入无名组，直接平铺渲染） */
-const modelGroups = computed(() => {
-  const out: { name: string; options: { value: string; name: string }[] }[] = []
-  for (const m of models.value) {
-    const name = m.group || ''
-    let g = out.find((x) => x.name === name)
-    if (!g) {
-      g = { name, options: [] }
-      out.push(g)
-    }
-    g.options.push({ value: m.value, name: m.name })
-  }
-  return out
-})
-
-/** 选中模型的说明（仅直接选中的那个有；"Agent 默认"没有） */
+// 选中模型的说明（仅直接选中的那个有；"Agent 默认"没有）
 const selectedModelHint = computed(() => models.value.find((m) => m.value === model.value)?.description || '')
 
 // 换 agent 就是换一整套模型清单 ⇒ 已选模型必然失效，必须清空再按需拉新清单。
@@ -188,28 +178,11 @@ async function submit() {
               {{ selectedAgent?.description || '选择由哪个 coding agent 执行本任务' }}
             </p>
           </div>
-          <!-- 模型：只在 agent 真的提供了清单时出现（claude 的桥没有，dsh 有）。
-               清单由 agent 自己下发（后端按需探测 + 缓存），前端不维护第二份。 -->
-          <div v-if="models.length || modelsLoading" class="rounded-lg border border-border bg-surface p-3" data-testid="model-field">
-            <div class="mb-1.5 text-xs font-medium text-muted">模型</div>
-            <!-- 首次拉清单要在服务端起一次 agent 进程（秒级），必须给出反馈，
-                 否则用户只会觉得"卡了一下然后什么都没有" -->
-            <p v-if="!models.length" class="text-xs text-muted">正在读取该 Agent 的可选模型…</p>
-            <Select v-else v-model="model" aria-label="模型" data-testid="model-select">
-              <option value="">Agent 默认</option>
-              <template v-for="g in modelGroups" :key="g.name">
-                <optgroup v-if="g.name" :label="g.name">
-                  <option v-for="m in g.options" :key="m.value" :value="m.value">{{ m.name }}</option>
-                </optgroup>
-                <template v-else>
-                  <option v-for="m in g.options" :key="m.value" :value="m.value">{{ m.name }}</option>
-                </template>
-              </template>
-            </Select>
-            <p v-if="models.length" class="mt-1.5 text-xs text-muted">
-              {{ selectedModelHint || '不选则用该 Agent 的默认模型。' }}
-            </p>
-          </div>
+          <!-- 模型选择器嵌在底部输入框内（与详情页同一套 ModelPicker），
+               不再在主区单开一块「模型」卡片 ——
+               「项目 / Agent」是**这个任务的属性**，而模型是**发这条消息时的选择**，
+               两者不在同一个决策时刻，摆在一起反而让人以为改模型等于改任务。
+               该 Agent 不下发清单时，弹层里有一句说明（ModelPicker 的空清单分支）。 -->
           <p class="px-1 text-xs text-muted">选择项目与 Agent 后，在下方描述要做什么，创建后进入会话。</p>
         </div>
       </div>
@@ -226,6 +199,17 @@ async function submit() {
             placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"
             @submit="submit"
           >
+            <template #lead>
+              <ModelPicker
+                v-if="agent"
+                :model="model"
+                :models="models"
+                :models-loaded="modelsLoaded"
+                data-testid="new-task-model-picker"
+                @update:model="model = $event"
+              />
+            </template>
+
             <template #actions>
               <!-- 视觉 36×36，命中区用伪元素外扩到 ≥44px 高（AC-R8-04） -->
               <button
@@ -243,6 +227,20 @@ async function submit() {
               </button>
             </template>
           </PromptInput>
+          <!-- 选中模型的说明 / 无清单时的说明：
+               弹层关着时这些信息没有出处，所以必须留在外面。
+               「没有下拉框」和「不支持选模型」在界面上无法区分 —— 触发器一直在，
+               点开就知道有没有可选项。 -->
+          <p v-if="models.length" class="mt-1 px-1 text-xs text-muted" data-testid="model-hint">
+            {{ selectedModelHint || '不选则用该 Agent 的默认模型。' }}
+          </p>
+          <p
+            v-else-if="modelsLoaded"
+            class="mt-1 px-1 text-xs text-muted"
+            data-testid="model-unsupported"
+          >
+            该 Agent 不提供可选模型，将使用它自身的默认模型。
+          </p>
         </div>
       </div>
     </div>

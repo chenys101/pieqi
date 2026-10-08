@@ -19,6 +19,7 @@ export type TaskEventTypeDto =
   | 'tool_result'
   | 'status'
   | 'rewind'
+  | 'model_switch'
 
 /** 决策类型：approval=权限审批（进程存活）；choice=多选（已废弃，兜底保留） */
 export type DecisionKindDto = 'approval' | 'choice'

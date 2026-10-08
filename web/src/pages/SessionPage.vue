@@ -16,6 +16,7 @@ import { adaptTask } from '@/services/api/client'
 import { useSession } from '@/composables/useSession'
 import { useResponsive } from '@/composables/useResponsive'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
+import { useNotificationStore } from '@/stores/notification'
 import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '@/features/session'
 import { FeedbackPanel } from '@/features/feedback'
 import Drawer from '@/components/ui/Drawer.vue'
@@ -29,6 +30,7 @@ const sessionStore = useSessionStore()
 const agentStore = useAgentStore()
 const { isMobile, isWide } = useResponsive()
 const fbPanel = useFeedbackPanelStore()
+const notify = useNotificationStore()
 
 const taskId = computed(() => route.params.id as string)
 const { task, canCancel, canSendPrompt, submitPrompt, cancel, approve, approveSession, deny, consumeForceScroll } =
@@ -48,6 +50,39 @@ watch(
 )
 const turnModels = computed(() => agentStore.modelsOf(task.value?.agent || ''))
 const turnModelsLoading = computed(() => !!agentStore.modelsLoading[task.value?.agent || ''])
+/** 清单已尝试加载过 → 组件据此把"还在读"与"该 agent 没有清单"分开说 */
+const turnModelsLoaded = computed(() => !!agentStore.modelsLoaded[task.value?.agent || ''])
+
+/** 会话当前模型（不透明值，空 = Agent 默认）—— 触发器上显示的就是它。
+ *  来自 Task.Model：切换走 POST /tasks/:id/model 落库，WS task_updated 推回来。 */
+const currentModel = computed(() => task.value?.model || '')
+
+/** 运行中不可切换：这一轮的模型在 prompt 边界就定死了（后端同样返回 409）。
+ *  与其摆一个按了没用的开关，不如禁用并说明。 */
+const canSwitchModel = computed(() => !canCancel.value)
+const switchingModel = ref(false)
+
+/**
+ * 切换会话模型：落库 + 在时间线上留一条 model_switch 记录。
+ *
+ * 为什么是「立刻切换」而不是「下一轮生效」：per-turn 那个（intervene.model）不落库，
+ * 用户无从确认上轮跑在哪个模型上，刷新页面更是直接丢失。会话级切换把这件事变成
+ * 可回溯的事实 —— 记录就在时间线里（ModelSwitchNote）。
+ *
+ * 失败必须报错：静默失败会让人以为已经切换，而实际下一轮还跑在旧模型上。
+ */
+async function switchModel(value: string) {
+  const id = task.value?.id
+  if (!id || value === currentModel.value || switchingModel.value) return
+  switchingModel.value = true
+  try {
+    await api.setTaskModel(id, value)
+  } catch (err) {
+    notify.error(err instanceof Error ? err.message : '切换模型失败')
+  } finally {
+    switchingModel.value = false
+  }
+}
 
 /** 决策横幅：waiting_input 且带 decision 时展示 */
 const decision = computed(() => (task.value?.status === 'waiting_input' ? task.value.decision : undefined))
@@ -205,8 +240,13 @@ async function doRemove() {
             :can-send="canSendPrompt || !!decision"
             :models="turnModels"
             :models-loading="turnModelsLoading"
+            :models-loaded="turnModelsLoaded"
+            :current-model="currentModel"
+            :switching="switchingModel"
+            :switch-disabled="!canSwitchModel"
             @send="submitPrompt"
             @cancel="cancel"
+            @switch-model="switchModel"
           />
         </div>
 
