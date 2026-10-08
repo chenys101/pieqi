@@ -165,17 +165,31 @@ watch(matches, (m) => {
       :disabled="disabled"
       :resizable="false"
       :aria-label="ariaLabel"
-      :class="hasFooter ? 'pb-11' : undefined"
+      :class="hasFooter ? 'pb-[4.375rem]' : undefined"
       @update:model-value="onInput"
       @keydown="onKeydown"
       @blur="onBlur"
     />
     <!-- 底部动作行：整条 pointer-events-none，只有插槽内容本身可点，
          让出的底部 padding 仍然能点进 textarea。
-         justify-between：模型选择器在左、发送/中止在右，两者同处一行。 -->
+         justify-between：模型选择器在左、发送/中止在右，两者同处一行。
+
+         ★ 间距（数字是 headless Chrome 实测的 getBoundingClientRect，别照直觉推）：
+         按钮外框到输入框**右沿 12px、下沿 12px**，两边相等。
+           · 右沿 = 行的 px-3(12px)。行宽 = textarea 宽，故行的右内边距就是右边距。
+           · 下沿 = 行的 bottom-2.5(10px) + pb-2(8px) - 行自身高度溢出的那 6px
+             ——实测：bottom-0 + pb-2 时下沿只有 2px（行 border-box 44px 比
+             textarea 的让位区矮不了多少，底部 6px 溢到框外被吃掉），
+             而右边是 12px ⇒ 按钮"贴着底、离右边远"，就是被反馈的那个观感问题。
+             抬到 bottom-2.5 后下沿正好 12px。
+         ⚠️ 别再往 textarea 上加 pb-* 去"对齐"：那会给每个动作按钮垫一层底，
+         触发器 hover 背景与 ■ 中止的红底都会明显上浮。
+         ⚠️ 让位高度绑死：pb-[4.375rem] = 70px = 行需要占的 44px + bottom 10px + 间距 16px。
+         改行的 bottom / pb 或按钮尺寸后，**必须重新量**（可用页面上临时挂的探针），
+         否则按钮要么压住文字、要么下沿又变了。 -->
     <div
       v-if="hasFooter"
-      class="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex items-center gap-1.5 px-2 pb-2"
+      class="pointer-events-none absolute inset-x-0 bottom-2.5 z-10 flex items-center gap-1.5 px-3 pb-2"
       :class="hasLead ? 'justify-between' : 'justify-end'"
       data-testid="composer-actions"
     >

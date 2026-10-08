@@ -346,13 +346,34 @@ describe('输入框内嵌动作按钮（PC 与移动端同一套 DOM）', () => 
   })
 
   it('有动作区时 textarea 让出底部空间，没有则不留空 padding', () => {
-    expect(ta(mount(WithActions).host).className).toContain('pb-11')
+    expect(ta(mount(WithActions).host).className).toContain('pb-[4.375rem]')
     expect(ta(mount(PromptInput, { modelValue: '' }).host).className).not.toContain('pb-')
+  })
+
+  // 按钮外框到输入框**右沿与下沿都必须是 12px**（headless Chrome 实测基准）。
+  // 只靠 class 断言守不住几何：曾经 px-3/pb-2/bottom-0 看着"下沿=pb-2=8px"，
+  // 实测却是 2px —— 行的 border-box 比让位区矮不了多少，底部 6px 溢到框外被吃掉了，
+  // 于是右边 12px、下边 2px，按钮显得"贴底、离右边远"。
+  // 所以这里既钉 class，也钉"行必须在框内、且让位高度自洽"这两条推导链。
+  it('按钮右/下留白同值：行 px-3 + 行落在框内 + 让位高度自洽', () => {
+    const { host } = mount(WithLead)
+    const row = host.querySelector('[data-testid="composer-actions"]')!
+    const t = ta(host)
+    // 横向：行宽 = textarea 宽，行的 px-3(12px) 就是右边距
+    expect(row.className).toContain('px-3')
+    // 纵向：行**不能**贴 textarea 下沿（bottom-0）——那样 pb-2 会被溢出吃掉，
+    // 实测下沿只剩 2px。必须留出 bottom-2.5(10px) 把行抬进框内，下沿才等于 12px。
+    expect(row.className).toContain('bottom-2.5')
+    expect(row.className).not.toContain('bottom-0')
+    expect(row.className).toContain('pb-2')
+    // 让位高度绑死：70px = 行占位 44px(按钮 36 + 行 pb 8) + bottom 10px + 余量 16px。
+    // 改行的 bottom/pb 或按钮尺寸后必须重新量，否则按钮压住文字。
+    expect(t.className).toContain('pb-[4.375rem]')
   })
 
   it('只有 #lead（模型选择器）时也让出底部空间，且该行两端对齐', () => {
     const { host } = mount(WithLead)
-    expect(ta(host).className).toContain('pb-11')
+    expect(ta(host).className).toContain('pb-[4.375rem]')
     const row = host.querySelector('[data-testid="composer-actions"]')!
     expect(row.className).toContain('justify-between')
     // 结构判据：lead 与 actions 同处一行
