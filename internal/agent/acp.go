@@ -105,13 +105,17 @@ type ACPAgent struct {
 	turnMu    sync.Mutex
 	turnModel string
 
-	// catalogMu/modelCatalog 是 agent 最近一次建/续会话时下发的可选模型清单。
+	// catalogMu/modelCatalog/catalogSrc 是 agent 最近一次建/续会话时下发的可选模型清单，
+	// 以及**它是从哪条通道读到的**。
 	//
-	// 从哪来：**不是**响应的 configOptions（改造过的 dsh-acp 把它隐藏了，恒空），
-	// 而是响应 _meta["pieqi/configOptions"]（见 forks/dsh-acp 的 A3）。
+	// 两条通道：标准 configOptions（原生 agent，如 qodercli）与
+	// _meta["pieqi/configOptions"]（本仓库 fork 的 dsh-acp）。catalogSrc 不只是描述，
+	// 它决定**写**回哪条通道 —— 标准用 session/set_config_option，_meta 用请求的
+	// _meta.model。判据与理由见 model_catalog.go 的 catalogSource。
 	// 用途：GET /api/agents/:name/models 的一次性探测（见 model_catalog.go）。
 	catalogMu    sync.Mutex
 	modelCatalog ModelCatalog
+	catalogSrc   catalogSource
 
 	startOnce sync.Once
 	startErr  error
@@ -173,12 +177,15 @@ var (
 // acpConn 抽象 ACP 客户端连接（*acp.ClientSideConnection 的方法子集），让 ACPAgent.NewSession
 // 的 load/resume 路径可单测：生产由 *acp.ClientSideConnection 实现，测试注入 fake。
 // 仅收录 ACPAgent 实际调用的方法（Initialize/NewSession/LoadSession/ResumeSession/
-// Prompt/Cancel/CloseSession/Done/SetLogger）。
+// SetSessionConfigOption/Prompt/Cancel/CloseSession/Done/SetLogger）。
 type acpConn interface {
 	Initialize(ctx context.Context, params acp.InitializeRequest) (acp.InitializeResponse, error)
 	NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error)
 	LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error)
 	ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error)
+	// SetSessionConfigOption 是标准通道下"切模型"的手段（原生 agent，如 qodercli）。
+	// fork 的 dsh-acp 隐藏了 configOptions，调它会抛错，故只对 catalogStandard 使用。
+	SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error)
 	Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error)
 	Cancel(ctx context.Context, params acp.CancelNotification) error
 	CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error)
@@ -616,7 +623,7 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 		//
 		// Meta 同样带上本任务的模型：改造过的 agent 会把它当作"会话没有历史路由时的兜底"
 		// （agent 自己记的上次路由优先，见 forks/dsh-acp 的 selectionFor）。原生 agent 忽略。
-		// 响应的 configOptions 本实现不使用（不做 configOptions 驱动的会话内选模型）。
+		// 两条路径的响应都要接住清单 —— 续问时它是"这个会话能选哪些模型"的唯一来源。
 		if a.agentCaps.LoadSession {
 			resp, err := a.conn.LoadSession(sessCtx, acp.LoadSessionRequest{
 				Cwd:        cfg.Cwd,
@@ -627,7 +634,7 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 			if err != nil {
 				return "", fmt.Errorf("acp: load session %s: %w", cfg.ResumeFrom, err)
 			}
-			a.rememberCatalog(resp.Meta)
+			a.rememberCatalog(resp.ConfigOptions, resp.Meta)
 		} else {
 			resp, err := a.conn.ResumeSession(sessCtx, acp.ResumeSessionRequest{
 				Cwd:        cfg.Cwd,
@@ -638,14 +645,20 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 			if err != nil {
 				return "", fmt.Errorf("acp: resume session %s: %w", cfg.ResumeFrom, err)
 			}
-			a.rememberCatalog(resp.Meta)
+			a.rememberCatalog(resp.ConfigOptions, resp.Meta)
+		}
+		// 续问也要落定模型：会话被接回来后不一定还保持上次的路由（重启/换进程），
+		// 而 t.Model 是"这个会话现在该跑在哪个模型上"的持久事实。
+		if err := a.applyModel(sessCtx, string(sid), cfg.Model); err != nil {
+			return "", err
 		}
 		return string(sid), nil
 	}
 
 	// 新建会话路径（原逻辑）
 	// Meta 带上本任务的模型：ACP 协议没有"建会话指定模型"的字段，走标准 _meta 扩展位
-	// 传给改造过的 agent（见 agent.TurnModelSetter / forks/dsh-acp）。原生 agent 忽略它。
+	// 传给改造过的 agent（见 agent.TurnModelSetter / forks/dsh-acp）。原生 agent 忽略它，
+	// 所以原生 agent 的模型由下面的 applyModel 经 session/set_config_option 落定。
 	resp, err := a.conn.NewSession(sessCtx, acp.NewSessionRequest{
 		Cwd:        cfg.Cwd,
 		McpServers: toACPMcpServers(cfg.MCP),
@@ -654,14 +667,55 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 	if err != nil {
 		return "", fmt.Errorf("acp: new session: %w", err)
 	}
-	// 清单在 _meta 里（configOptions 被 fork 隐藏了），顺手记下供探测接口读。
-	a.rememberCatalog(resp.Meta)
+	// 清单可能来自标准 configOptions（原生 agent）或 _meta（fork 的 dsh-acp），
+	// 顺手记下供探测接口读 —— 读到哪条通道也决定了后面往哪条写。
+	a.rememberCatalog(resp.ConfigOptions, resp.Meta)
+	if err := a.applyModel(sessCtx, string(resp.SessionId), cfg.Model); err != nil {
+		return "", err
+	}
 	return string(resp.SessionId), nil
+}
+
+// applyModel 把指定模型落到一个刚建立/接回的会话上（空串 = 不指定，直接返回）。
+//
+// 分通道写，判据是清单从哪读到的（见 catalogSource）：
+//
+//   - catalogStandard（原生 agent，如 qodercli）→ session/set_config_option；
+//   - catalogMeta（fork 的 dsh-acp）→ **什么都不做**：建/续会话请求里已经带了
+//     `_meta.model`，那侧在 session/new 时就吃掉了它（见 forks/dsh-acp 的 selectionFor）。
+//     这里再发一次 set_config_option 会直接抛错（它把 configOptions 隐藏成恒空）。
+//   - catalogNone（不支持选模型）→ 静默跳过：指定了也不生效，但**不报错** ——
+//     Task.Model 此时只是一个记录值，拦下来反而让"先建任务后换 agent"这类流程不可用
+//     （同 api.verifyModelChoice 对空清单放行的取舍）。
+//
+// 失败要冒泡（不静默）：用户显式选了模型却没生效，比直接报错糟糕得多。
+func (a *ACPAgent) applyModel(ctx context.Context, sessionID, model string) error {
+	if model == "" {
+		return nil
+	}
+	a.catalogMu.Lock()
+	src := a.catalogSrc
+	a.catalogMu.Unlock()
+	if src != catalogStandard {
+		return nil // _meta 通道已在请求里带过；无清单则无处可设
+	}
+	_, err := a.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+		ValueId: &acp.SetSessionConfigOptionValueId{
+			SessionId: acp.SessionId(sessionID),
+			ConfigId:  acp.SessionConfigId(ModelConfigID),
+			Value:     acp.SessionConfigValueId(model),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("acp: set model %q on session %s: %w", model, sessionID, err)
+	}
+	return nil
 }
 
 // SetTurnModel 设定下一轮 prompt 使用的模型（空串 = 不改）。实现 agent.TurnModelSetter。
 //
-// 只对支持 _meta 模型通道的 agent（本仓库 fork 的 dsh-acp）有意义；原生 agent 会忽略 _meta。
+// 两条通道都支持，由清单来源决定走哪条（见 promptOnce）：
+// _meta（fork 的 dsh-acp）或标准 session/set_config_option（原生 agent，如 qodercli）。
 // 为什么由调用方在每轮 Run 前设置而不是挂在 SendPrompt 参数上：见 TurnModelSetter 的说明。
 func (a *ACPAgent) SetTurnModel(model string) {
 	a.turnMu.Lock()
@@ -690,15 +744,20 @@ func modelMeta(model string) map[string]any {
 	return map[string]any{"model": model}
 }
 
-// rememberCatalog 记下响应 _meta 里的可选模型清单。
-// 空清单**不覆盖**已记的：agent 若不下发（或本次是原生 agent），别把上次拿到的弄丢。
-func (a *ACPAgent) rememberCatalog(meta map[string]any) {
-	cat := ExtractModelCatalog(catalogOptionsFromMeta(meta))
+// rememberCatalog 记下本次会话协商下发的可选模型清单**与它的来源通道**。
+//
+// 两个来源都收（标准 configOptions 与 _meta），优先级与理由见 pickCatalog。
+// 空清单**不覆盖**已记的：agent 若不下发（或本次响应确实没带），别把上次拿到的弄丢。
+// catalogSrc 随清单一起更新 —— 它决定后续 applyModel / promptOnce 往哪条通道写，
+// 与清单必须同源，否则会出现"读标准、写 _meta"这种静默失效的组合。
+func (a *ACPAgent) rememberCatalog(opts []acp.SessionConfigOption, meta map[string]any) {
+	cat, src := pickCatalog(opts, meta)
 	if len(cat.Options) == 0 {
 		return
 	}
 	a.catalogMu.Lock()
 	a.modelCatalog = cat
+	a.catalogSrc = src
 	a.catalogMu.Unlock()
 }
 
@@ -710,6 +769,14 @@ func (a *ACPAgent) Models() ModelCatalog {
 	cat := a.modelCatalog
 	cat.Options = append([]ModelOption(nil), cat.Options...)
 	return cat
+}
+
+// catalogSourceOf 返回清单的来源通道（catalogNone / catalogStandard / catalogMeta）。
+// 供 promptOnce 决定按轮换模型走哪条通道。
+func (a *ACPAgent) catalogSourceOf() catalogSource {
+	a.catalogMu.Lock()
+	defer a.catalogMu.Unlock()
+	return a.catalogSrc
 }
 
 // RealSessionID 返回会话的真实 session ID（用于持久化与续问）。
@@ -727,14 +794,27 @@ func (a *ACPAgent) SendPrompt(ctx context.Context, sessionID, prompt string) err
 
 // promptOnce 发一轮 prompt，不做任何重试。
 //
-// Meta 里带**本轮**指定的模型（"发提示词时选"）：取后即清，未指定则不带 _meta，
-// 会话沿用当前路由。原生 agent 会忽略 _meta。
+// 按轮指定的模型（"发提示词时选"）取后即清，未指定则沿用会话当前路由。
+// 写回哪条通道看清单来源（见 catalogSource）：
+//
+//   - catalogStandard（原生 agent，如 qodercli）→ 先 session/set_config_option，
+//     再发 prompt。顺序不能反：set 是对**会话**生效的，prompt 必须跑在设置之后。
+//   - catalogMeta / catalogNone → 走请求 _meta.model（fork 的 dsh-acp 吃这个；
+//     不支持的 agent 会忽略它，行为与改动前一致）。
 func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, prompt string) error {
-	if _, err := a.conn.Prompt(ctx, acp.PromptRequest{
+	turnModel := a.takeTurnModel()
+	req := acp.PromptRequest{
 		SessionId: acp.SessionId(sessionID),
 		Prompt:    []acp.ContentBlock{acp.TextBlock(prompt)},
-		Meta:      modelMeta(a.takeTurnModel()),
-	}); err != nil {
+	}
+	if turnModel != "" && a.catalogSourceOf() == catalogStandard {
+		if err := a.applyModel(ctx, sessionID, turnModel); err != nil {
+			return err
+		}
+	} else {
+		req.Meta = modelMeta(turnModel)
+	}
+	if _, err := a.conn.Prompt(ctx, req); err != nil {
 		return fmt.Errorf("acp: prompt: %w", err)
 	}
 	return nil

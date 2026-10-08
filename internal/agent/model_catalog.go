@@ -9,10 +9,23 @@
 //
 // （2026-10-07 实际踩过：把 -ai 加到 glm 上——glm 属 `workbuddy/`，没有 -ai。）
 //
-// 清单从哪读（2026-10-07 之后）：**响应 _meta，不是响应 configOptions**。
-// 本仓库 fork 过的 dsh-acp 出于「不向通用客户端暴露 ACP config」的考虑把
-// configOptions 隐藏了（恒空），改把真实清单挂在 `_meta["pieqi/configOptions"]`；
-// 于是这里也走 _meta。原生 agent 没有这个键 → 视为"不支持会话内选模型"。
+// 清单从哪读：**两条通道都读，按 agent 实际下发的那个走**。
+//
+//   - **标准 `configOptions`**：ACP 协议正路。原生 agent（qodercli 实测 v1.1.64）
+//     就走这条：`session/new` 响应里带 id="model" 的 select 项。
+//   - **`_meta["pieqi/configOptions"]`**：本仓库 fork 的 dsh-acp 私有通道。它出于
+//     「不向通用客户端暴露 ACP config」的考虑把标准 configOptions 隐藏了（恒空），
+//     改把真实清单挂在这个 _meta 键上（见 forks/dsh-acp 的 A3）。
+//
+// 为什么要分通道而不能只读一个（2026-10-08 实证）：bd0cd28 为迁就 fork 后的 dsh
+// 把读取从标准字段整体换成 _meta，**qoder 是这次迁移的附带损伤** —— 它是原生 ACP
+// 实现，_meta 整个缺失，于是清单恒空、前端显示"该 Agent 不提供可选模型"，
+// 而它其实既下发清单（`qmodel_38max` / `qfmodel`）又接受 `session/set_config_option`。
+//
+// 「从哪读到」还决定「往哪写」：标准通道要用 `session/set_config_option`，
+// _meta 通道要用请求的 `_meta.model`（dsh 侧 configOptions 恒空，set_config_option
+// 会直接抛错）。所以读到的通道要记下来，见 catalogSource。
+//
 // 清单的唯一事实源仍是 agent 自己，本文件只做「读出来」与「缓存」两件事。
 package agent
 
@@ -27,6 +40,20 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+)
+
+// catalogSource 说明"这份清单是从哪条通道读到的"，同时决定**写**回哪条通道。
+//
+// 读与写必须同源：标准通道的 agent 不认 `_meta.model`（原生实现会忽略扩展位），
+// 而 _meta 通道的 agent（fork 的 dsh-acp）标准 configOptions 恒空、
+// `set_config_option` 会抛错（见 forks/dsh-acp/FORK.md 的 A1）。猜错任一侧，
+// 表现都是"界面显示已切换、实际没换"——最难排查的那类静默失效。
+type catalogSource int
+
+const (
+	catalogNone     catalogSource = iota // 没读到清单：不支持会话内选模型
+	catalogStandard                      // 标准 configOptions → 用 session/set_config_option 设
+	catalogMeta                          // _meta["pieqi/configOptions"] → 用请求 _meta.model 设
 )
 
 // ModelConfigID 是 ACP 里「模型」这一配置项的 id。
@@ -124,6 +151,22 @@ func strDeref(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+// pickCatalog 从一次会话协商的两种来源里挑出清单，并报出它是从哪条通道来的。
+//
+// 优先级：**标准字段优先**。理由：标准字段存在即说明 agent 是原生实现、走协议正路，
+// 而走正路的 agent 支持 `set_config_option`；fork 的 dsh-acp 标准字段恒空，
+// 自然落到 _meta 分支。反过来先看 _meta 的话，一个"两者都发"的 agent 会被误判成
+// fork 通道，于是用 `_meta.model` 去设模型——原生 agent 会忽略它，静默失效。
+func pickCatalog(opts []acp.SessionConfigOption, meta map[string]any) (ModelCatalog, catalogSource) {
+	if cat := ExtractModelCatalog(opts); len(cat.Options) > 0 {
+		return cat, catalogStandard
+	}
+	if cat := ExtractModelCatalog(catalogOptionsFromMeta(meta)); len(cat.Options) > 0 {
+		return cat, catalogMeta
+	}
+	return ModelCatalog{}, catalogNone
 }
 
 // --- 清单探测（带缓存） ---

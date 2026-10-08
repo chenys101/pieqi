@@ -70,12 +70,14 @@ func (s *Server) listAgents(c *gin.Context) {
 // listAgentModels GET /api/agents/:name/models：该 agent 当前可选的模型清单。
 //
 // 为什么单独一个接口、而不是塞进 GET /api/agents：取清单的代价服务端**不能**替所有
-// agent 预付 —— 清单只有 agent 自己知道（改造过的 dsh-acp 放在 session/new 响应的
-// _meta 里，见 agent.ListAgentModels），拿一次就要起一个 agent 进程。放这里 =
-// 只有"用户真的选中了某个 agent"才付这份代价，且 agent 包内做了 10 分钟缓存。
+// agent 预付 —— 清单只有 agent 自己知道（原生 agent 放标准 configOptions，改造过的
+// dsh-acp 放 session/new 响应的 _meta，见 agent.ListAgentModels），拿一次就要起一个
+// agent 进程。放这里 = 只有"用户真的选中了某个 agent"才付这份代价，且 agent 包内做了
+// 10 分钟缓存。
 //
 // 两种"没有清单"的情形返回 200 + 空 models，不算错误路径（前端据此隐藏下拉框）：
-//   - 该 agent 不支持外部指定模型（如 claude 的桥、未改造的 agent）→ error 为空；
+//   - 该 agent 不支持外部指定模型（如 claude 的桥：它整个 HTTP 面没有 model 字段）
+//     → error 为空；
 //   - agent 支持但本次没下发清单。
 //
 // 探测**失败**（进程起不来 / 未登录 / profile 的模型配置失效）返回 **502** + error：

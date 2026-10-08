@@ -107,8 +107,11 @@ func (s *Server) setTaskModel(c *gin.Context) {
 // verifyModelChoice 确认 target 是该 agent 当前清单里的一个选项。
 //
 // 清单取不到（agent 不支持选模型 / 探测失败）时**放行**：那是"没法验证"而不是"验证不过"。
-// 这种情况在实践中意味着该 agent 压根不吃外部指定的 model（claude / qoder），
+// 这种情况在实践中意味着该 agent 压根不吃外部指定的 model（如 claude 走桥时的 SDK 层），
 // 此时 Task.Model 只是一个记录值，拦下来反而会让功能不可用。
+//
+// 注意：qoder 现在**能**取到清单（原生 ACP 的标准 configOptions，2026-10-08 修），
+// 所以这条校验对它已经真正生效 —— 提交清单外的值会拿到 400。
 func verifyModelChoice(ctx context.Context, agentName, target string) error {
 	cat, err := agent.ListAgentModels(ctx, agentName)
 	if err != nil || len(cat.Options) == 0 {

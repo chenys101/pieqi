@@ -258,7 +258,7 @@ Windows 实测：
 | `sessionCapabilities` | `close` / `list` / **`resume`**，**没有 `load`** | 续问走 `ACPAgent.NewSession` 的 `ResumeSession` 分支（现有判据自动选对，无需分叉） |
 | 活跃会话上 `session/resume` | 报错 `session is already active` | 只有进程重启 / 会话已关后才能 resume；同进程内复用仍靠 pieqi 的轮间保活 |
 | `session/request_permission` | 支持，一次性 allow/deny 选项 | 审批卡片链路正常，与 qoder 一致 |
-| `session/new` 返回 `configOptions` | `model` / `reasoning_effort` 是**会话内选项**，改要发 `session/set_config_option` | 原生 dsh-acp 会下发；本仓库 fork 后**恒为空**（见 6.2），清单改走响应 `_meta`。pieqi 已实现 `setConfigOption`：建会话 / 续问都能指定模型 |
+| `session/new` 返回 `configOptions` | `model` / `reasoning_effort` 是**会话内选项**，改要发 `session/set_config_option` | 原生 dsh-acp 会下发；本仓库 fork 后**恒为空**（见 6.2），清单改走响应 `_meta`。pieqi 两条通道都读、并据此选写回方式（见 6.2.1）：fork 的 dsh 走 `_meta.model`，原生 agent 走 `set_config_option` |
 | provider 路由 | 原生只来自 dsh `acp` profile 里 `acp` 这条 entry 的 pin（出厂 pin `deepseek-official`，需 `DEEPSEEK_API_KEY`）；pin **缺失或写错**时 `session/new` 直接失败 | 路由归 dsh 侧配置，pieqi 不干预。fork 后 pin 缺失会**回落到 `agent-default-model`**；写错（指向已下架的模型）仍会失败，`explainProbeErr` 会给可操作提示 |
 | stdout | 只承载协议流量，无 banner 污染 | 满足 JSON-RPC over stdio 前提 |
 | 客户端 fs / terminal / plan / elicitation | 文档明确「不支持的界面会被省略或拒绝」 | `acp.go` 目前虚报 `ClientCapabilities.Fs=true` 而实现返回 `ErrNotSupported`；dsh 不据此发调用，暂无影响，但**这是个待修的虚报** |
@@ -299,6 +299,30 @@ ACP 请求的 `_meta` 扩展位把模型传进去 —— 不改协议字段，�
 
 改动清单、`_meta` 契约、重打/还原与探针用法见 `forks/dsh-acp/FORK.md`；
 pieqi 侧对应 `internal/agent/{acp,adapter,model_catalog}.go`。
+
+#### 6.2.1 两条模型通道：`_meta` 是 dsh 专用，原生 agent 走标准字段
+
+`_meta` 通道**只是 dsh 这一个 fork 的私有约定**，不是所有 ACP agent 的模型入口。
+pieqi 侧必须**两条都读**，读哪条还决定**写**哪条（判据集中在
+`internal/agent/model_catalog.go` 的 `catalogSource`）：
+
+| agent | 清单来源 | 设模型的手段 |
+|---|---|---|
+| fork 的 dsh | `_meta["pieqi/configOptions"]` | 请求 `_meta.model`（它的 configOptions 恒空，`set_config_option` 会抛错） |
+| 原生 agent（qodercli 等） | 标准 `configOptions` | `session/set_config_option`（它忽略 `_meta`） |
+
+**优先级是标准字段优先**：标准字段存在即说明 agent 走协议正路、支持
+`set_config_option`；fork 的 dsh 标准字段恒空，自然落到 `_meta` 分支。反过来先看 `_meta`
+的话，一个"两者都发"的 agent 会被误判成 fork 通道，于是用 `_meta.model` 去设 —— 原生 agent
+忽略它，表现是「界面显示已切换、实际没换」这种最难排查的静默失效。
+
+这段历史值得记一笔：`bd0cd28`（移除 ACP 会话内选模型链路）为迁就 fork 后的 dsh，把清单读取
+从标准字段**整体换成** `_meta`、并删掉 `set_config_option`。**qoder 是那次迁移的附带损伤** ——
+它是原生 ACP 实现（实测 qodercli v1.1.64），`_meta` 整个缺失，于是清单恒空、前端显示
+「该 Agent 不提供可选模型」，而它其实既下发清单（`qmodel_38max` / `qfmodel`）又接受
+`set_config_option`。回归测试见 `internal/agent/model_catalog_test.go`（四个组合都钉住）。
+
+探针：`go run ./.verify-acp/probe_qoder.go`（直连 qodercli，打印两个通道的实际内容并试设一次模型）。
 
 ---
 
