@@ -437,15 +437,18 @@ function jumpToLatest() {
       :active-turn="activeTurn"
       @jump="jumpToTurn"
     />
-    <!-- 相对定位的容器：需求 3 的按钮要浮在滚动区右下角。
-         不给滚动容器（el）加 relative 是刻意的 —— 那会让它成为浮层的定位祖先，
-         浮层就会跟着内容滚走；挂在这一层（滚动容器的兄弟）才是"钉在视口"。
-         滚动容器上的 h-full / min-w-0 / flex-1 也一个字不能动：
-         TurnRail 与它都靠这几个类撑出"左侧轨道 + 右侧滚动区"的布局。 -->
+    <!-- ⚠️ **不要**把浮层放在这里当滚动容器的兄弟。
+         曾经它就是这个位置的一个 `sticky bottom-0` flex 子项，结果（真机实测）：
+           · flex 行里 `align-items` 默认 stretch，按钮被**拉满整屏高**（118×446）；
+           · sticky 的"粘"只对**最近的滚动祖先**生效，而兄弟节点根本不在滚动容器内，
+             所以它既不粘底、又按普通 flex item 占了 `w-full` 的宽度 ⇒
+             滚动区被挤到只剩 24px 宽，整页看起来就是"被按钮占满"。
+         浮层必须放在**滚动容器内部**：那样它才真正 sticky 在滚动区下沿，
+         且不参与外层 flex 的宽度/高度分配。见下方滚动容器末尾。 -->
     <div class="relative flex min-h-0 min-w-0 flex-1">
       <div
         ref="el"
-        class="h-full min-w-0 flex-1 overflow-y-auto px-3 py-4 md:px-4"
+        class="relative h-full min-w-0 flex-1 overflow-y-auto px-3 py-4 md:px-4"
         data-testid="session-timeline"
         @scroll.passive="onScrollAll"
       >
@@ -531,40 +534,45 @@ function jumpToLatest() {
           <!-- 旧任务兜底：直接展示累积输出 -->
           <TextBubble v-if="outputFallback" :text="task!.output!" />
           <ThinkingBadge v-if="showThinking" />
-        </div>
-      </div>
 
-      <!-- 需求 3：上拉翻历史时浮出「直达最新输出」。
-           定位用 sticky 而不是 absolute：absolute 会脱离文档流、需要额外给
-           滚动内容垫一块占位高度，而 sticky 自己就参与布局 ——
-           它先按正常流占一行（底部那 0 行高），再被粘在滚动区下沿。
-           移动端（<768px）居中、桌面端贴右：手机拇指够得到中间，
-           而桌面端鼠标在右半边操作，居中反而离手更远。 -->
-      <div
-        v-if="showJumpLatest"
-        class="pointer-events-none sticky bottom-0 z-10 -mt-px flex w-full justify-center pb-2 md:justify-end md:pr-3"
-      >
-        <button
-          type="button"
-          class="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-secondary shadow-md transition-colors hover:border-accent hover:text-accent"
-          data-testid="jump-latest"
-          title="回到最新输出"
-          @click="jumpToLatest"
-        >
-          直达最新输出
-          <svg
-            class="h-3.5 w-3.5"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
+          <!-- 需求 3：上拉翻历史时浮出「回到最新」小箭头。
+               ⚠️ 位置有讲究，三处都不能改：
+               1. **必须待在滚动容器（el）内部**：sticky 只对最近的滚动祖先生效，
+                  放到容器外就既不粘底、又会被当成 flex 子项拉满高度并被抢宽度
+                  （真机实测：按钮 118×446、滚动区被挤到 24px 宽 = "占满整页"）。
+               2. **sticky bottom-0**：参与正常流（只占自己那一行高），
+                  再把这一行粘在可视区下沿 —— 不遮挡内容，也不用垫占位高度。
+               3. **自身尺寸交给内容**：`justify-center` / `md:justify-end` 只决定水平位置，
+                  绝不给外层 `w-full` —— 那正是上次把它撑满的写法。
+               按用户的定案，它就是一个**小箭头**，不是一条文案按钮：
+               文案会横跨内容区、压住正在读的正文。 -->
+          <div
+            v-if="showJumpLatest"
+            class="pointer-events-none sticky bottom-0 z-10 flex justify-center md:justify-end"
           >
-            <path d="M12 5v14M6 13l6 6 6-6" />
-          </svg>
-        </button>
+            <button
+              type="button"
+              class="pointer-events-auto mb-1 inline-flex h-8 w-8 items-center justify-center rounded-full border border-border bg-surface text-text-secondary shadow-md transition-colors hover:border-accent hover:text-accent"
+              data-testid="jump-latest"
+              title="回到最新输出"
+              aria-label="回到最新输出"
+              @click="jumpToLatest"
+            >
+              <svg
+                class="h-4 w-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 5v14M6 13l6 6 6-6" />
+              </svg>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
