@@ -331,6 +331,39 @@ auth:
      （A5-① 已执行：token 通道已关，URL 无凭据 — 即 §A6 的当前态）
 ```
 
+### A8 · ⚠️ Access 与 PWA 的耦合：manifest / sw.js 依赖 cookie，凭据一丢就 302
+
+**现象**：浏览器已登录 Access、主文档正常，但 DevTools 里 `manifest.webmanifest`
+**反复 302 到登录页**（成对出现「manifest 302」+「登录页 200」），PWA 装不上、
+`display: standalone` 与桌面图标不生效。
+
+**为什么偏偏是这两个请求**：Access 的边缘判定挂在 **cookie（`CF_Authorization`）** 上，
+而下面两类请求都是**浏览器进程发起、不经过页面**的 —— 一旦不带 cookie，边缘就判未登录：
+
+| 请求 | 凭据模式 | 本仓库处置 |
+|---|---|---|
+| `<link rel="manifest">` | 按 HTML 的 `create a potential-CORS request`，`crossorigin` **缺省**（No CORS）时 credentials mode 是 `include`；但 Chrome **实测并不总是照此执行**，同源 manifest 被省略凭据是已知现象 | `web/index.html` 显式写 `crossorigin="use-credentials"`，钉死 `include`（同源无副作用） |
+| `/sw.js`（`register()` 与更新检查） | Chromium `service_worker_loader_helpers.cc` 对主脚本**明确**设 `mode = kSameOrigin` + `credentials_mode = kSameOrigin`（源码注释引 HTML「fetch a classic worker script」） | 规范与实现都已带 cookie，**不需要改**；若将来 sw.js 也被 302，先查 `updateViaCache` / HTTP 缓存，别改代码猜 |
+
+**判定顺序（下次遇到"某个资源一直 302"先走这条）**：
+
+1. 先确认**主文档**是不是 200 —— 主文档 200 说明 Access 会话本身是好的，
+   问题只在该请求的凭据携带上，**别去动 Access 策略**。
+2. `curl --noproxy '*' -D- -o /dev/null http://127.0.0.1:3000/<那个路径>` 应为 200 ——
+   这排除"源站根本没这个文件"。
+3. 只有这两条都成立，才去改前端的凭据声明（manifest 的 `crossorigin`）。
+
+> **别用 Access 的 Bypass 策略来"解决"这类问题。** Bypass 是**按 Access 应用的 URL 路径**
+> 生效的（不是按策略选择器），且官方明确写「Bypass does not enforce any Access security
+> controls and requests are not logged」—— 给 `/manifest.webmanifest` 开 Bypass 等于把它
+> 公开；虽然它本身不含敏感信息，但会打开"用路径豁免绕 Access"的口子，且与 A5-① 的
+> 全量保护决策冲突。
+>
+> 源站侧同理：`registerStatic`（`cmd/pieqi/web.go`）挂在 `NoRoute` 上、**不经**
+> `ExternalAuthMiddleware`，静态资源本来就不吃源站鉴权 —— 挡它的是边缘。
+> 所以这里**两边都不该松**：边缘不要开 Bypass，源站也不要给静态资源加鉴权
+> （加了反而会让已缓存的 SW 拿不到更新）。
+
 ---
 
 ## 5. 形态 B：无域名整改清单

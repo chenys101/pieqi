@@ -7,7 +7,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#F6F7F9" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="manifest" href="/manifest.webmanifest" />
+  <!-- crossorigin="use-credentials" 的作用是把 manifest 的凭据模式**钉死**在 include。
+       按 HTML 规范，crossorigin 缺省（No CORS）时 create a potential-CORS request 取的是
+       credentials mode = "include"，理论上同源会带 cookie；但 Chrome 的实际行为并不保证
+       这一点（同源 manifest 被省略凭据是已知现象），而本站点挂在 Cloudflare Access 后，
+       边缘**只靠 CF_Authorization cookie 认人** —— 凭据一丢就是未登录，直接 302 到登录页。
+       写 use-credentials 是显式声明、不依赖浏览器默认行为；同源场景无副作用。
+       manifest 的 icons 沿用 link 元素的 CORS settings attribute credentials mode，
+       故图标也一并带上 cookie。
+       注：rel="icon" 不支持该属性（crbug 1121645），favicon 仍可能 302 —— 仅影响图标显示。 -->
+  <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
   <title>Pieqi</title>
   <script>
     // 首屏防闪：必须**同步**执行，且在任何样式生效之前完成，否则会闪一下默认色。
