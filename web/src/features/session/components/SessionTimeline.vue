@@ -222,8 +222,16 @@ const mountFrom = computed(() => {
 /** 被收起的更早轮数（= 挂载窗口之前的 Turn 组数，含前导区 turn 0） */
 const olderCount = computed(() => (mountFrom.value > 0 ? mountFrom.value : 0))
 
-/** 需要"补挂"的 Turn：**包含当前正在看的那一轮**、之前已挂载的、以及用户点开的。
- *  三者取最大，保证这些轮永远不会因为窗口滑动而被卸载。 */
+/**
+ * 需要"补挂"的 Turn：**用户主动跳到过的那一轮**。
+ *
+ * ⚠️ 这里**只能由用户的显式动作驱动**（点轨道泡泡 / 点「更早的 N 轮」），
+ * 绝不能挂到 `activeTurn` 上。曾经写成 `watch(activeTurn, t => pin(t))`，
+ * 结果是：初载时 `trackActive()` 把 activeTurn 设成**最后一轮**（12），
+ * 于是 pinnedTurn=12 ⇒ `isMounted` 对**所有**轮都返回 true ⇒ 窗口形同虚设，
+ * 12 轮 2120 条事件全部挂载。而 jsdom 里量不出这个（它不做布局、
+ * 也不体现真实渲染代价），只有真机才会暴露 —— 所以必须靠 self-test.ps1 守。
+ */
 const pinnedTurn = ref(0)
 
 function pin(turn: number) {
@@ -307,8 +315,11 @@ function trackActive() {
   activeTurn.value = current
 }
 
-/** 点击泡泡：平滑滚动到该 Turn 分组，并同步高亮（jsdom 无 scrollTo → 降级为直接设 scrollTop） */
+/** 点击泡泡：平滑滚动到该 Turn 分组，并同步高亮（jsdom 无 scrollTo → 降级为直接设 scrollTop）。
+ *  这是**用户的显式动作**，所以要 pin 住它 —— 目标轮可能还在窗口之外（未挂载），
+ *  pin 之后 `isMounted` 才会把它补挂进来，否则下面 querySelector 找不到节点、点了没反应。 */
 function jumpToTurn(turn: number) {
+  pin(turn)
   const root = el.value
   if (root) {
     const node = root.querySelector<HTMLElement>(`[data-testid="turn-group-${turn}"]`)
@@ -324,13 +335,9 @@ function jumpToTurn(turn: number) {
   activeTurn.value = turn
 }
 
-/** 当前正在读的 Turn 变深时钉住它（翻历史过程中窗口会跟着往下滑时不至于卸载）。
- *  ⚠️ 这条 watch 必须待在 `activeTurn` 的声明**之后** ——
- *  `watch()` 的第一个参数在这里是求值后的值，提前引用会直接
- *  `ReferenceError: Cannot access 'activeTurn' before initialization`（整个组件挂不起来）。 */
-watch(activeTurn, (t) => {
-  if (t) pin(t)
-})
+/** 当前正在读的 Turn 变深时**不动窗口** —— 见 pinnedTurn 的注释：
+ *  把 pin 挂在 activeTurn 上会让初载即 pin 到最后一轮，窗口直接失效。
+ *  （曾经的 `watch(activeTurn, t => pin(t))` 就是这么把 12 轮全挂上去的。） */
 
 // 初载 / Turn 集合变化后重算当前 Turn，保证初始高亮正确。
 // ⚠️ 这里**不再注册 window 级 scroll/resize 监听** —— 见 onScrollAll 的注释：
