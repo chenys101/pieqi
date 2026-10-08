@@ -230,3 +230,64 @@ describe('需求 3：直达最新输出', () => {
     expect(host.querySelector('[data-testid="jump-latest"]')).toBeNull()
   })
 })
+
+// ============================================================================
+// 白屏回归：滚动处理不得挂在 window 上、也不得在滚动里重入
+// ============================================================================
+
+describe('白屏回归：滚动监听的作用域与重入', () => {
+  /**
+   * 曾经的元凶：`window.addEventListener('scroll', onScrollAll, true)`。
+   * 捕获阶段的全窗口监听会在**任何**容器滚动时触发（输入框、反馈面板的 diff 列表…），
+   * 于是每 tick 都跑一遍逐 Turn 的 getBoundingClientRect（强制同步布局）；
+   * 12 轮就是每 tick 12 次，叠加"滚动中插入/卸载 Turn"就成了布局抖动 → 白屏。
+   */
+  it('滚动无关容器不触发时间线的高亮重算', async () => {
+    const { host } = setup(10)
+    await nextTick()
+
+    // 造一个与时间线无关的可滚动容器，滚动它
+    const other = document.createElement('div')
+    other.style.overflowY = 'auto'
+    document.body.appendChild(other)
+
+    const root = host.querySelector<HTMLElement>('[data-testid="session-timeline"]')!
+    let rootQueried = 0
+    const realQS = root.querySelectorAll.bind(root)
+    root.querySelectorAll = ((sel: string) => {
+      rootQueried += 1
+      return realQS(sel as never)
+    }) as never
+
+    other.dispatchEvent(new Event('scroll'))
+    await nextTick()
+
+    // 时间线自己的节点没被查询 = 没跑 trackActive
+    expect(rootQueried).toBe(0)
+  })
+
+  it('点「直达最新输出」不重入滚动处理（否则按钮会闪一下又回来）', async () => {
+    const { host } = setup(3)
+    await nextTick()
+    const root = host.querySelector<HTMLElement>('[data-testid="session-timeline"]')!
+    Object.defineProperty(root, 'scrollHeight', { value: 2000, configurable: true })
+    Object.defineProperty(root, 'clientHeight', { value: 600, configurable: true })
+
+    root.scrollTop = 0
+    root.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    const btn = host.querySelector<HTMLButtonElement>('[data-testid="jump-latest"]')!
+    expect(btn).not.toBeNull()
+
+    // 点击后：jsdom 无 scrollTo → 直接贴底。button 的显隐交给后续 scroll 事件，
+    // 不能在 click 里手动重算 —— 那会用"还没滚到"的几何把 atBottom 写回 false
+    btn.click()
+    await nextTick()
+    expect(root.scrollTop).toBe(2000)
+
+    // 模拟平滑滚动最终派发的 scroll（贴底）→ 按钮消失，且不会自己冒回来
+    root.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    expect(host.querySelector('[data-testid="jump-latest"]')).toBeNull()
+  })
+})

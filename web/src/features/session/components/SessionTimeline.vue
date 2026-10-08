@@ -280,6 +280,13 @@ const activeTurn = ref<number | null>(null)
 /**
  * 跟踪当前所在 Turn：以滚动容器顶部往下约 80px 为基准线，
  * 取最后一个「顶部已越过基准线」的 Turn。
+ *
+ * ⚠️ 逐 Turn 的 `getBoundingClientRect()` 会**强制同步布局**，是滚动里最贵的一步；
+ * 长会话每 tick 十几次就是卡顿甚至白屏的来源。这里用两条来压：
+ *   1. **单次查询**：`querySelectorAll` 一次拿到所有已挂载的 Turn 分组，
+ *      而不是每个 Turn 各查一次（O(n) 选择器 → O(1)）；
+ *   2. 提前退出：用 rect 数组从后往前找第一个越过基准线的即可。
+ *
  * jsdom 下 getBoundingClientRect 全为 0 → 基准线命中所有组 → 稳定返回最后一个 Turn，且不抛错。
  */
 function trackActive() {
@@ -289,11 +296,13 @@ function trackActive() {
     return
   }
   const baseline = root.getBoundingClientRect().top + 80
-  let current = railTurns.value[0].turn
-  for (const t of railTurns.value) {
-    const node = root.querySelector<HTMLElement>(`[data-testid="turn-group-${t.turn}"]`)
-    if (!node) continue
-    if (node.getBoundingClientRect().top <= baseline) current = t.turn
+  // 只认**已挂载**的 Turn 分组（窗口外的根本不在 DOM 里）
+  const nodes = root.querySelectorAll<HTMLElement>('[data-testid^="turn-group-"]')
+  let current = activeTurn.value ?? railTurns.value[0].turn
+  for (const node of nodes) {
+    const turn = Number(node.getAttribute('data-testid')!.slice('turn-group-'.length))
+    if (!turn) continue // turn 0 前导区不参与跳转
+    if (node.getBoundingClientRect().top <= baseline) current = turn
   }
   activeTurn.value = current
 }
@@ -323,16 +332,29 @@ watch(activeTurn, (t) => {
   if (t) pin(t)
 })
 
-// 初载 / Turn 集合变化后重算当前 Turn，保证初始高亮正确
+// 初载 / Turn 集合变化后重算当前 Turn，保证初始高亮正确。
+// ⚠️ 这里**不再注册 window 级 scroll/resize 监听** —— 见 onScrollAll 的注释：
+// 捕获阶段的全窗口监听会在无关容器滚动时也跑一遍每-Turn 的几何测量，
+// 那是白屏的元凶。时间线自己的滚动由模板上的 @scroll.passive 驱动；
+// resize 只需重算一次高亮，用节流版本即可。
 onMounted(() => {
   nextTick(() => trackActive())
-  window.addEventListener('scroll', onScrollAll, true)
-  window.addEventListener('resize', onScrollAll)
+  window.addEventListener('resize', onResize)
 })
 onBeforeUnmount(() => {
-  window.removeEventListener('scroll', onScrollAll, true)
-  window.removeEventListener('resize', onScrollAll)
+  window.removeEventListener('resize', onResize)
+  if (rafId !== 0) cancelAnimationFrame(rafId)
 })
+
+/** resize 只关心"基准线变了、高亮要重算"，节流到一帧一次就够 */
+let rafId = 0
+function onResize() {
+  if (rafId !== 0) return
+  rafId = requestAnimationFrame(() => {
+    rafId = 0
+    trackActive()
+  })
+}
 
 watch(railTurns, () => {
   nextTick(() => trackActive())
@@ -354,7 +376,18 @@ watch(railTurns, () => {
  */
 const atBottom = ref(true)
 
-/** 滚动事件：底部跟随 + 当前 Turn 跟踪 + 直达按钮显隐 */
+/**
+ * 滚动事件：底部跟随 + 当前 Turn 跟踪 + 直达按钮显隐。
+ *
+ * ⚠️ **必须只由时间线自己的滚动容器触发**（模板上是 `@scroll.passive`）。
+ * 曾经这里还挂了 `window.addEventListener('scroll', onScrollAll, true)`，
+ * 那是白屏的元凶：捕获阶段会在**任何**元素滚动时触发（输入框、反馈面板里的
+ * diff 列表、外层页面…），而 `trackActive()` 每 tick 都要对每个 Turn 做一次
+ * `querySelector` + `getBoundingClientRect` —— 那会强制同步布局，
+ * 12 轮就是每 tick 12 次；再叠加"滚动中插入/卸载 Turn"就成了布局抖动，
+ * 内容被反复重排到视口之外，看起来就是**白屏**。
+ * （附带一害：`jumpToLatest()` 里也会调它，等于在自己触发的事件里重入。）
+ */
 function onScrollAll() {
   onScroll()
   trackActive()
@@ -370,17 +403,21 @@ function onScrollAll() {
  */
 const showJumpLatest = computed(() => !atBottom.value)
 
-/** 平滑到底 + 复位标记。滚到底之后 atBottom 由下一次 scroll 事件确认（不在这里硬改）。 */
+/**
+ * 平滑到底。
+ *
+ * ⚠️ **不要在这里回手调 `onScrollAll()`**：平滑滚动会持续派发 scroll 事件，
+ * 由它自己去更新 atBottom 才是唯一真相；手动再调一次既重入、又会用
+ * "此刻还没滚到"的几何把 atBottom 写成 false，按钮迟迟不消失（闪一下又回来）。
+ */
 function jumpToLatest() {
   const root = el.value
-  if (root) {
-    try {
-      root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' })
-    } catch {
-      root.scrollTop = root.scrollHeight
-    }
+  if (!root) return
+  try {
+    root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' })
+  } catch {
+    root.scrollTop = root.scrollHeight
   }
-  onScrollAll()
 }
 </script>
 
