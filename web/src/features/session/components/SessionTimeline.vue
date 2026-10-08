@@ -9,13 +9,19 @@
 // 详情页 UI 优化 · 需求 1：**一轮结束后自动收起"过程"，但提示词与结果始终可见**。
 // 分类与时机见下方 PROCESS_TYPES / autoFolded 两处注释 —— 判据放在本组件而不是
 // groupTurns（那是纯分组逻辑，不带"何时折叠"的 UI 语义）。
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+//
+// 详情页 UI 优化 · 需求 2：**只挂载最近两个 Turn，更早的按需挂载**。
+// 判定见下方 MOUNT_WINDOW —— 折叠只是视觉上收起了过程，那批事件仍在 DOM 里，
+// 所以真正决定首次渲染代价的是"挂载了几个 Turn"。
+//
+// 详情页 UI 优化 · 需求 3：**上拉查历史时浮出「直达最新输出」**。
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Ref } from 'vue'
 import { useSessionStore } from '@/stores/session'
 import { useTaskStore } from '@/stores/task'
 import { useFeedbackBundleStore } from '@/stores/feedbackBundle'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
-import { useTimelineScroll } from '@/composables/useSession'
+import { useTimelineScroll, BOTTOM_SLACK } from '@/composables/useSession'
 import { isTerminalStatus } from '@/types/task'
 import { groupEventsByTurn, countUserMessages } from '../groupTurns'
 import type { TurnGroup, TurnRailItem } from '../groupTurns'
@@ -154,6 +160,101 @@ watch(
   { immediate: true, deep: true },
 )
 
+// ---- 需求 2：只挂载最近两个 Turn ----
+
+/**
+ * 首次挂载保留几个 Turn，更早的收进「更早的 N 轮」。
+ *
+ * **为什么是 2**：一个 Turn 的全部过程事件原样留在 DOM 里（折叠用 hidden，
+ * 不是 v-if —— 见下方模板注释），所以"折叠过的长会话"其实一点也没省下渲染。
+ * 而用户点进详情页要看的**永远是最新那一轮的输出**，历史放在那里只是"以防万一"。
+ * 2 而不是 1：留一轮上下文，"上一轮说了什么"是读最新结果时最常回看的东西，
+ * 只挂 1 轮会让人每读一次结果都先点一次"展开"。
+ *
+ * 与"只加载最近 4 个任务"同一个判据：**默认渲染的应该是"多数时候要看的那部分"**，
+ * 其余交给一个明确、便宜、可逆的展开动作。
+ */
+const MOUNT_WINDOW = 2
+
+/**
+ * 判断一个 Turn 是否"太大，值得先拦一道"。
+ *
+ * 这是"要不要做这件事"的核心取舍，不是可选优化：
+ * 挂载窗口本身有代价 —— 向后翻历史时多一次点击，且需要重建滚动位置。
+ * 代价能换来什么，取决于被省掉的那部分有多重：
+ *   - 100 个 Turn 的长会话：省下的是 98 个 Turn 的 DOM（含全部工具卡片 /
+ *     Markdown / diff），首次渲染从"几秒的白屏"变成"一次排版" —— 很值。
+ *   - 3 个 Turn 的短会话：省下的 DOM 微乎其微，用户却凭空多一次点击 —— 不值。
+ * 所以窗口**只对"确实是长会话"的长会话生效**：
+ *   - **分组数 > MOUNT_WINDOW**：有东西可省（2 轮以内整体挂载，与改动前无差别）；
+ *   - **已加载事件数超过门槛**：轮数少但每轮巨长（几十条工具调用）同样很重，
+ *     不过"重不重"要看事件量，不能只看轮数。
+ * 两条都不满足 → 返回 null = 不截断。
+ *
+ * ⚠️ 判据是 `groups.length` 而**不是轮数**：前导区（turn 0，首条 user_message
+ * 之前的系统事件）也占一个分组。所以"N 轮 ⇒ N 组"只在事件流以 user_message
+ * 开头时成立；带前导的会话会多一组。两者都属正常，窗口按分组数走即可。
+ */
+const HEAVY_EVENT_THRESHOLD = 160
+const mountWindow = computed<number | null>(() =>
+  railTurns.value.length > MOUNT_WINDOW || events.value.length > HEAVY_EVENT_THRESHOLD
+    ? MOUNT_WINDOW
+    : null,
+)
+
+/**
+ * 是否展示全部 Turn。
+ *
+ * 三态而不是布尔，且**默认态必须由 `mountWindow` 决定**（null → 展开）：
+ * 一个"用户没表过态、数据也不长"的会话不该被拦，所以它不能是 `ref(false)`。
+ * 这里存的是**用户的显式选择**（null = 还没选过）。
+ * 换会话要复位 —— 上一任务的"展开全部"不是这一任务的意图。
+ */
+const expandAll = ref<boolean | null>(null)
+const allMounted = computed(() => (mountWindow.value === null ? true : expandAll.value === true))
+
+/** 首个挂载的 Turn 序号（`groups` 的索引；-1 = 全部挂载） */
+const mountFrom = computed(() => {
+  if (allMounted.value) return -1
+  return Math.max(0, groups.value.length - MOUNT_WINDOW)
+})
+
+/** 被收起的更早轮数（= 挂载窗口之前的 Turn 组数，含前导区 turn 0） */
+const olderCount = computed(() => (mountFrom.value > 0 ? mountFrom.value : 0))
+
+/** 需要"补挂"的 Turn：**包含当前正在看的那一轮**、之前已挂载的、以及用户点开的。
+ *  三者取最大，保证这些轮永远不会因为窗口滑动而被卸载。 */
+const pinnedTurn = ref(0)
+
+function pin(turn: number) {
+  if (turn > pinnedTurn.value) pinnedTurn.value = turn
+}
+
+/** 是否挂载第 i 个分组（i 是 groups 的下标） */
+function isMounted(i: number): boolean {
+  if (mountFrom.value < 0) return true
+  if (i >= mountFrom.value) return true
+  return groups.value[i]?.turn !== 0 && groups.value[i].turn <= pinnedTurn.value
+}
+
+/**
+ * 展开更早的 N 轮。
+ *
+ * 先把当前可见的那一轮钉住：**在列表上方插入内容会把内容推下去**，
+ * 浏览器为了保持视觉位置会自动补偿 scrollTop —— 但只在内容确实位于
+ * 视口上方时成立。钉住当前轮是这一动作对"我正在读第 7 轮"的承诺：
+ * 展开历史不该让我丢掉正在读的位置。
+ */
+function showOlder() {
+  pin(railTurns.value.at(-1)?.turn ?? 0)
+  expandAll.value = true
+}
+
+/** 当前正在读的 Turn 变深时钉住它（翻历史过程中窗口会跟着往下滑时不至于卸载）。
+ *  ⚠️ 这条 watch 必须待在 `activeTurn` 的声明**之后**（见下方 trackActive 一节）——
+ *  `watch()` 的第一个参数在这里是求值后的值，提前引用会直接
+ *  `ReferenceError: Cannot access 'activeTurn' before initialization`（整个组件挂不起来）。 */
+
 const { el, onScroll, scrollToEnd } = useTimelineScroll(
   events as unknown as Ref<unknown[]>,
   props.consumeForceScroll,
@@ -197,12 +298,6 @@ function trackActive() {
   activeTurn.value = current
 }
 
-/** 滚动事件：原滚动跟随 + 当前 Turn 跟踪 */
-function onScrollAll() {
-  onScroll()
-  trackActive()
-}
-
 /** 点击泡泡：平滑滚动到该 Turn 分组，并同步高亮（jsdom 无 scrollTo → 降级为直接设 scrollTop） */
 function jumpToTurn(turn: number) {
   const root = el.value
@@ -220,13 +315,73 @@ function jumpToTurn(turn: number) {
   activeTurn.value = turn
 }
 
+/** 当前正在读的 Turn 变深时钉住它（翻历史过程中窗口会跟着往下滑时不至于卸载）。
+ *  ⚠️ 这条 watch 必须待在 `activeTurn` 的声明**之后** ——
+ *  `watch()` 的第一个参数在这里是求值后的值，提前引用会直接
+ *  `ReferenceError: Cannot access 'activeTurn' before initialization`（整个组件挂不起来）。 */
+watch(activeTurn, (t) => {
+  if (t) pin(t)
+})
+
 // 初载 / Turn 集合变化后重算当前 Turn，保证初始高亮正确
 onMounted(() => {
   nextTick(() => trackActive())
+  window.addEventListener('scroll', onScrollAll, true)
+  window.addEventListener('resize', onScrollAll)
 })
+onBeforeUnmount(() => {
+  window.removeEventListener('scroll', onScrollAll, true)
+  window.removeEventListener('resize', onScrollAll)
+})
+
 watch(railTurns, () => {
   nextTick(() => trackActive())
 })
+
+// ---- 需求 3：直达最新输出 ----
+
+/**
+ * 是否已离开底部。
+ *
+ * 复用 useTimelineScroll 里那条 120px 的"贴底"判据（滚动跟随也用它）——
+ * 两个东西对"在不在底部"必须给同一个答案，各写一个阈值就会出现
+ * 「箭头说你在底部、而新输出没跟随」这种自相矛盾。
+ * 所以返回值直接取自 `onScroll`：底部跟随仍然只有一处真相。
+ *
+ * 不能用 IntersectionObserver：pinnedTurn 会**卸载窗口之外**的 Turn，
+ * 观察器的根是滚动容器，被观测的哨兵一旦从 DOM 里消失就再也不触发，
+ * 按钮会永久卡在上一次的状态。滚动事件不依赖 DOM 结构，卸载多少次都对。
+ */
+const atBottom = ref(true)
+
+/** 滚动事件：底部跟随 + 当前 Turn 跟踪 + 直达按钮显隐 */
+function onScrollAll() {
+  onScroll()
+  trackActive()
+  const root = el.value
+  if (root) atBottom.value = root.scrollHeight - root.scrollTop - root.clientHeight < BOTTOM_SLACK
+}
+
+/**
+ * 显示「直达最新输出」。
+ *
+ * `!atBottom` 就够了，不需要再加"内容够长"的条件：一个没得滚的会话里
+ * atBottom 恒为真，按钮本来就不会出现。多写一个条件只是多一处会漂移的判据。
+ */
+const showJumpLatest = computed(() => !atBottom.value)
+
+/** 平滑到底 + 复位标记。滚到底之后 atBottom 由下一次 scroll 事件确认（不在这里硬改）。 */
+function jumpToLatest() {
+  const root = el.value
+  if (root) {
+    try {
+      root.scrollTo({ top: root.scrollHeight, behavior: 'smooth' })
+    } catch {
+      root.scrollTop = root.scrollHeight
+    }
+  }
+  onScrollAll()
+}
 </script>
 
 <template>
@@ -238,80 +393,134 @@ watch(railTurns, () => {
       :active-turn="activeTurn"
       @jump="jumpToTurn"
     />
-    <div
-      ref="el"
-      class="h-full min-w-0 flex-1 overflow-y-auto px-3 py-4 md:px-4"
-      data-testid="session-timeline"
-      @scroll.passive="onScrollAll"
-    >
-      <div class="mx-auto flex max-w-3xl flex-col gap-2.5">
-        <!-- 分组渲染（有 user_message 事件即分组） -->
-        <template v-if="groups.length">
-          <section
-            v-for="g in groups"
-            :key="g.turn"
-            class="flex flex-col gap-2.5"
-            :data-testid="`turn-group-${g.turn}`"
+    <!-- 相对定位的容器：需求 3 的按钮要浮在滚动区右下角。
+         不给滚动容器（el）加 relative 是刻意的 —— 那会让它成为浮层的定位祖先，
+         浮层就会跟着内容滚走；挂在这一层（滚动容器的兄弟）才是"钉在视口"。
+         滚动容器上的 h-full / min-w-0 / flex-1 也一个字不能动：
+         TurnRail 与它都靠这几个类撑出"左侧轨道 + 右侧滚动区"的布局。 -->
+    <div class="relative flex min-h-0 min-w-0 flex-1">
+      <div
+        ref="el"
+        class="h-full min-w-0 flex-1 overflow-y-auto px-3 py-4 md:px-4"
+        data-testid="session-timeline"
+        @scroll.passive="onScrollAll"
+      >
+        <div class="mx-auto flex max-w-3xl flex-col gap-2.5">
+          <!-- 需求 2：默认只挂载最近 MOUNT_WINDOW 个 Turn，更早的收进
+               「更早的 N 轮」按需补挂。被收起的轮**真的不在 DOM 里**（v-if），
+               这才是省下首次渲染代价的地方（折叠只藏过程，不省 DOM）。 -->
+          <button
+            v-if="olderCount"
+            type="button"
+            class="shrink-0 rounded-lg border border-border/60 bg-surface-subtle py-2 text-xs font-medium text-accent transition-colors hover:bg-surface-muted"
+            data-testid="load-older-turns"
+            @click="showOlder"
           >
-            <!-- 前导区（turn 0）：首条用户消息前的系统事件，无头部 -->
-            <div v-if="g.turn > 0" :data-testid="`turn-header-${g.turn}`">
-              <button
-                class="flex w-full items-center gap-2 border-t border-border/40 pt-2 text-left text-xs text-text-tertiary hover:text-text-secondary"
-                :aria-expanded="!folded.has(g.turn)"
-                @click="toggleFold(g.turn)"
+            更早的 {{ olderCount }} 轮（点击展开）
+          </button>
+
+          <!-- 分组渲染（有 user_message 事件即分组） -->
+          <template v-if="groups.length">
+            <template v-for="(g, i) in groups" :key="g.turn">
+              <section
+                v-if="isMounted(i)"
+                class="flex flex-col gap-2.5"
+                :data-testid="`turn-group-${g.turn}`"
               >
-                <span class="shrink-0 font-mono font-semibold text-text-secondary">Turn #{{ g.turn }}</span>
-                <!-- 去重（需求 1）：展开态正文里的 UserBubble 已完整呈现该轮文案，
-                     头部不再重复；折叠态正文被隐藏，头部才补回（截断），保证同一句只出现一次。 -->
-                <span v-if="folded.has(g.turn)" class="min-w-0 flex-1 truncate">{{
-                  g.events[0]?.payload.text || '（无输入）'
-                }}</span>
-                <!-- 展开态占位：把右侧统计顶到右边，保持头部单行布局不塌 -->
-                <span v-else class="min-w-0 flex-1"></span>
-                <!-- 文件数取 TurnInfo.summary —— 与反馈面板同一份数据（AC-R3-02 同源）。
-                     info 为 null（bundle 落后/缺失）就不显示数字，而不是算一个替代值。 -->
-                <span v-if="g.info" class="shrink-0 font-mono">
-                  <span class="text-success">+{{ g.info.summary.additions }}</span>
-                  <span class="text-error ml-1">-{{ g.info.summary.deletions }}</span>
-                  <span class="ml-2">{{ g.info.summary.files }} 个文件</span>
-                </span>
-                <!-- 折叠态：只报"过程"的条数（需求 1）—— 该轮文案与结果仍在正文里可见，
-                     这里说「5 条已收起」会让人以为整轮都没了 -->
-                <span v-if="folded.has(g.turn)" class="shrink-0">{{ processCount(g) }} 条过程已收起</span>
-              </button>
-              <button
-                v-if="g.info"
-                class="mt-1 text-xs text-accent hover:underline"
-                data-testid="turn-link"
-                @click="fb.focusTurn(g.turn)"
-              >
-                查看本轮变更
-              </button>
-            </div>
-            <!--
-              折叠只作用在"过程"事件上（需求 1）：该轮的 user_message（提示词）与
-              text_delta（结果）永远渲染。折叠时过程事件**保留在 DOM 里**用 hidden 藏起来，
-              而不是 v-if 摘掉 —— 它们自带展开态且是局部的，重建代价大于隐藏，
-              而且 hidden 不参与布局，视觉上与摘除等价。
-            -->
-            <template v-for="event in g.events" :key="event.id">
-              <TimelineEventView
-                v-if="!(folded.has(g.turn) && isProcess(event))"
-                :event="event"
-              />
-              <div v-else hidden :data-testid="`turn-process-hidden-${g.turn}`">
-                <TimelineEventView :event="event" />
-              </div>
+                <!-- 前导区（turn 0）：首条用户消息前的系统事件，无头部 -->
+                <div v-if="g.turn > 0" :data-testid="`turn-header-${g.turn}`">
+                  <button
+                    class="flex w-full items-center gap-2 border-t border-border/40 pt-2 text-left text-xs text-text-tertiary hover:text-text-secondary"
+                    :aria-expanded="!folded.has(g.turn)"
+                    @click="toggleFold(g.turn)"
+                  >
+                    <span class="shrink-0 font-mono font-semibold text-text-secondary">Turn #{{ g.turn }}</span>
+                    <!-- 去重（需求 1）：展开态正文里的 UserBubble 已完整呈现该轮文案，
+                         头部不再重复；折叠态正文被隐藏，头部才补回（截断），保证同一句只出现一次。 -->
+                    <span v-if="folded.has(g.turn)" class="min-w-0 flex-1 truncate">{{
+                      g.events[0]?.payload.text || '（无输入）'
+                    }}</span>
+                    <!-- 展开态占位：把右侧统计顶到右边，保持头部单行布局不塌 -->
+                    <span v-else class="min-w-0 flex-1"></span>
+                    <!-- 文件数取 TurnInfo.summary —— 与反馈面板同一份数据（AC-R3-02 同源）。
+                         info 为 null（bundle 落后/缺失）就不显示数字，而不是算一个替代值。 -->
+                    <span v-if="g.info" class="shrink-0 font-mono">
+                      <span class="text-success">+{{ g.info.summary.additions }}</span>
+                      <span class="text-error ml-1">-{{ g.info.summary.deletions }}</span>
+                      <span class="ml-2">{{ g.info.summary.files }} 个文件</span>
+                    </span>
+                    <!-- 折叠态：只报"过程"的条数（需求 1）—— 该轮文案与结果仍在正文里可见，
+                         这里说「5 条已收起」会让人以为整轮都没了 -->
+                    <span v-if="folded.has(g.turn)" class="shrink-0">{{ processCount(g) }} 条过程已收起</span>
+                  </button>
+                  <button
+                    v-if="g.info"
+                    class="mt-1 text-xs text-accent hover:underline"
+                    data-testid="turn-link"
+                    @click="fb.focusTurn(g.turn)"
+                  >
+                    查看本轮变更
+                  </button>
+                </div>
+                <!--
+                  折叠只作用在"过程"事件上（需求 1）：该轮的 user_message（提示词）与
+                  text_delta（结果）永远渲染。折叠时过程事件**保留在 DOM 里**用 hidden 藏起来，
+                  而不是 v-if 摘掉 —— 它们自带展开态且是局部的，重建代价大于隐藏，
+                  而且 hidden 不参与布局，视觉上与摘除等价。
+                -->
+                <template v-for="event in g.events" :key="event.id">
+                  <TimelineEventView
+                    v-if="!(folded.has(g.turn) && isProcess(event))"
+                    :event="event"
+                  />
+                  <div v-else hidden :data-testid="`turn-process-hidden-${g.turn}`">
+                    <TimelineEventView :event="event" />
+                  </div>
+                </template>
+              </section>
             </template>
-          </section>
-        </template>
-        <!-- 平铺兜底：旧任务（无 user_message 事件）→ 与改动前行为一致（AC-R3-04） -->
-        <template v-else>
-          <TimelineEventView v-for="event in events" :key="event.id" :event="event" />
-        </template>
-        <!-- 旧任务兜底：直接展示累积输出 -->
-        <TextBubble v-if="outputFallback" :text="task!.output!" />
-        <ThinkingBadge v-if="showThinking" />
+          </template>
+          <!-- 平铺兜底：旧任务（无 user_message 事件）→ 与改动前行为一致（AC-R3-04） -->
+          <template v-else>
+            <TimelineEventView v-for="event in events" :key="event.id" :event="event" />
+          </template>
+          <!-- 旧任务兜底：直接展示累积输出 -->
+          <TextBubble v-if="outputFallback" :text="task!.output!" />
+          <ThinkingBadge v-if="showThinking" />
+        </div>
+      </div>
+
+      <!-- 需求 3：上拉翻历史时浮出「直达最新输出」。
+           定位用 sticky 而不是 absolute：absolute 会脱离文档流、需要额外给
+           滚动内容垫一块占位高度，而 sticky 自己就参与布局 ——
+           它先按正常流占一行（底部那 0 行高），再被粘在滚动区下沿。
+           移动端（<768px）居中、桌面端贴右：手机拇指够得到中间，
+           而桌面端鼠标在右半边操作，居中反而离手更远。 -->
+      <div
+        v-if="showJumpLatest"
+        class="pointer-events-none sticky bottom-0 z-10 -mt-px flex w-full justify-center pb-2 md:justify-end md:pr-3"
+      >
+        <button
+          type="button"
+          class="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-secondary shadow-md transition-colors hover:border-accent hover:text-accent"
+          data-testid="jump-latest"
+          title="回到最新输出"
+          @click="jumpToLatest"
+        >
+          直达最新输出
+          <svg
+            class="h-3.5 w-3.5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 5v14M6 13l6 6 6-6" />
+          </svg>
+        </button>
       </div>
     </div>
   </div>

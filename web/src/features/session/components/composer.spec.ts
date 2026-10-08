@@ -341,7 +341,12 @@ describe('输入框内嵌动作按钮（PC 与移动端同一套 DOM）', () => 
     // "嵌在框内" 的结构性判据：与 textarea 共用那个 relative 容器
     expect(actions.parentElement).toBe(t.parentElement)
     expect(actions.parentElement!.className).toContain('relative')
-    for (const cls of ['absolute', 'bottom-0', 'justify-end', 'pointer-events-none'])
+    // ⚠️ 这里只验证"贴着右下角"这一结构事实，**具体偏移值不在这里钉**：
+    // 下沿几何由下方那条几何用例负责（它要求 `bottom-2.5` 且**明确禁止** `bottom-0`）。
+    // 早期这里写死 `bottom-0`，与那条用例互相矛盾 —— 41f8d7f 把行从 bottom-0 抬到
+    // bottom-2.5（下沿才等于 12px）时只改了代码没改这里，于是同一份断言集里
+    // 「必须含 bottom-0」和「必须不含 bottom-0」同时成立，测试永远红。
+    for (const cls of ['absolute', 'inset-x-0', 'bottom-', 'justify-end', 'pointer-events-none'])
       expect(actions.className, `缺少 ${cls}`).toContain(cls)
   })
 

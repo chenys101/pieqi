@@ -15,6 +15,7 @@ import { useRouter } from 'vue-router'
 import { useTaskStore } from '@/stores/task'
 import { useTaskTreeStore } from '@/stores/taskTree'
 import { TaskBrowserGroup } from '@/features/task'
+import { TASKS_PER_PROJECT } from '@/features/task'
 import type { BrowserGroup } from '@/features/task/types'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Spinner from '@/components/ui/Spinner.vue'
@@ -53,6 +54,18 @@ function isOpen(key: string, count: number): boolean {
   return filtering.value && count > 0
 }
 
+/**
+ * 该项目是否已「加载更多」。
+ *
+ * 与 isOpen 同一条优先级，且**筛选期间一律视为已展开** ——
+ * 见下方 groups 里 hiddenCount 的注释：搜索词命中某个任务却把它留在
+ * 「加载更多」后面，等于搜不到。
+ */
+function isExpanded(key: string): boolean {
+  if (filtering.value) return true
+  return tree.isProjectExpanded(key)
+}
+
 const groups = computed<BrowserGroup[]>(() => {
   const q = search.value.trim().toLowerCase()
   return taskStore.groupsByProject.map((g) => {
@@ -70,11 +83,20 @@ const groups = computed<BrowserGroup[]>(() => {
     }, {})
     const agg = AGG_ORDER.filter((k) => counts[k]).map((k) => `${counts[k]} ${STATUS_LABELS[k]}`).join(' · ')
 
+    // 默认只渲染最近 TASKS_PER_PROJECT 个（g.tasks 已按 updatedAt 倒序，
+    // 所以"前 N 个"就是"最近 N 个"），其余收进「加载更多」。
+    // 计数（列表头、状态聚合、项目行的数字）**一律用 list 的全量**，
+    // 否则用户会看到"项目写着 12 个任务、下面只列出 4 个"这种自相矛盾的界面。
+    const expanded = isExpanded(g.key)
+    const visible = expanded ? list : list.slice(0, TASKS_PER_PROJECT)
+
     return {
       key: g.key,
       name: g.projectId || g.projectPath,
       path: g.projectPath,
       tasks: list,
+      visible,
+      hiddenCount: list.length - visible.length,
       open: isOpen(g.key, list.length),
       dim: filtering.value && !list.length,
       agg,
@@ -89,6 +111,12 @@ const anyOpen = computed(() => groups.value.some((g) => g.open))
 
 function toggle(key: string) {
   tree.toggleProject(key)
+}
+
+/** 「加载更多」：把该项目剩余任务摊开。状态进 store —— 与侧栏树同一份，
+ *  在一处点开、切到另一处仍是摊开的（SPEC §6.1.1）。 */
+function expand(key: string) {
+  tree.expandProject(key)
 }
 
 function toggleAll() {
@@ -205,7 +233,14 @@ function clearFilter() {
         </div>
 
         <div v-if="groups.length" class="mt-2.5 space-y-2.5">
-          <TaskBrowserGroup v-for="g in groups" :key="g.key" :group="g" @toggle="toggle(g.key)" @remove="removeTask" />
+          <TaskBrowserGroup
+            v-for="g in groups"
+            :key="g.key"
+            :group="g"
+            @toggle="toggle(g.key)"
+            @expand="expand(g.key)"
+            @remove="removeTask"
+          />
         </div>
 
         <div v-if="!shownTasks" class="py-11 text-center">

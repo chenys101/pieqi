@@ -117,13 +117,23 @@ export function useSession(taskId: Ref<string>) {
 }
 
 /** 滚动跟随：在底部时跟随新事件；翻历史不被打断（方案 §36/§39） */
+
+/**
+ * 「贴底」判定余量（px）。
+ *
+ * 导出而不是在组件里另写一个：**"在不在底部"只能有一处真相** ——
+ * 底部跟随（这里）与「直达最新输出」按钮的显隐（SessionTimeline）若各写一个阈值，
+ * 就会出现「按钮说你在底部、而新输出没跟随」这种自相矛盾的界面。
+ */
+export const BOTTOM_SLACK = 120
+
 export function useTimelineScroll(eventsRef: Ref<unknown[]>, consumeForceScroll: () => boolean) {
   const el = ref<HTMLElement | null>(null)
   let nearBottom = true
 
   function onScroll() {
     if (!el.value) return
-    nearBottom = el.value.scrollHeight - el.value.scrollTop - el.value.clientHeight < 120
+    nearBottom = el.value.scrollHeight - el.value.scrollTop - el.value.clientHeight < BOTTOM_SLACK
   }
 
   watch(

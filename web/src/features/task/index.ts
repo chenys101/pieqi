@@ -5,3 +5,6 @@
 // 列表主体已是全部项目，再筛同一维度就是第二次收窄，与树本身互相打架"）。
 // 任务浏览器页的工具栏只有搜索 + 状态两项，写在该页内。
 export { default as TaskBrowserGroup } from './components/TaskBrowserGroup.vue'
+/** 单项目默认渲染条数（侧栏树与任务浏览器页共用同一个阈值，勿各写一份） */
+export { TASKS_PER_PROJECT } from './types'
+export type { BrowserGroup } from './types'

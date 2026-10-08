@@ -5,13 +5,16 @@
 // 折叠状态都来自 `stores/taskTree`。差别只在渲染密度 ——
 // 侧栏 240px 只放名称（§6.1.2：再插一列会把 80% 的名字截断），
 // 这里是整屏，所以补回侧栏放不下的时间与状态徽章。
+//
+// 渲染条数由页面给的 `visible` / `hiddenCount` 决定（默认最近 4 个 + 「加载更多」）：
+// 截断阈值与"还剩几条"必须出自同一次计算，组件不自己 slice。
 import { ref } from 'vue'
 import type { BrowserGroup } from '../types'
 import { STATUS_DOT, STATUS_LABELS } from '@/utils/format'
 import { timeAgo } from '@/utils/date'
 
 const props = defineProps<{ group: BrowserGroup }>()
-const emit = defineEmits<{ toggle: []; remove: [id: string] }>()
+const emit = defineEmits<{ toggle: []; expand: []; remove: [id: string] }>()
 
 // 删除入口：**必须常驻可见**（不能靠 hover 显形），因为这一页只有移动端可达，
 // 而移动端没有 hover —— 悬浮才出现的按钮在那里等于不存在。
@@ -55,8 +58,7 @@ function doDelete(id: string) {
       <span class="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-text">{{ props.group.name }}</span>
       <span class="shrink-0 rounded-full border border-border-subtle bg-surface-muted px-1.5 py-px text-[11.5px] font-semibold tabular-nums text-text-secondary">
         {{ props.group.tasks.length }}
-      </span>
-      <!-- 状态聚合在移动端隐藏（§6.1.5）：它会跟项目名抢宽度。
+      </span>      <!-- 状态聚合在移动端隐藏（§6.1.5）：它会跟项目名抢宽度。
            这一页本就只有移动端可达，但桌面深链进来也能看，故按断点取舍。 -->
       <span class="agg hidden shrink-0 text-xs tabular-nums text-text-tertiary md:inline">
         {{ props.group.agg || '无匹配任务' }}
@@ -65,7 +67,11 @@ function doDelete(id: string) {
 
     <div class="tb-body">
       <div class="inner">
-        <div v-for="t in props.group.tasks" :key="t.id" class="tb-item">
+        <!-- 只渲染 visible（最近 TASKS_PER_PROJECT 个，除非点过「加载更多」）。
+             遍历 group.tasks 会让展开一个攒了几十次任务的项目时，
+             一次性挂出几十个 RouterLink —— 树高度本该由项目数决定，
+             展开某个项目不该是"把整棵树的代价补回来"。 -->
+        <div v-for="t in props.group.visible" :key="t.id" class="tb-item">
           <div class="tb-row">
             <RouterLink
               :to="`/sessions/${t.id}`"
@@ -99,6 +105,23 @@ function doDelete(id: string) {
             <button type="button" class="tb-act" @click="pendingDelete = ''">取消</button>
           </div>
         </div>
+
+        <!-- 「加载更多」：只说还剩几条，不说"展开全部"——
+             用户要的是"还有 N 个没看到"，而这正是他决定点不点的判据。
+             整行可点（手机拇指区），不是一个小按钮挂在行尾。 -->
+        <button
+          v-if="props.group.hiddenCount > 0"
+          type="button"
+          class="tb-more"
+          :data-testid="`group-more-${props.group.key}`"
+          :aria-label="`加载 ${props.group.name} 的其余 ${props.group.hiddenCount} 个任务`"
+          @click="emit('expand')"
+        >
+          加载更多（还有 {{ props.group.hiddenCount }} 个）
+          <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
       </div>
     </div>
   </div>
@@ -166,6 +189,26 @@ function doDelete(id: string) {
 
 .tb-item { border-bottom: 1px solid rgb(var(--color-border-subtle)); }
 .tb-item:last-child { border-bottom: 0; }
+
+/* 「加载更多」：整行可点（手机上拇指区够大），但用最弱的颜色 ——
+   它是"把剩下的摊开"，不是这一页的主操作，不该抢任务名的注意力。 */
+.tb-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgb(var(--color-accent));
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.tb-more:hover { background: rgb(var(--color-surface-subtle)); }
 
 .tb-row { display: flex; align-items: stretch; }
 .tb-row:hover { background: rgb(var(--color-surface-subtle)); }

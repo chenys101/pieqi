@@ -7,6 +7,7 @@
 //
 // 折叠状态**不在这里**，在 stores/taskTree —— 移动端任务浏览器页与侧栏
 // 共用同一份，否则用户在两个容器里要各展开一次同样的项目（SPEC §6.1.1）。
+// 「加载更多」的展开态同理，共用一份：在一处摊开、切到另一处仍是摊开的。
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '@/composables/useWebSocket'
@@ -14,7 +15,8 @@ import { useSessionStore } from '@/stores/session'
 import { useTaskStore } from '@/stores/task'
 import { useTaskTreeStore } from '@/stores/taskTree'
 import { useNotificationStore } from '@/stores/notification'
-import type { TaskGroup } from '@/types/task'
+import type { Task, TaskGroup } from '@/types/task'
+import { TASKS_PER_PROJECT } from '@/features/task'
 import { STATUS_DOT } from '@/utils/format'
 
 const route = useRoute()
@@ -32,6 +34,31 @@ const currentSessionId = computed(() => route.path.match(/^\/sessions\/([^/]+)/)
 function isProjectOpen(g: TaskGroup): boolean {
   if (tree.openProjects[g.key] !== undefined) return tree.openProjects[g.key]
   return !!currentSessionId.value && g.tasks.some((t) => t.id === currentSessionId.value)
+}
+
+/**
+ * 该项目展开后实际渲染的任务：默认最近 TASKS_PER_PROJECT 个，
+ * 点过「加载更多」才全摊开。
+ *
+ * **当前正在看的那个会话必须在窗口里**，否则会出现一个荒诞场景：
+ * 侧栏自动展开了这个项目（因为路由就在它下面），但那条任务被截断到
+ * 「加载更多」后面 —— 用户看不见自己在哪一项。把当前项换进来
+ * （挤掉窗口里最后一个），保证"当前项永远可见"。
+ */
+function visibleTasks(g: TaskGroup): Task[] {
+  if (tree.isProjectExpanded(g.key)) return g.tasks
+  const head = g.tasks.slice(0, TASKS_PER_PROJECT)
+  const cur = currentSessionId.value
+  if (!cur || head.some((t) => t.id === cur)) return head
+  const active = g.tasks.find((t) => t.id === cur)
+  return active ? [...head.slice(0, TASKS_PER_PROJECT - 1), active] : head
+}
+
+/** 被「加载更多」收起来的条数（当前项被换进来时它已不在隐藏区，故按 id 实测） */
+function hiddenCount(g: TaskGroup): number {
+  if (tree.isProjectExpanded(g.key)) return 0
+  const shown = new Set(visibleTasks(g).map((t) => t.id))
+  return g.tasks.reduce((n, t) => (shown.has(t.id) ? n : n + 1), 0)
 }
 
 const totalTasks = computed(() => taskStore.groupsByProject.reduce((n, g) => n + g.tasks.length, 0))
@@ -130,7 +157,7 @@ async function doDelete(id: string) {
           </button>
 
           <div v-if="isProjectOpen(g)">
-            <div v-for="t in g.tasks" :key="t.id" class="group/task relative">
+            <div v-for="t in visibleTasks(g)" :key="t.id" class="group/task relative">
               <RouterLink
                 :to="`/sessions/${t.id}`"
                 class="flex items-center gap-2 rounded-lg py-1.5 pl-5 pr-6 text-sm transition-colors"
@@ -172,6 +199,16 @@ async function doDelete(id: string) {
                 </button>
               </div>
             </div>
+            <!-- 「加载更多」：240px 里只放得下一行小字，所以不放图标也不写
+                 "还有 N 个"以外的字 —— 数量本身就是他决定点不点的判据。 -->
+            <button
+              v-if="hiddenCount(g)"
+              class="w-full rounded-lg py-1.5 pl-5 text-left text-[11px] font-medium text-accent transition-colors hover:bg-elevated/60"
+              :data-testid="`sidebar-more-${g.key}`"
+              @click="tree.expandProject(g.key)"
+            >
+              加载更多（还有 {{ hiddenCount(g) }} 个）
+            </button>
           </div>
         </section>
         <div v-if="!taskStore.groupsByProject.length" class="px-2 py-4 text-xs text-muted">

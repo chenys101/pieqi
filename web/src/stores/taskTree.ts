@@ -22,11 +22,22 @@ export const useTaskTreeStore = defineStore('taskTree', {
      * O(项目数) 而非 O(任务数)。
      */
     openProjects: {} as Record<string, boolean>,
+    /**
+     * 项目 key → 是否已经「加载更多」把全部任务摊开。
+     *
+     * 与 openProjects 一样放在 store（同一份状态两个容器），但**是两件事**：
+     * 一个是"这个项目展不展开"，一个是"展开后看 4 条还是看全部"。
+     * 收起再展开不该把用户的"我要看全部"重置掉，所以不能合成一个字段。
+     */
+    expandedProjects: {} as Record<string, boolean>,
   }),
 
   getters: {
     isProjectOpen(state) {
       return (key: string): boolean => state.openProjects[key] ?? false
+    },
+    isProjectExpanded(state) {
+      return (key: string): boolean => state.expandedProjects[key] ?? false
     },
   },
 
@@ -40,9 +51,18 @@ export const useTaskTreeStore = defineStore('taskTree', {
     setProjectOpen(key: string, open: boolean) {
       this.openProjects[key] = open
     },
-    /** 一次性展开/收起全部（移动端「展开全部」） */
+    /** 「加载更多」：把该项目剩余任务一次摊开 */
+    expandProject(key: string) {
+      this.expandedProjects[key] = true
+    },
+    /** 一次性展开/收起全部（移动端「展开全部」）。收起时一并复位"加载更多"，
+     *  否则用户收起再展开会看到一批项目直接摊开全部任务 —— 与"展开全部"
+     *  的字面承诺（展开一层）不符。 */
     setAllProjects(keys: string[], open: boolean) {
-      for (const k of keys) this.openProjects[k] = open
+      for (const k of keys) {
+        this.openProjects[k] = open
+        if (!open) delete this.expandedProjects[k]
+      }
     },
   },
 })
