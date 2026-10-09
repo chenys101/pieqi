@@ -693,27 +693,42 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 	return string(resp.SessionId), nil
 }
 
-// applyModel 把指定模型落到一个刚建立/接回的会话上（空串 = 不指定，直接返回）。
+// applyModel 把模型落到一个刚建立/接回的会话上。
 //
 // 分通道写，判据是清单从哪读到的（见 catalogSource）：
 //
-//   - catalogStandard（原生 agent，如 qodercli）→ session/set_config_option；
-//   - catalogMeta（fork 的 dsh-acp）→ **什么都不做**：建/续会话请求里已经带了
+//   - catalogStandard（原生 ACP agent，如 qodercli / **官方 dsh-acp**）→
+//     session/set_config_option；
+//   - catalogMeta（本仓库 fork 的 dsh-acp）→ **什么都不做**：建/续会话请求里已经带了
 //     `_meta.model`，那侧在 session/new 时就吃掉了它（见 forks/dsh-acp 的 selectionFor）。
 //     这里再发一次 set_config_option 会直接抛错（它把 configOptions 隐藏成恒空）。
 //   - catalogNone（不支持选模型）→ 静默跳过：指定了也不生效，但**不报错** ——
-//     Task.Model 此时只是一个记录值，拦下来反而让"先建任务后换 agent"这类流程不可用
-//     （同 api.verifyModelChoice 对空清单放行的取舍）。
+//     Task.Model 此时只是一个记录值（如 claude 走桥时 SDK 层根本没有 model 字段，
+//     见 api.verifyModelChoice 对空清单放行的同一取舍）。
+//
+// **model 为空时不再是"直接返回"**：若走标准通道且清单非空，改设为**清单首项**
+// （见 fallbackModel）。理由与判据见该函数；一句话是"agent 自己的默认值可能是坏的，
+// 而清单首项是 agent 亲口说它有的"。非标准通道（_meta / none）仍按空串跳过 ——
+// 前者由请求 _meta 承载，后者无处可设。
 //
 // 失败要冒泡（不静默）：用户显式选了模型却没生效，比直接报错糟糕得多。
 func (a *ACPAgent) applyModel(ctx context.Context, sessionID, model string) error {
-	if model == "" {
-		return nil
-	}
 	a.catalogMu.Lock()
 	src := a.catalogSrc
+	cat := a.modelCatalog
 	a.catalogMu.Unlock()
-	if src != catalogStandard {
+
+	if model == "" {
+		// 只有标准通道 + 有清单时才兜底：_meta 通道由请求 _meta 承载（空 = 不指定，
+		// 是它支持的语义）；catalogNone 无清单可挑。
+		if src != catalogStandard {
+			return nil
+		}
+		model = fallbackModel(cat)
+		if model == "" {
+			return nil // 清单为空：无可挑，维持"不指定"
+		}
+	} else if src != catalogStandard {
 		return nil // _meta 通道已在请求里带过；无清单则无处可设
 	}
 	_, err := a.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
@@ -727,6 +742,34 @@ func (a *ACPAgent) applyModel(ctx context.Context, sessionID, model string) erro
 		return fmt.Errorf("acp: set model %q on session %s: %w", model, sessionID, err)
 	}
 	return nil
+}
+
+// fallbackModel 在用户没指定模型时，从清单里挑一个可以落地的值（挑不到返回空串）。
+//
+// 为什么需要"兜底"而不是"不指定就让 agent 用自己的默认"：**agent 的默认值是它自己的
+// 配置，pieqi 对它没有判断力，而它可能是坏的**。2026-10-09 实证（官方 dsh-acp
+// 0.2.1-alpha.1 + profile 里没有 `- id: acp` pin）：
+//
+//	session/new 成功，configOptions 正常下发（清单里有 deepseek-official 两项），
+//	但**第一轮 prompt 直接失败**：
+//	  llm-deepseek: no API key for provider route "deepseek-official"
+//
+// 原因是 `@deepseek-ai/dsh-acp-app` bundle 自带 `provider: deepseek-official` 兜底，
+// 而本机没有 DEEPSEEK_API_KEY。注意这个坏默认**也在清单里** —— 所以「默认值在不在
+// 清单里」判不出可用性，判据只能从"agent 亲口说它有哪些"出发。
+//
+// 取**首项**（而非随机/启发式）：清单顺序由 agent 自己给，它是 agent 侧配置的声明
+// 顺序。dsh 实测把 `magpie` 组排在 `deepseek-official` 之前，首项即
+// `["magpie","group/auto-deepseek-v4-1-flash"]`（可用）。pieqi 不做"哪个桶有额度"
+// 这类判断 —— 那是 agent 侧配置知识，硬编码进来迟早漂移。
+//
+// 副作用（知悉并接受）：删掉 agent 侧 pin 之后，「不选模型」的语义从"用 agent 默认"
+// 变成"用清单首项"。这是**刻意的**：在清单可读的前提下，"agent 默认"不再可信。
+func fallbackModel(cat ModelCatalog) string {
+	if len(cat.Options) == 0 {
+		return ""
+	}
+	return cat.Options[0].Value
 }
 
 // SetTurnModel 设定下一轮 prompt 使用的模型（空串 = 不改）。实现 agent.TurnModelSetter。

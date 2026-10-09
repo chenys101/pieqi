@@ -289,8 +289,9 @@ func TestACPAgent_ForkDshKeepsMetaChannel(t *testing.T) {
 }
 
 // TestACPAgent_NoCatalogSkipsSetQuietly 没有清单的 agent（不支持选模型）：
-// 指定了模型也不报错、也不发 set_config_option —— Task.Model 此时只是记录值，
-// 拦下来会让"先建任务后换 agent"之类流程不可用（同 api.verifyModelChoice 的取舍）。
+// 指定了模型也不报错、也不发 set_config_option —— Task.Model 此时只是记录值。
+// 真实场景是 claude 走桥：SDK 层根本没有 model 字段，拦下来没有意义
+// （同 api.verifyModelChoice 对空清单放行的取舍）。
 func TestACPAgent_NoCatalogSkipsSetQuietly(t *testing.T) {
 	conn := &fakeModelConn{newSessionResp: acp.NewSessionResponse{SessionId: "plain"}}
 	a := newModelAgent(t, conn, acp.AgentCapabilities{})
@@ -304,6 +305,102 @@ func TestACPAgent_NoCatalogSkipsSetQuietly(t *testing.T) {
 	if len(a.Models().Options) != 0 {
 		t.Fatalf("Models() 应为空，实得 %+v", a.Models())
 	}
+}
+
+// TestACPAgent_EmptyModelFallsBackToFirstOption 未指定模型时的兜底（2026-10-09）。
+//
+// 守的是什么：**agent 自己的默认值可能是坏的，而它照样出现在清单里**。
+// 实证（官方 dsh-acp 0.2.1-alpha.1 + profile 无 `- id: acp` pin）：
+// `session/new` 成功、清单正常下发，但第一轮 prompt 因 bundle 自带的
+// `provider: deepseek-official`（本机无 DEEPSEEK_API_KEY）直接失败。
+//
+// 所以「不指定」不能理解为「让 agent 用它自己的默认」，而是「用清单首项」——
+// 首项是 agent 亲口说它有的东西，且 dsh 把 magpie 组排在 deepseek-official 之前。
+//
+// 判据：**只有标准通道 + 清单非空时**才兜底。另两条通道各有正当的"空 = 不指定"语义
+// （_meta 由请求承载；catalogNone 无清单可挑），不能被这条改动污染。
+func TestACPAgent_EmptyModelFallsBackToFirstOption(t *testing.T) {
+	t.Run("标准通道 + 清单非空 → 设清单首项", func(t *testing.T) {
+		conn := &fakeModelConn{
+			newSessionResp: acp.NewSessionResponse{
+				SessionId: "s1",
+				ConfigOptions: []acp.SessionConfigOption{
+					modelSelect("first-model", opt("first-model", "首个", ""), opt("second-model", "次个", "")),
+				},
+			},
+		}
+		a := newModelAgent(t, conn, acp.AgentCapabilities{})
+
+		// Model 留空 = 用户建任务时没选模型
+		if _, err := a.NewSession(context.Background(), SessionConfig{Cwd: t.TempDir()}); err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		if len(conn.setCalls) != 1 {
+			t.Fatalf("set_config_option 调用 %d 次，期望 1 次（空 model 应兜底为首项）：%+v",
+				len(conn.setCalls), conn.setCalls)
+		}
+		if got := conn.setCalls[0].value; got != "first-model" {
+			t.Errorf("兜底值=%q，期望清单首项 first-model —— 取错项会让会话跑在不可用的桶上", got)
+		}
+	})
+
+	t.Run("_meta 通道 + 空 model → 不发 set（fork 会抛错）", func(t *testing.T) {
+		conn := &fakeModelConn{
+			newSessionResp: acp.NewSessionResponse{
+				SessionId: "s2",
+				ConfigOptions: []acp.SessionConfigOption{},
+				Meta: map[string]any{modelCatalogMetaKey: []any{
+					map[string]any{
+						"type": "select", "id": "model", "name": "Model",
+						"currentValue": "meta-first",
+						"options": []any{
+							map[string]any{"value": "meta-first", "name": "Meta 首个"},
+						},
+					},
+				}},
+			},
+		}
+		a := newModelAgent(t, conn, acp.AgentCapabilities{})
+
+		if _, err := a.NewSession(context.Background(), SessionConfig{Cwd: t.TempDir()}); err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		if len(conn.setCalls) != 0 {
+			t.Fatalf("对 _meta 通道的 agent 发了 set_config_option（%+v）—— fork 隐藏了 "+
+				"configOptions，调它会抛错", conn.setCalls)
+		}
+	})
+
+	t.Run("无清单 + 空 model → 不发 set", func(t *testing.T) {
+		conn := &fakeModelConn{newSessionResp: acp.NewSessionResponse{SessionId: "s3"}}
+		a := newModelAgent(t, conn, acp.AgentCapabilities{})
+
+		if _, err := a.NewSession(context.Background(), SessionConfig{Cwd: t.TempDir()}); err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		if len(conn.setCalls) != 0 {
+			t.Fatalf("无清单却发了 set_config_option：%+v", conn.setCalls)
+		}
+	})
+
+	t.Run("显式指定时不走兜底（用户选择优先）", func(t *testing.T) {
+		conn := &fakeModelConn{
+			newSessionResp: acp.NewSessionResponse{
+				SessionId: "s4",
+				ConfigOptions: []acp.SessionConfigOption{
+					modelSelect("first-model", opt("first-model", "首个", ""), opt("second-model", "次个", "")),
+				},
+			},
+		}
+		a := newModelAgent(t, conn, acp.AgentCapabilities{})
+
+		if _, err := a.NewSession(context.Background(), SessionConfig{Cwd: t.TempDir(), Model: "second-model"}); err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		if len(conn.setCalls) != 1 || conn.setCalls[0].value != "second-model" {
+			t.Fatalf("set_config_option=%+v，期望用户指定的 second-model 而非兜底首项", conn.setCalls)
+		}
+	})
 }
 
 // TestACPAgent_TurnModelUsesStandardChannel 按轮换模型（续问时选模型）也要分通道：
@@ -322,7 +419,11 @@ func TestACPAgent_TurnModelUsesStandardChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	conn.setCalls = nil // 清掉建会话那次的记录，只看本轮
+	// 清掉建会话那次的两份记录，只看本轮。
+	// order 必须一起清：漏了它会把上一轮残留的 "set" 算进来，令下面的顺序断言假失败
+	// （2026-10-09 空 model 兜底上线后暴露 —— 建会话那次现在也会发一次 set）。
+	conn.setCalls = nil
+	conn.order = nil
 
 	a.SetTurnModel("qfmodel") // 调用方在每轮 Run 前设置（见 TurnModelSetter）
 	if err := a.SendPrompt(context.Background(), sid, "换到 Flash 再回答"); err != nil {
@@ -332,8 +433,9 @@ func TestACPAgent_TurnModelUsesStandardChannel(t *testing.T) {
 	if len(conn.setCalls) != 1 || conn.setCalls[0].value != "qfmodel" {
 		t.Fatalf("本轮 set_config_option=%+v，期望一次 qfmodel", conn.setCalls)
 	}
-	if len(conn.order) < 2 || conn.order[0] != "set" || conn.order[1] != "prompt" {
-		t.Fatalf("调用顺序=%v，期望 set 在 prompt 之前", conn.order)
+	if len(conn.order) != 2 || conn.order[0] != "set" || conn.order[1] != "prompt" {
+		t.Fatalf("调用顺序=%v，期望恰好 [set prompt]（set 必须在 prompt 之前：set 对会话生效，"+
+			"顺序反了这一轮还是跑在旧模型上）", conn.order)
 	}
 	// 原生 agent 不该收到 _meta.model（它忽略 _meta，带了等于没设）
 	if len(conn.promptMetas) != 1 {
