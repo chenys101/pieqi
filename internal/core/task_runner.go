@@ -195,11 +195,15 @@ func (tr *TaskRunner) captureBaseline(taskID string) {
 	if tr.feedback == nil {
 		return
 	}
+	tr.logger.Debug("captureBaseline: before store.Get", zap.String("task", taskID))
 	t, ok := tr.store.Get(taskID)
+	tr.logger.Debug("captureBaseline: after store.Get", zap.String("task", taskID), zap.Bool("ok", ok))
 	if !ok || t == nil || t.WorktreePath == "" || t.Baseline != nil {
 		return
 	}
+	tr.logger.Debug("captureBaseline: calling feedback.CaptureBaseline", zap.String("task", taskID))
 	b := tr.feedback.CaptureBaseline(t)
+	tr.logger.Debug("captureBaseline: feedback done", zap.String("task", taskID), zap.Bool("nil", b == nil))
 	if b == nil {
 		return // 已捕获或捕获失败
 	}
@@ -210,6 +214,7 @@ func (tr *TaskRunner) captureBaseline(taskID string) {
 		}
 		return false
 	})
+	tr.logger.Debug("captureBaseline: store update done", zap.String("task", taskID))
 }
 
 // captureTurnEnd 在 Turn 结束边界（Task 终态 / 下一 EventUser 到达前）捕获 Turn 快照。
@@ -921,6 +926,8 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 // 部分从 claude -p 子进程换成 AgentManager（ACP / Print 透明切换）。
 // model 是本轮要用的模型（不透明选择值，空 = 沿用会话当前路由）。见 Resume 的说明。
 func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resumePrompt, turnModel string, images []agent.ImageInput) {
+	tr.logger.Debug("runACP: enter", zap.String("task", task.ID), zap.String("agent", task.Agent),
+		zap.String("worktree", task.WorktreePath), zap.Bool("use_acp", tr.useACP), zap.Bool("has_mgr", tr.agentMgr != nil))
 	project := &model.Project{ID: task.ProjectID, RepoPath: task.ProjectPath, BaseBranch: tr.baseBranch}
 	if task.WorktreePath == "" {
 		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
@@ -940,7 +947,10 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 	}
 
 	// Feedback P0：Agent 动工前捕获 baseline（幂等；失败不影响主流程）
+	tr.logger.Debug("runACP: before captureBaseline", zap.String("task", task.ID))
 	tr.captureBaseline(task.ID)
+	tr.logger.Debug("runACP: after captureBaseline", zap.String("task", task.ID))
+	tr.logger.Debug("runACP: store.Get done", zap.String("task", task.ID))
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
@@ -969,6 +979,8 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		resumeFrom = task.ACPSessionID
 	}
 	fellBack := tr.ensureACPSession(ctx, task, resumeFrom)
+	tr.logger.Debug("runACP: ensureACPSession done", zap.String("task", task.ID), zap.Bool("fell_back", fellBack),
+		zap.Bool("adapter", tr.agentMgr.Adapter(task.ID) != nil))
 	if tr.agentMgr.Adapter(task.ID) == nil {
 		return // Open 失败已 surface（failTask / 续问 status + forceFailTask）
 	}

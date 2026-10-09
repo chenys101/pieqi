@@ -168,7 +168,9 @@ func (m *AgentManager) Open(ctx context.Context, taskID, projectID string, cfg S
 
 	// 取项目并发槽（MaxConcurrent<=0 时 sem=nil，acquire/release 为 no-op）。
 	sem := m.projectSem(projectID)
+	m.logger.Debug("open: before sem acquire", zap.String("task", taskID), zap.String("project", projectID))
 	sem.acquire()
+	m.logger.Debug("open: sem acquired", zap.String("task", taskID), zap.String("project", projectID))
 
 	att, err := m.createAdapterWithFallback(ctx, cfg)
 	if err != nil {
@@ -223,9 +225,13 @@ type adapterAttempt struct {
 // 调用方负责在 err != nil 时释放并发槽（本方法不碰 sem，避免双重释放）；在 err == nil 时
 // 登记 session。primary NewSession 失败时先 Close primary adapter 再回退，防资源泄漏。
 func (m *AgentManager) createAdapterWithFallback(ctx context.Context, cfg SessionConfig) (adapterAttempt, error) {
+	m.logger.Debug("fallback: before primaryFor", zap.String("agent", cfg.Agent), zap.String("task", cfg.TaskID))
 	primaryAdapter, primaryKind, perr := m.primaryFor(cfg.Agent)()
+	m.logger.Debug("fallback: after primaryFor", zap.String("agent", cfg.Agent), zap.Bool("factory_ok", perr == nil))
 	if perr == nil {
+		m.logger.Debug("fallback: before NewSession", zap.String("task", cfg.TaskID), zap.String("cwd", cfg.Cwd), zap.String("model", cfg.Model))
 		sid, nerr := primaryAdapter.NewSession(ctx, cfg)
+		m.logger.Debug("fallback: after NewSession", zap.String("task", cfg.TaskID), zap.String("sid", sid), zap.Bool("ok", nerr == nil))
 		if nerr == nil {
 			return adapterAttempt{adapter: primaryAdapter, kind: primaryKind, sessionID: sid}, nil
 		}

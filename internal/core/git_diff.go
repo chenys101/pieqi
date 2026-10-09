@@ -47,13 +47,26 @@ func GitHeadSHA(repo string) string {
 }
 
 // GitStatusPorcelain 返回 `git status --porcelain` 的脏文件列表（path 相对 repo 根）。
-// 非 git repo 返回 nil。
+//
+// ★★返回值语义（2026-10-09修，**这个区分是load-bearing的**）：
+//   - `nil`   = **不是 git 仓库**（命令失败）→ 调用方应走全量文件树兜底
+//   - `[]`空  = **是git 仓库且工作区干净**（无脏文件）→ **绝不能**当兜底信号
+//   - 非空切片 = 有脏文件
+//
+// 为什么必须区分：`git status --porcelain` 在干净仓库输出**空字符串**，
+// `strings.Split("", "\n")` 得 `[""]`，被下面的 `len(line) < 4` 过滤光，
+// 于是 `paths` 保持声明时的 nil ⇒ **干净仓库被误判成「非 git 项目」**。
+// 后果不是报错而是**静默卡死**：调用方走walkWorktreeFiles 兜底全量遍历，
+// 在带 node_modules 的大项目上枚举出 8万多文件再逐个拷贝，任务永远停在
+// `pending`（见 checkpoint.go CaptureBaseline 的 dirty == nil 分支）。
+// 这个 bug 极隐蔽：命令成功、无err、无日志，只是「什么都不发生」。
 func GitStatusPorcelain(repo string) []string {
 	out, err := gitOutput(repo, "status", "--porcelain")
 	if err != nil {
-		return nil
+		return nil // 真的是非 git 仓库
 	}
-	var paths []string
+	// ★ 干净仓库必须返回**非 nil 的空切片**（`[]string{}`），不能是 nil。
+	paths := []string{}
 	for _, line := range strings.Split(out, "\n") {
 		if len(line) < 4 {
 			continue

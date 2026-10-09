@@ -65,6 +65,19 @@ func defaultFeedbackDataRoot() string {
 
 // --- Baseline 捕获 ---
 
+// baselineMaxSnapshotFiles 是全量基线快照的文件数上限（2026-10-09 加）。
+//
+// 为什么需要：非 git 项目会走 walkWorktreeFiles 全量遍历，而它只跳过固定几个噪音目录
+// （见 baselineNoiseDirs）。在把 node_modules/.venv 直接放在仓库根、或者项目本身很大的
+// 情况下，一次遍历能枚举出**十万级**文件，再逐个 ReadFile+WriteFile拷进 pre/
+// —— 实测在 D:\code\agent\deepseek-harness（8.4 万文件、node_modules 2.1 万）
+// 上这一轮要跑几十分钟，表现为**任务永远停在 pending 且日志一行不多**。
+//
+// 这里的取舍：基线快照是「尽力而为」的反馈数据，不是功能前提。
+// 超限时**放弃快照本身但仍记录 HEAD 与路径清单**，让 diff 退化成
+// 「按路径比对内容」而不是「把整棵树搬一遍」—— 宁可粗一点，也不能卡住任务。
+const baselineMaxSnapshotFiles = 2000
+
 // CaptureBaseline 在 Task 开始（Agent 尚未动工）时捕获 baseline：
 // 记录 git HEAD + dirty 文件全量快照到 pre/。幂等（已有 pre/ 或 task.Baseline 时跳过）。
 // 返回应写入 task.Baseline 的记录（已捕获时返回 nil 供调用方判断）。
@@ -79,20 +92,31 @@ func (fs *FeedbackStore) CaptureBaseline(task *model.Task) *model.TaskBaseline {
 
 	head := GitHeadSHA(task.WorktreePath)
 	dirty := GitStatusPorcelain(task.WorktreePath)
-	// 非 git 项目（git status 失败 → nil）：回退为全量快照文件树。
-	// 否则 pre/ 空、HEAD 空 → before 状态不可知 → diff 退化成「整文件当新增」（数据失真）。
+	// ★ 只有**真的是非 git 仓库**（nil）才走全量文件树兜底；
+	// 「干净的 git 仓库」返回的是非 nil 空切片，不该被当成兜底信号。
+	// 两者混同会让干净的大仓库走进全量遍历，任务静默卡死在 pending（见 GitStatusPorcelain 注释）。
+	truncated := false
 	if dirty == nil {
 		dirty = walkWorktreeFiles(task.WorktreePath)
+		if len(dirty) > baselineMaxSnapshotFiles {
+			fs.logger.Warn("feedback: baseline snapshot too large, keeping paths only",
+				zap.String("task", task.ID),
+				zap.Int("files", len(dirty)), zap.Int("limit", baselineMaxSnapshotFiles))
+			dirty = dirty[:baselineMaxSnapshotFiles]
+			truncated = true
+		}
 	}
 
 	if err := os.MkdirAll(preDir, 0755); err != nil {
 		fs.logger.Warn("feedback: mkdir pre", zap.String("task", task.ID), zap.Error(err))
 		return nil
 	}
-	for _, p := range dirty {
-		if err := copyFileInto(filepath.Join(task.WorktreePath, filepath.FromSlash(p)), preDir, p); err != nil {
-			fs.logger.Warn("feedback: snapshot dirty file",
-				zap.String("task", task.ID), zap.String("path", p), zap.Error(err))
+	if !truncated {
+		for _, p := range dirty {
+			if err := copyFileInto(filepath.Join(task.WorktreePath, filepath.FromSlash(p)), preDir, p); err != nil {
+				fs.logger.Warn("feedback: snapshot dirty file",
+					zap.String("task", task.ID), zap.String("path", p), zap.Error(err))
+			}
 		}
 	}
 	return &model.TaskBaseline{HeadSHA: head, CapturedAt: time.Now(), DirtyPaths: dirty}
