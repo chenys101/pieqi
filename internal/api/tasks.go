@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"pieqi/internal/agent"
 	"pieqi/internal/core"
 	"pieqi/internal/model"
 
@@ -28,6 +29,33 @@ type createTaskReq struct {
 	// 秒级）、要么依赖可能过期的缓存。两者都不值当 —— 错的取值会让会话打开时**明确报错**
 	// （agent 报未知模型），失败是响亮的，不会静默跑错。
 	Model string `json:"model"`
+	// Images 随首轮 prompt 一起发出的图片（可选）。
+	//
+	// ⚠️ 与 Model 不同，这里的取值**必须校验**：base64 与 mime 是协议硬要求，
+	// 而图片体积直接决定上下文开销 —— 放进去一张 20MB 的图，代价是真金白银。
+	// 校验在 agent 层（buildPromptBlocks/validateImage）统一做，这里只做装配。
+	Images []imageReq `json:"images"`
+}
+
+// imageReq 一张待发图片的请求载荷。
+//
+// Data 是**纯 base64**（不带 `data:image/png;base64,` 前缀）—— 带前缀是最常见的
+// 误用，且症状（图片损坏/协议报错）离根因很远，故在 agent 层专门为它写了一条错误。
+type imageReq struct {
+	Data     string `json:"data"`
+	MimeType string `json:"mime_type"`
+}
+
+// toImageInputs 把请求里的图片载荷转成 agent 层类型。
+func toImageInputs(reqs []imageReq) []agent.ImageInput {
+	if len(reqs) == 0 {
+		return nil
+	}
+	out := make([]agent.ImageInput, 0, len(reqs))
+	for _, r := range reqs {
+		out = append(out, agent.ImageInput{Data: r.Data, MimeType: strings.ToLower(strings.TrimSpace(r.MimeType))})
+	}
+	return out
 }
 
 func (s *Server) createTask(c *gin.Context) {
@@ -67,6 +95,8 @@ func (s *Server) createTask(c *gin.Context) {
 
 	// 预置首条 user 事件（seq=1）：POST 返回即带该事件，前端立刻渲染用户气泡，
 	// 且已持久化，WS 推送不会丢。续问事件由 Resume 以 EventUser 追加，风格一致。
+	// 带图时记图片**元数据**（类型/大小/哈希），base64 本体绝不入任务文件
+	// —— 理由见 model.TaskEvent.Images。
 	task, err := s.store.Create(&model.Task{
 		Source:       model.SourceHTTP,
 		Agent:        agentName,
@@ -77,6 +107,7 @@ func (s *Server) createTask(c *gin.Context) {
 		Prompt:       req.Prompt,
 		Events: []model.TaskEvent{{
 			Type: model.EventUser, Text: req.Prompt, Seq: 1, At: time.Now(),
+			Images: core.ImageMeta(toImageInputs(req.Images)),
 		}},
 	})
 	if err != nil {
@@ -84,7 +115,13 @@ func (s *Server) createTask(c *gin.Context) {
 		return
 	}
 	s.bus.Publish(core.Event{Type: "task_created", TaskID: task.ID, Task: task})
-	s.runner.Start(c.Request.Context(), task)
+	// 带图走 StartRich（图只在内存过一次手，见 core.StartRich）；不带图仍走 Start。
+	images := toImageInputs(req.Images)
+	if len(images) > 0 {
+		s.runner.StartRich(c.Request.Context(), task, images)
+	} else {
+		s.runner.Start(c.Request.Context(), task)
+	}
 	// 异步生成一句话标题（大模型摘要）：不阻塞创建，生成后经 WS 推送替换前端截断标题
 	s.runner.GenerateTitleAsync(task.ID)
 	c.JSON(http.StatusCreated, task)
@@ -160,6 +197,25 @@ func (s *Server) getTask(c *gin.Context) {
 	c.JSON(http.StatusOK, t)
 }
 
+// taskCapabilities GET /api/tasks/:id/capabilities：该任务会话**此刻**的能力位。
+//
+// 为什么单开一个接口而不是塞进 Task DTO：这些能力来自 ACP 握手（对端在 Initialize
+// 里声明什么），是**会话级的运行时事实**，而 Task 是持久化模型 —— 把运行时能力
+// 写进落盘结构，会立刻产生"磁盘上的那份说的和实际不符"（重启后会话没了，
+// 记录里却还写着支持收图）。
+//
+// 前端在进入详情页后问一次，据此决定要不要显示加图入口。
+func (s *Server) taskCapabilities(c *gin.Context) {
+	id := c.Param("id")
+	if _, ok := s.store.Get(id); !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"image_prompt": s.runner.SupportsImagePrompt(id),
+	})
+}
+
 type interveneReq struct {
 	Kind       string `json:"kind" binding:"required"` // "decision" | "append_prompt"
 	DecisionID string `json:"decision_id"`
@@ -171,6 +227,11 @@ type interveneReq struct {
 	// 只在续问路径（Resume → 新一轮 prompt）有意义；对 decision 忽略，也不落库
 	// —— 它是**按轮**的选择，作用是"这条消息换个模型跑"，不是改任务的长期模型。
 	Model string `json:"model"`
+	// Images 随这条消息一起发出的图片（可选）。与 Model 同为**按轮**载荷，不落库。
+	//
+	// 只对 append_prompt 有意义：decision 是回答一张审批卡，没有"这条消息"可言；
+	// running 中的输入本就走 stdin 注入（纯文本通道），收不了图。
+	Images []imageReq `json:"images"`
 }
 
 func (s *Server) intervene(c *gin.Context) {
@@ -205,7 +266,7 @@ func (s *Server) intervene(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "choice decision requires option text (append_prompt)"})
 			return
 		}
-		if err := s.runner.Resume(id, req.Text, req.Model); err != nil {
+		if err := s.runner.ResumeRich(id, req.Text, req.Model, toImageInputs(req.Images)); err != nil {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
@@ -223,7 +284,7 @@ func (s *Server) intervene(c *gin.Context) {
 	}
 	if isTerminal {
 		// 同步检查 Resume 前置条件（worktree/session 存在），异步启动
-		if err := s.runner.Resume(id, req.Text, req.Model); err != nil {
+		if err := s.runner.ResumeRich(id, req.Text, req.Model, toImageInputs(req.Images)); err != nil {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}

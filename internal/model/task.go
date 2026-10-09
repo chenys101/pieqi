@@ -134,7 +134,29 @@ type TaskEvent struct {
 	Input     json.RawMessage `json:"input,omitempty"`    // tool_use 的参数(原样 JSON)
 	Result    string          `json:"result,omitempty"`   // tool_result 文本化内容
 	IsError   bool            `json:"is_error,omitempty"` // tool_result 是否失败
-	At        time.Time       `json:"at"`
+	// Images 该事件随附的图片（当前只有 user 事件会有）。
+	//
+	// ⚠️ **只存元数据，绝不存 base64**：一张图动辄几百 KB~几 MB，而 Task.Events
+	// 是要整体序列化进任务 JSON、并在 WS task_updated 里全量下发的。把 base64
+	// 写进来会让单任务文件膨胀到几十 MB —— 这正是 TaskSummary 当初从列表里
+	// 摘掉 events 的原因（见 TaskSummary 注释里那次 11.25MB 的实测）。
+	// 前端要展示缩略图时按需从专用接口取。
+	Images []TaskImage `json:"images,omitempty"`
+	At     time.Time   `json:"at"`
+}
+
+// TaskImage 随消息发出的图片的**元数据**（不含图片本体）。
+//
+// 为什么留 Hash：它是"同一张图被重复发出"的判据，也是日后接内容寻址存储
+// （dsh-acp 的 attachment store 就是这个形态）时回查图片的键。只存张数就没法
+// 在 UI 上正确复原"这条消息带的是哪几张图"。
+type TaskImage struct {
+	// MimeType 图片类型（image/png 等）。
+	MimeType string `json:"mime_type"`
+	// Bytes 解码后的字节数（供 UI 显示大小，也便于排查"为什么这条特别大"）。
+	Bytes int `json:"bytes"`
+	// Hash 图片内容的 SHA-256（hex）。空 = 未计算（旧数据/降级路径）。
+	Hash string `json:"hash,omitempty"`
 }
 
 // DiffStat 任务在**进入终态那一刻**对累计代码改动的快照。
@@ -242,10 +264,37 @@ type Task struct {
 	OriginChatID   string `json:"origin_chat_id,omitempty"`
 	OriginIdentity string `json:"origin_identity,omitempty"`
 
+	// Usage 最近一次上下文用量快照（agent 上报；nil = 该 agent 不上报，或还没报过）。
+	//
+	// 为什么是**覆盖式的最新值**而不是 History：它表达的是"此刻上下文有多满"，
+	// 这是个瞬时量；ACP 的 usage_update 一轮内会随每条消息到达多次，攒成历史只会
+	// 让 task JSON 无谓膨胀，而用户要看的就是最新的那一条。
+	//
+	// 只用**指针**、配 omitempty：nil 与零值必须可区分 —— "agent 不上报用量"
+	// 与 "用量是 0" 在 UI 上是两种显示（隐藏 vs 显示 0%）。
+	Usage *TaskUsage `json:"usage,omitempty"`
+
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+// TaskUsage 上下文用量快照（映射 agent.UsageInfo）。
+//
+// 数字全部由 agent 给（dsh 走 tokenMeter + contextWindow），pieqi 不估算：
+// 估算值与 agent 实际截断行为不一致，显示出来只会误导。
+type TaskUsage struct {
+	// Used 当前已占用的上下文 tokens。
+	Used int `json:"used"`
+	// Size 上下文窗口总量（tokens）。> 0 才是有意义的快照。
+	Size int `json:"size"`
+	// CostUSD 会话累计成本（可选）。HasCost=false 时该字段无意义，
+	// UI 不应显示 "$0.00" —— 那是"没报成本"被误读成"免费"。
+	CostUSD float64 `json:"cost_usd,omitempty"`
+	HasCost bool    `json:"has_cost,omitempty"`
+	// At 该快照的采集时刻（供 UI 判断"这条还新鲜吗"）。
+	At time.Time `json:"at"`
 }
 
 // TaskBaseline Task 创建时记录的工作区起始状态（ADR-0002：只读 Git，绝不写用户分支）。

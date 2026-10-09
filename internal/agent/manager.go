@@ -306,6 +306,18 @@ func (m *AgentManager) DefaultAgent() string {
 // adapter（ACP 系）会消费它；其余 adapter 静默忽略。必须在 SendPrompt **之前**落定 ——
 // ACP 侧该轮的路由是在 prompt 入口被定住的，晚设无效。
 func (m *AgentManager) Run(ctx context.Context, taskID, prompt, turnModel string) error {
+	return m.RunRich(ctx, taskID, prompt, turnModel, nil)
+}
+
+// RunRich 与 Run 相同，但可附带本轮要一起发出的图片。
+//
+// 独立于 Run 而不是改它的签名：Run 的调用点遍布生产与测试替身，加参会逼所有
+// 实现方跟着改，而图片是**可选**增强（只有 ACP 系能收）。images 为空时语义与
+// Run 完全一致。
+//
+// 图片与模型选择一样，必须在 SendPrompt **之前**备好：两者都只在 prompt 这一个
+// 入口被消费（见 promptOnce）。
+func (m *AgentManager) RunRich(ctx context.Context, taskID, prompt, turnModel string, images []ImageInput) error {
 	m.mu.Lock()
 	sess, ok := m.sessions[taskID]
 	m.mu.Unlock()
@@ -327,7 +339,17 @@ func (m *AgentManager) Run(ctx context.Context, taskID, prompt, turnModel string
 	if setter, ok := sess.adapter.(TurnModelSetter); ok {
 		setter.SetTurnModel(turnModel)
 	}
-	err := sess.adapter.SendPrompt(runCtx, sess.sessionID, prompt)
+	var err error
+	if len(images) > 0 {
+		sender, ok := sess.adapter.(RichPromptSender)
+		if !ok {
+			err = fmt.Errorf("%w: 当前 agent 传输不支持图片（%T）", ErrImageNotSupported, sess.adapter)
+		} else {
+			err = sender.SendRichPrompt(runCtx, sess.sessionID, prompt, images)
+		}
+	} else {
+		err = sess.adapter.SendPrompt(runCtx, sess.sessionID, prompt)
+	}
 
 	sess.runMu.Lock()
 	sess.runCancel = nil
@@ -336,6 +358,22 @@ func (m *AgentManager) Run(ctx context.Context, taskID, prompt, turnModel string
 	sess.runMu.Unlock()
 	cancel() // 释放 runCtx 资源（已 cancel 时为 no-op）
 	return err
+}
+
+// SupportsImagePrompt 报告某个 task 的会话当前能否接收图片。
+//
+// 无会话/无该能力时返回 false —— 调用方（API）据此决定要不要把入口暴露给前端。
+// 注意它反映的是**会话建立后**的握手结果：会话还没开时不知道对端会不会声明，
+// 只能说"暂时不能"（保守侧）。
+func (m *AgentManager) SupportsImagePrompt(taskID string) bool {
+	m.mu.Lock()
+	sess, ok := m.sessions[taskID]
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	capable, ok := sess.adapter.(ImagePromptCapable)
+	return ok && capable.SupportsImagePrompt()
 }
 
 // Cancel 取消 task 正在进行的 prompt turn：先经 runCancel 中断 SendPrompt 的 ctx，

@@ -13,8 +13,16 @@ Pieqi 的 Observe→Verify→Control→Intervene 层；围绕 Agent Task 的展�
 _Avoid_: 输出面板, 日志
 
 **TaskEvent**:
-Agent Task 执行流中的一条持久化事件（text / user / thinking / tool_use / tool_result / status / rewind）。Feedback 的事实源。
+Agent Task 执行流中的一条持久化事件（text / user / thinking / tool_use / tool_result / status / rewind / model_switch）。Feedback 的事实源。
 _Avoid_: 日志条目
+
+**Usage（上下文用量）**:
+Agent 上报的「此刻上下文有多满」快照（used / size，可选 cost）。来自 ACP 的 `usage_update`，是**瞬时量而非累计量**——一轮内可到达多次，每次都覆盖前值。**不是** TaskEvent：它不进事件流，而是持久化在 `Task.Usage` 上，实时更新经轻量 `task_usage` WS 事件推送（与 `task_delta` 同理，不带完整 Task）。数字全部由 agent 给，pieqi 不估算。
+_Avoid_: token 统计, 计费, 流量
+
+**Image Prompt（图片 prompt）**:
+随一轮 prompt 内联发出的图片（ACP `ContentBlock::Image`）。**能不能发由对端 agent 决定**（它须在 Initialize 里声明 `promptCapabilities.image`），pieqi 侧只做校验与转发。图片本体是**纯 base64**（不带 `data:` 前缀）、只在内存过一次手；任务里只留元数据（`TaskEvent.Images`：mime / bytes / hash），因为 Task 要整体落盘并在 WS 全量下发。
+_Avoid_: 附件上传, 文件, 截图（截图另有所指，见 Visual）
 
 **Turn**:
 一次用户消息边界内的执行段：从 EventUser(N) 到 EventUser(N+1) 之间的所有事件（含其间所有 Agent / Tool 事件）。Turn #1 从 Task 初始 prompt 起算。内部工具循环不产生新 Turn。Turn 是变更分组、Checkpoint 与 Rewind 的基准单位。

@@ -112,6 +112,35 @@ func (a *sessionBackedAdapter) SendPrompt(ctx context.Context, sessionID, prompt
 	return sess.Prompt(ctx, prompt)
 }
 
+// SendRichPrompt 透传带图 prompt（实现 RichPromptSender）。
+//
+// 之所以要它：TaskRunner 拿到的 AgentAdapter 是 sessionBackedAdapter（不是底层
+// AgentSession），若不在这一层转发，RichPromptSender 的类型断言就会失败，
+// 于是"agent 明明支持收图、pieqi 却说它不支持"。
+func (a *sessionBackedAdapter) SendRichPrompt(ctx context.Context, sessionID, prompt string, images []ImageInput) error {
+	a.mu.Lock()
+	sess := a.sess
+	a.mu.Unlock()
+	if sess == nil {
+		return errors.New("session adapter: SendRichPrompt before NewSession")
+	}
+	return sess.PromptRich(ctx, prompt, images)
+}
+
+// SupportsImagePrompt 实现 ImagePromptCapable：问底层会话能不能收图。
+//
+// 底层说不出个所以然（未实现该能力）时返回 false —— 保守侧，
+// 让 UI 隐藏入口，而不是让用户传了图再收到一个运行时错误。
+func (a *sessionBackedAdapter) SupportsImagePrompt() bool {
+	a.mu.Lock()
+	sess := a.sess
+	a.mu.Unlock()
+	if capable, ok := sess.(interface{ SupportsImagePrompt() bool }); ok {
+		return capable.SupportsImagePrompt()
+	}
+	return false
+}
+
 // SetTurnModel 把本轮模型选择下传给底层会话（仅支持该能力的会话，即 ACP 系）。
 // 与 ResumeID 同一模式：向上透传一个可选能力，不支持就当没发生。
 func (a *sessionBackedAdapter) SetTurnModel(model string) {

@@ -21,6 +21,8 @@ type fakeSession4Adapter struct {
 	permOpt   string
 	onEvent   func(Event)
 	onErr     func(Event) // 测试注入：EventError 时联动（模拟桥崩 dispatch）
+	// lastImages 最近一次 PromptRich 收到的图片张数（0 = 纯文本）。
+	lastImages int
 }
 
 var _ AgentSession = (*fakeSession4Adapter)(nil)
@@ -35,6 +37,16 @@ func (f *fakeSession4Adapter) Prompt(ctx context.Context, text string) error {
 	f.mu.Lock()
 	f.promptN++
 	f.lastText = text
+	f.mu.Unlock()
+	return nil
+}
+
+// PromptRich 测试替身：记录收到的图片数，供"透传/拒绝"两类断言使用。
+func (f *fakeSession4Adapter) PromptRich(ctx context.Context, text string, images []ImageInput) error {
+	f.mu.Lock()
+	f.promptN++
+	f.lastText = text
+	f.lastImages = len(images)
 	f.mu.Unlock()
 	return nil
 }

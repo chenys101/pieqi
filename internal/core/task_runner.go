@@ -3,6 +3,9 @@ package core
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +42,15 @@ type TaskRunner struct {
 	port           int      // 主进程端口，hook 子进程回连 /internal/hook 用
 	hookTools      []string // 拦截的工具名，如 ["Bash","Write","Edit","NotebookEdit"]
 	hookTimeoutSec int      // hook 等决策上限（秒），应 ≥ HookService 超时
+
+	// pendingMu/pendingImages 是"某任务首轮待发的图片"，只在内存里过一手。
+	//
+	// 为什么不挂在 model.Task 上：图片本体是几百 KB~几 MB 的大块数据，而 Task
+	// 要整体落盘并在 task_updated 里全量下发（见 model.TaskEvent.Images 的说明）。
+	// 放在这里让"图片从不进任务文件"成为**结构上**的事实，而不是靠各处自觉。
+	// 取用见 takePendingImages（取后即清：图片只属于发起的那一轮）。
+	pendingMu     sync.Mutex
+	pendingImages map[string][]agent.ImageInput
 
 	// 每项目并发上限：maxConcurrent<=0 表示不限制
 	maxConcurrent int
@@ -97,12 +109,18 @@ type agentRunner interface {
 	// Run 发一轮 prompt；model 是**本轮**要用的模型（空 = 沿用会话当前路由）。
 	// 只有支持 TurnModelSetter 的 adapter（ACP 系）会消费它，其余静默忽略。
 	Run(ctx context.Context, taskID, prompt, turnModel string) error
+	// RunRich 同 Run，但可附带本轮要一起发出的图片（空 = 纯文本，语义与 Run 一致）。
+	// 只有实现 RichPromptSender 的 adapter（ACP 系）能收；其余在 images 非空时明确报错。
+	RunRich(ctx context.Context, taskID, prompt, turnModel string, images []agent.ImageInput) error
 	Cancel(ctx context.Context, taskID string) error
 	Close(taskID string) error
 	Adapter(taskID string) agent.AgentAdapter
 	// SessionID 返回 task 的 sessionID（无则 ""）。runACP 持久化真实 session ID 时用它取
 	// NewSession 返回的句柄，喂给 adapter.RealSessionID 拿到真实协议/claude session ID。
 	SessionID(taskID string) string
+	// SupportsImagePrompt 报告该 task 的会话能否接收图片 prompt（对端 ACP 握手时声明）。
+	// 无会话/对端没声明 → false。供 API 决定要不要把加图入口暴露给前端。
+	SupportsImagePrompt(taskID string) bool
 	// SetOnSessionClosed 注册会话关闭回调：reaper 空闲回收 / Cancel / 删任务 / 关停时触发，
 	// TaskRunner 借此清理会话级资源（unwire + 延迟 worktree 清理）。
 	SetOnSessionClosed(fn func(taskID string))
@@ -113,6 +131,8 @@ type acpWires struct {
 	delta *DeltaHandle
 	perm  *PermissionWire
 	tool  *ToolCallHandle
+	// usage 可能为 nil —— 该 agent 不上报上下文用量（见 WireUsage）。
+	usage *UsageHandle
 }
 
 // NewTaskRunner 创建 runner。
@@ -325,6 +345,74 @@ func (tr *TaskRunner) Start(ctx context.Context, task *model.Task) {
 	tr.submitTurn(task.ID, func(cur *model.Task) { tr.run(context.Background(), cur, "") })
 }
 
+// StartRich 与 Start 相同，但首轮可附带图片。
+//
+// 图片为什么走这里而不是挂在 Task 上：图片本体是**只在这一次 spawn 用得上**的
+// 大块数据，而 Task 是要整体落盘并在 WS 上全量下发的（见 model.TaskEvent.Images
+// 里那条"绝不存 base64"）。把它挂在内存里的 pendingImages 上，用完即清 ——
+// 这样"图片不进任务文件"是**结构上**成立的，而不是靠每处代码自觉。
+//
+// 元数据（类型/大小/哈希）会落到首条 user 事件上，供前端展示"这条带了图"。
+// 这里**自己也写一次**（而不是假定调用方写过）：API 层创建任务时会顺手写，
+// 但 StartRich 是个公开入口，谁调用它都该得到完整的记录 —— 让"带了图的 user
+// 事件"只依赖一个调用点的自觉，就是等着漏。
+func (tr *TaskRunner) StartRich(ctx context.Context, task *model.Task, images []agent.ImageInput) {
+	if len(images) > 0 {
+		tr.attachImageMeta(task.ID, images)
+	}
+	tr.setPendingImages(task.ID, images)
+	tr.submitTurn(task.ID, func(cur *model.Task) { tr.run(context.Background(), cur, "") })
+}
+
+// attachImageMeta 把图片元数据补到该任务**最后一条** user 事件上（幂等）。
+//
+// 为什么是"最后一条 user 事件"而不是"第一条"：创建任务时 API 预置了首条 user 事件，
+// 但如果调用方没写元数据，那条事件就在末尾；已经写过时这次是覆盖成同样的值。
+// 覆盖而非追加，避免同一张图记两遍。
+func (tr *TaskRunner) attachImageMeta(taskID string, images []agent.ImageInput) {
+	meta := ImageMeta(images)
+	if len(meta) == 0 {
+		return
+	}
+	if _, err := tr.store.Update(taskID, func(t *model.Task) bool {
+		for i := len(t.Events) - 1; i >= 0; i-- {
+			if t.Events[i].Type == model.EventUser {
+				t.Events[i].Images = meta
+				return true
+			}
+		}
+		return false // 没有 user 事件：不改（首次 prompt 的 user 事件由调用方预置）
+	}); err != nil {
+		tr.logger.Warn("attach image meta", zap.String("task", taskID), zap.Error(err))
+	}
+}
+
+// setPendingImages 记下某任务首轮要发的图片（见 StartRich 的理由）。空切片等于清除。
+func (tr *TaskRunner) setPendingImages(taskID string, images []agent.ImageInput) {
+	tr.pendingMu.Lock()
+	defer tr.pendingMu.Unlock()
+	if len(images) == 0 {
+		delete(tr.pendingImages, taskID)
+		return
+	}
+	if tr.pendingImages == nil {
+		tr.pendingImages = make(map[string][]agent.ImageInput)
+	}
+	tr.pendingImages[taskID] = images
+}
+
+// takePendingImages 取出并清除某任务首轮待发的图片。
+//
+// **取后即清**：图片只属于发起的那一轮。留着会让下一轮（续问）莫名其妙地
+// 又发一遍同样的图 —— 而用户这一轮压根没传图。
+func (tr *TaskRunner) takePendingImages(taskID string) []agent.ImageInput {
+	tr.pendingMu.Lock()
+	defer tr.pendingMu.Unlock()
+	imgs := tr.pendingImages[taskID]
+	delete(tr.pendingImages, taskID)
+	return imgs
+}
+
 // Resume 在已结束（completed/failed/cancelled）的任务上续问：复用同一 ClaudeSessionID
 // 与 worktree，用补充文本作为新 prompt 重跑一轮 claude。--session-id 让 claude 续上下文。
 //
@@ -340,6 +428,14 @@ func (tr *TaskRunner) Start(ctx context.Context, task *model.Task) {
 // 即 POST /api/tasks/:id/model 设过的那个）；它本身是**按轮**的覆盖，只影响这一轮、
 // 不落库 —— 用户可以在会话里逐条消息换模型（"发送提示词时选择模型"）。
 func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
+	return tr.ResumeRich(taskID, text, turnModel, nil)
+}
+
+// ResumeRich 与 Resume 相同，但本轮可附带图片（images 为空时与 Resume 完全一致）。
+//
+// 历史为何按"元数据"落事件而非 base64：见 model.TaskEvent.Images 的说明。
+// 这里只负责把图**转发**给 agent，并在 user 事件上留一条可追溯的记录。
+func (tr *TaskRunner) ResumeRich(taskID, text, turnModel string, images []agent.ImageInput) error {
 	t, ok := tr.store.Get(taskID)
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
@@ -359,6 +455,16 @@ func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
 	if !resumable {
 		return fmt.Errorf("task not resumable: %s", t.Status)
 	}
+	// claude -p 路径收不了图（stream-json 的 user 消息只有文本）。**必须在任何状态
+	// 变更之前**拒绝：下面会 captureTurnEnd + appendEvent（写一条 user 记录）。
+	// 若先写事件再拒，任务里就会留下一条"带了图"的记录，而图根本没发出去 ——
+	// 那条记录成了假事实，日后回看会把排查引向错误方向。
+	//
+	// 判据为什么用 useACP/agentMgr 而不是等到最后：这条路径选择在 run() 里才定，
+	// 但"能不能收图"在**排队之前**就该知道，否则用户会拿到一个 202 然后任务静默失败。
+	if len(images) > 0 && !(tr.useACP && tr.agentMgr != nil) {
+		return fmt.Errorf("%w: claude -p 路径不支持图片，请改用支持图片的 agent", agent.ErrImageNotSupported)
+	}
 	if t.WorktreePath == "" {
 		return fmt.Errorf("task missing worktree, cannot resume")
 	}
@@ -369,8 +475,9 @@ func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
 	if t.Status != model.TaskRunning {
 		tr.captureTurnEnd(taskID)
 	}
-	// 追加一条 user 事件，标记续问起点（前端渲染为右对齐气泡，与首次 prompt 一致）
-	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text})
+	// 追加一条 user 事件，标记续问起点（前端渲染为右对齐气泡，与首次 prompt 一致）。
+	// 带图时同时记下图片元数据（see model.TaskEvent.Images）。
+	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text, Images: ImageMeta(images)})
 
 	// ACP 路径（Task 5）：续问经 session/load/resume 复用已有会话上下文（M4 的 re-Open 丢失
 	// 上下文限制已修复）。runACP 据 task.ACPSessionID 构造 SessionConfig.ResumeFrom 触发 load/resume。
@@ -389,7 +496,7 @@ func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
 		// 排队提交（turn_queue.go）：上一轮还没跑完时排在它后面，而不是同时打进同一会话
 		// （并发第二个 Run 会被 AgentManager 拒掉，老代码据此 failTask 把任务打死）。
 		tr.noteQueued(taskID, tr.submitTurn(taskID, func(cur *model.Task) {
-			tr.runACP(context.Background(), cur, text, turnModel)
+			tr.runACP(context.Background(), cur, text, turnModel, images)
 		}))
 		return nil
 	}
@@ -408,6 +515,49 @@ func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
 		tr.run(context.Background(), cur, text)
 	}))
 	return nil
+}
+
+// SupportsImagePrompt 报告某任务的会话此刻能否接收图片 prompt。
+//
+// 无会话（还没跑过）/非 ACP 路径/对端没声明 → false。
+//
+// ⚠️ 语义是"**此刻**能不能"，不是"这个任务支不支持"：能力来自 ACP 握手时对端的
+// 声明，而握手只在会话建立时发生一次。会话还没起时只能回答 false（保守侧）——
+// 前端据此隐藏入口，用户先发一条文本把会话建起来，入口就会出现。
+// 这比"乐观显示入口、点了报错"好：后者让用户以为功能坏了。
+func (tr *TaskRunner) SupportsImagePrompt(taskID string) bool {
+	if !tr.useACP || tr.agentMgr == nil {
+		return false
+	}
+	if m, ok := tr.agentMgr.(interface{ SupportsImagePrompt(string) bool }); ok {
+		return m.SupportsImagePrompt(taskID)
+	}
+	return false
+}
+
+// ImageMeta 把待发图片转成可落事件的元数据（**不含 base64**，见 model.TaskImage）。
+//
+// 导出供 API 层在创建任务时预置 user 事件用 —— 那条事件在 TaskRunner 接手之前
+// 就要写好，所以这段计算不能只存在于 runner 内部。
+//
+// 只在这里算一次：Hash 要对 base64 解码后再摘要，重复算就是重复解码。
+// 解码失败（理论上不该发生，前置校验已保证形状）时退化为"只有大小/类型"，
+// 不让一个统计字段的失败阻断发图。
+func ImageMeta(images []agent.ImageInput) []model.TaskImage {
+	if len(images) == 0 {
+		return nil
+	}
+	out := make([]model.TaskImage, 0, len(images))
+	for _, img := range images {
+		mi := model.TaskImage{MimeType: img.MimeType}
+		if raw, err := base64.StdEncoding.DecodeString(img.Data); err == nil {
+			mi.Bytes = len(raw)
+			sum := sha256.Sum256(raw)
+			mi.Hash = hex.EncodeToString(sum[:])
+		}
+		out = append(out, mi)
+	}
+	return out
 }
 
 // LiveTaskIDs 返回此刻挂在本进程上、会被重启打断的会话 id。
@@ -607,10 +757,19 @@ func cleanTitle(s string) string {
 //
 // 每项目并发上限：阻塞等槽位（任务仍是 pending 状态，直到获得槽位才往下走）
 func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePrompt string) {
+	// 首轮待发图片（StartRich 存入）。**必须在这里取**（而不是在 ACP 分支里）：
+	// 无论走 ACP 还是 claude -p 都要消费掉它，否则残留的图会漏进下一轮。
+	images := tr.takePendingImages(task.ID)
 	// ACP 路径（Task 4.4）：useACP 且已注入 AgentManager 时走 AgentManager 驱动。
 	// 放在 projectSem 之前——ACP 的并发上限由 AgentManager 自己的 sem 管，不能重复 acquire。
 	if tr.useACP && tr.agentMgr != nil {
-		tr.runACP(parentCtx, task, resumePrompt, "")
+		tr.runACP(parentCtx, task, resumePrompt, "", images)
+		return
+	}
+	// claude -p 路径收不了图（stream-json 的 user 消息只有文本）。明确失败，
+	// 不静默丢图 —— 用户会以为 agent 看过图了。
+	if len(images) > 0 {
+		tr.failTask(task.ID, agent.ErrImageNotSupported.Error()+": claude -p 路径不支持图片，请改用支持图片的 agent")
 		return
 	}
 	sem := tr.projectSem(task.ProjectID)
@@ -761,7 +920,7 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 // 保留 transition/appendEvent/notify/generateTitle 等 Phase 1 状态机逻辑；仅把 agent 驱动
 // 部分从 claude -p 子进程换成 AgentManager（ACP / Print 透明切换）。
 // model 是本轮要用的模型（不透明选择值，空 = 沿用会话当前路由）。见 Resume 的说明。
-func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resumePrompt, turnModel string) {
+func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resumePrompt, turnModel string, images []agent.ImageInput) {
 	project := &model.Project{ID: task.ProjectID, RepoPath: task.ProjectPath, BaseBranch: tr.baseBranch}
 	if task.WorktreePath == "" {
 		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
@@ -798,7 +957,7 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		if adapterDead(a) {
 			_ = tr.agentMgr.Close(task.ID)
 		} else {
-			tr.runACPTurn(ctx, task, prompt, true, turnModel)
+			tr.runACPTurn(ctx, task, prompt, true, turnModel, images)
 			return
 		}
 	}
@@ -814,7 +973,7 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		return // Open 失败已 surface（failTask / 续问 status + forceFailTask）
 	}
 	// ACP 路径保活（轮末不关，由空闲回收/取消/删任务/关停关）；PrintAgent 回退一次性（轮末关）
-	tr.runACPTurn(ctx, task, prompt, !fellBack, turnModel)
+	tr.runACPTurn(ctx, task, prompt, !fellBack, turnModel, images)
 }
 
 // ensureACPSession 为 task 建立 agent 会话：Open（spawn/握手/LoadSession）+ 注册 wires +
@@ -873,7 +1032,9 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	dh := WireContentDelta(adapter, tr.bus, tr.store, task.ID)
 	ph := WirePermission(adapter, tr.bus, tr.store, task.ID, tr.notify, tr.permTimeout, tr.autoApproveList(), tr.logger)
 	th := WireToolCall(adapter, tr.bus, tr.store, task.ID)
-	tr.setWires(task.ID, dh, ph, th)
+	// 用量可能为 nil（agent 不上报），setWires/Unwire 均容忍 nil。
+	uh := WireUsage(adapter, tr.bus, tr.store, task.ID)
+	tr.setWires(task.ID, dh, ph, th, uh)
 
 	// Open 成功后立即持久化真实 session ID（续问用）。
 	// ACP 路径（!fellBack）：sessionID 即真实协议资源 ID，存 ACPSessionID。
@@ -932,9 +1093,9 @@ func (tr *TaskRunner) refreshResumeID(taskID string) {
 // 不做 LoadSession/重新 spawn，也不产生新的 claude 进程去抢会话锁）；会话由空闲回收器
 // （AgentManager reaper）/Cancel/删任务/服务器关停负责关闭。
 // keepAlive=false（PrintAgent 回退）：轮末关会话并 unwire（一次性进程语义）。
-func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt string, keepAlive bool, turnModel string) {
+func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt string, keepAlive bool, turnModel string, images []agent.ImageInput) {
 	tr.setRunning(task.ID)
-	runErr := tr.runAgentTurn(ctx, task.ID, prompt, turnModel)
+	runErr := tr.runAgentTurn(ctx, task.ID, prompt, turnModel, images)
 
 	// 桥路径：turn_end 后才带出 SDK resume id，轮末回写 ACPSessionID（续问用）。
 	// 若 adapter 是带 ResumeID() 的会话（sessionBackedAdapter），id 非空时覆盖旧值。
@@ -960,7 +1121,7 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 			_ = tr.agentMgr.Close(task.ID)
 			fellBack := tr.ensureACPSession(ctx, task, "") // resumeFrom="" → 全新会话
 			if tr.agentMgr.Adapter(task.ID) != nil {
-				tr.runACPTurn(ctx, task, prompt, !fellBack, turnModel)
+				tr.runACPTurn(ctx, task, prompt, !fellBack, turnModel, images)
 			}
 			return
 		}
@@ -1001,10 +1162,10 @@ const (
 
 // runAgentTurn 跑一轮 SendPrompt。会话忙（同 task 已有轮次在跑）时退避重试：
 // 把"并发提交"当等待信号，而不是任务失败。
-// model 是本轮要用的模型（空 = 沿用会话当前路由）。
-func (tr *TaskRunner) runAgentTurn(ctx context.Context, taskID, prompt, turnModel string) error {
+// model 是本轮要用的模型（空 = 沿用会话当前路由）；images 是本轮随附的图片（空 = 纯文本）。
+func (tr *TaskRunner) runAgentTurn(ctx context.Context, taskID, prompt, turnModel string, images []agent.ImageInput) error {
 	for attempt := 0; ; attempt++ {
-		err := tr.agentMgr.Run(ctx, taskID, prompt, turnModel)
+		err := tr.agentMgr.RunRich(ctx, taskID, prompt, turnModel, images)
 		if !errors.Is(err, agent.ErrSessionBusy) {
 			return err
 		}
@@ -1045,6 +1206,7 @@ func (tr *TaskRunner) onAgentSessionClosed(taskID string) {
 		w.delta.Unwire()
 		w.perm.Unwire()
 		w.tool.Unwire()
+		w.usage.Unwire() // nil-safe（agent 不上报用量时 wire 就是 nil）
 	}
 	// 非 worktree 任务（WorktreePath==ProjectPath，如生产直接跑原目录）不清理，避免误删原项目目录。
 	if tr.cleanupWorktrees {
@@ -1064,10 +1226,11 @@ func (tr *TaskRunner) CloseAgentSession(taskID string) {
 }
 
 // setWires 登记 ACP 路径的 wire 句柄（供 Intervene 审批决策取 PermissionWire）。
-func (tr *TaskRunner) setWires(taskID string, dh *DeltaHandle, ph *PermissionWire, th *ToolCallHandle) {
+// uh（用量）可为 nil —— 该 agent 不上报用量。
+func (tr *TaskRunner) setWires(taskID string, dh *DeltaHandle, ph *PermissionWire, th *ToolCallHandle, uh *UsageHandle) {
 	tr.wireMu.Lock()
 	defer tr.wireMu.Unlock()
-	tr.wires[taskID] = &acpWires{delta: dh, perm: ph, tool: th}
+	tr.wires[taskID] = &acpWires{delta: dh, perm: ph, tool: th, usage: uh}
 }
 
 // clearWires 摘除 task 的 wire 句柄登记（句柄本身的 Unwire 由调用方负责）。

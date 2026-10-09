@@ -41,6 +41,7 @@ type fakeAgentRunner struct {
 	closeN     int
 	runN       int // Run（prompt turn）调用次数，断言保活复用时用
 	busyN      int // 接下来 N 次 Run 返回 ErrSessionBusy（模拟并发提交撞上"已有轮次在跑"）
+	imagesN    int // 最近一次 RunRich 收到的图片数（0 = 纯文本）；读用 lastImages()
 	sessSeq    int
 	onClosed   func(taskID string) // SetOnSessionClosed 注册；Close 时触发（镜像 AgentManager）
 }
@@ -53,6 +54,8 @@ type fakeScript struct {
 	block         bool                     // true → SendPrompt 阻塞到 ctx 取消（Cancel 测试用）
 	delay         time.Duration            // 非零 → SendPrompt 先等这么久（拉长轮次，构造并发排队窗口）
 	realSessionID string                   // 非空 → adapter.RealSessionID 返回它（模拟真实协议 sid 持久化）
+	// noImageCapability 置 true 让替身声明"收不了图"（模拟 claude / print 这类纯文本 agent）。
+	noImageCapability bool
 }
 
 type fakeOpenCall struct {
@@ -89,6 +92,9 @@ func (f *fakeAgentRunner) Open(ctx context.Context, taskID, projectID string, cf
 		permRelease:       make(chan struct{}),
 		sendPromptStarted: make(chan struct{}, 1),
 		done:              make(chan struct{}),
+		// 默认声明收图能力（多数用例关心的是"图有没有传到"而不是"能不能传"）；
+		// 要测纯文本 agent 的拒绝路径，用 fakeScript.imageCapable=false 关掉。
+		imageCapable: !f.script.noImageCapability,
 	}
 	f.adapters[taskID] = a
 	return a, f.fellBack, nil
@@ -106,9 +112,19 @@ func (f *fakeAgentRunner) SessionID(taskID string) string {
 }
 
 func (f *fakeAgentRunner) Run(ctx context.Context, taskID, prompt, turnModel string) error {
+	return f.RunRich(ctx, taskID, prompt, turnModel, nil)
+}
+
+// RunRich 镜像 AgentManager.RunRich：图片非空时走适配器的富文本入口（不支持则报错）。
+// 复制 Run 的忙判定与 cancel 登记逻辑，两条路径的行为才一致 —— 否则测试会在
+// "图片路径没还原 ErrSessionBusy 约束"上留下盲区。
+func (f *fakeAgentRunner) RunRich(ctx context.Context, taskID, prompt, turnModel string, images []agent.ImageInput) error {
 	f.mu.Lock()
 	a := f.adapters[taskID]
 	f.runN++
+	if len(images) > 0 {
+		f.imagesN = len(images)
+	}
 	// 镜像 AgentManager：同一 task 同时只允许一个 Run，并发第二个返回 ErrSessionBusy。
 	// （不还原这条约束，测试就对"并发提交把任务打成 failed"这个 bug 免疫 —— 那正是回归盲区。）
 	if f.runActive[taskID] {
@@ -141,6 +157,12 @@ func (f *fakeAgentRunner) Run(ctx context.Context, taskID, prompt, turnModel str
 		f.mu.Unlock()
 		cancel()
 	}()
+	if len(images) > 0 {
+		if !a.SupportsImagePrompt() {
+			return fmt.Errorf("%w: 当前 agent 传输不支持图片", agent.ErrImageNotSupported)
+		}
+		return a.SendRichPrompt(runCtx, a.sessionID, prompt, images)
+	}
 	return a.SendPrompt(runCtx, a.sessionID, prompt)
 }
 
@@ -276,6 +298,9 @@ type fakeAgentAdapter struct {
 	inFlight     int // 当前在跑 SendPrompt 的次数
 	maxInFlight  int // 峰值并发 SendPrompt 数：串行化（排队）的直接证据
 	promptN      int // SendPrompt 总调用次数
+	imagesN      int // SendRichPrompt 收到的图片总张数（断言"图真的传到 adapter 了"）
+	// imageCapable 该替身是否声明收图能力（默认 true；置 false 模拟 claude 之类纯文本 agent）。
+	imageCapable bool
 
 	releaseOnce sync.Once
 	closeOnce   sync.Once
@@ -310,6 +335,28 @@ func (f *fakeAgentAdapter) RealSessionID(sessionID string) string {
 }
 
 func (f *fakeAgentAdapter) SendPrompt(ctx context.Context, sessionID, prompt string) error {
+	return f.doPrompt(ctx, sessionID, prompt)
+}
+
+// SendRichPrompt 测试替身：记下图片张数后走同一条 prompt 路径。
+// 两条入口共用 doPrompt 是为了让"带图/不带图"在 fake 上**行为一致**
+// （延时、并发探测、权限脚本都不走两遍），否则测试会在等价路径上给出不同结论。
+func (f *fakeAgentAdapter) SendRichPrompt(ctx context.Context, sessionID, prompt string, images []agent.ImageInput) error {
+	f.mu.Lock()
+	f.imagesN += len(images)
+	f.mu.Unlock()
+	return f.doPrompt(ctx, sessionID, prompt)
+}
+
+var (
+	_ agent.RichPromptSender   = (*fakeAgentAdapter)(nil)
+	_ agent.ImagePromptCapable = (*fakeAgentAdapter)(nil)
+)
+
+// SupportsImagePrompt 测试替身默认支持收图（imageCapable 置 false 可关）。
+func (f *fakeAgentAdapter) SupportsImagePrompt() bool { return f.imageCapable }
+
+func (f *fakeAgentAdapter) doPrompt(ctx context.Context, sessionID, prompt string) error {
 	// 并发探测：SendPrompt 同时在跑的次数必须恒为 1（串行队列不变式）。
 	f.mu.Lock()
 	f.inFlight++
@@ -467,6 +514,28 @@ func (f *fakeAgentAdapter) promptCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.promptN
+}
+
+// imagesReceived 返回 SendRichPrompt 累计收到的图片张数（0 = 从未走富文本入口）。
+func (f *fakeAgentAdapter) imagesReceived() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.imagesN
+}
+
+// lastImages 返回最近一次 RunRich 收到的图片张数（0 = 纯文本）。
+func (f *fakeAgentRunner) lastImages() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.imagesN
+}
+
+// SupportsImagePrompt 镜像 AgentManager：问当前 adapter 能不能收图。
+func (f *fakeAgentRunner) SupportsImagePrompt(taskID string) bool {
+	f.mu.Lock()
+	a := f.adapters[taskID]
+	f.mu.Unlock()
+	return a != nil && a.SupportsImagePrompt()
 }
 
 // --- 测试辅助 ---

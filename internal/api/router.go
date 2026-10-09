@@ -185,6 +185,8 @@ func (s *Server) Register(r gin.IRouter) {
 		api.GET("/agents/:name/models", s.listAgentModels)
 		api.GET("/tasks", s.listTasks)
 		api.GET("/tasks/:id", s.getTask)
+		// 该任务会话此刻的能力位（如能否收图）。会话级运行时事实，不进 Task 持久化模型。
+		api.GET("/tasks/:id/capabilities", s.taskCapabilities)
 		api.POST("/tasks", s.createTask)
 		api.POST("/tasks/:id/intervene", s.intervene)
 		// 会话内切换模型：落库 + 追加一条 model_switch 事件（时间线上的切换记录）。

@@ -12,6 +12,14 @@ const (
 	// EventTaskDelta 内容增量事件（M2 真流式）：ACP AgentMessageChunk/AgentThoughtChunk
 	// 增量逐字推送。携带 Delta（轻量），不带完整 Task，前端增量追加而非全量重绘。
 	EventTaskDelta = "task_delta"
+
+	// EventTaskUsage 上下文用量更新（轻量）：ACP usage_update 到达时推送。
+	//
+	// 为什么单开一个事件而不是复用 task_updated：usage_update 一轮内会到达**多次**
+	// （每条 assistant message 一次），而 task_updated 带完整 Task —— 那会让前端在
+	// 逐字渲染期间被反复全量重绘，正是 agent_stream.go 顶部记着的那个坑。
+	// 这里只推 Used/Size 两个数，前端就地更新一个小角标。
+	EventTaskUsage = "task_usage"
 )
 
 // DeltaPayload task_delta 事件携带的增量载荷（M2 真流式）。
@@ -21,15 +29,26 @@ type DeltaPayload struct {
 	IsThought bool   `json:"is_thought,omitempty"` // true=思考过程，false=回答正文
 }
 
+// UsagePayload task_usage 事件携带的用量载荷（轻量，与 DeltaPayload 同理）。
+// 字段集与 model.TaskUsage 一致，但**不含时间戳**：那是持久化才需要的事实，
+// 前端只关心"现在多满"。
+type UsagePayload struct {
+	Used    int     `json:"used"`
+	Size    int     `json:"size"`
+	CostUSD float64 `json:"cost_usd,omitempty"`
+	HasCost bool    `json:"has_cost,omitempty"`
+}
+
 // Event 任务状态变更事件，由 TaskRunner 发布，WS 层订阅转发。
 //
-// task_delta 事件只填 Delta（Task 为 nil）；task_updated 等事件只填 Task（Delta 为 nil）。
-// 两者通过 Type 区分，互不破坏。
+// task_delta / task_usage 只填各自的轻量载荷（Task 为 nil）；
+// task_updated 等事件只填 Task（载荷为 nil）。通过 Type 区分，互不破坏。
 type Event struct {
-	Type   string        `json:"type"` // "task_updated" | "task_created" | "task_deleted" | "task_delta"
+	Type   string        `json:"type"` // "task_updated" | "task_created" | "task_deleted" | "task_delta" | "task_usage"
 	TaskID string        `json:"task_id"`
 	Task   *model.Task   `json:"task,omitempty"`
 	Delta  *DeltaPayload `json:"delta,omitempty"` // 仅 task_delta 事件填充
+	Usage  *UsagePayload `json:"usage,omitempty"` // 仅 task_usage 事件填充
 }
 
 // EventBus 任务事件的 fan-out。订阅者慢时不阻塞发布者（丢弃积压）。

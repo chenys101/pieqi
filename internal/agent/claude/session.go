@@ -99,6 +99,24 @@ func (s *session) Prompt(ctx context.Context, text string) error {
 	return s.waitTurn(ctx, ref)
 }
 
+// PromptRich 发一轮带图的 prompt（实现 agent.AgentSession）。
+//
+// claude 桥这条路的 prompt 接口只有纯文本（桥的 POST /prompt 收 text），
+// 所以：
+//   - 没图 → 与 Prompt 完全一致（正常路径，不叫降级）；
+//   - 有图 → 明确报错。绝不静默丢图 —— 用户会以为 agent 看过图了，
+//     而它会对着没图的上下文说些不相干的话，那种失败最难归因。
+func (s *session) PromptRich(ctx context.Context, text string, images []agent.ImageInput) error {
+	if len(images) == 0 {
+		return s.Prompt(ctx, text)
+	}
+	return fmt.Errorf("%w: claude 桥传输只支持纯文本 prompt", agent.ErrImageNotSupported)
+}
+
+// SupportsImagePrompt 实现 agent.ImagePromptCapable：claude 桥恒不支持收图。
+// 显式返回 false（而不是不实现接口）—— 让上层问一次就能拿到确定的答案。
+func (s *session) SupportsImagePrompt() bool { return false }
+
 // waitTurn 等 clientRef 对应轮的 turn_end（或致命错误/会话关闭/ctx 取消）。
 func (s *session) waitTurn(ctx context.Context, ref string) error {
 	// ctx 取消时唤醒 cond.Wait

@@ -126,6 +126,7 @@ type ACPAgent struct {
 	onDelta    ContentDeltaFunc
 	onPerm     PermissionRequestFunc
 	onToolCall ToolCallUpdateFunc
+	onUsage    UsageUpdateFunc
 
 	// 权限请求挂起表：reqID -> chan PermissionResponse。
 	// RequestPermission 注册并阻塞等；Approve/Deny 投递响应后唤醒。
@@ -539,6 +540,10 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 		ClientCapabilities: acp.ClientCapabilities{
 			Fs: acp.FileSystemCapabilities{ReadTextFile: true, WriteTextFile: true},
 		},
+		// 注意：这里**不声明**图片能力 —— 协议把 promptCapabilities 只放在
+		// AgentCapabilities 上（见 SDK 的 ClientCapabilities 定义，它压根没这个字段）。
+		// 图片是"客户端往 prompt 里塞 ContentBlock::Image"，能不能收由**对端**声明，
+		// 读 initResp.AgentCapabilities.PromptCapabilities.Image，见 agentSupportsImagePrompt。
 	})
 	if err != nil {
 		// 握手失败：统一走 Close 清理（杀进程 + markDone + 清 pending），避免与 watchExit 双重 close done。
@@ -553,8 +558,20 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 	a.logger.Debug("acp initialized",
 		zap.Any("protocol_version", initResp.ProtocolVersion),
 		zap.Any("agent_info", initResp.AgentInfo),
-		zap.Bool("load_session", a.agentCaps.LoadSession))
+		zap.Bool("load_session", a.agentCaps.LoadSession),
+		// 能否发图完全由对端声明决定，且**不影响**文本链路 —— 必须打在日志里：
+		// 用户报"发图没反应"时，第一件事就是分清"agent 说它不收图"与"我们没发出去"。
+		zap.Bool("prompt_image", agentSupportsImagePrompt(a.agentCaps)))
 	return nil
+}
+
+// agentSupportsImagePrompt 读 agent 在 Initialize 应答里声明的图片入站能力。
+//
+// 保守取真：只有对端**明确**说 true 才算支持。PromptCapabilities 是逐变体可选
+// 的结构，缺失/字段缺省都解析成 false（见 SDK 的 UnmarshalJSON 默认值），
+// 所以这里不需要额外判空 —— 但要把它单独抽出来，好让"判据只有这一处"成立。
+func agentSupportsImagePrompt(caps acp.AgentCapabilities) bool {
+	return caps.PromptCapabilities.Image
 }
 
 // watchExit 等进程退出或连接断开，关闭 a.done（仅一次）。
@@ -789,7 +806,171 @@ func (a *ACPAgent) SendPrompt(ctx context.Context, sessionID, prompt string) err
 	if !a.started {
 		return errors.New("acp: SendPrompt before Start")
 	}
-	return a.promptOnce(ctx, sessionID, prompt)
+	return a.promptOnce(ctx, sessionID, prompt, nil)
+}
+
+// SupportsImagePrompt 实现 ImagePromptCapable：对端是否声明了图片入站能力。
+//
+// 保守取真：未握手（agentCaps 零值）时返回 false —— 还没确认的能力当作没有，
+// 让调用方走"隐藏入口"而不是"发出去再失败"。
+func (a *ACPAgent) SupportsImagePrompt() bool {
+	return agentSupportsImagePrompt(a.agentCaps)
+}
+
+// SendRichPrompt 实现 RichPromptSender：发一轮带图（可 0 张）的 prompt。
+//
+// 对端没声明图片能力时**明确报错**，不静默丢图：用户传了图却"agent 说没看到"
+// 是最难排查的一类问题（图到底是没发出去、还是 agent 没读）。错误信息里点明
+// 是 agent 侧不支持，用户就知道该换模型/换 agent，而不是反复重试。
+func (a *ACPAgent) SendRichPrompt(ctx context.Context, sessionID, text string, images []ImageInput) error {
+	if !a.started {
+		return errors.New("acp: SendRichPrompt before Start")
+	}
+	if len(images) > 0 && !a.SupportsImagePrompt() {
+		return fmt.Errorf("%w: agent %q 未声明图片输入能力（promptCapabilities.image），"+
+			"无法接收图片；请改用支持图片的模型/agent，或去掉图片后重发",
+			ErrImageNotSupported, a.cmdName)
+	}
+	if len(images) == 0 {
+		return a.promptOnce(ctx, sessionID, text, nil)
+	}
+	blocks, err := buildPromptBlocks(text, images)
+	if err != nil {
+		return err
+	}
+	return a.promptOnce(ctx, sessionID, text, blocks)
+}
+
+// ErrImageNotSupported 对端 agent 不支持图片 prompt。
+//
+// 单独一个哨兵错误：调用方（API 层）要把它翻成 400 而不是 500 ——
+// "agent 不支持"是**用户可修正**的输入问题（换 agent / 去掉图），不是服务故障。
+var ErrImageNotSupported = errors.New("acp: image prompt not supported by agent")
+
+// maxPromptImages 一轮 prompt 里的图片张数上限。
+//
+// 取 8 而不是"不限"：每张图都进上下文，张数直接决定 token 与费用，而且真到
+// 十几张时模型对图片的利用率反而下降。上限在这层拦，是为了给出**明确的**
+// 错误信息（agent 侧的报错通常只有一句协议级 invalid）。
+const maxPromptImages = 8
+
+// buildPromptBlocks 把文本 + 图片组装成 ACP 的 prompt 内容块序列。
+//
+// 顺序：**文本在前，图片紧随其后**。理由：dsh-acp 的 admitAcpPrompt 按块序
+// 重建 content（见 forks/dsh-acp lib/index.js），把图放在文本之前会让模型的
+// 语境变成"先看到图，再看到问题"；而人写提示词的习惯就是"先说要什么，再给素材"。
+//
+// 校验在这里做（而不是只靠 agent）：mime 白名单与 base64 形状在协议层就是硬要求，
+// 早点失败能给出比 agent 那句 invalid 有用得多的信息。
+func buildPromptBlocks(text string, images []ImageInput) ([]acp.ContentBlock, error) {
+	if len(images) > maxPromptImages {
+		return nil, fmt.Errorf("acp: 一轮最多 %d 张图片（收到 %d 张）", maxPromptImages, len(images))
+	}
+	blocks := make([]acp.ContentBlock, 0, len(images)+1)
+	// 空文本时不放空 TextBlock：某些 agent 对空文本块会报 invalid，
+	// 而"只发图"是完全合理的用法（让 agent 描述图片）。
+	if strings.TrimSpace(text) != "" {
+		blocks = append(blocks, acp.TextBlock(text))
+	}
+	for i, img := range images {
+		if err := validateImage(img); err != nil {
+			return nil, fmt.Errorf("acp: 第 %d 张图片: %w", i+1, err)
+		}
+		blocks = append(blocks, acp.ImageBlock(img.Data, img.MimeType))
+	}
+	if len(blocks) == 0 {
+		return nil, errors.New("acp: prompt 内容为空（既无文本也无图片）")
+	}
+	return blocks, nil
+}
+
+// imageMimeWhitelist 允许的图片 MIME 类型。
+//
+// 与 forks/dsh-acp 的 IMAGE_MEDIA_TYPES 保持一致 —— 那里是**唯一**的最终把关，
+// 这里提前拦只是为了给出更清楚的错误。多一种这里放行而 agent 拒收的类型，
+// 表现就是一句语焉不详的协议错误。
+var imageMimeWhitelist = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/webp": true,
+	"image/gif":  true,
+}
+
+// maxImageBytes 单张图片解码后的字节上限（5 MiB）。
+//
+// 为什么按**解码后**算：base64 会把体积撑大约 1/3，拿 base64 长度当判据
+// 会在边界上放进来过大的图。而这条限制的真实意图是控制上下文开销 ——
+// 那取决于原始字节数。
+const maxImageBytes = 5 << 20
+
+// validateImage 校验一张待发图片：mime 白名单、base64 形状、解码后大小。
+//
+// 这里**不解码出图**（那会为校验白拷一份内存），只做长度推算 + 字符集检查：
+//   - 字符集与 padding 位置用标准 base64 的严格判据；
+//   - 解码后字节数由长度推出（4 字符 → 3 字节，再减 padding）。
+func validateImage(img ImageInput) error {
+	if !imageMimeWhitelist[img.MimeType] {
+		return fmt.Errorf("不支持的图片类型 %q（仅支持 image/png、image/jpeg、image/webp、image/gif）", img.MimeType)
+	}
+	if img.Data == "" {
+		return errors.New("图片数据为空")
+	}
+	if strings.HasPrefix(img.Data, "data:") {
+		// 这是最容易犯的错：把 data URL 整个塞进来。点明它，别让人对着
+		// "图片损坏"猜半天。
+		return errors.New("图片数据必须是**纯 base64**，不能带 `data:image/...;base64,` 前缀")
+	}
+	if decoded, ok := decodedBase64Len(img.Data); ok {
+		if decoded > maxImageBytes {
+			return fmt.Errorf("图片过大：%d 字节（上限 %d 字节）", decoded, maxImageBytes)
+		}
+		return nil
+	}
+	return errors.New("图片数据不是合法的 base64")
+}
+
+// decodedBase64Len 校验严格 base64 并返回解码后的字节数。
+//
+// 不用 base64.StdEncoding.DecodeString 直接解：那要为每张图分配一份完整副本，
+// 而我们只想知道"合不合法、多大"。这里用标准编码的字符集与长度同余规则判断，
+// 与 base64.StdEncoding.Strict() 等价（拒非规范编码的尾部填充位）。
+func decodedBase64Len(s string) (int, bool) {
+	// 标准 base64：长度必须是 4 的倍数（有 padding 时），无 padding 也按 4 的倍数排。
+	if len(s)%4 != 0 {
+		return 0, false
+	}
+	padding := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '=' {
+			// padding 只允许出现在末尾，且至多两个。
+			if i < len(s)-2 {
+				return 0, false
+			}
+			padding++
+			continue
+		}
+		if padding > 0 {
+			return 0, false // padding 之后还有数据
+		}
+		if !isBase64Char(c) {
+			return 0, false
+		}
+	}
+	if padding > 2 {
+		return 0, false
+	}
+	n := len(s)/4*3 - padding
+	if n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// isBase64Char 标准 base64 字母表（A-Za-z0-9+/）。
+func isBase64Char(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		(c >= '0' && c <= '9') || c == '+' || c == '/'
 }
 
 // promptOnce 发一轮 prompt，不做任何重试。
@@ -801,11 +982,18 @@ func (a *ACPAgent) SendPrompt(ctx context.Context, sessionID, prompt string) err
 //     再发 prompt。顺序不能反：set 是对**会话**生效的，prompt 必须跑在设置之后。
 //   - catalogMeta / catalogNone → 走请求 _meta.model（fork 的 dsh-acp 吃这个；
 //     不支持的 agent 会忽略它，行为与改动前一致）。
-func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, prompt string) error {
+//
+// blocks 非 nil 时用它作为 prompt 内容（图文混合）；nil 表示纯文本，用 text 组块。
+// 两个参数并存是为了让**模型选择逻辑只有这一份** —— 富文本路径若自己再实现一遍
+// 模型写回，日后改通道（如 bd0cd28 那种）必然漏掉一边。
+func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, text string, blocks []acp.ContentBlock) error {
 	turnModel := a.takeTurnModel()
+	if blocks == nil {
+		blocks = []acp.ContentBlock{acp.TextBlock(text)}
+	}
 	req := acp.PromptRequest{
 		SessionId: acp.SessionId(sessionID),
-		Prompt:    []acp.ContentBlock{acp.TextBlock(prompt)},
+		Prompt:    blocks,
 	}
 	if turnModel != "" && a.catalogSourceOf() == catalogStandard {
 		if err := a.applyModel(ctx, sessionID, turnModel); err != nil {
@@ -819,6 +1007,12 @@ func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, prompt string) err
 	}
 	return nil
 }
+
+// 编译期断言：ACPAgent 支持图文 prompt（可选能力）。
+var (
+	_ RichPromptSender   = (*ACPAgent)(nil)
+	_ ImagePromptCapable = (*ACPAgent)(nil)
+)
 
 // OnContentDelta 注册内容增量回调。
 func (a *ACPAgent) OnContentDelta(fn ContentDeltaFunc) {
@@ -840,6 +1034,18 @@ func (a *ACPAgent) OnToolCallUpdate(fn ToolCallUpdateFunc) {
 	a.onToolCall = fn
 	a.cbMu.Unlock()
 }
+
+// OnUsageUpdate 注册上下文用量回调（实现 UsageReporter）。传 nil 注销。
+func (a *ACPAgent) OnUsageUpdate(fn UsageUpdateFunc) {
+	a.cbMu.Lock()
+	a.onUsage = fn
+	a.cbMu.Unlock()
+}
+
+// 编译期断言：ACPAgent 支持用量上报与富文本 prompt（可选能力）。
+var (
+	_ UsageReporter = (*ACPAgent)(nil)
+)
 
 // Approve 批准权限请求：按 ReqID 选中指定 OptionID，唤醒等待中的 RequestPermission。
 // 未找到 ReqID（已超时/取消/不存在）返回错误。
@@ -964,6 +1170,11 @@ func (a *ACPAgent) Close(ctx context.Context) error {
 			a.toolInputCond.Broadcast()
 		}
 		a.toolInputsMu.Unlock()
+		// 摘除全部回调：进程已结束，留着只会让后续（迟到/重放）的更新
+		// 继续写进已收尾的 task。与 toolInputs 同步置 nil，理由同上。
+		a.cbMu.Lock()
+		a.onDelta, a.onPerm, a.onToolCall, a.onUsage = nil, nil, nil, nil
+		a.cbMu.Unlock()
 		a.markDone()
 		// 释放自持 lifeCtx（最后一步）：若上面优雅等待超时且进程仍在，此处经 CommandContext
 		// 兜底强杀。cancel 幂等，重复 Close / 启动失败路径重复调用均安全。
@@ -1068,8 +1279,37 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 			info.RawOutput = rawAnyToJSON(u.ToolCallUpdate.RawOutput)
 			fn(info)
 		}
+	case u.UsageUpdate != nil:
+		// 上下文用量（UNSTABLE 扩展；dsh-acp 每次 assistant message 后推一条）。
+		//
+		// 只上报 Used/Size 有意义的样本：Size<=0 说明 agent 不知道上下文窗口
+		// （协议里 Size 是必填，但实现可能给 0），此时"占用了 x/0"是个荒谬的
+		// 显示，宁可整条丢弃 —— 前端据此保持"暂无用量"而不是渲染错数。
+		if u.UsageUpdate.Size <= 0 {
+			a.logger.Debug("acp usage update ignored (no context window size)",
+				zap.Int("used", u.UsageUpdate.Used), zap.Int("size", u.UsageUpdate.Size))
+			return nil
+		}
+		a.cbMu.RLock()
+		ufn := a.onUsage
+		a.cbMu.RUnlock()
+		if ufn != nil {
+			info := UsageInfo{
+				SessionID: sid,
+				Used:      u.UsageUpdate.Used,
+				Size:      u.UsageUpdate.Size,
+			}
+			// Cost 是指针：nil = agent 没报（区别于报了 0）。
+			if c := u.UsageUpdate.Cost; c != nil {
+				info.HasCost = true
+				info.CostUSD = c.Amount
+			}
+			ufn(info)
+		}
+		a.logger.Debug("acp usage update",
+			zap.Int("used", u.UsageUpdate.Used), zap.Int("size", u.UsageUpdate.Size))
 	}
-	// 其他更新类型（Plan/UserMessageChunk/UsageUpdate 等）M1 暂不处理，留给后续里程碑。
+	// 其他更新类型（Plan/UserMessageChunk 等）暂不处理，留给后续里程碑。
 	return nil
 }
 

@@ -77,6 +77,83 @@ type SessionConfig struct {
 	Model string
 }
 
+// UsageInfo 一次上下文用量上报（映射 ACP 的 SessionUsageUpdate）。
+//
+// 语义是「**当前**上下文占用」，不是「本轮累计」：ACP 的 usage_update 在一轮内
+// 可能随每条 assistant message 多次到达，每次都是当时的最新快照。故调用方应
+// **覆盖**而非累加（见 core 的 usage wire）。
+//
+// Used/Size 由 agent 给出：Size=上下文窗口总量（tokens），Used=当前已占用。
+// 两者由 agent 自己量（dsh 走 tokenMeter + contextWindow），pieqi 不做估算 ——
+// 估出来的数与 agent 实际截断行为不一致，只会误导用户。
+type UsageInfo struct {
+	SessionID string
+	Used      int
+	Size      int
+	// CostUSD 会话累计成本（可选；agent 不给时为 0，此时 UI 不应显示"$0.00"）。
+	CostUSD float64
+	// HasCost 区分"成本为 0"与"agent 没报成本"——CostUSD 是 float64，
+	// 零值有歧义。只有它为 true 时 CostUSD 才有意义。
+	HasCost bool
+}
+
+// UsageUpdateFunc 用量上报回调（可选能力；ACP 侧的 usage_update 触发）。
+type UsageUpdateFunc func(u UsageInfo)
+
+// UsageReporter 由能上报上下文用量的 adapter 实现（当前仅 ACP 系）。
+//
+// 与 TurnModelSetter 同样是**可选**能力：没实现就静默忽略，claude/print 路径
+// 与全部测试替身不受影响。之所以不复用 EventTurnEnd（agent.EventTurnEnd /
+// TurnInfo.Usage）：那条通道的语义是"**轮末**快照"，而 usage_update 是**轮内**
+// 的多次过程量 —— 塞进轮末事件要么丢掉中间更新，要么把轮末事件发成多次，
+// 两者都会让"本轮结束"这个信号失去意义。
+type UsageReporter interface {
+	// OnUsageUpdate 注册用量回调（传 nil 注销）。同 adapter 只保留最后一个回调。
+	OnUsageUpdate(fn UsageUpdateFunc)
+}
+
+// ImageInput 一张随 prompt 一起发出的内联图片（映射 ACP 的 ContentBlock::Image）。
+//
+// Data 是**标准 base64**（不是 data URL，不带 `data:image/png;base64,` 前缀）：
+//   - ACP 的 ImageContent.data 就是无前缀 base64；
+//   - 带前缀会让对端把前缀也当数据解码，得到的字节数对不上、图片损坏。
+//
+// MimeType 必须是 image/png | image/jpeg | image/webp | image/gif（dsh-acp
+// 只认这四个，见 forks/dsh-acp 的 IMAGE_MEDIA_TYPES）。传别的会在 agent 侧报错。
+type ImageInput struct {
+	// Data 标准 base64 编码的图片字节。
+	Data string
+	// MimeType 图片 MIME 类型（小写，如 "image/png"）。
+	MimeType string
+}
+
+// RichPromptSender 由支持「图文混合 prompt」的 adapter 实现（当前仅 ACP 系）。
+//
+// 与 TurnModelSetter / UsageReporter 同样是**可选**能力：没实现就回落纯文本
+// （或由调用方明确拒绝），claude/print 路径与全部测试替身不受影响。
+//
+// 为什么不开在 AgentAdapter.SendPrompt 上加参数：SendPrompt 是通用接口，为它
+// 加参会波及 claude/print 两个实现与全部测试替身（fakeAdapter 之类），而我们
+// 要表达的恰恰是"只有某些 agent 能收图"。可选接口把这条边界写在类型里，
+// 调用方用一次类型断言就能知道"这个 adapter 到底能不能收图"。
+type RichPromptSender interface {
+	// SendRichPrompt 发一轮带图（可 0 张）的 prompt，阻塞到该轮结束。
+	// images 为空时语义等价于 SendPrompt（纯文本）。
+	SendRichPrompt(ctx context.Context, sessionID, text string, images []ImageInput) error
+}
+
+// ImagePromptCapable 由能**声明**其图片入站能力的 adapter 实现（当前仅 ACP 系）。
+//
+// 与 RichPromptSender 分开是有意的：那个接口只说明"这个类型有发图的方法"，
+// 而能不能真的发，取决于**对端**在 Initialize 里有没有声明 promptCapabilities.image。
+// 混在一起会让调用方以为"实现了 RichPromptSender 就等于能发图"，然后在对端
+// 不支持时拿到一个运行时错误（而不是提前隐藏入口）。
+type ImagePromptCapable interface {
+	// SupportsImagePrompt 对端是否声明了图片入站能力。未握手时返回 false
+	// （保守侧：还没确认的能力一律当作没有）。
+	SupportsImagePrompt() bool
+}
+
 // TurnModelSetter 由支持「按轮指定模型」的 adapter 实现（当前仅 ACP 系会话）。
 //
 // 与 ResumeID 一样是**可选**能力：没实现就忽略，其它 agent 不受影响。之所以不复用

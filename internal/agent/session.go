@@ -83,6 +83,13 @@ type Event struct {
 type AgentSession interface {
 	ID() string
 	Prompt(ctx context.Context, text string) error
+	// PromptRich 发一轮带图（可 0 张）的 prompt：images 为空时语义等价于 Prompt。
+	//
+	// 放在接口上（而不是像 TurnModelSetter 那样做可选接口）是因为**它的降级语义
+	// 必须在接口层定死**：底层不支持图片时，实现要么明确报错、要么明确拒收 ——
+	// 绝不能静默丢掉图继续发文本（那会让用户以为 agent"看过图了"）。
+	// 各实现照此自决，调用方只需处理返回的 error。
+	PromptRich(ctx context.Context, text string, images []ImageInput) error
 	Cancel(ctx context.Context) error
 	Close(ctx context.Context) error
 	// RespondPermission 对 PermissionNeeded 事件给出审批响应。
@@ -175,6 +182,30 @@ func (s *sessionAdapter) ID() string { return s.adapter.RealSessionID(s.sessionI
 // Prompt 发送一轮 prompt（阻塞到该轮结束）。
 func (s *sessionAdapter) Prompt(ctx context.Context, text string) error {
 	return s.adapter.SendPrompt(ctx, s.sessionID, text)
+}
+
+// PromptRich 发一轮带图的 prompt。
+//
+// 底层 adapter 实现 RichPromptSender 时透传；否则：
+//   - images 为空 → 回落到纯文本 Prompt（与调用方不传图完全一致，不是降级）；
+//   - images 非空 → **明确报错**。静默丢掉图继续发文本是最坏的选择：
+//     用户会以为 agent 看过图，而 agent 只会对着没图的上下文说些不相干的话。
+func (s *sessionAdapter) PromptRich(ctx context.Context, text string, images []ImageInput) error {
+	if len(images) == 0 {
+		return s.adapter.SendPrompt(ctx, s.sessionID, text)
+	}
+	sender, ok := s.adapter.(RichPromptSender)
+	if !ok {
+		return fmt.Errorf("%w: 当前 agent 传输不支持图片（%T）", ErrImageNotSupported, s.adapter)
+	}
+	return sender.SendRichPrompt(ctx, s.sessionID, text, images)
+}
+
+// SupportsImagePrompt 透传底层的图片入站能力；底层不支持时返回 false。
+// 供上层（API）决定要不要把"可发图"暴露给前端。
+func (s *sessionAdapter) SupportsImagePrompt() bool {
+	capable, ok := s.adapter.(ImagePromptCapable)
+	return ok && capable.SupportsImagePrompt()
 }
 
 // SetTurnModel 把本轮模型选择转交给底层 adapter（仅实现了 TurnModelSetter 的会生效，
