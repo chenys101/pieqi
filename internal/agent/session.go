@@ -45,6 +45,11 @@ const (
 	EventTurnEnd          EventKind = "turn_end"          // 本轮结束（可带 usage / resume id）
 	EventError            EventKind = "error"             // 错误
 	EventStateChanged     EventKind = "state_changed"     // idle/running/waiting_permission/closed
+	// EventUsage 上下文用量上报（轮内可多次到达；**不是**轮末快照）。
+	//
+	// 单列一个 kind 而不并进 EventTurnEnd：用量是**过程量**，一轮会来很多条，
+	// 而 TurnEnd 是"本轮结束"这一位信号 —— 混在一起会让"这轮结束了"不可判定。
+	EventUsage EventKind = "usage"
 )
 
 // TurnInfo TurnEnd 的载荷：本轮结束信息（带底层 resume id，供持久化/续问）。
@@ -71,6 +76,10 @@ type Event struct {
 	Turn       *TurnInfo         // TurnEnd 载荷
 	Err        error             // Error 事件
 	State      string            // StateChanged 的新状态
+	// Usage 上下文用量（EventUsage 载荷）。
+	// 用指针区分"没有用量"与"用量是零值" —— 零值 UsageInfo 会显示成 0/0，
+	// 而 0/0 不是信息（前端据 nil 隐藏整块显示）。
+	Usage *UsageInfo
 }
 
 // AgentSession 中性 agent 会话接口（§3.1）。
@@ -273,6 +282,13 @@ func (s *sessionAdapter) OnEvent(fn func(Event)) {
 	s.adapter.OnPermissionRequest(func(req PermissionRequest) {
 		s.fire(Event{Kind: EventPermissionNeeded, SessionID: req.SessionID, Permission: req})
 	})
+	// 用量：底层 adapter 支持上报时桥接到中性事件（不支持则静默 —— 那是"该 agent 不报用量"）。
+	if reporter, ok := s.adapter.(UsageReporter); ok {
+		reporter.OnUsageUpdate(func(u UsageInfo) {
+			uu := u
+			s.fire(Event{Kind: EventUsage, SessionID: u.SessionID, Usage: &uu})
+		})
+	}
 }
 
 // Caps 返回会话能力。

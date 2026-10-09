@@ -48,6 +48,11 @@ type sessionBackedAdapter struct {
 	onDelta ContentDeltaFunc
 	onPerm  PermissionRequestFunc
 	onTool  ToolCallUpdateFunc
+	// onUsage 用量回调。与上面三个一样必须**显式转发**：TaskRunner 拿到的 adapter
+	// 是本类型（不是底层 AgentSession），WireUsage 靠类型断言找 UsageReporter；
+	// 不实现这个接口，用量就会静默丢掉（2026-10-09 实测踩过：日志里 acp usage update
+	// 一直在打，任务文件里 usage 却恒为空）。
+	onUsage UsageUpdateFunc
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -170,6 +175,19 @@ func (a *sessionBackedAdapter) OnToolCallUpdate(fn ToolCallUpdateFunc) {
 	a.mu.Unlock()
 }
 
+// OnUsageUpdate 实现 UsageReporter：转发用量回调。
+//
+// 为什么这里**必须**再声明一次（而不是靠底层 AgentSession 自动生效）：
+// TaskRunner 持有的 adapter 是 sessionBackedAdapter，WireUsage 对它做
+// `adapter.(agent.UsageReporter)` 断言。本类型不实现 => 断言失败 => WireUsage
+// 返回 nil => 用量永不落库，而**日志里却一切正常**（ACP 层的 usage update 照打）。
+// 这是"链路中段少一环"式的静默失效，单测用直接实现该接口的 fake 抓不到。
+func (a *sessionBackedAdapter) OnUsageUpdate(fn UsageUpdateFunc) {
+	a.mu.Lock()
+	a.onUsage = fn
+	a.mu.Unlock()
+}
+
 func (a *sessionBackedAdapter) Approve(ctx context.Context, reqID, optionID string) error {
 	a.mu.Lock()
 	sess := a.sess
@@ -241,6 +259,15 @@ func (a *sessionBackedAdapter) onEvent(ev Event) {
 		a.emitDelta(ContentDelta{SessionID: a.sid, Text: ev.Text, IsThought: false})
 	case EventThinkingDelta:
 		a.emitDelta(ContentDelta{SessionID: a.sid, Text: ev.Text, IsThought: true})
+	case EventUsage:
+		// 用量透传（nil 保护：中性事件里的 Usage 是指针，见 Event.Usage 的说明）。
+		if ev.Usage != nil {
+			u := *ev.Usage
+			if u.SessionID == "" {
+				u.SessionID = a.sid
+			}
+			a.emitUsage(u)
+		}
 	case EventToolStart:
 		a.emitTool(ToolCallUpdateInfo{
 			SessionID: a.sid, ToolCallID: ev.ToolCallID, Title: ev.ToolTitle,
@@ -303,6 +330,15 @@ func (a *sessionBackedAdapter) emitTool(t ToolCallUpdateInfo) {
 	a.mu.Unlock()
 	if fn != nil {
 		fn(t)
+	}
+}
+
+func (a *sessionBackedAdapter) emitUsage(u UsageInfo) {
+	a.mu.Lock()
+	fn := a.onUsage
+	a.mu.Unlock()
+	if fn != nil {
+		fn(u)
 	}
 }
 
