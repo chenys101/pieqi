@@ -220,5 +220,18 @@ export function adaptTask(dto: TaskDto | TaskSummaryDto): Task {
           capturedAt: dto.diff_stat.captured_at,
         }
       : undefined,
+    // usage：后端 omitempty，不上报用量的 agent 压根不下发 → undefined（UI 隐藏）。
+    // size<=0 快照由后端已拦掉，这里再判一次是因为**大小写/门禁不能只靠对端**：
+    // 拿到 size=0 会让进度条除零。
+    usage:
+      dto.usage && dto.usage.size > 0
+        ? {
+            used: dto.usage.used,
+            size: dto.usage.size,
+            costUsd: dto.usage.cost_usd,
+            hasCost: dto.usage.has_cost === true,
+            at: dto.usage.at,
+          }
+        : undefined,
   }
 }

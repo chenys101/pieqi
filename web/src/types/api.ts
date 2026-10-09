@@ -36,7 +36,16 @@ export interface TaskEventDto {
   input?: unknown
   result?: string
   is_error?: boolean
+  /** 该事件随附的图片**元数据**（当前只有 user 事件有）。**不含图片本体** —— 见 model.TaskImage。 */
+  images?: TaskImageDto[]
   at: string
+}
+
+/** 随消息发出的图片元数据（后端 model.TaskImage；不含 base64） */
+export interface TaskImageDto {
+  mime_type: string
+  bytes: number
+  hash?: string
 }
 
 export interface DecisionDto {
@@ -82,8 +91,33 @@ export interface TaskDto {
   finished_at?: string
   /** 终态时的累计代码改动快照（见 core.SnapshotDiffStat：这是随时间丢失的数据，必须当场固存） */
   diff_stat?: DiffStatDto
+  /** 上下文用量快照（agent 上报；不上报用量的 agent 不下发 → undefined，UI 应隐藏而非显示 0） */
+  usage?: TaskUsageDto
   /** 用户干预记录（R6）。旧任务/新口径前任务没有 → undefined；**消费方一律 `?? []`**（Go nil 切片序列化为 null 的老坑在适配层归一） */
   interventions?: InterventionDto[]
+}
+
+/**
+ * 上下文用量快照（后端 model.TaskUsage）。
+ *
+ * 数字全部由 agent 给：Size=上下文窗口总量，Used=当前占用。前端**不要**自己估，
+ * 估算值与 agent 实际截断行为不一致。
+ */
+export interface TaskUsageDto {
+  used: number
+  size: number
+  /** 会话累计成本。**只有 has_cost=true 时才有意义** —— 否则那是"agent 没报"被误读成免费 */
+  cost_usd?: number
+  has_cost?: boolean
+  at: string
+}
+
+/** WS `task_usage` 事件的载荷（轻量，不带完整 Task） */
+export interface UsagePayloadDto {
+  used: number
+  size: number
+  cost_usd?: number
+  has_cost?: boolean
 }
 
 /** 用户对任务的一次干预（R6，后端 model.Intervention） */
@@ -142,6 +176,21 @@ export interface InterveneRequestDto {
    * 那才是"起新一轮"。运行中 append_prompt 只是往当前轮注入 stdin，后端不看这个字段。
    */
   model?: string
+  /**
+   * 随这条消息发出的图片（**纯 base64**，不带 data: 前缀）。
+   *
+   * 与 model 同为**按轮**载荷，不落库。只对 append_prompt 有意义：
+   * decision 是回答一张审批卡，运行中 append_prompt 走的是纯文本 stdin 通道。
+   */
+  images?: ImageReqDto[]
+}
+
+/** 一张待发图片的 wire 形态（后端 api.imageReq） */
+export interface ImageReqDto {
+  /** 纯 base64 —— **不是** data URL（带前缀会被后端明确拒绝） */
+  data: string
+  /** image/png | image/jpeg | image/webp | image/gif */
+  mime_type: string
 }
 
 /** WebSocket 消息（EventBus 转发 + snapshot） */
@@ -178,7 +227,24 @@ export interface WsTaskDeltaDto {
   }
 }
 
-export type WsMessageDto = WsSnapshotDto | WsTaskEventDto | WsTaskDeletedDto | WsTaskDeltaDto
+/**
+ * task_usage：上下文用量更新（轻量，**不带完整 Task**）。
+ *
+ * 与 task_delta 同一套路：agent 一轮内会推多次 usage_update，若走 task_updated
+ * 就会在逐字渲染期间反复触发全量重绘。前端只就地更新用量角标。
+ */
+export interface WsTaskUsageDto {
+  type: 'task_usage'
+  task_id: string
+  usage: UsagePayloadDto
+}
+
+export type WsMessageDto =
+  | WsSnapshotDto
+  | WsTaskEventDto
+  | WsTaskDeletedDto
+  | WsTaskDeltaDto
+  | WsTaskUsageDto
 
 /** GET /api/auth/status 响应 */
 export interface AuthStatusDto {

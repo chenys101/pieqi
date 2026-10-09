@@ -59,10 +59,22 @@ export async function getTaskDto(id: string): Promise<TaskDto> {
  * ⚠️ 它是**不透明串**，必须原样取自清单、原样回传，前端不得解析或拼接 ——
  * 自己拼的取值会让 agent 在建会话时报未知模型（任务直接失败）。
  */
-export async function createTask(projectPath: string, prompt: string, agent?: string, model?: string): Promise<TaskDto> {
+export async function createTask(
+  projectPath: string,
+  prompt: string,
+  agent?: string,
+  model?: string,
+  images?: ImagePayload[],
+): Promise<TaskDto> {
   return request<TaskDto>('/tasks', {
     method: 'POST',
-    body: { project_path: projectPath, prompt, agent: agent || undefined, model: model || undefined },
+    body: {
+      project_path: projectPath,
+      prompt,
+      agent: agent || undefined,
+      model: model || undefined,
+      images: images?.length ? images : undefined,
+    },
   })
 }
 
@@ -80,6 +92,21 @@ export interface IntervenePayload {
    * 只在续问（终态 Resume）这一轮生效 —— 那是唯一"起新一轮"的 append_prompt。
    */
   model?: string
+  /**
+   * 随这条消息发出的图片（纯 base64，**不带 data: 前缀**；见 imageAttach.ts）。
+   *
+   * 与 model 同为**按轮**载荷：只对 append_prompt 有意义，后端不落库
+   * （落库的只有"这条消息带了几张图"的元数据）。
+   */
+  images?: ImagePayload[]
+}
+
+/** 一张待发图片的 wire 形态（与后端 api.imageReq 对应） */
+export interface ImagePayload {
+  /** 纯 base64 */
+  data: string
+  /** image/png | image/jpeg | image/webp | image/gif */
+  mime_type: string
 }
 
 /** POST /api/tasks/:id/intervene：决策 / 追加 prompt / 终态续问 */
@@ -90,8 +117,26 @@ export async function intervene(taskId: string, p: IntervenePayload): Promise<vo
     choice: p.choice,
     text: p.text,
     model: p.model || undefined,
+    images: p.images?.length ? p.images : undefined,
   }
   await request(`/tasks/${encodeURIComponent(taskId)}/intervene`, { method: 'POST', body })
+}
+
+/**
+ * GET /api/tasks/:id/capabilities：该任务会话**此刻**的能力位。
+ *
+ * 为什么单独问而不是从 Task DTO 读：能力来自 ACP 握手，是**会话级运行时事实**；
+ * Task 是持久化模型，把运行时能力写进去会立刻产生"磁盘那份与实际不符"
+ * （重启后会话没了，记录里还写着支持收图）。
+ *
+ * 会话还没建立时后端回答 false（保守侧）—— 前端据此隐藏入口，用户先发一条文本
+ * 把会话建起来，入口就会出现。这比"乐观显示、点了报错"好：后者像功能坏了。
+ */
+export async function getTaskCapabilities(taskId: string): Promise<{ imagePrompt: boolean }> {
+  const data = await request<{ image_prompt?: boolean }>(
+    `/tasks/${encodeURIComponent(taskId)}/capabilities`,
+  )
+  return { imagePrompt: data.image_prompt === true }
 }
 
 /**

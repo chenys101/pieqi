@@ -12,7 +12,9 @@
 import { computed, ref } from 'vue'
 import PromptInput from './PromptInput.vue'
 import ModelPicker from './ModelPicker.vue'
+import ImagePicker from './ImagePicker.vue'
 import type { AgentModelDto } from '@/types/api'
+import type { PendingImage } from '../imageAttach'
 
 const props = defineProps<{
   canCancel: boolean
@@ -31,20 +33,38 @@ const props = defineProps<{
   switching?: boolean
   /** 运行中不可切换（这一轮的模型已经定死了，见后端 setTaskModel） */
   switchDisabled?: boolean
+  /**
+   * 该 agent 能否收图（后端 agentCapabilities.promptCapabilities.image）。
+   *
+   * 为 false 时**整个加图入口都不出现** —— 摆一个按了必然失败的按钮，
+   * 比没有这个功能更糟（用户会反复试，而每次都以一句 agent 报错收场）。
+   */
+  canAttachImages?: boolean
 }>()
-const emit = defineEmits<{ send: [text: string]; cancel: []; 'switch-model': [value: string] }>()
+const emit = defineEmits<{
+  send: [text: string, images: PendingImage[]]
+  cancel: []
+  'switch-model': [value: string]
+}>()
 
 const text = ref('')
+const images = ref<PendingImage[]>([])
 const submitting = ref(false)
 
-const sendDisabled = computed(() => !text.value.trim() || !props.canSend || submitting.value)
+// 有图就算有内容 —— "只发一张图、不写字"是正当用法（让 agent 描述图片）。
+const sendDisabled = computed(
+  () => (!text.value.trim() && images.value.length === 0) || !props.canSend || submitting.value,
+)
 
 async function onSend() {
   if (sendDisabled.value) return
   submitting.value = true
   try {
-    emit('send', text.value.trim())
+    emit('send', text.value.trim(), images.value)
     text.value = ''
+    // 图发出去就清空：留在框里会让人以为"还没发"，且下一轮会重复带上
+    // （而后端是**按轮**的，不会替我们记住）。
+    images.value = []
   } finally {
     submitting.value = false
   }
@@ -66,10 +86,11 @@ function onPick(value: string) {
         :disabled="canCancel"
         @submit="!canCancel && onSend()"
       >
-        <!-- 模型选择器：输入框内左下角，与右下角的发送/中止按钮同一行。
+        <!-- #lead 行：加图按钮 + 模型选择器（都靠左，与右侧发送/中止同一行）。
              ⚠️ 必须放在 #lead 而不是 #actions：#actions 整行是 justify-end，
              塞进去会被推到最右、和发送按钮挤在一起。 -->
         <template #lead>
+          <ImagePicker v-if="canAttachImages && !canCancel" v-model="images" :disabled="submitting" />
           <ModelPicker
             :model="currentModel"
             :models="models"

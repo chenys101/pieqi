@@ -68,6 +68,39 @@ export interface Task {
    * 老任务没有这个字段（在本 feature 上线前就已完成），渲染时要能容忍缺失。
    */
   diffStat?: DiffStat
+  /**
+   * 上下文用量快照（agent 上报）。
+   *
+   * undefined = 该 agent 不上报用量（如 claude 桥/print），或还没跑过一轮 ——
+   * UI 必须**隐藏**用量显示，而不是渲染 0%（那是"未知"被读成"空"）。
+   */
+  usage?: TaskUsage
+}
+
+/**
+ * 上下文用量快照（来源：后端 model.TaskUsage / WS task_usage 事件）。
+ *
+ * 语义是「**此刻**上下文有多满」的瞬时量，不是流量计 —— 每次上报**覆盖**前值。
+ */
+export interface TaskUsage {
+  /** 当前已占用 tokens */
+  used: number
+  /** 上下文窗口总量（tokens）。> 0 才是有意义的快照 */
+  size: number
+  /**
+   * 会话累计成本（USD）。**只有 hasCost=true 时才能显示** ——
+   * 否则那是"agent 没报成本"，显示 "$0.00" 会让人误读成免费。
+   */
+  costUsd?: number
+  hasCost: boolean
+  /** 采集时刻（ISO） */
+  at?: string
+}
+
+/** 已用比例（0~1）；Size 无效时返回 undefined（调用方据此隐藏进度显示） */
+export function usageRatio(u: TaskUsage | undefined): number | undefined {
+  if (!u || u.size <= 0) return undefined
+  return Math.min(1, Math.max(0, u.used / u.size))
 }
 
 /** 终态时的累计代码改动 */

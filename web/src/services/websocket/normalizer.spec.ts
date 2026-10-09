@@ -67,6 +67,44 @@ describe('normalizeWsMessage', () => {
     expect(normalizeWsMessage({ type: 'unknown' })).toBeNull()
     expect(normalizeWsMessage({ type: 'task_delta', task_id: 't1' })).toBeNull()
   })
+
+  // --- task_usage：上下文用量（ACP usage_update 的透传） ---
+
+  it('task_usage：归一为 usage 消息并保留 used/size', () => {
+    const msg = normalizeWsMessage({
+      type: 'task_usage',
+      task_id: 't1',
+      usage: { used: 12345, size: 200000 },
+    })
+    expect(msg).toEqual({
+      type: 'usage',
+      taskId: 't1',
+      usage: { used: 12345, size: 200000, costUsd: undefined, hasCost: false },
+    })
+  })
+
+  it('task_usage：has_cost 缺省即 false（"没报成本"不得被读成免费）', () => {
+    const omitted = normalizeWsMessage({ type: 'task_usage', task_id: 't1', usage: { used: 1, size: 100 } })
+    expect(omitted).toMatchObject({ usage: { hasCost: false, costUsd: undefined } })
+
+    // 明确报 0 与没报是两件事：前者 hasCost=true，UI 才允许显示 "$0.00"
+    const explicitZero = normalizeWsMessage({
+      type: 'task_usage',
+      task_id: 't1',
+      usage: { used: 1, size: 100, cost_usd: 0, has_cost: true },
+    })
+    expect(explicitZero).toMatchObject({ usage: { hasCost: true, costUsd: 0 } })
+  })
+
+  // size<=0 的快照没有信息量（"占用了 x/0"）。后端已拦，这里再拦一次是因为
+  // 本层的职责就是"进来的一定是合法模型"，消费方（进度条）不该各写一遍守卫。
+  it('task_usage：size<=0 或缺字段一律丢弃', () => {
+    expect(normalizeWsMessage({ type: 'task_usage', task_id: 't1', usage: { used: 9, size: 0 } })).toBeNull()
+    expect(normalizeWsMessage({ type: 'task_usage', task_id: 't1', usage: { used: 9, size: -1 } })).toBeNull()
+    expect(normalizeWsMessage({ type: 'task_usage', task_id: 't1' })).toBeNull()
+    expect(normalizeWsMessage({ type: 'task_usage', task_id: 't1', usage: { used: 'x', size: 100 } })).toBeNull()
+    expect(normalizeWsMessage({ type: 'task_usage', usage: { used: 1, size: 100 } })).toBeNull()
+  })
 })
 
 describe('normalizeEvents', () => {

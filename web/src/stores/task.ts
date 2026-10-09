@@ -2,7 +2,7 @@
 // 只管 State / Derived / Actions；API 一律走 services 层。
 
 import { defineStore } from 'pinia'
-import type { Task, TaskGroup, TaskStatus } from '@/types/task'
+import type { Task, TaskGroup, TaskStatus, TaskUsage } from '@/types/task'
 import { isTerminalStatus } from '@/types/task'
 import * as api from '@/services/api/tasks'
 import { adaptTask } from '@/services/api/client'
@@ -159,6 +159,18 @@ export const useTaskStore = defineStore('task', {
     clearDecision(id: string) {
       const t = this.byId(id)
       if (t) t.decision = undefined
+    },
+
+    /**
+     * WS task_usage：就地更新任务上的用量快照（覆盖式）。
+     *
+     * 为什么**替换整个 usage** 而不是合并字段：Used/Size 是一次完整度量。
+     * 只更其中一个会让两个数来自不同时刻（Size 涨了而 Used 还是旧的），
+     * 显示出自相矛盾的进度条。
+     */
+    applyUsage(id: string, usage: TaskUsage) {
+      const t = this.byId(id)
+      if (t) t.usage = usage
     },
   },
 })

@@ -33,5 +33,12 @@ export function dispatch(msg: RealtimeMessage, t: DispatchTargets): void {
       if (!t.taskStore.byId(msg.delta.taskId)) return
       t.sessionStore.applyDelta(msg.delta)
       return
+    case 'usage':
+      // 用量是 task 的**可变快照**，落回 taskStore（详情页/列表都从这里读），
+      // 不进 sessionStore 的事件流 —— 它不是"发生过的一件事"，而是"此刻的状态"。
+      // 未知任务同样丢弃（快照未到/已删除）。
+      if (!t.taskStore.byId(msg.taskId)) return
+      t.taskStore.applyUsage(msg.taskId, msg.usage)
+      return
   }
 }

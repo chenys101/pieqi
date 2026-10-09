@@ -7,6 +7,7 @@ import { useApprovalStore } from '@/stores/approval'
 import { useNotificationStore } from '@/stores/notification'
 import { isTerminalStatus } from '@/types/task'
 import * as tasksApi from '@/services/api/tasks'
+import type { PendingImage } from '@/features/session/imageAttach'
 
 export function useSession(taskId: Ref<string>) {
   const sessionStore = useSessionStore()
@@ -43,12 +44,23 @@ export function useSession(taskId: Ref<string>) {
    * model（可选）是**本轮**要用的模型（不透明选择值，见 GET /api/agents/{agent}/models）。
    * 空 = 沿用会话当前路由。只对续问（Resume 起新一轮）有意义 —— 后端在纯 stdin 注入的
    * 路径上不看它，故 UI 也只在可续问时给出这个选择器（见 InterveneInput）。
+   *
+   * images（可选）随这条消息发出。**纯 base64**（见 imageAttach.ts 的说明）。
+   * 同样只对续问有意义：运行中的 stdin 注入是纯文本通道。
    */
-  async function submitPrompt(text: string, model?: string) {
+  async function submitPrompt(text: string, model?: string, images?: PendingImage[]) {
     const id = taskId.value
-    if (!text.trim()) return
+    // 有图就算有内容：只发一张图、不写字是正当用法。
+    if (!text.trim() && !images?.length) return
     try {
-      await tasksApi.intervene(id, { kind: 'append_prompt', text: text.trim(), model: model || undefined })
+      await tasksApi.intervene(id, {
+        kind: 'append_prompt',
+        text: text.trim(),
+        model: model || undefined,
+        images: images?.length
+          ? images.map((i) => ({ data: i.data, mime_type: i.mimeType }))
+          : undefined,
+      })
       sessionStore.appendLocalUserMessage(id, text.trim())
       sessionStore.setThinking(id, true)
       forceScroll.value = id

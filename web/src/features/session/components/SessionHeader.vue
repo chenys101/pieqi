@@ -8,6 +8,10 @@
 //   - 反馈入口从文字按钮换成图标，把宽度让给标题。
 // 例外是 error：任务为什么失败在别处看不到，所以只有它值得再多占一行。
 //
+// **用量角标（UsageBadge）是第二个例外**，但只占行内一小段：它随 agent 的
+// usage_update 实时变（每轮多条），放在时间线里会刷屏，放在反馈面板里又看不见。
+// 移动端用 dense 形态（只有条 + 百分比）挤进头部那一行；没有上报的 agent 整块不渲染。
+//
 // **「中止」不在这里**（详情页 UI 优化 · 需求 2）：它与输入框内右下角那枚 ■ 是同一个
 // 动作（都 emit cancel → taskStore.cancelTask），顶部再挂一个就是同一件事给两个入口，
 // 且顶部那个在手机上还紧挨着「返回」，误触成本高。中止的唯一入口 = 输入框内那枚按钮
@@ -15,6 +19,7 @@
 import { useRouter } from 'vue-router'
 import StatusBadge from '@/components/task/StatusBadge.vue'
 import Button from '@/components/ui/Button.vue'
+import UsageBadge from './UsageBadge.vue'
 import type { Task } from '@/types/task'
 import { timeAgo } from '@/utils/date'
 import { shortId } from '@/utils/format'
@@ -81,6 +86,10 @@ function goBack() {
       </h1>
 
       <StatusBadge :status="task.status" />
+      <!-- 上下文用量：**只在该 agent 上报过时才显示**（task.usage 为 undefined 就整块不渲染）。
+           移动端走 dense（只有条 + 百分比）—— 头部这一行是常驻 chrome，token 数不值得
+           占掉标题的宽度；桌面有整行元信息位，就放在那里给全数字。 -->
+      <UsageBadge v-if="task.usage && compact" :usage="task.usage" dense class="text-xs text-muted" />
       <!-- 变更反馈入口：移动端图标（＋上－下 = diff），其余档文字按钮 -->
       <button
         v-if="compact"
@@ -117,6 +126,8 @@ function goBack() {
         <span class="truncate" :title="task.projectPath">{{ task.project }}</span>
         <span>{{ timeAgo(task.updatedAt || task.createdAt) }}前</span>
       </template>
+      <!-- 桌面：用量跟在时间后面（同一行，同一层级的信息） -->
+      <UsageBadge v-if="task.usage && !compact" :usage="task.usage" />
       <span v-if="task.error" class="min-w-0 truncate text-error" :title="task.error">{{ task.error }}</span>
     </div>
   </header>

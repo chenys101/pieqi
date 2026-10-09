@@ -19,6 +19,7 @@ import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
 import { useNotificationStore } from '@/stores/notification'
 import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '@/features/session'
 import { FeedbackPanel } from '@/features/feedback'
+import type { PendingImage } from '@/features/session/imageAttach'
 import Drawer from '@/components/ui/Drawer.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Button from '@/components/ui/Button.vue'
@@ -53,6 +54,34 @@ const turnModelsLoading = computed(() => !!agentStore.modelsLoading[task.value?.
 /** 清单已尝试加载过 → 组件据此把"还在读"与"该 agent 没有清单"分开说 */
 const turnModelsLoaded = computed(() => !!agentStore.modelsLoaded[task.value?.agent || ''])
 
+/**
+ * 该任务会话能否收图（加图入口的显隐依据）。
+ *
+ * **只在任务状态变化时重问**：能力是会话级的，会话建立（第一轮跑起来）之后才有
+ * 确定答案。终态/续问时再问一次，是因为会话可能已经被空闲回收掉、续问会重建它。
+ * 不作为 computed 每次求值去问 —— 那会把一次 HTTP 变成渲染路径上的副作用。
+ */
+const canAttachImages = ref(false)
+watch(
+  () => [task.value?.id, task.value?.status] as const,
+  ([id]) => {
+    if (!id) {
+      canAttachImages.value = false
+      return
+    }
+    void api
+      .getTaskCapabilities(id)
+      .then((c) => {
+        canAttachImages.value = c.imagePrompt
+      })
+      .catch(() => {
+        // 探测失败按"不支持"处理：能力是**可选**增强，不该在会话页弹错误打扰用户。
+        canAttachImages.value = false
+      })
+  },
+  { immediate: true },
+)
+
 /** 会话当前模型（不透明值，空 = Agent 默认）—— 触发器上显示的就是它。
  *  来自 Task.Model：切换走 POST /tasks/:id/model 落库，WS task_updated 推回来。 */
 const currentModel = computed(() => task.value?.model || '')
@@ -85,6 +114,17 @@ async function switchModel(value: string) {
 }
 
 /** 决策横幅：waiting_input 且带 decision 时展示 */
+/**
+ * 发送补充指令：把输入框的 (文本, 图片) 接到 submitPrompt。
+ *
+ * 中间为什么要这一层：submitPrompt 的第二个参数是 **per-turn 模型**，而输入框
+ * 现在不带它（模型已改成会话级切换，见 switchModel 的注释）—— 直接绑上去会让
+ * 图片数组落到模型参数位。用显式适配器把两边的签名对齐，比调整任一侧的公共签名好。
+ */
+function onSendPrompt(text: string, images: PendingImage[]) {
+  void submitPrompt(text, undefined, images)
+}
+
 const decision = computed(() => (task.value?.status === 'waiting_input' ? task.value.decision : undefined))
 const approvalBusy = ref(false)
 /** 冷启动探测完成（详情已尝试拉取），仍无任务 → 视为不存在 */
@@ -244,7 +284,8 @@ async function doRemove() {
             :current-model="currentModel"
             :switching="switchingModel"
             :switch-disabled="!canSwitchModel"
-            @send="submitPrompt"
+            :can-attach-images="canAttachImages"
+            @send="onSendPrompt"
             @cancel="cancel"
             @switch-model="switchModel"
           />

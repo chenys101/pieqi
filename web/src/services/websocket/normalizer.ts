@@ -6,9 +6,10 @@ import type {
   TaskDto,
   TaskSummaryDto,
   TaskEventDto,
+  UsagePayloadDto,
 } from '@/types/api'
 import type { AgentEvent, AgentEventType, AgentDelta, RewindPayload, ModelSwitchPayload } from '@/types/event'
-import type { Task } from '@/types/task'
+import type { Task, TaskUsage } from '@/types/task'
 import { adaptTask } from '@/services/api/client'
 import { persistentEventId } from '@/utils/event'
 
@@ -18,6 +19,7 @@ export type RealtimeMessage =
   | { type: 'task_upserted'; task: Task; dto: TaskDto }
   | { type: 'task_deleted'; taskId: string }
   | { type: 'delta'; delta: AgentDelta }
+  | { type: 'usage'; taskId: string; usage: TaskUsage }
 
 /** 校验 + 归一化一条 WS 消息；无法识别返回 null（静默丢弃） */
 export function normalizeWsMessage(raw: unknown): RealtimeMessage | null {
@@ -45,8 +47,36 @@ export function normalizeWsMessage(raw: unknown): RealtimeMessage | null {
         delta: { taskId: msg.task_id, text: msg.delta.text, isThought: !!msg.delta.is_thought },
       }
     }
+    case 'task_usage': {
+      const u = adaptUsagePayload(msg.task_id, msg.usage)
+      if (!u) return null
+      return { type: 'usage', taskId: msg.task_id!, usage: u }
+    }
     default:
       return null
+  }
+}
+
+/**
+ * 校验并归一化 usage 载荷；不合法返回 undefined。
+ *
+ * 判据：`size > 0` 是这份快照有意义的**必要条件**（"占用了 x/0" 不是信息）。
+ * 后端在 ACPAgent 与 core wire 两处都拦过 size<=0，这里再拦一次不是不信任对端，
+ * 而是这一层的职责就是"进来的一定是合法模型"—— 消费方（进度条）不该再各写一遍守卫。
+ */
+export function adaptUsagePayload(
+  taskId: unknown,
+  raw: UsagePayloadDto | undefined,
+): TaskUsage | undefined {
+  if (typeof taskId !== 'string' || !taskId) return undefined
+  if (!raw || typeof raw.used !== 'number' || typeof raw.size !== 'number') return undefined
+  if (raw.size <= 0) return undefined
+  return {
+    used: raw.used,
+    size: raw.size,
+    costUsd: raw.cost_usd,
+    // has_cost 缺省即 false：只有 agent 明确报了成本才显示金额。
+    hasCost: raw.has_cost === true,
   }
 }
 

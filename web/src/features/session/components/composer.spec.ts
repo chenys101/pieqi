@@ -171,9 +171,10 @@ describe('InterveneInput', () => {
     await type(host, '补充一句')
     expect(send().disabled).toBe(false)
     send().click()
-    // 模型已改为**会话级切换**（独立 emit），send 只带文本 ——
-    // 「这一轮用哪个模型」不再随发送走，见 ModelSwitchNote 的注释
-    expect(onSend).toHaveBeenCalledWith('补充一句')
+    // 模型已改为**会话级切换**（独立 emit），send 只带文本 + 图片 ——
+    // 「这一轮用哪个模型」不再随发送走，见 ModelSwitchNote 的注释。
+    // 图片是第二个参数（无图时为空数组）。
+    expect(onSend).toHaveBeenCalledWith('补充一句', [])
   })
 
   it('canSend=false 时不可发送（决策横幅未就绪）', async () => {
@@ -392,5 +393,42 @@ describe('输入框内嵌动作按钮（PC 与移动端同一套 DOM）', () => 
     const send = host.querySelector('button[aria-label="发送"]')!
     expect(send.parentElement!.getAttribute('data-testid')).toBe('composer-actions')
     expect(send.querySelector('svg')).not.toBeNull()
+  })
+})
+
+// ---- 图片附件入口：显隐由**会话能力**决定 ----
+
+describe('InterveneInput 图片入口', () => {
+  it('能力为真时出现加图按钮，且在 #lead 行内', () => {
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    const add = host.querySelector('[data-testid="composer-add-image"]')
+    expect(add).not.toBeNull()
+    // 与发送按钮同一行（嵌在框内），不是另起一行
+    expect(add!.closest('[data-testid="composer-actions"]')).toBe(
+      host.querySelector('button[aria-label="发送"]')!.closest('[data-testid="composer-actions"]'),
+    )
+  })
+
+  // 摆一个按了必然失败的按钮，比没有这个功能更糟：用户会反复试，
+  // 而每次都以一句 agent 报错收场。
+  it('能力为假（或未声明）时整个入口不渲染', () => {
+    for (const props of [{ canAttachImages: false }, { canAttachImages: undefined }]) {
+      const { host } = mount(InterveneInput, { canCancel: false, canSend: true, ...props })
+      expect(host.querySelector('[data-testid="composer-add-image"]')).toBeNull()
+    }
+  })
+
+  // 运行中输入走的是纯文本 stdin 注入通道，收不了图 —— 与后端口径一致。
+  it('运行中（canCancel）不渲染图片入口', () => {
+    const { host } = mount(InterveneInput, { canCancel: true, canSend: false, canAttachImages: true })
+    expect(host.querySelector('[data-testid="composer-add-image"]')).toBeNull()
+  })
+
+  it('file input 的 accept 与后端白名单一致', () => {
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    const input = host.querySelector('[data-testid="composer-image-input"]') as HTMLInputElement
+    expect(input).not.toBeNull()
+    expect(input.accept).toBe('image/png,image/jpeg,image/webp,image/gif')
+    expect(input.multiple).toBe(true)
   })
 })
