@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type Component } from 'vue'
 import TextBubble from './TextBubble.vue'
 import MarkdownBody from './MarkdownBody.vue'
+import TimelineEventView from './TimelineEventView.vue'
 import SessionHeader from '@/features/session/components/SessionHeader.vue'
 import InterveneInput from '@/features/session/components/InterveneInput.vue'
+import type { AgentEvent } from '@/types/event'
 import type { Task } from '@/types/task'
 
 // 详情页 UI 优化 · 需求 2 / 需求 3 的出口条件：
@@ -115,6 +117,63 @@ describe('需求 3：Agent 输出 markdown 渲染', () => {
     expect(body.querySelector('table')).not.toBeNull()
     expect(body.querySelectorAll('th')).toHaveLength(2)
     expect(body.querySelector('input[type="checkbox"]')).not.toBeNull()
+  })
+})
+
+// ---- 时间展示：提示词 / 结论的「时:分」在**内容下方** ----
+//
+// 定案来源：时间徽标原先是 Turn 头部两枚 + 气泡左侧一枚，2026-10 统一成
+// 「跟着内容走、放在内容下方」。这里钉的是**结构契约**（DOM 顺序与 flex 方向），
+// 因为 jsdom 不做布局：尺寸/是否真的在下方必须由 self-test.ps1 在真机上量
+// （脚本已输出 prompt-at / result-at 的 dy、gap）。
+describe('时间展示位置：内容下方', () => {
+  function ev(type: AgentEvent['type'], text: string, at = '2026-10-13T08:07:00Z'): AgentEvent {
+    return { id: `t:${type}`, taskId: 't', type, timestamp: at, payload: { text } }
+  }
+
+  it('用户消息：气泡在前、时间在后，容器是纵向 flex（下方靠右对齐）', async () => {
+    const { host } = mount(TimelineEventView, { event: ev('user_message', '做A') })
+    await nextTick()
+    const row = host.firstElementChild as HTMLElement
+    expect(row.className).toContain('flex-col')
+    expect(row.className).toContain('items-end')
+
+    const kids = [...row.children]
+    expect(kids[0].getAttribute('data-testid')).toBe('user-message')
+    expect(kids[1].getAttribute('data-testid')).toBe('prompt-at')
+    // 时间文案本身就是事件的时间戳（本地时区渲染），不是渲染时刻
+    expect(kids[1].textContent).toMatch(/^\d{2}:\d{2}$/)
+    expect(kids[1].getAttribute('title')).toContain('发送于')
+  })
+
+  it('正文结论：气泡在前、时间在后，容器是纵向 flex（下方靠左对齐）', async () => {
+    const { host } = mount(TimelineEventView, { event: ev('text_delta', '结果') })
+    await nextTick()
+    const row = host.firstElementChild as HTMLElement
+    expect(row.className).toContain('flex-col')
+    expect(row.className).toContain('items-start')
+
+    const kids = [...row.children]
+    expect(kids[0].getAttribute('data-testid')).toBe('text-bubble')
+    expect(kids[1].getAttribute('data-testid')).toBe('result-at')
+    expect(kids[1].getAttribute('title')).toContain('产出结论于')
+  })
+
+  it('过程事件（thinking / tool）不带时间戳 —— 一轮几十条会淹没时间线', async () => {
+    for (const type of ['thinking_delta', 'tool_call', 'tool_result', 'status'] as const) {
+      document.body.innerHTML = ''
+      const { host } = mount(TimelineEventView, { event: ev(type, 'x') })
+      await nextTick()
+      expect(host.querySelector('[data-testid="prompt-at"]')).toBeNull()
+      expect(host.querySelector('[data-testid="result-at"]')).toBeNull()
+    }
+  })
+
+  it('时间戳缺失/非法时不渲染空徽标', async () => {
+    const { host } = mount(TimelineEventView, { event: { ...ev('text_delta', '结果'), timestamp: '' } })
+    await nextTick()
+    expect(host.querySelector('[data-testid="result-at"]')).toBeNull()
+    expect(host.textContent).toContain('结果')
   })
 })
 

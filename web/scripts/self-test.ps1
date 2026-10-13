@@ -60,6 +60,19 @@ $probe = @'
     var doc = root();
     var tl = doc.querySelector('[data-testid="session-timeline"]');
     var vis = function(el){ if(!el) return false; var r = el.getBoundingClientRect(); var s = el.ownerDocument.defaultView.getComputedStyle(el); return r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden'; };
+    /** 徽标相对「所属内容块」的几何：dy>0 = 在下方；gap>=0 = 没压住内容 */
+    function badgeGeo(d, badgeSel, contentSel){
+      var b = d.querySelector('[data-testid="' + badgeSel + '"]');
+      if (!b) return null;
+      var block = b.closest('[data-testid^="turn-group-"]') || d;
+      var c = block.querySelector('[data-testid="' + contentSel + '"]');
+      if (!c) return null;
+      var br = b.getBoundingClientRect(), cr = c.getBoundingClientRect();
+      return {
+        dy: Math.round((br.top + br.height/2) - (cr.top + cr.height/2)),
+        gap: Math.round(br.top - cr.bottom)
+      };
+    }
     var turns = [];
     doc.querySelectorAll('[data-testid^="turn-group-"]').forEach(function(n){
       var m = /turn-group-(\d+)/.exec(n.getAttribute('data-testid')||'');
@@ -79,6 +92,14 @@ $probe = @'
       jumpLatest: !!doc.querySelector('[data-testid="jump-latest"]'),
       groupMore: doc.querySelectorAll('[data-testid^="group-more-"]').length,
       rail: !!doc.querySelector('[data-testid="turn-rail"]'),
+      // 时间徽标：挂载了几枚 + 首枚的中心相对所属内容块的位置。
+      // 「时间在内容下方」这条契约只有真机能验（jsdom 无布局），所以量两个数：
+      //   dy  = 徽标中心 y − 内容块中心 y（>0 才叫"在下方"）
+      //   gap = 徽标顶边 y − 内容块底边 y（>=0 才叫"没压住内容"）
+      promptAt: doc.querySelectorAll('[data-testid="prompt-at"]').length,
+      resultAt: doc.querySelectorAll('[data-testid="result-at"]').length,
+      promptAtGeo: badgeGeo(doc, 'prompt-at', 'user-message'),
+      resultAtGeo: badgeGeo(doc, 'result-at', 'text-bubble'),
       errs: errs
     };
   }
@@ -183,6 +204,9 @@ Write-Output ("更早的按钮   : " + $obj.loadOlder)
 Write-Output ("直达最新按钮 : " + $obj.jumpLatest)
 Write-Output ("加载更多按钮 : " + $obj.groupMore)
 Write-Output ("Turn 轨道    : " + $obj.rail)
+Write-Output ("时间徽标     : prompt-at=" + $obj.promptAt + " result-at=" + $obj.resultAt)
+if ($obj.promptAtGeo) { Write-Output ("  prompt-at  : 相对用户气泡 dy=" + $obj.promptAtGeo.dy + "px gap=" + $obj.promptAtGeo.gap + "px") }
+if ($obj.resultAtGeo) { Write-Output ("  result-at  : 相对正文气泡 dy=" + $obj.resultAtGeo.dy + "px gap=" + $obj.resultAtGeo.gap + "px") }
 Write-Output ("控制台报错   : " + $(if ($obj.errs.Count -eq 0) { '(none)' } else { '' }))
 foreach ($e in $obj.errs) { Write-Output ("   " + $e) }
 

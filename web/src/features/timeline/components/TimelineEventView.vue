@@ -23,30 +23,41 @@ const props = defineProps<{ event: AgentEvent }>()
  *
  * 取**事件自身的 timestamp**（后端落库里事件的 At），不是渲染时刻 ——
  * 刷新页面后必须完全一致，否则这个信息就没法和后端日志对账。
+ *
+ * 位置（2026-10 定案）：**在内容下方**，不再贴在气泡左侧。理由有三条，
+ * 每条都能独立成立：
+ *   1. 归属无歧义：贴在左侧时它落在**上一条**内容的右侧（一轮里正文被工具调用
+ *      切成多段，时间戳是给"这条气泡"的，视觉上却像上一条的落款）；
+ *      放在下方只可能属于正上方那块内容。
+ *   2. 不抢内容宽度：移动端 390px 下气泡最多只剩 ~85% 宽，左侧时间戳还要再吃掉
+ *      ~34px；下方是独立一行，气泡能占满内容区。
+ *   3. 两个方向对称：用户气泡（右对齐）与正文气泡（左对齐）现在用的是同一个
+ *      结构，不再需要为对齐各写一套 flex 摆放。
  */
 const clock = computed(() => formatClock(props.event.timestamp))
 </script>
 
 <template>
-  <div v-if="event.type === 'user_message'" class="event-enter flex items-end justify-end gap-1.5">
-    <!-- 时间在气泡外侧左方（气泡右对齐，时间贴它左边才不推挤对齐线），
-         极小字号 + 单行 + 不换行：移动端最窄也就多占 ~34px 一行内空间。 -->
+  <!-- ⚠️ 两种气泡都用「flex-col + items-end/items-start」：块级子项在交叉轴上
+       本来就按 align-items 摆放，所以下方那行时间不用再写任何 margin/self-* 去贴边，
+       气泡右对齐时时间也自然贴右 —— 手写 ml-auto/mr-auto 会在改对齐时忘记同步。 -->
+  <div v-if="event.type === 'user_message'" class="event-enter flex flex-col items-end gap-0.5">
+    <UserBubble :text="event.payload.text ?? ''" />
+    <!-- 时间在气泡下方（右对齐 → 贴气泡右下）。极小字号 + 单行 + 单行高，
+         高度只加 ~12px，换掉的是原来那一行被挤掉的气泡宽度。 -->
     <span
       v-if="clock"
-      class="shrink-0 pb-1 font-mono text-[10px] leading-none text-text-tertiary tabular-nums"
+      class="shrink-0 font-mono text-[10px] leading-none text-text-tertiary tabular-nums"
       :title="`发送于 ${clock}`"
       data-testid="prompt-at"
     >{{ clock }}</span>
-    <UserBubble :text="event.payload.text ?? ''" />
   </div>
 
-  <div v-else-if="event.type === 'text_delta'" class="event-enter flex items-start gap-1.5">
-    <!-- min-w-0 flex-1：让气泡吃掉行内剩余宽度（否则它按内容宽度收缩、
-         时间戳跟着左右横跳）。min-w-0 是 flex 子项能真正收缩的必要条件。 -->
-    <TextBubble class="min-w-0 flex-1" :text="event.payload.text ?? ''" />
+  <div v-else-if="event.type === 'text_delta'" class="event-enter flex flex-col items-start gap-0.5">
+    <TextBubble :text="event.payload.text ?? ''" />
     <span
       v-if="clock"
-      class="shrink-0 pt-1 font-mono text-[10px] leading-none text-text-tertiary tabular-nums"
+      class="shrink-0 font-mono text-[10px] leading-none text-text-tertiary tabular-nums"
       :title="`产出结论于 ${clock}`"
       data-testid="result-at"
     >{{ clock }}</span>

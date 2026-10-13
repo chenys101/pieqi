@@ -23,7 +23,6 @@ import { useFeedbackBundleStore } from '@/stores/feedbackBundle'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
 import { useTimelineScroll, BOTTOM_SLACK } from '@/composables/useSession'
 import { isTerminalStatus } from '@/types/task'
-import { formatClock } from '@/utils/date'
 import { groupEventsByTurn, countUserMessages } from '../groupTurns'
 import type { TurnGroup, TurnRailItem } from '../groupTurns'
 import type { AgentEvent, AgentEventType } from '@/types/event'
@@ -102,31 +101,13 @@ function processCount(g: TurnGroup): number {
   return g.events.reduce((n, e) => (isProcess(e) ? n + 1 : n), 0)
 }
 
-// ---- 每轮时间标记：提示词与结论各自一个「时:分」 ----
+// ---- 每轮时间标记 ----
 //
-// 为什么要分开取而不是"一轮一个时间"：用户真正会问的是"这句提示是几点发的、
-// 这个结论是几点出来的"，两者常常差几分钟到几十分钟（agent 干活的时间）。
-// 只标一个数就无法回答"这轮跑了多久"。
-//
-// 归属判据用的是**事件自己的 timestamp**（后端落库的 At），不是前端渲染时刻 ——
-// 刷新页面后必须一模一样，否则这个信息就没有对账价值。
-
-/** 该轮提示词的时间（取轮内第一条 user_message；无则不显示） */
-function promptAt(g: TurnGroup): string {
-  const ev = g.events.find((e) => e.type === 'user_message')
-  return formatClock(ev?.timestamp)
-}
-
-/**
- * 该轮结论（正文）的时间：取轮内**最后一条** text_delta。
- *
- * 取最后一条而不是第一条：正文常被工具调用切成多段（"我来看看…" → 工具 → 结论），
- * 用户关心的是"最终答复出现在几点"。轮内没有任何正文时返回空串 → 不渲染徽标。
- */
-function resultAt(g: TurnGroup): string {
-  const text = g.events.filter((e) => e.type === 'text_delta')
-  return formatClock(text.at(-1)?.timestamp)
-}
+// ⚠️ 时间徽标**不在本组件**：它跟着内容走，渲染在每条提示词/结论气泡的**下方**
+// （TimelineEventView 的 prompt-at / result-at，取事件自己的 timestamp）。
+// Turn 头部曾经各挂一枚（提示词一枚、结论一枚），已按"时间属于内容"的定案撤掉：
+// 头部的结论时间取的是全轮最后一条 text_delta，正文被工具调用切成多段时
+// 它落不到任何一条气泡上，于是同一轮出现两个互相矛盾的时间。
 
 /**
  * 该轮（去掉开头的提示词气泡后）是否以**正文**收尾。
@@ -509,15 +490,12 @@ function jumpToLatest() {
                     @click="toggleFold(g.turn)"
                   >
                     <span class="shrink-0 font-mono font-semibold text-text-secondary">Turn #{{ g.turn }}</span>
-                    <!-- 「时:分」时间标记：提示词时间贴在 Turn 号后（这一轮的起点）。
-                         极小字号 + shrink-0 + 等宽，移动端也只是一枚小徽标，
-                         不占额外行高（整个头部本就是单行 flex）。 -->
-                    <span
-                      v-if="promptAt(g)"
-                      class="shrink-0 font-mono text-[10px] text-text-tertiary tabular-nums"
-                      :title="`本轮提示词于 ${promptAt(g)} 发出`"
-                      :data-testid="`turn-prompt-at-${g.turn}`"
-                    >{{ promptAt(g) }}</span>
+                    <!-- ⚠️ 这里**不再**放「时:分」徽标（原是提示词/结论各一枚）。
+                         2026-10 定案：时间属于内容，一律移到内容**下方**（见 TimelineEventView
+                         的 prompt-at / result-at）。一处数据只有一个展示位，否则同一轮的
+                         "几点的提示词、几点的结论"会同时出现在头部和正文两处、两个数字
+                         还都是末条正文的时间（旧结论徽标取的是全轮最后一条 text_delta，
+                         在正文被拆成多段时对不上任何一条气泡）。 -->
                     <!-- 去重（需求 1）：展开态正文里的 UserBubble 已完整呈现该轮文案，
                          头部不再重复；折叠态正文被隐藏，头部才补回（截断），保证同一句只出现一次。 -->
                     <span v-if="folded.has(g.turn)" class="min-w-0 flex-1 truncate">{{
@@ -525,14 +503,6 @@ function jumpToLatest() {
                     }}</span>
                     <!-- 展开态占位：把右侧统计顶到右边，保持头部单行布局不塌 -->
                     <span v-else class="min-w-0 flex-1"></span>
-                    <!-- 结论时间：该轮最后一段正文出现的时刻。没有正文就不显示 ——
-                         摆一个空徽标只会让人以为"这轮没结果"，而那正是要区分的信息。 -->
-                    <span
-                      v-if="resultAt(g)"
-                      class="shrink-0 font-mono text-[10px] text-text-tertiary tabular-nums"
-                      :title="`本轮结论于 ${resultAt(g)} 产出`"
-                      :data-testid="`turn-result-at-${g.turn}`"
-                    >{{ resultAt(g) }}</span>
                     <!-- 文件数取 TurnInfo.summary —— 与反馈面板同一份数据（AC-R3-02 同源）。
                          info 为 null（bundle 落后/缺失）就不显示数字，而不是算一个替代值。 -->
                     <span v-if="g.info" class="shrink-0 font-mono">
