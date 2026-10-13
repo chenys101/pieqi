@@ -436,6 +436,43 @@ func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
 	return tr.ResumeRich(taskID, text, turnModel, nil)
 }
 
+// isResumable 判定某任务当前是否可被 Resume 接续一轮新输入。
+//
+// 三种可续：
+//   - 终态（completed / failed / cancelled）：常规续问；
+//   - running：方案②排队，提交的轮次排进串行队列（turn_queue.go）；
+//   - waiting_input(choice)：路径 B，Claude 文本提问后进程已 end_turn 退出，用户选完续跑。
+//
+// **waiting_input 且 CurrentDecision == nil 也算可续**（本函数存在的理由）。
+// 这不是"等决策"——路径 A 的 approval 一定有 decision，因为它是
+// setWaitingInput() 在**同一次 transition** 里写进 t.CurrentDecision 的，
+// 二者不会分离。所以 decision 为空只可能是这两种情况：
+//
+//  1. **快照竞态**：任务本轮已判 waiting_input，但 CurrentDecision 还没来得及落盘
+//     （或落盘后被并发读取到中间态）。此时它本质仍是"在跑的一轮"，续问即排队。
+//  2. **历史脏数据**：早期版本留下的、或手工改过的文件。
+//
+// 两种情况都该按"可续"处理，而不是甩一句 not resumable 把任务判死：
+// 判死的代价是不可逆的（用户看到 failed、必须人工介入），而放行的代价最多
+// 是排一次队 —— 用户本来就在发新消息，这一轮的语义就是"排队等下一轮"。
+//
+// ⚠️ 这个口子**不会**放行真正的路径 A：approval 态的 decision 必然非空，
+// 仍会被下面那条 Kind == choice 的分支排除，需要走 Intervene 回答那张卡。
+func isResumable(t *model.Task) bool {
+	switch t.Status {
+	case model.TaskCompleted, model.TaskFailed, model.TaskCancelled, model.TaskRunning:
+		return true
+	case model.TaskWaitingInput:
+		// decision 为空 ⇒ 快照竞态或脏数据，按可续排队处理（见上方说明）。
+		if t.CurrentDecision == nil {
+			return true
+		}
+		// decision 非空 ⇒ 只有路径 B（choice）可续；路径 A（approval）要等 Intervene。
+		return t.CurrentDecision.Kind == model.DecisionKindChoice
+	}
+	return false
+}
+
 // ResumeRich 与 Resume 相同，但本轮可附带图片（images 为空时与 Resume 完全一致）。
 //
 // 历史为何按"元数据"落事件而非 base64：见 model.TaskEvent.Images 的说明。
@@ -451,13 +488,7 @@ func (tr *TaskRunner) ResumeRich(taskID, text, turnModel string, images []agent.
 	if turnModel == "" {
 		turnModel = t.Model
 	}
-	// 路径 B 的 choice waiting_input 也可 resume；路径 A 的 approval waiting_input 不行
-	// （那是在等一个决策，不是等一轮新输入）。
-	resumable := t.Status == model.TaskCompleted || t.Status == model.TaskFailed ||
-		t.Status == model.TaskCancelled || t.Status == model.TaskRunning ||
-		(t.Status == model.TaskWaitingInput && t.CurrentDecision != nil &&
-			t.CurrentDecision.Kind == model.DecisionKindChoice)
-	if !resumable {
+	if !isResumable(t) {
 		return fmt.Errorf("task not resumable: %s", t.Status)
 	}
 	// claude -p 路径收不了图（stream-json 的 user 消息只有文本）。**必须在任何状态
@@ -650,6 +681,17 @@ func (tr *TaskRunner) ResumeInterruptedWithInitiator(taskIDs []string, version, 
 		prompt := genericResumePrompt(version)
 		if id == initiatorID {
 			prompt = initiatorResumePrompt(version)
+		}
+		// 重新读一次状态再判：上面那条筛选（running/waiting_input）到 Resume 之间
+		// 存在窗口，而这正是本函数历史 bug 的温床 —— 实测（2026-10-13）出现过
+		// 快照那一刻 CurrentDecision 尚未落盘，Resume 里 resumable 判定为 false，
+		// 于是整条会话被判 failed（见 isResumable 的说明）。
+		// 现在 isResumable 已覆盖该中间态；这里再显式复核一次，是为了让
+		// "不可续"只在**确实**不该接续时才走失败分支。
+		if cur, ok := tr.store.Get(id); ok && cur != nil && !isResumable(cur) {
+			tr.logger.Info("resume interrupted task skipped (not resumable)",
+				zap.String("task", id), zap.String("status", string(cur.Status)))
+			continue
 		}
 		if err := tr.Resume(id, prompt, ""); err != nil {
 			tr.logger.Warn("resume interrupted task failed",
