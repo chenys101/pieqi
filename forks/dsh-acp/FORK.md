@@ -119,6 +119,25 @@ store DEEPSEEK_API_KEY through the credentials service …
 （本机是 `magpie` / `workbuddy/deepseek-v4.1-flash`），会话可正常跑完一轮。
 用 `dsh --profile acp --dump-config` 看 `- id: acp` 段即可确认 provider/model 是否真的不在了。
 
+**2026-10-10 复测（就是当前上线形态：profile 无 pin）** —— 两条路差别很大，别混：
+
+| 运行时 | 无 pin 时第一轮 prompt 的结果 |
+| --- | --- |
+| 官方 `dsh-acp` | ✗ `Internal error: prompt variable "{{model}}" has no value for this assembly (section "deployment:persona-prefix")` —— 会话**根本没有模型**，整轮失败 |
+| 本 fork（B1 在位） | ✓ `end_turn`，实际路由 `["magpie","group/auto-deepseek-v4-1-flash"]`（取自 `agent-default-model`）；`_meta` 清单 2 组、`currentValue` 正常；B2/B3 指定模型也照常 |
+
+所以 **fork 补丁是「无 pin 还能用」的前提**：官方版没有 B1，provider/model 一空就是首轮失败
+（显式 undefined → 上面那条 `{{model}}`；删整行 → bundle 的 `deepseek-official` 接管 → 无 API key）。
+
+另外，无 pin 时 `promptCapabilities.image` **必为 false**（`initialize` 读的是静态 pin，不是
+`deploymentSelection`），带图 prompt 被 `admitAcpPrompt` 直接拒：
+
+```
+-32602 Invalid params: inline image prompts were not advertised by this connection
+```
+
+这是去 pin 的**固有代价**，与 B1 无关；要两全只能改 `initialize` 的回落链。
+
 ### `_meta` 里模型的两种等价写法
 
 ```jsonc
@@ -205,3 +224,54 @@ node install.mjs --restore
 ```
 
 `backups/` 里还留着每次安装前的 runtime 内容（按 sha + 时间戳命名），需要时可手动取用。
+
+## ★ 当前状态（2026-10-13）：**已还原官方版，本 fork 未启用** ★
+
+**运行时装的是官方 `dsh-acp`，不是本 fork。** 上面 A1–A3 / B1–B3 六处改动**当前均未生效**，
+`--check` 会报「✗ runtime 与 fork 不一致」，**这是预期的，不是故障**。
+
+```bash
+node install.mjs --check     # → exit 2「不一致」= 正确（官方版在位）
+```
+
+### 为什么改回官方
+
+产品决策：**优先使用官方版本**。而这与「profile 无 pin」不能共存 —— 见下方"无 pin 的两种死法"。
+官方版没有 B1 兜底，pin 一空会话就没有模型。所以二选一里选了「官方 + 恢复 pin」。
+
+### 官方版的实测表现（2026-10-13，`probe-config.mjs` 实跑）
+
+profile 恢复 `provider: magpie` / `model: group/auto-deepseek-v4-1-flash` 后：
+
+| 观测点 | 值 | 说明 |
+| --- | --- | --- |
+| `promptCapabilities.image` | **`true`** | **图片能力恢复** —— 这正是当初保留 pin 的理由 |
+| `session/prompt` | `end_turn`，回复"好的" | 真实会话正常跑通 |
+| `configOptions` | **2 项**（`model` / `reasoning_effort`） | 走**标准通道**，不再是 `_meta` |
+| `_meta["pieqi/configOptions"]` | `undefined` | fork 的 A3 通道随 fork 一起消失（符合预期） |
+| `config_option_update` 通知 | 0 条 | — |
+
+**对 pieqi 的影响**：`catalogSource` 变为 `catalogStandard`（标准优先，`model_catalog.go:162`），
+于是模型清单与**会话内切模型**都走 `session/set_config_option` —— 正是 `acp.go:700` 为
+"原生 ACP agent（qodercli / 官方 dsh-acp）"写的那条路。回归测试
+`TestPickCatalog_PrefersStandardThenMeta` 覆盖这个分支。**pieqi 侧无需改动。**
+
+### 代价（已重新背上）
+
+1. **pin 要手工跟随上游清单漂移** —— 见 `~/.dsh/profiles/acp/cordis.patch.yml` 开头记的两次踩坑
+   （命名空间写错、上游下架 glm 导致建会话即失败）。
+2. **`_meta` 模型清单通道没了**；pieqi 侧 `fallbackModel`（未选模型时取清单首项）安全网仍在。
+
+### 无 pin 的两种死法（官方版，实测）
+
+提醒后来者：官方版下"配置缺失"不是可用状态，且两种写法**都是建会话能过、第一轮才炸**：
+
+| 写法 | 结果 |
+| --- | --- |
+| `provider/model: !!js undefined` | `Internal error: prompt variable "{{model}}" has no value` |
+| 删掉 `- id: acp` 整条 | bundle 的 `provider: deepseek-official` 接管 → `no API key for provider route` |
+
+### 想切回 fork
+
+若将来需要「无 pin + 会话内按轮换模型」，重跑 `node install.mjs` 即可；
+但**同时必须把 profile 的 pin 清成显式 `!!js undefined`**，两者是配套的。

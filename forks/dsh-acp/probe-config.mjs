@@ -42,6 +42,11 @@ const PROMPT = process.env.PROBE_PROMPT || "";
 const WANT_MODEL = process.env.PROBE_MODEL || "";
 /** 发这一轮时经 _meta 指定的模型。 */
 const SWITCH_MODEL = process.env.PROBE_SWITCH_MODEL || "";
+/** 带一张 1x1 PNG 发这一轮：验证「连接没声明收图」时 dsh 侧的准入闸门是否真的拒收。 */
+const PROBE_IMAGE = process.env.PROBE_IMAGE === "1";
+/** 1x1 透明 PNG（canonical base64，dsh 会校验字符集与往返一致）。 */
+const TINY_PNG =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
 const NODE =
 	process.env.PROBE_NODE ||
@@ -192,6 +197,10 @@ child.stdout.on("data", (chunk) => {
 		if (msg.id === 1) {
 			if (msg.error) return done(1, `✗ initialize 失败: ${JSON.stringify(msg.error)}`);
 			console.log(`[probe] ✓ initialize OK（protocolVersion=${msg.result?.protocolVersion}）`);
+			// 能力声明是**连接级**的、只在这一次握手里给出：排 pin 的取舍全落在它身上，
+			// 所以必须原样打出来（pieqi 也就读这一个值，见 internal/agent/acp.go）。
+			console.log("   agentInfo:", JSON.stringify(msg.result?.agentInfo));
+			console.log("   promptCapabilities:", JSON.stringify(msg.result?.agentCapabilities?.promptCapabilities));
 			const params = { cwd: PROBE_CWD, mcpServers: [] };
 			if (WANT_MODEL) params._meta = { model: WANT_MODEL };
 			console.log(`[probe] 发 session/new …${WANT_MODEL ? "（带 _meta.model）" : ""}\n`);
@@ -223,8 +232,10 @@ child.stdout.on("data", (chunk) => {
 
 			if (!PROMPT) return done(verdict.code, verdict.text);
 
-			console.log(`[probe] 发 session/prompt …${SWITCH_MODEL ? "（带 _meta.model，验证按轮换模型）" : ""}\n`);
-			const promptParams = { sessionId: msg.result.sessionId, prompt: [{ type: "text", text: PROMPT }] };
+			console.log(`[probe] 发 session/prompt …${SWITCH_MODEL ? "（带 _meta.model，验证按轮换模型）" : ""}${PROBE_IMAGE ? "（带 1 张 image 块）" : ""}\n`);
+			const blocks = [{ type: "text", text: PROMPT }];
+			if (PROBE_IMAGE) blocks.push({ type: "image", mimeType: "image/png", data: TINY_PNG });
+			const promptParams = { sessionId: msg.result.sessionId, prompt: blocks };
 			if (SWITCH_MODEL) promptParams._meta = { model: SWITCH_MODEL };
 			send({ jsonrpc: "2.0", id: 3, method: "session/prompt", params: promptParams });
 			newVerdict = verdict;
