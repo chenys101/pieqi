@@ -10,6 +10,12 @@ export interface AgentInfo {
   capabilities: string[]
   /** 一句话说明（新任务页选择器展示；后端 /api/agents 下发） */
   description?: string
+  /**
+   * 该 agent 的传输是否具备图片入站通路（新建任务页据此显示加图入口）。
+   * 由服务端按配置下发（后端 agent.AgentInfo.ImagePrompt），前端不自行推断。
+   * true 只表示"能把图送出去"，不保证对端模型看得见图。
+   */
+  imagePrompt: boolean
 }
 
 /** Agent 运行时统计（从任务列表派生） */

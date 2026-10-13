@@ -5,6 +5,7 @@ import { defineStore } from 'pinia'
 import type { Task, TaskGroup, TaskStatus, TaskUsage } from '@/types/task'
 import { isTerminalStatus } from '@/types/task'
 import * as api from '@/services/api/tasks'
+import type { ImagePayload } from '@/services/api/tasks'
 import { adaptTask } from '@/services/api/client'
 import { groupKey } from '@/utils/format'
 import { timestamp } from '@/utils/date'
@@ -118,9 +119,17 @@ export const useTaskStore = defineStore('task', {
 
     /** 创建任务：本地立即 upsert + 返回完整 DTO（含预置 user 事件）。
      *  agent 为 agent 业务名（claude / qoder）；省略 = 后端默认（Claude Code）。
-     *  model 为模型选择值（不透明串，见 GET /api/agents/{agent}/models）；省略 = agent 默认。 */
-    async createTask(projectPath: string, prompt: string, agent?: string, model?: string): Promise<Task> {
-      const dto = await api.createTask(projectPath, prompt, agent, model)
+     *  model 为模型选择值（不透明串，见 GET /api/agents/{agent}/models）；省略 = agent 默认。
+     *  images 为随首轮 prompt 一起发出的图片（纯 base64，见 imageAttach.ts）；
+     *  省略/空数组 = 纯文本（与不带图完全一致，不是降级）。 */
+    async createTask(
+      projectPath: string,
+      prompt: string,
+      agent?: string,
+      model?: string,
+      images?: ImagePayload[],
+    ): Promise<Task> {
+      const dto = await api.createTask(projectPath, prompt, agent, model, images)
       const task = adaptTask(dto)
       this.upsertTask(task)
       return task

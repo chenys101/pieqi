@@ -58,6 +58,13 @@ describe('常量与后端一致', () => {
   })
 })
 
+// 加图入口的显隐判据已迁到**服务端目录**（GET /api/agents 的 image_prompt）：
+// 能力取决于配置而非 agent 名（claude 走桥有图片通路、配成 print 就没有），
+// 所以前端不再持有任何硬编码名单，这里也就不再需要那组用例。
+// 覆盖它的地方：internal/agent 的 AvailableAgents 测试（服务端算能力）、
+// 以及 web/src/stores/agent.spec.ts（目录字段搬运）。
+
+
 describe('formatBytes', () => {
   it('分档显示', () => {
     expect(formatBytes(500)).toBe('500 B')

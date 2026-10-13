@@ -224,7 +224,14 @@ export class SessionRuntime {
       if (this.closed || item == null) return;
       this.currentClientRef = item.ref ?? null;
       this.turnInFlight = true;
-      yield { type: "user", message: { role: "user", content: item.text }, parent_tool_use_id: null };
+      // content 有两种形态（两者都是 SDK MessageParam 允许的）：
+      //   - 纯文本轮：字符串。保持原样，**不要**统一改成块数组 ——
+      //     字符串路径已经是线上跑通很多轮的形态，无谓变更只会引入回归面。
+      //   - 带图轮：块数组 [text, image, image, ...]。顺序是「文本在前、图片紧随」，
+      //     与 ACP 侧 buildPromptBlocks 的选择一致（人写提示词的习惯：先说要什么，
+      //     再给素材；反过来会让语境变成"先看图再读题"）。
+      const content = item.blocks && item.blocks.length > 0 ? item.blocks : item.text;
+      yield { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
     }
   }
 
@@ -233,10 +240,16 @@ export class SessionRuntime {
     return new Promise((resolve) => this.waiters.push(resolve));
   }
 
-  /** 入队一轮用户消息（HTTP /prompt 调用）。clientRef 供 turn_end 回带，host 精确匹配本轮。关闭后返回 false。 */
-  pushPrompt(text, clientRef) {
+  /**
+   * 入队一轮用户消息（HTTP /prompt 调用）。clientRef 供 turn_end 回带，host 精确匹配本轮。关闭后返回 false。
+   *
+   * blocks 可选：带图轮的内容块数组（见 promptStream）。**两者只能给一个**：
+   * 同时给会让 "到底发哪个" 变成隐式约定，而这类隐式约定正是最容易在改动中
+   * 悄悄翻转的东西（比如有人给带图轮也顺手填了 text，图就被静默丢掉）。
+   */
+  pushPrompt(text, clientRef, blocks) {
     if (this.closed) return false;
-    const item = { text, ref: clientRef ?? null };
+    const item = { text, ref: clientRef ?? null, blocks: blocks ?? null };
     if (this.waiters.length > 0) {
       this.waiters.shift()(item);
     } else {

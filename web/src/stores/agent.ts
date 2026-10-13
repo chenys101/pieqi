@@ -21,6 +21,11 @@ const FALLBACK: AgentInfo[] = [
     name: 'Claude Code',
     transport: 'SDK Bridge',
     capabilities: ['流式输出', '工具审批', '续问', '取消'],
+    // 兜底目录代表"默认配置"（claude 走 SDK 桥），该路径具备图片通路。
+    // 若服务端实际配的是 print，目录一旦拉到就会被真实值覆盖；拉不到时这里给 true
+    // 是**宽松侧**：宁可显示了入口后发送报错（有明确错误信息），也不要在目录暂时
+    // 拉不到时把加图能力整个藏起来。
+    imagePrompt: true,
   },
 ]
 
@@ -91,6 +96,8 @@ export const useAgentStore = defineStore('agent', {
           transport: a.transport || '',
           capabilities: a.capabilities ?? [],
           description: a.description,
+          // 图片通路能力由服务端算（取决于配置，不只是 agent 名）—— 原样搬运，不推断
+          imagePrompt: a.image_prompt === true,
         }))
         this.defaultAgentId = res.default || agents[0].name
         this.loaded = true

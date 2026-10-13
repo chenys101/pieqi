@@ -15,6 +15,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"go.uber.org/zap"
@@ -122,6 +123,12 @@ func (a *sessionBackedAdapter) SendPrompt(ctx context.Context, sessionID, prompt
 // 之所以要它：TaskRunner 拿到的 AgentAdapter 是 sessionBackedAdapter（不是底层
 // AgentSession），若不在这一层转发，RichPromptSender 的类型断言就会失败，
 // 于是"agent 明明支持收图、pieqi 却说它不支持"。
+//
+// ★ 为什么在这里**补一句降级理由**，而不是在 AgentManager 里：
+//   AgentSession 层的 PromptRich 是**一定存在**的（print 的 sessionAdapter 也实现了它，
+//   见 session.go），所以 manager 的 `sess.adapter.(RichPromptSender)` 断言**永远成功** ——
+//   错误是从 PromptRich 内部返回的。把理由判断放在 manager 的"断言失败"分支里
+//   就永远走不到（实测：那样写测试会红）。理由必须在**错误真正产生的地方**附加。
 func (a *sessionBackedAdapter) SendRichPrompt(ctx context.Context, sessionID, prompt string, images []ImageInput) error {
 	a.mu.Lock()
 	sess := a.sess
@@ -129,7 +136,18 @@ func (a *sessionBackedAdapter) SendRichPrompt(ctx context.Context, sessionID, pr
 	if sess == nil {
 		return errors.New("session adapter: SendRichPrompt before NewSession")
 	}
-	return sess.PromptRich(ctx, prompt, images)
+	err := sess.PromptRich(ctx, prompt, images)
+	if err == nil || !errors.Is(err, ErrImageNotSupported) {
+		return err
+	}
+	// 收不了图：看看底层能不能说清为什么（如"桥不可用、已回退 claude -p"）。
+	// 能说清就把通用文案换成人话 —— 用户才知道这是**可重试的降级**而非功能缺陷。
+	reason := a.ImagePromptUnavailableReason()
+	if reason != "" {
+		return fmt.Errorf("%w: 图片发送失败——%s。请稍后重试（桥恢复后自动可用），或去掉图片只发文本",
+			ErrImageNotSupported, reason)
+	}
+	return err
 }
 
 // SupportsImagePrompt 实现 ImagePromptCapable：问底层会话能不能收图。
@@ -144,6 +162,21 @@ func (a *sessionBackedAdapter) SupportsImagePrompt() bool {
 		return capable.SupportsImagePrompt()
 	}
 	return false
+}
+
+// ImagePromptUnavailableReason 实现 ImagePromptUnavailableReason：透传底层的降级说明。
+//
+// 与 SupportsImagePrompt 同一模式（都要显式转发，否则上层拿不到）：
+// 底层是 claude 的 print 回退时，这里会给出"桥不可用、本次已回退"这类**可行动**的理由，
+// 而不是让用户对着一个类型名发懵。
+func (a *sessionBackedAdapter) ImagePromptUnavailableReason() string {
+	a.mu.Lock()
+	sess := a.sess
+	a.mu.Unlock()
+	if r, ok := sess.(interface{ ImagePromptUnavailableReason() string }); ok {
+		return r.ImagePromptUnavailableReason()
+	}
+	return ""
 }
 
 // SetTurnModel 把本轮模型选择下传给底层会话（仅支持该能力的会话，即 ACP 系）。

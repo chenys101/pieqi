@@ -628,6 +628,16 @@ export interface AgentDto {
   /** 传输层描述（展示用） */
   transport?: string
   capabilities?: string[]
+  /**
+   * 该 agent 的传输是否具备图片入站通路（新建任务页据此显示加图入口）。
+   *
+   * 与 transport / capabilities 的区别：那两个是**展示用**文案，而这个字段是**判据**。
+   * 由服务端按配置算出（后端 agent.AgentInfo.ImagePrompt）—— 前端不要自己按 agent 名
+   * 硬编码，能力取决于配置（claude 走桥时有图片通路，配成 print 就没有）。
+   *
+   * true 只表示"能把图送出去"，不保证对端模型看得见图；真发不进去时后端会明确报错。
+   */
+  image_prompt?: boolean
 }
 
 /** GET /api/agents 响应 */

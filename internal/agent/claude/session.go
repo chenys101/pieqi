@@ -93,7 +93,7 @@ func (s *session) OnEvent(fn func(agent.Event)) {
 // Prompt 发送一轮并阻塞到该轮结束（turn_end 按 clientRef 匹配）。
 func (s *session) Prompt(ctx context.Context, text string) error {
 	ref := uuid.New().String()
-	if err := s.client.Prompt(ctx, s.id, text, ref); err != nil {
+	if err := s.client.Prompt(ctx, s.id, text, ref, nil); err != nil {
 		return err
 	}
 	return s.waitTurn(ctx, ref)
@@ -101,21 +101,44 @@ func (s *session) Prompt(ctx context.Context, text string) error {
 
 // PromptRich 发一轮带图的 prompt（实现 agent.AgentSession）。
 //
-// claude 桥这条路的 prompt 接口只有纯文本（桥的 POST /prompt 收 text），
-// 所以：
-//   - 没图 → 与 Prompt 完全一致（正常路径，不叫降级）；
-//   - 有图 → 明确报错。绝不静默丢图 —— 用户会以为 agent 看过图了，
-//     而它会对着没图的上下文说些不相干的话，那种失败最难归因。
+// 桥这条路**能**收图：内容经桥转成 SDK 的 content blocks（见 bridge 的
+// buildImageBlocks 与 session.js 的 promptStream），最终由 Claude 按
+// Anthropic Messages API 的 image block 消费。text 为空、只有图也是合法的。
+//
+// 校验分两处：这里先按 agent 层同一份规则（agent.ValidateImages）拦一道，
+// 给出比桥的协议级报错更有用的信息；桥侧再校验一次（它是独立进程，不能假设
+// 调用方守规矩）。两处规则同源，改一处必须改另一处。
 func (s *session) PromptRich(ctx context.Context, text string, images []agent.ImageInput) error {
 	if len(images) == 0 {
+		// 无图 = 纯文本：与 Prompt 完全等价（正常路径，不是降级）
 		return s.Prompt(ctx, text)
 	}
-	return fmt.Errorf("%w: claude 桥传输只支持纯文本 prompt", agent.ErrImageNotSupported)
+	if err := agent.ValidateImages(images); err != nil {
+		return fmt.Errorf("%w: %v", agent.ErrImageNotSupported, err)
+	}
+	ref := uuid.New().String()
+	promptImages := make([]bridge.PromptImage, 0, len(images))
+	for _, img := range images {
+		promptImages = append(promptImages, bridge.PromptImage{Data: img.Data, MimeType: img.MimeType})
+	}
+	if err := s.client.Prompt(ctx, s.id, text, ref, promptImages); err != nil {
+		return err
+	}
+	return s.waitTurn(ctx, ref)
 }
 
-// SupportsImagePrompt 实现 agent.ImagePromptCapable：claude 桥恒不支持收图。
-// 显式返回 false（而不是不实现接口）—— 让上层问一次就能拿到确定的答案。
-func (s *session) SupportsImagePrompt() bool { return false }
+// SupportsImagePrompt 实现 agent.ImagePromptCapable：桥路径**支持**收图。
+//
+// 为什么从恒 false 改成 true：此前桥的 /prompt 只收 text（session.js 的
+// content: item.text），图在 Go→桥这一层就丢了，所以那时返回 false 是对的。
+// 现在整条链路已打通（Go client → 桥 buildImageBlocks → SDK content blocks），
+// 再返回 false 会让前端**永远**不显示加图入口 —— 一个真能收图的能力被隐藏，
+// 用户完全无解。
+//
+// 注意这只承诺"通路能送图"，不承诺"对端模型一定看得见"：那取决于模型自身的
+// 视觉能力（如所选模型是否接受 image content block）。真送不进去时 API 会
+// 明确报错，不会静默丢图。
+func (s *session) SupportsImagePrompt() bool { return true }
 
 // waitTurn 等 clientRef 对应轮的 turn_end（或致命错误/会话关闭/ctx 取消）。
 func (s *session) waitTurn(ctx context.Context, ref string) error {

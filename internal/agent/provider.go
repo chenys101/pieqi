@@ -102,6 +102,19 @@ type AgentInfo struct {
 	Transport string `json:"transport,omitempty"`
 	// Capabilities 该 agent 具备的能力标签（展示用）。
 	Capabilities []string `json:"capabilities,omitempty"`
+	// ImagePrompt 该 agent 的传输**是否具备图片入站通路**（新建任务页据此显示加图入口）。
+	//
+	// 与上面两个字段的关键区别：这是**判据**，不是展示文案 —— 前端拿它做显隐决策，
+	// 所以它必须反映真实能力，且不能是给人看的字符串（改文案会静默改变行为）。
+	//
+	// 语义边界：true = "这条路能把图送出去"，**不**保证"对端模型一定看得见图"。
+	// 那取决于模型自身的视觉能力，只有真正发送时才由对端报错暴露。所以前端
+	// 显示入口 ≠ 保证能发；残余不确定性由后端的明确报错兜底（绝不静默丢图）。
+	//
+	// 为什么放在目录里而不是让前端按 agent 名硬编码：硬编码的名单必然会与
+	// 服务端配置漂移（例如把 claude 的 transport 配成 print 后，桥的图片通路
+	// 就不存在了，而前端仍会显示入口）。目录是服务端算出来的唯一事实源。
+	ImagePrompt bool `json:"image_prompt"`
 }
 
 // AgentClaude / AgentQoder / AgentDsh 可用 agent 的常量名（避免散落的裸串拼错）。
@@ -121,6 +134,11 @@ const (
 //   - qoder / dsh：transport=acp 且 agent_type 非空。
 func AvailableAgents(a config.AgentsConfig) []AgentInfo {
 	claudeTransport := "SDK Bridge"
+	// claude 的图片通路**只在桥路径存在**：桥能把图转成 SDK 的 content blocks；
+	// 而 print 回退（claude -p 的纯文本 prompt 通道）没有实现图片。
+	// 所以显式配成 transport=print 时，这里必须是 false —— 否则前端会显示加图入口，
+	// 用户选了图却在发送时失败（配置决定能力，不是 agent 名决定能力）。
+	claudeImages := a.Claude.Transport != "print"
 	if a.Claude.Transport == "print" {
 		claudeTransport = "claude -p"
 	}
@@ -130,6 +148,7 @@ func AvailableAgents(a config.AgentsConfig) []AgentInfo {
 		Description:  "Anthropic 官方 Agent，经 SDK 常驻桥驱动（不可用时自动回退 claude -p）",
 		Transport:    claudeTransport,
 		Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
+		ImagePrompt:  claudeImages,
 	}}
 	configured := ACPProviderConfigFromAgents(a)
 	if _, ok := configured.Agents[AgentQoder]; ok {
@@ -139,6 +158,9 @@ func AvailableAgents(a config.AgentsConfig) []AgentInfo {
 			Description:  "Qoder 官方 CLI（ACP 协议），可选用限时免费的 Qwen3.8-Flash 模型",
 			Transport:    "ACP",
 			Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
+			// ACP 具备图片入站通路（ACPAgent 实现 RichPromptSender），
+			// 但是否真收取决于对端握手声明 promptCapabilities.image —— 见 ImagePrompt 的说明。
+			ImagePrompt: true,
 		})
 	}
 	if _, ok := configured.Agents[AgentDsh]; ok {
@@ -148,6 +170,7 @@ func AvailableAgents(a config.AgentsConfig) []AgentInfo {
 			Description:  "DeepSeek 官方 agent harness（dsh --profile acp）。模型路由取自 dsh 侧 acp profile 的 pin，出厂 pin 需 DEEPSEEK_API_KEY",
 			Transport:    "ACP",
 			Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
+			ImagePrompt:  true,
 		})
 	}
 	return out

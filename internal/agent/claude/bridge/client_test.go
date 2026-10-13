@@ -34,7 +34,7 @@ func TestClientPromptSessionClosed(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL)
-	err := c.Prompt(context.Background(), "sid", "hi", "r1")
+	err := c.Prompt(context.Background(), "sid", "hi", "r1", nil)
 	if err == nil || !strings.Contains(err.Error(), "session closed") {
 		t.Fatalf("Prompt err = %v, want contains 'session closed'", err)
 	}
@@ -107,7 +107,7 @@ func TestClientTokenHeader(t *testing.T) {
 	if _, err := c.CreateSession(context.Background(), CreateSessionRequest{Cwd: "/tmp"}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if err := c.Prompt(context.Background(), "s1", "hi", "r1"); err != nil {
+	if err := c.Prompt(context.Background(), "s1", "hi", "r1", nil); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 	if err := c.CloseSession(context.Background(), "s1"); err != nil {

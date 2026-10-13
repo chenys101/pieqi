@@ -82,10 +82,26 @@ func (c *Client) CreateSession(ctx context.Context, req CreateSessionRequest) (s
 	return out.ID, nil
 }
 
+// PromptImage 一张随 prompt 发出的图片（POST /prompt 的 images 元素）。
+//
+// Data 是**纯 base64**（不带 `data:image/png;base64,` 前缀）—— 与 ACP 侧
+// agent.ImageInput 同一约定，带前缀会被桥明确拒绝。
+type PromptImage struct {
+	Data     string `json:"data"`
+	MimeType string `json:"mime_type"`
+}
+
 // Prompt 追加一轮用户消息（非阻塞：桥返回 202，结果经 SSE turn_end 到达）。
 // clientRef 供 turn_end 精确关联本轮。
-func (c *Client) Prompt(ctx context.Context, id, text, clientRef string) error {
-	body, err := json.Marshal(map[string]string{"text": text, "clientRef": clientRef})
+//
+// images 为空时发出的 JSON **不含 images 字段**，与改动前的报文逐字节一致 ——
+// 纯文本是占绝大多数的路径，无谓地多带一个空数组只会扩大回归面。
+func (c *Client) Prompt(ctx context.Context, id, text, clientRef string, images []PromptImage) error {
+	payload := map[string]any{"text": text, "clientRef": clientRef}
+	if len(images) > 0 {
+		payload["images"] = images
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("bridge: prompt marshal: %w", err)
 	}

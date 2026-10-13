@@ -17,6 +17,7 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { SessionRuntime } from "./session.js";
+import { buildImageBlocks } from "./images.js";
 
 const PORT = Number(process.env.BRIDGE_PORT || 18790);
 const HOST = process.env.BRIDGE_HOST || "127.0.0.1";
@@ -196,10 +197,21 @@ async function route(req, res) {
     if (method === "POST" && parts[3] === "prompt") {
       if (!runtime) return sendError(res, 404, "session not found");
       const body = await parseBody(req);
-      if (typeof body.text !== "string" || body.text.trim() === "") {
+      const images = body.images;
+      const hasImages = Array.isArray(images) && images.length > 0;
+      // text 的必填性：**只发图**是合法用法（让 agent 描述图片），所以有图时
+      // 允许 text 为空。这与 ACP 侧 buildPromptBlocks 的判据一致。
+      if (typeof body.text !== "string") {
         return sendError(res, 400, "text required");
       }
-      if (!runtime.pushPrompt(body.text, body.clientRef)) return sendError(res, 409, "session closed");
+      if (!hasImages && body.text.trim() === "") {
+        return sendError(res, 400, "text required");
+      }
+      const built = buildImageBlocks(body.text, images);
+      if (built.error) return sendError(res, 400, built.error);
+      if (!runtime.pushPrompt(body.text, body.clientRef, built.blocks)) {
+        return sendError(res, 409, "session closed");
+      }
       return sendJson(res, 202, { ok: true });
     }
 

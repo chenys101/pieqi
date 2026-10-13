@@ -9,6 +9,7 @@ import type { Task } from '@/types/task'
 vi.mock('@/services/api/tasks', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/api/tasks')>()),
   getTasks: vi.fn(),
+  createTask: vi.fn(),
 }))
 
 /** 最小 Task fixture */
@@ -124,5 +125,33 @@ describe('TaskStore', () => {
     s.applySnapshot([task({ id: 'a' }), task({ id: 'b' })])
     s.removeTask('a')
     expect(s.tasks.map((t) => t.id)).toEqual(['b'])
+  })
+
+  // 回归：createTask 曾把 images 参数**截断**在自己的签名外（api.createTask 早就支持，
+  // 但 store 这一层没往上传），表现就是"新建任务时选了图也发不出去"且不报错。
+  // 这里钉住 store → api 的透传，防止签名再次被中间截断。
+  it('createTask：images 必须透传到 api 层（纯 base64 + mime_type）', async () => {
+    const s = useTaskStore()
+    vi.mocked(api.createTask).mockResolvedValueOnce(task() as never)
+    const imgs = [{ data: 'AAAA', mime_type: 'image/png' }]
+
+    await s.createTask('G:/ws/erp', '看图', 'qoder', 'qwen', imgs)
+
+    expect(api.createTask).toHaveBeenCalledWith('G:/ws/erp', '看图', 'qoder', 'qwen', imgs)
+    // 本地乐观插入也要发生（详情页靠它立刻渲染）
+    expect(s.tasks.map((t) => t.id)).toEqual(['t1'])
+  })
+
+  it('createTask：不带图时 images 为 undefined（语义与纯文本一致）', async () => {
+    const s = useTaskStore()
+    vi.mocked(api.createTask).mockResolvedValueOnce(task() as never)
+
+    await s.createTask('G:/ws/erp', '纯文本', 'claude')
+
+    // 取**最后一次**调用：mock 的 calls 在同文件内跨用例累积，
+    // 写死 calls[0] 会读到前一个用例留下的那条（本文件最初就是这么错的）。
+    const last = vi.mocked(api.createTask).mock.calls.at(-1)!
+    expect(last[1]).toBe('纯文本')
+    expect(last[4]).toBeUndefined()
   })
 })

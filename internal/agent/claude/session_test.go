@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +34,11 @@ type fakeBridge struct {
 	lastPermOptID string
 	cancelCount   int
 	closeCount    int
+
+	// lastPrompt 最近一次 /prompt 收到的**原始** JSON 体。
+	// 存原始字节而不是解析后的结构：要断言的正是"images 字段到底发出去没有、
+	// 形态对不对"，解析成结构体再断言会把字段名/嵌套写错当成通过。
+	lastPrompt []byte
 }
 
 type fakeSess struct {
@@ -89,7 +95,11 @@ func newFakeBridge(t *testing.T) *fakeBridge {
 				Text      string `json:"text"`
 				ClientRef string `json:"clientRef"`
 			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &body)
+			fb.mu.Lock()
+			fb.lastPrompt = raw
+			fb.mu.Unlock()
 			w.WriteHeader(http.StatusAccepted)
 			_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
 			// 异步补一轮（text_delta + turn_end），模拟桥的异步 turn 完成

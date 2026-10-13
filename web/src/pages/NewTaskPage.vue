@@ -8,6 +8,8 @@ import Input from '@/components/ui/Input.vue'
 import Select from '@/components/ui/Select.vue'
 import PromptInput from '@/features/session/components/PromptInput.vue'
 import ModelPicker from '@/features/session/components/ModelPicker.vue'
+import ImagePicker from '@/features/session/components/ImagePicker.vue'
+import type { PendingImage } from '@/features/session/imageAttach'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useTaskStore } from '@/stores/task'
 import { useSessionStore } from '@/stores/session'
@@ -22,6 +24,8 @@ const agentStore = useAgentStore()
 const notify = useNotificationStore()
 
 const prompt = ref('')
+/** 已选图片（v-model 给 ImagePicker）。发送后清空 —— 图片是**按轮**载荷。 */
+const images = ref<PendingImage[]>([])
 const mode = ref<'select' | 'path'>('select')
 const selectedPath = ref('')
 const customPath = ref('')
@@ -54,10 +58,16 @@ const selectedModelHint = computed(() => models.value.find((m) => m.value === mo
 
 // 换 agent 就是换一整套模型清单 ⇒ 已选模型必然失效，必须清空再按需拉新清单。
 // 用 immediate 覆盖"进页面时目录后到"的情况（agent 由 0 → 默认值 也会触发）。
+//
+// 图片同理清空，而且理由更硬：图片能力**取决于 agent**（claude 恒不收图）。若留着
+// 在 qoder 下选的图再切到 claude，提交时整条任务会被后端以 ErrImageNotSupported
+// 拒绝 —— 用户刚只是换了个 agent，却收到一句关于图片的报错，成因离操作很远。
+// 清空比"悄悄把图带上再报错"好，也比默默丢图好（静默丢图是最坏的一种，见 agent/session.go）。
 watch(
   agent,
   (a) => {
     model.value = ''
+    images.value = []
     agentStore.loadModels(a)
   },
   { immediate: true },
@@ -91,10 +101,31 @@ watch(
   },
 )
 
+/**
+ * 有内容可提交：文字或图片任一即可。
+ *
+ * 「只发一张图、不写字」是正当用法（让 agent 描述/分析图片），与新增会话输入框
+ * 同一套口径（见 InterveneInput 的 sendDisabled）。若仍以文字非空为判据，
+ * 选了图却发不出去，入口就成了摆设。
+ */
+const canSubmitContent = computed(() => !!prompt.value.trim() || images.value.length > 0)
+
 const canSubmit = computed(() => {
-  if (creating.value || !prompt.value.trim()) return false
+  if (creating.value || !canSubmitContent.value) return false
   return mode.value === 'path' ? !!customPath.value.trim() : !!selectedPath.value
 })
+
+/**
+ * 加图入口的显隐依据。
+ *
+ * 判据来自**服务端目录**（GET /api/agents 的 image_prompt，见 selectedAgent）——
+ * 不用前端的 agent 名硬编码名单：能力取决于配置（claude 走桥时有图片通路，
+ * 配成 transport=print 就没有），硬编码必然在配置变化时静默过期。
+ *
+ * 判据本体的说明在 selectedAgent?.imagePrompt 的来源处（types/api.ts 的 AgentDto）。
+ * 注意 selectedAgent 为 undefined 时（目录还没到）取 false：不显示一个可能不该显示的按钮。
+ */
+const canAttachImages = computed(() => selectedAgent.value?.imagePrompt === true)
 
 /** 当前生效的项目路径 */
 function effectivePath(): string | null {
@@ -110,9 +141,24 @@ async function submit() {
     mode.value = 'path'
     return
   }
+  // 兜底：正常情况下 agent 切换时会清空图片，这里防的是"入口被绕过"（例如目录后到、
+  // agent 由空变成 claude 而图片已在框里）。宁可前置报一句人话，也不让后端那句
+  // 「当前 agent 传输不支持图片（*claude.session）」直接糊到用户脸上。
+  if (images.value.length > 0 && !canAttachImages.value) {
+    notify.error('当前 Agent 不支持图片，请先移除已选图片')
+    return
+  }
   creating.value = true
   try {
-    const task = await taskStore.createTask(path, prompt.value.trim(), agent.value || undefined, model.value || undefined)
+    // 图片是**按轮**载荷（同 model），只在这一次创建时发出，不落库
+    // （落库的只有"这条消息带了几张图"的元数据，见 model.TaskEvent.Images）。
+    const task = await taskStore.createTask(
+      path,
+      prompt.value.trim(),
+      agent.value || undefined,
+      model.value || undefined,
+      images.value.map((i) => ({ data: i.data, mime_type: i.mimeType })),
+    )
     sessionStore.setThinking(task.id, true)
     router.push(`/sessions/${task.id}`)
   } catch (err) {
@@ -196,10 +242,13 @@ async function submit() {
             v-model="prompt"
             :rows="3"
             aria-label="任务描述"
-            placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"
-            @submit="submit"
+            placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"            @submit="submit"
           >
             <template #lead>
+              <!-- 加图入口：与详情页同一套 ImagePicker。位置与理由同 InterveneInput ——
+                   必须放 #lead 而不是 #actions（后者整行 justify-end，会被推到最右与创建按钮挤在一起）。
+                   显隐依据见 canAttachImages 的注释（只有 ACP 系 agent 才可能收图）。 -->
+              <ImagePicker v-if="canAttachImages" v-model="images" :disabled="creating" />
               <ModelPicker
                 v-if="agent"
                 :model="model"

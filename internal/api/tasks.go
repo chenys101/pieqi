@@ -31,9 +31,13 @@ type createTaskReq struct {
 	Model string `json:"model"`
 	// Images 随首轮 prompt 一起发出的图片（可选）。
 	//
-	// ⚠️ 与 Model 不同，这里的取值**必须校验**：base64 与 mime 是协议硬要求，
-	// 而图片体积直接决定上下文开销 —— 放进去一张 20MB 的图，代价是真金白银。
-	// 校验在 agent 层（buildPromptBlocks/validateImage）统一做，这里只做装配。
+	// ⚠️ 与 Model 不同，这里的取值**必须校验**，且在**建任务之前**校验：base64 与 mime
+	// 是协议硬要求，图片体积直接决定上下文开销 —— 放进去一张 20MB 的图，代价是真金白银。
+	//
+	// 校验复用 agent.ValidateImages（规则只有那一份，避免两处判据漂移）。
+	// 曾经只在 agent 层（buildPromptBlocks）校验，那是**发送时**才发生的 ——
+	// 于是永远发不出去的输入会先拿到 201、留下一个 failed 任务和一串假图片元数据
+	// （bytes:0 之类已落盘）。先落库再报错是错的顺序，见下方 createTask 的用法。
 	Images []imageReq `json:"images"`
 }
 
@@ -68,6 +72,16 @@ func (s *Server) createTask(c *gin.Context) {
 	req.Prompt = strings.TrimSpace(req.Prompt)
 	if req.Prompt == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "prompt is empty"})
+		return
+	}
+
+	// 选路前先校验图片入参：非法输入必须在这里、且**在任何落库之前**被拒绝。
+	// 放行到 agent 层的代价不只一句晚来的报错 —— 任务会先被 store.Create 持久化、
+	// 事件里写进假元数据（如 bytes:0 的空图），再以 failed 收场，留下需要人工清理的垃圾。
+	// 400 而不是 500：这是**用户可修正**的输入问题（换格式 / 去掉图）。
+	reqImages := toImageInputs(req.Images)
+	if err := agent.ValidateImages(reqImages); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -107,7 +121,7 @@ func (s *Server) createTask(c *gin.Context) {
 		Prompt:       req.Prompt,
 		Events: []model.TaskEvent{{
 			Type: model.EventUser, Text: req.Prompt, Seq: 1, At: time.Now(),
-			Images: core.ImageMeta(toImageInputs(req.Images)),
+			Images: core.ImageMeta(reqImages),
 		}},
 	})
 	if err != nil {
@@ -116,9 +130,8 @@ func (s *Server) createTask(c *gin.Context) {
 	}
 	s.bus.Publish(core.Event{Type: "task_created", TaskID: task.ID, Task: task})
 	// 带图走 StartRich（图只在内存过一次手，见 core.StartRich）；不带图仍走 Start。
-	images := toImageInputs(req.Images)
-	if len(images) > 0 {
-		s.runner.StartRich(c.Request.Context(), task, images)
+	if len(reqImages) > 0 {
+		s.runner.StartRich(c.Request.Context(), task, reqImages)
 	} else {
 		s.runner.Start(c.Request.Context(), task)
 	}
@@ -229,8 +242,10 @@ type interveneReq struct {
 	Model string `json:"model"`
 	// Images 随这条消息一起发出的图片（可选）。与 Model 同为**按轮**载荷，不落库。
 	//
-	// 只对 append_prompt 有意义：decision 是回答一张审批卡，没有"这条消息"可言；
-	// running 中的输入本就走 stdin 注入（纯文本通道），收不了图。
+	// 只对终态/choice 的 append_prompt（走 Resume 起新进程）有意义。两类请求**不收图**：
+	//   - decision：那是回答一张审批卡，没有"这条消息"可言；
+	//   - running / waiting_input(approval)：走 stdin 注入，那是纯文本通道。
+	// 给这两类带图会被**明确 400**（而不是静默丢图，见 intervene 里的说明）。
 	Images []imageReq `json:"images"`
 }
 
@@ -253,6 +268,14 @@ func (s *Server) intervene(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// 图片入参同样在**任何副作用之前**校验（续问会 append 事件 / RecordIntervention）。
+	// 与 createTask 同一口径、同一份规则（agent.ValidateImages）：不合法就 400，
+	// 别等到 Resume→PromptRich 才报错，那时事件已经写进任务了。
+	reqImages := toImageInputs(req.Images)
+	if err := agent.ValidateImages(reqImages); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	// 终态任务只接受 append_prompt（续问）；decision 对终态无意义
 	if isTerminal && req.Kind != "append_prompt" {
 		c.JSON(http.StatusConflict, gin.H{"error": "terminal task only supports append_prompt"})
@@ -266,7 +289,7 @@ func (s *Server) intervene(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "choice decision requires option text (append_prompt)"})
 			return
 		}
-		if err := s.runner.ResumeRich(id, req.Text, req.Model, toImageInputs(req.Images)); err != nil {
+		if err := s.runner.ResumeRich(id, req.Text, req.Model, reqImages); err != nil {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
@@ -284,7 +307,7 @@ func (s *Server) intervene(c *gin.Context) {
 	}
 	if isTerminal {
 		// 同步检查 Resume 前置条件（worktree/session 存在），异步启动
-		if err := s.runner.ResumeRich(id, req.Text, req.Model, toImageInputs(req.Images)); err != nil {
+		if err := s.runner.ResumeRich(id, req.Text, req.Model, reqImages); err != nil {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
@@ -293,6 +316,19 @@ func (s *Server) intervene(c *gin.Context) {
 			TaskID: id, Kind: "append_prompt", Text: req.Text, Source: model.SourceHTTP,
 		})
 		c.JSON(http.StatusAccepted, gin.H{"ok": true, "resumed": true})
+		return
+	}
+	// 运行中 / waiting_input(approval) 的输入走 stdin 注入，那是**纯文本通道**，
+	// 收不了图（见 interveneReq.Images 的说明）。带图到这里必须**明确拒绝**。
+	//
+	// 为什么不能放任它往下走：Intervene 收的是 model.Intervention，那个结构里
+	// 根本没有图片字段 —— 图会被**静默丢掉**，用户以为 agent 看到了图，
+	// 而它只会对着没图的上下文说些不相干的话。这正是 agent 层一直严防的失败模式
+	// （见 session.go「静默丢图是最坏的选择」），接口层不能自己制造一个。
+	if len(reqImages) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "运行中的任务不支持随消息发图（stdin 注入是纯文本通道）；请等该轮结束后再续问带图",
+		})
 		return
 	}
 	if err := s.runner.Intervene(id, in); err != nil {

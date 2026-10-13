@@ -90,7 +90,8 @@ func init() {
 //   - print：直接走 claude -p 回退，不碰桥。
 func openSession(ctx context.Context, cfg Config, p agent.OpenParams) (agent.AgentSession, error) {
 	if cfg.Transport == "print" {
-		return openPrintFallback(ctx, cfg.Print, p)
+		// 显式配成 print = 用户有意为之，不是降级；reason 为空，走通用文案。
+		return openPrintFallback(ctx, cfg.Print, p, "")
 	}
 	client := bridge.NewClientWithToken(cfg.BaseURL, cfg.Token)
 	if err := client.Health(ctx); err != nil {
@@ -98,7 +99,7 @@ func openSession(ctx context.Context, cfg Config, p agent.OpenParams) (agent.Age
 			cfg.Logger.Warn("claude: bridge health failed, falling back to print",
 				zap.String("base_url", cfg.BaseURL), zap.Error(err))
 		}
-		return openPrintFallback(ctx, cfg.Print, p)
+		return openPrintFallback(ctx, cfg.Print, p, "Claude 桥当前不可用")
 	}
 	if cfg.Logger != nil {
 		cfg.Logger.Debug("claude: creating bridge session", zap.String("cwd", p.Cwd), zap.String("resume_from", p.ResumeFrom))
@@ -108,7 +109,8 @@ func openSession(ctx context.Context, cfg Config, p agent.OpenParams) (agent.Age
 		ResumeSdkSessionID: p.ResumeFrom,
 	})
 	if err != nil {
-		return openPrintFallback(ctx, cfg.Print, p)
+		// 探活通过但建会话失败（桥刚崩/版本不匹配）：同样是降级，理由要带给用户。
+		return openPrintFallback(ctx, cfg.Print, p, "Claude 桥建会话失败")
 	}
 	sess := newSession(client, id, p.Cwd, cfg.Logger)
 	go sess.runEventLoop()
@@ -117,17 +119,39 @@ func openSession(ctx context.Context, cfg Config, p agent.OpenParams) (agent.Age
 
 // openPrintFallback 桥不可用时的 print 兜底（multi-agent.md §7）。
 // 用现有 PrintAgent + sessionAdapter 桥接成 AgentSession，接口不变。
-func openPrintFallback(ctx context.Context, pc agent.PrintConfig, p agent.OpenParams) (agent.AgentSession, error) {
+//
+// degradedReason 非空 = 这是**降级**（桥不可用）而非用户配置；它会被带到
+// "发图失败"的提示里（见 agent.ImagePromptUnavailableReason），
+// 让用户知道"稍后重试就好"而不是"这个 agent 天生不支持图片"。
+func openPrintFallback(ctx context.Context, pc agent.PrintConfig, p agent.OpenParams, degradedReason string) (agent.AgentSession, error) {
 	pa := agent.NewPrintAgent(pc, nil)
 	sid, err := pa.NewSession(ctx, agent.SessionConfig{Cwd: p.Cwd, ResumeFrom: p.ResumeFrom})
 	if err != nil {
 		return nil, err
 	}
-	return agent.NewSessionAdapter(pa, sid, agent.Caps{
+	sess := agent.NewSessionAdapter(pa, sid, agent.Caps{
 		MultiTurnPersistent: false,
 		ResumeSupported:     true,
 		Streaming:           false,
-	}), nil
+	})
+	if degradedReason != "" {
+		// 包一层，把"本次是降级"这件事挂到会话上（接口是可选能力，故不能直接改
+		// sessionAdapter 的结构 —— 那会波及全部实现与测试替身）。
+		return &degradedSession{AgentSession: sess, reason: degradedReason}, nil
+	}
+	return sess, nil
+}
+
+// degradedSession 给会话附加"为什么收不了图"的说明（可选能力，见
+// agent.ImagePromptUnavailableReason）。只实现这一个方法，其余全部透传。
+type degradedSession struct {
+	agent.AgentSession
+	reason string
+}
+
+// ImagePromptUnavailableReason 实现 agent.ImagePromptUnavailableReason。
+func (d *degradedSession) ImagePromptUnavailableReason() string {
+	return d.reason + "，本次已回退到 claude -p（纯文本通道，无法发送图片）"
 }
 
 // ErrNoBridge 桥不可达且无 print 回退可用的错误（诊断用）。

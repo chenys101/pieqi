@@ -154,6 +154,19 @@ type ImagePromptCapable interface {
 	SupportsImagePrompt() bool
 }
 
+// ImagePromptUnavailableReason 由"收不了图、但能说清为什么"的会话实现。
+//
+// 为什么需要它：同样一句"不支持图片"，用户能做的动作完全不同 ——
+//   - 走了一次性回退（桥不可用 → claude -p）：这是**瞬时故障**，稍后重试就好；
+//   - 对端本就不支持：只能换 agent 或去掉图。
+// 分不清这两者时，用户会对着一个"重试就能好"的提示去做无用的排查（或反之）。
+//
+// 返回空串 = 没有额外可说的（调用方用通用文案）。
+// 实现方只在**确实处于可解释的降级态**时返回非空，别把这里当成通用错误通道。
+type ImagePromptUnavailableReason interface {
+	ImagePromptUnavailableReason() string
+}
+
 // TurnModelSetter 由支持「按轮指定模型」的 adapter 实现（当前仅 ACP 系会话）。
 //
 // 与 ResumeID 一样是**可选**能力：没实现就忽略，其它 agent 不受影响。之所以不复用

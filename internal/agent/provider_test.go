@@ -179,6 +179,30 @@ func TestAvailableAgents(t *testing.T) {
 		if got[0].Transport != "claude -p" {
 			t.Fatalf("transport=%q, want claude -p", got[0].Transport)
 		}
+		// ★ print 路径**没有**图片通路（claude -p 是纯文本通道），所以 ImagePrompt 必须是
+		// false。若这里报 true，前端会显示加图入口而发送必然失败 —— 配置决定能力，
+		// 不是 agent 名决定能力，这条正是"别在前端硬编码 claude 能不能收图"的理由。
+		if got[0].ImagePrompt {
+			t.Error("print 模式报 ImagePrompt=true：该路径没有图片通路，前端会显示一个必然失败的入口")
+		}
+	})
+
+	t.Run("claude 走桥时具备图片通路", func(t *testing.T) {
+		got := AvailableAgents(config.AgentsConfig{
+			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
+		})
+		if !got[0].ImagePrompt {
+			t.Error("桥路径 ImagePrompt=false：前端永远不显示加图入口，刚打通的图片能力被锁死")
+		}
+	})
+
+	t.Run("claude transport 空缺（默认走桥）时也具备图片通路", func(t *testing.T) {
+		// 空 transport 走默认 sdk-bridge（见 openSession）；判据必须与之一致，
+		// 否则"没写 transport"这个最常见的配置会让入口消失。
+		got := AvailableAgents(config.AgentsConfig{})
+		if !got[0].ImagePrompt {
+			t.Error("默认配置（未写 transport）应走桥并具备图片通路")
+		}
 	})
 
 	dshConfig := config.AgentDshConfig{
@@ -200,6 +224,10 @@ func TestAvailableAgents(t *testing.T) {
 		}
 		if got[2].Transport != "ACP" {
 			t.Fatalf("dsh transport = %q, want ACP", got[2].Transport)
+		}
+		// ACP 系具备图片入站通路（ACPAgent 实现 RichPromptSender）
+		if !got[2].ImagePrompt {
+			t.Error("dsh ImagePrompt=false：ACP 具备图片通路，应在目录里体现")
 		}
 	})
 

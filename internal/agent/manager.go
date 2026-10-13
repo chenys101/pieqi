@@ -349,6 +349,13 @@ func (m *AgentManager) RunRich(ctx context.Context, taskID, prompt, turnModel st
 	if len(images) > 0 {
 		sender, ok := sess.adapter.(RichPromptSender)
 		if !ok {
+			// 理论上少见：AgentSession 层（sessionAdapter/*session）都实现了 PromptRich，
+			// 故 sessionBackedAdapter 恒满足 RichPromptSender。这里是给"未来某个只实现
+			// AgentAdapter 的传输"兜底的 —— 它若收不了图，也没办法解释理由。
+			//
+			// 注意：**降级理由（桥不可用→回退 print）不在这里**。那种情况下断言是成功的，
+			// 错误由 PromptRich 返回，理由在 sessionBackedAdapter.SendRichPrompt 里附带
+			// （见那里的说明）。曾把理由判断写在本分支，实测永远不触发。
 			err = fmt.Errorf("%w: 当前 agent 传输不支持图片（%T）", ErrImageNotSupported, sess.adapter)
 		} else {
 			err = sender.SendRichPrompt(runCtx, sess.sessionID, prompt, images)

@@ -952,6 +952,32 @@ const maxImageBytes = 5 << 20
 //   - 字符集与 padding 位置用标准 base64 的严格判据；
 //   - 解码后字节数由长度推出（4 字符 → 3 字节，再减 padding）。
 func validateImage(img ImageInput) error {
+	return validateImageRules(img)
+}
+
+// ValidateImages 校验一组待发图片（导出给 API 层**入参**校验用）。
+//
+// 为什么要在 API 层也校验一次：validateImage 原本只在 buildPromptBlocks 里跑，
+// 而那是**发送时**（任务已 store.Create、脏元数据已落盘、已回 201）才发生的。
+// 表现是 POST /api/tasks 对永远发不出去的输入回 201，还留下一个 failed 任务
+// 和一串假图片元数据（bytes:0 之类）。接口安全上，"先落库再报错"是错的顺序。
+//
+// 规则只有这一份（mime 白名单 / 严格 base64 / 解码后上限），API 层复用而不是
+// 自己再写一遍 —— 两份判据必然漂移，而漂移的表现是"接口放行了、发的时候才炸"。
+func ValidateImages(images []ImageInput) error {
+	if len(images) > maxPromptImages {
+		return fmt.Errorf("一轮最多 %d 张图片（收到 %d 张）", maxPromptImages, len(images))
+	}
+	for i, img := range images {
+		if err := validateImageRules(img); err != nil {
+			return fmt.Errorf("第 %d 张图片: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// validateImageRules 单张图片的规则本体（validateImage / ValidateImages 共用）。
+func validateImageRules(img ImageInput) error {
 	if !imageMimeWhitelist[img.MimeType] {
 		return fmt.Errorf("不支持的图片类型 %q（仅支持 image/png、image/jpeg、image/webp、image/gif）", img.MimeType)
 	}
