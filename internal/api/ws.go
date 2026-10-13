@@ -107,10 +107,30 @@ func (s *Server) handleWS(c *gin.Context) {
 // 用途有二：连接建立时的首帧；**丢弃事件后的重同步**（见 Publish 的 dropped 标记）。
 // 重同步直接复用同一条 snapshot 消息 —— 前端对 snapshot 的处理本来就是"全量替换 + 去重"，
 // 不需要为补拉再造一套协议，也就不会出现两条路径行为不一致。
+//
+// ⚠️ 「读任务列表」与「读 seq」必须在同一把锁内完成（WithSeqHeld），否则两步之间
+// 新发布的事件会落在快照视野之外：客户端比对 seq 后认为"没漏"，而那条事件它永远
+// 收不到 —— 连 gap 检测都发现不了。详见 EventBus.WithSeqHeld 的说明。
 func (s *Server) writeSnapshot(ctx context.Context, conn *websocket.Conn) error {
+	var tasks []*model.TaskSummary
+	var seq uint64
+	// 注意 store.List() 走的是 TaskStore 的锁，与 EventBus 的锁无关；
+	// 这里持有 EventBus 读锁只是为了冻结"事件序号"这一读数，
+	// 与列表内容构成一个一致的采样点（发布者无法在两者之间插入新事件）。
+	s.bus.WithSeqHeld(func(cur uint64) {
+		tasks = model.NewTaskSummaries(s.store.List())
+		seq = cur
+	})
 	snapshot := gin.H{
 		"type":  "snapshot",
-		"tasks": model.NewTaskSummaries(s.store.List()),
+		"tasks": tasks,
+		// seq 是服务端**当前已分配的最大事件序号**。
+		//
+		// 客户端靠它判断自己漏没漏：重连后本地 lastSeq 若小于这个值，说明断开
+		// 窗口内有事件被投给了已 Unsubscribe 的订阅者（服务端不留痕、不补发），
+		// 必须重拉详情。没有这个数，客户端只能"猜"——而猜错的表现正是
+		// 「任务完成了、详情不刷新」。
+		"seq": seq,
 	}
 	data, err := json.Marshal(snapshot)
 	if err != nil {

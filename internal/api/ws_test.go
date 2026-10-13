@@ -192,3 +192,82 @@ func TestWS_ResyncsAfterDroppedEvents(t *testing.T) {
 	}
 	t.Fatal("事件被丢弃后未收到重同步 snapshot —— 前端会永久停留在过期视图")
 }
+
+// 回归：**持续**（而非有限）高频事件流下，WS 循环仍必须能观察到 dropped 并补发 snapshot。
+//
+// 与 TestWS_ResyncsAfterDroppedEvents 的区别在负载形态：那条用有限次 Publish 打满缓冲后
+// 即停手，总线很快排空 —— 覆盖不到"总线一直有货"的情形。
+//
+// 这里守的是写循环 select 的一个真实风险：resyncTick() 每次迭代都新建
+// time.After(wsResyncInterval)，若 evCh 每次都被优先选中，新建的计时器就被丢弃、
+// resync 分支可能永远轮不到 → dropped 永不消费 → 前端永久停在过期视图。
+//
+// 实测结论（Go 1.25）：**不会发生** —— select 在多个 case 同时就绪时随机选取，
+// 持续负载下 resync 分支仍按时被选中。本测试把该性质钉住：若将来有人把 select 改成
+// 优先级判断（例如先非阻塞 drain evCh 再 select），就会破坏它，本测试会失败。
+func TestWS_ResyncsUnderSustainedLoad(t *testing.T) {
+	r, store, bus := setupWSTest(t)
+	store.Create(&model.Task{ProjectID: "cb", Prompt: "p"})
+
+	oldResync := wsResyncInterval
+	wsResyncInterval = 50 * time.Millisecond
+	defer func() { wsResyncInterval = oldResync }()
+
+	server := httptest.NewServer(r)
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/ws"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// 首帧 snapshot
+	if _, _, err := conn.Read(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// 持续高频发布 3 秒：既打满缓冲（置 dropped），又让 evCh 始终有货
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				bus.Publish(core.Event{Type: "task_delta", TaskID: "flood"})
+			}
+		}
+	}()
+	time.AfterFunc(3*time.Second, func() { close(stop) })
+
+	// 客户端持续读取，寻找重同步 snapshot
+	found := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		readCtx, readCancel := context.WithTimeout(ctx, 2*time.Second)
+		_, data, err := conn.Read(readCtx)
+		readCancel()
+		if err != nil {
+			break
+		}
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(data, &probe) == nil && probe.Type == "snapshot" {
+			found = true
+			break
+		}
+	}
+	<-done
+
+	if !found {
+		t.Fatal("持续负载下未收到重同步 snapshot —— resync 分支被 evCh 饿死，前端会永久停在过期视图")
+	}
+}

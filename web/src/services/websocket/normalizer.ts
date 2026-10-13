@@ -13,44 +13,57 @@ import type { Task, TaskUsage } from '@/types/task'
 import { adaptTask } from '@/services/api/client'
 import { persistentEventId } from '@/utils/event'
 
-/** 归一化后的实时消息（dispatcher 的输入） */
-export type RealtimeMessage =
+/**
+ * 归一化后的实时消息（dispatcher 的输入）。
+ *
+ * seq 是后端分配的全局事件序号，**每种消息都有**（缺省 0 = 未知）。
+ * 它不参与业务分发，只供 SeqTracker 判断连续性 —— 放在联合类型上而不是
+ * 各分支里，是为了让"每条消息都带 seq"成为类型上的事实，新增消息类型时
+ * 不会漏掉（漏掉就是一个静默的 gap 检测盲区）。
+ */
+export type RealtimeMessage = { seq: number } & (
   | { type: 'snapshot'; tasks: Task[]; dtos: TaskSummaryDto[] }
   | { type: 'task_upserted'; task: Task; dto: TaskDto }
   | { type: 'task_deleted'; taskId: string }
   | { type: 'delta'; delta: AgentDelta }
   | { type: 'usage'; taskId: string; usage: TaskUsage }
+)
 
 /** 校验 + 归一化一条 WS 消息；无法识别返回 null（静默丢弃） */
 export function normalizeWsMessage(raw: unknown): RealtimeMessage | null {
   if (typeof raw !== 'object' || raw === null) return null
   const msg = raw as Partial<WsMessageDto>
 
+  // seq 缺失（旧服务端）按 0 处理：0 = "服务端没告诉我"，消费方据此跳过 gap 判断
+  // —— 宁可不判定，也不能凭一个缺失的字段去误报"丢事件"。
+  const seq = typeof msg.seq === 'number' && msg.seq > 0 ? msg.seq : 0
+
   switch (msg.type) {
     case 'snapshot':
       if (!Array.isArray(msg.tasks)) return null
-      return { type: 'snapshot', tasks: msg.tasks.map(adaptTask), dtos: msg.tasks }
+      return { type: 'snapshot', tasks: msg.tasks.map(adaptTask), dtos: msg.tasks, seq }
     case 'task_created':
     case 'task_updated':
     // 后端 completed 终态走专用类型（task_runner.go transition），载荷与 task_updated 相同；
     // 不接住则命中 default 被静默丢弃，详情页状态要刷新页面才更新
     case 'task_completed':
       if (!msg.task_id || !msg.task) return null
-      return { type: 'task_upserted', task: adaptTask(msg.task), dto: msg.task }
+      return { type: 'task_upserted', task: adaptTask(msg.task), dto: msg.task, seq }
     case 'task_deleted':
       if (!msg.task_id) return null
-      return { type: 'task_deleted', taskId: msg.task_id }
+      return { type: 'task_deleted', taskId: msg.task_id, seq }
     case 'task_delta': {
       if (!msg.task_id || !msg.delta || typeof msg.delta.text !== 'string') return null
       return {
         type: 'delta',
         delta: { taskId: msg.task_id, text: msg.delta.text, isThought: !!msg.delta.is_thought },
+        seq,
       }
     }
     case 'task_usage': {
       const u = adaptUsagePayload(msg.task_id, msg.usage)
       if (!u) return null
-      return { type: 'usage', taskId: msg.task_id!, usage: u }
+      return { type: 'usage', taskId: msg.task_id!, usage: u, seq }
     }
     default:
       return null

@@ -193,8 +193,19 @@ export interface ImageReqDto {
   mime_type: string
 }
 
+/**
+ * 所有 WS 业务消息共有的全局事件序号（后端 EventBus 分配，见 core.Event.Seq）。
+ *
+ * 存在意义是**让丢事件可被发现**：task_delta 是纯增量、不带状态，断线期间漏收后
+ * 客户端无从察觉；有了连续序号，`本次 seq !== lastSeq + 1` 就说明中间有洞。
+ * 缺省（旧服务端/未填）视为"未知"，跳过判断而不是误报。
+ */
+interface SeqCarrier {
+  seq?: number
+}
+
 /** WebSocket 消息（EventBus 转发 + snapshot） */
-export interface WsSnapshotDto {
+export interface WsSnapshotDto extends SeqCarrier {
   type: 'snapshot'
   /**
    * 快照为轻量视图（无 events）。
@@ -207,18 +218,18 @@ export interface WsSnapshotDto {
 }
 
 /** task_completed 是后端 completed 终态的专用类型，载荷与 task_updated 相同 */
-export interface WsTaskEventDto {
+export interface WsTaskEventDto extends SeqCarrier {
   type: 'task_created' | 'task_updated' | 'task_completed'
   task_id: string
   task: TaskDto
 }
 
-export interface WsTaskDeletedDto {
+export interface WsTaskDeletedDto extends SeqCarrier {
   type: 'task_deleted'
   task_id: string
 }
 
-export interface WsTaskDeltaDto {
+export interface WsTaskDeltaDto extends SeqCarrier {
   type: 'task_delta'
   task_id: string
   delta: {
@@ -233,7 +244,7 @@ export interface WsTaskDeltaDto {
  * 与 task_delta 同一套路：agent 一轮内会推多次 usage_update，若走 task_updated
  * 就会在逐字渲染期间反复触发全量重绘。前端只就地更新用量角标。
  */
-export interface WsTaskUsageDto {
+export interface WsTaskUsageDto extends SeqCarrier {
   type: 'task_usage'
   task_id: string
   usage: UsagePayloadDto

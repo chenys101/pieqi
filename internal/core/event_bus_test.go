@@ -22,6 +22,106 @@ func TestEventBus_PublishSubscribe(t *testing.T) {
 	}
 }
 
+// Publish 必须给每条事件分配**全局单调**序号：客户端靠它判断自己漏没漏
+// （见 Event.Seq 的说明）。序号必须严格 +1 递增 —— 有跳号会让客户端误判为丢事件，
+// 重号或回退则会让它漏判。
+func TestEventBus_PublishAssignsMonotonicSeq(t *testing.T) {
+	bus := NewEventBus()
+	sub := bus.Subscribe(16)
+	defer bus.Unsubscribe(sub)
+
+	for i := 0; i < 5; i++ {
+		bus.Publish(Event{Type: "task_delta", TaskID: "t"})
+	}
+
+	var want uint64 = 1
+	for i := 0; i < 5; i++ {
+		select {
+		case ev := <-sub.Chan():
+			if ev.Seq != want {
+				t.Fatalf("event %d: Seq = %d, want %d", i, ev.Seq, want)
+			}
+			want++
+		case <-time.After(time.Second):
+			t.Fatalf("event %d not received", i)
+		}
+	}
+}
+
+// 序号跨任务共享一条序列（订阅关系本身就是全局的，见 Event.Seq 的设计取舍）。
+// 这条测试把该取舍钉住：若将来改成"每任务独立序号"，客户端只需一个 lastSeq
+// 的简化假设就不再成立，必须同步改 SeqTracker。
+func TestEventBus_SeqIsGlobalAcrossTasks(t *testing.T) {
+	bus := NewEventBus()
+	sub := bus.Subscribe(16)
+	defer bus.Unsubscribe(sub)
+
+	bus.Publish(Event{Type: "task_delta", TaskID: "a"})
+	bus.Publish(Event{Type: "task_delta", TaskID: "b"})
+
+	first := <-sub.Chan()
+	second := <-sub.Chan()
+	if first.Seq != 1 || second.Seq != 2 {
+		t.Fatalf("seq 应为跨任务的全局序列 1,2，实得 %d,%d", first.Seq, second.Seq)
+	}
+}
+
+// 调用方自带 Seq 时必须尊重（测试造数据用），不能被覆盖。
+func TestEventBus_ExplicitSeqRespected(t *testing.T) {
+	bus := NewEventBus()
+	sub := bus.Subscribe(8)
+	defer bus.Unsubscribe(sub)
+
+	bus.Publish(Event{Type: "x", TaskID: "t", Seq: 999})
+	if ev := <-sub.Chan(); ev.Seq != 999 {
+		t.Fatalf("Seq = %d, want 999（显式序号应被尊重）", ev.Seq)
+	}
+}
+
+// Seq() 反映已分配的最大序号；WithSeqHeld 在持锁下读到同一读数。
+// 两者是快照告知客户端"你收到的最后一条是第几号"的依据。
+func TestEventBus_SeqReadable(t *testing.T) {
+	bus := NewEventBus()
+	if got := bus.Seq(); got != 0 {
+		t.Fatalf("初始 Seq = %d, want 0", got)
+	}
+	sub := bus.Subscribe(8)
+	defer bus.Unsubscribe(sub)
+	bus.Publish(Event{Type: "x"})
+	bus.Publish(Event{Type: "y"})
+	if got := bus.Seq(); got != 2 {
+		t.Fatalf("Seq = %d, want 2", got)
+	}
+
+	var held uint64
+	bus.WithSeqHeld(func(seq uint64) { held = seq })
+	if held != 2 {
+		t.Fatalf("WithSeqHeld 读到 %d, want 2", held)
+	}
+}
+
+// WithSeqHeld 必须与 Publish 互斥：持有期间不能有新事件插入，
+// 否则快照报出的 seq 与它随后的接收范围不衔接 —— 客户端会漏判（见方法注释）。
+func TestEventBus_WithSeqHeldExcludesPublish(t *testing.T) {
+	bus := NewEventBus()
+	sub := bus.Subscribe(16)
+	defer bus.Unsubscribe(sub)
+
+	bus.Publish(Event{Type: "x"}) // seq=1
+
+	// 在持锁回调里读到的 seq，必须与此刻"已广播出去的事件数"一致：
+	// 若 Publish 能插入，这里就会读到比已入队事件更大的值。
+	var seqInLock uint64
+	var queuedWhenLocked int
+	bus.WithSeqHeld(func(seq uint64) {
+		seqInLock = seq
+		queuedWhenLocked = len(sub.Chan())
+	})
+	if seqInLock != 1 || queuedWhenLocked != 1 {
+		t.Fatalf("持锁时 seq=%d 已入队=%d，两者应一致（均为 1）", seqInLock, queuedWhenLocked)
+	}
+}
+
 func TestEventBus_MultipleSubscribers(t *testing.T) {
 	bus := NewEventBus()
 	s1 := bus.Subscribe(8)

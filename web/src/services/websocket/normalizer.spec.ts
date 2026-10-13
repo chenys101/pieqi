@@ -27,7 +27,13 @@ describe('normalizeWsMessage', () => {
       type: 'snapshot',
       tasks: [expect.objectContaining({ id: 't1', project: 'erp', agent: 'claude' })],
       dtos: [dto()],
+      seq: 0, // 未带 seq（旧服务端）→ 0 = 未知，消费方据此跳过 gap 判断
     })
+  })
+
+  it('snapshot：携带 seq 时原样透传（客户端据此判断断线期间漏没漏）', () => {
+    const msg = normalizeWsMessage({ type: 'snapshot', tasks: [dto()], seq: 42 })
+    expect(msg).toMatchObject({ type: 'snapshot', seq: 42 })
   })
 
   it('task_updated：task_id + task 缺一不可', () => {
@@ -40,15 +46,21 @@ describe('normalizeWsMessage', () => {
 
   it('task_completed：与 task_updated 同样适配（后端 completed 终态走此类型）', () => {
     const completed = dto({ status: 'completed' })
-    const msg = normalizeWsMessage({ type: 'task_completed', task_id: 't1', task: completed })
+    const msg = normalizeWsMessage({ type: 'task_completed', task_id: 't1', task: completed, seq: 7 })
     expect(msg?.type).toBe('task_upserted')
-    expect(msg).toEqual({ type: 'task_upserted', task: expect.objectContaining({ status: 'completed' }), dto: completed })
+    expect(msg).toEqual({
+      type: 'task_upserted',
+      task: expect.objectContaining({ status: 'completed' }),
+      dto: completed,
+      seq: 7,
+    })
   })
 
   it('task_deleted：取 task_id', () => {
     expect(normalizeWsMessage({ type: 'task_deleted', task_id: 't1' })).toEqual({
       type: 'task_deleted',
       taskId: 't1',
+      seq: 0,
     })
   })
 
@@ -58,7 +70,33 @@ describe('normalizeWsMessage', () => {
       task_id: 't1',
       delta: { text: 'hello', is_thought: true },
     })
-    expect(msg).toEqual({ type: 'delta', delta: { taskId: 't1', text: 'hello', isThought: true } })
+    expect(msg).toEqual({
+      type: 'delta',
+      delta: { taskId: 't1', text: 'hello', isThought: true },
+      seq: 0,
+    })
+  })
+
+  // gap detection 的前提是"每条消息都带 seq"。漏掉任何一类都会造成静默盲区：
+  // 那类消息之间的空洞永远检测不出来。
+  it('每一类消息都透传 seq（漏一类就是一处 gap 检测盲区）', () => {
+    expect(normalizeWsMessage({ type: 'snapshot', tasks: [], seq: 1 })?.seq).toBe(1)
+    expect(normalizeWsMessage({ type: 'task_updated', task_id: 't', task: dto(), seq: 2 })?.seq).toBe(2)
+    expect(normalizeWsMessage({ type: 'task_created', task_id: 't', task: dto(), seq: 3 })?.seq).toBe(3)
+    expect(normalizeWsMessage({ type: 'task_deleted', task_id: 't', seq: 4 })?.seq).toBe(4)
+    expect(normalizeWsMessage({ type: 'task_delta', task_id: 't', delta: { text: 'x' }, seq: 5 })?.seq).toBe(5)
+    expect(
+      normalizeWsMessage({ type: 'task_usage', task_id: 't', usage: { used: 1, size: 9 }, seq: 6 })?.seq,
+    ).toBe(6)
+  })
+
+  // 非法 seq（0 / 负数 / 非数字）一律归一为 0 = "未知"，绝不透传。
+  // 若把负数字漏过去，SeqTracker 会把它当成真实序号而使游标错乱。
+  it('seq 非法时归零（不得让脏值污染 gap 检测游标）', () => {
+    const base = { type: 'task_deleted', task_id: 't' } as const
+    expect(normalizeWsMessage({ ...base, seq: 0 })?.seq).toBe(0)
+    expect(normalizeWsMessage({ ...base, seq: -3 })?.seq).toBe(0)
+    expect(normalizeWsMessage({ ...base, seq: 'x' })?.seq).toBe(0)
   })
 
   it('无法识别的消息返回 null（静默丢弃）', () => {
@@ -80,6 +118,7 @@ describe('normalizeWsMessage', () => {
       type: 'usage',
       taskId: 't1',
       usage: { used: 12345, size: 200000, costUsd: undefined, hasCost: false },
+      seq: 0,
     })
   })
 

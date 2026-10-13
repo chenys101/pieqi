@@ -35,6 +35,25 @@ export function formatDateTime(iso?: string): string {
   return t.toLocaleString()
 }
 
+/**
+ * 时:分（24 小时制，零填充）—— 时间线上每轮"提示词 / 结论"的时间标记。
+ *
+ * 为什么固定 24 小时制而不是 toLocaleTimeString()：后者按浏览器区域设置输出，
+ * 同一份数据在不同机器上会显示成 "4:08 PM" 或 "16:08"，而这是**日志性质**的
+ * 信息、要和后端时间/其他人截图对得上。固定格式 = 可比。
+ *
+ * 为什么不显示日期：同一会话内的轮次几乎都在同一天，日期会挤占本就很窄的
+ * 移动端头部；跨天的情况由任务详情头部的时间兜底。
+ */
+export function formatClock(iso?: string): string {
+  if (!iso) return ''
+  const t = new Date(iso)
+  if (Number.isNaN(t.getTime())) return ''
+  const hh = String(t.getHours()).padStart(2, '0')
+  const mm = String(t.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
 /** 取时间戳（排序用；解析失败为 0） */
 export function timestamp(iso?: string): number {
   if (!iso) return 0

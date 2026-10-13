@@ -1201,6 +1201,13 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 
 	// 正常结束但未达终态：与 claude -p 路径一致的空输出兜底——无任何产出则标 failed，
 	// 有产出则标 completed（adapter 内部已通过 wire 把增量持久化进 Output/Events）。
+	//
+	// ⚠️ 必须先 Flush 流式增量缓冲再判：增量落盘有 200ms 合并窗口（见 core.FlushDeltaWindow），
+	// 此刻最后一段正文可能还在内存里。不刷就判会有两个后果，且都是静默的：
+	//   1. taskHasContent 读到空 events → 把**有产出的任务误判为 failed**；
+	//   2. completeTask 的快照漏掉尾部正文 → task_completed 事件带的内容不完整，
+	//      前端重连补拉后看到的就是"回答结尾被截断"。
+	tr.flushDelta(task.ID)
 	if t, ok := tr.store.Get(task.ID); ok && t.Status != model.TaskCompleted && t.Status != model.TaskFailed {
 		if t.Output == "" && !taskHasContent(t) {
 			tr.failTask(task.ID, "agent 结束但未产出任何内容")
@@ -1257,6 +1264,21 @@ func adapterDead(a agent.AgentAdapter) bool {
 	default:
 		return false
 	}
+}
+
+// flushDelta 把该 task 待落盘的流式增量立刻写进 store（无 wire / 无待落盘内容时是空操作）。
+//
+// 用于所有"要读 task 当前内容做判断"的边界：轮末判空产出、终态快照。
+// 增量落盘有 200ms 合并窗口（见 FlushDeltaWindow），不刷就会读到滞后的内容
+// —— 而"滞后"在这里等价于"错"，例如把有产出的任务判成 failed。
+func (tr *TaskRunner) flushDelta(taskID string) {
+	tr.wireMu.Lock()
+	w, ok := tr.wires[taskID]
+	tr.wireMu.Unlock()
+	if !ok || w == nil || w.delta == nil {
+		return
+	}
+	w.delta.Flush()
 }
 
 // onAgentSessionClosed AgentManager 会话关闭回调：清除并 unwire 该 task 的 wire 句柄，
@@ -1737,8 +1759,19 @@ func (tr *TaskRunner) appendEvent(taskID string, ev model.TaskEvent) {
 }
 
 func (tr *TaskRunner) completeTask(taskID, output string) {
+	// 先落盘待写的流式增量，再取终态快照。
+	//
+	// 收口在这里（而不是只依赖各调用点自觉）是因为终态快照会被发成 task_updated/
+	// task_completed 事件推给前端、也会被重连补拉直接读走 —— 它一旦漏掉尾部正文，
+	// 用户看到的就是"回答结尾被截断"，而磁盘上与内存里其实都是完整的。
+	// 放在唯一的完成入口，才不会有新的调用点漏掉这一步。
+	tr.flushDelta(taskID)
 	updated := tr.transition(taskID, model.TaskCompleted, func(t *model.Task) {
-		t.Output = output
+		// output 为空时保留 wire 已累积进 task 的正文：调用点传空串表示"用当前的"，
+		// 而 flushDelta 刚把缓冲并进 t.Output，此处不能再用空串把它覆盖掉。
+		if output != "" {
+			t.Output = output
+		}
 		t.CurrentDecision = nil
 		now := time.Now()
 		t.FinishedAt = &now

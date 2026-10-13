@@ -6,7 +6,7 @@
 //   平板 768–1279 420px 侧栏，靠头部按钮开合
 //   移动端 <768  整屏，由头部那一行的反馈图标切换 时间线 / 变更反馈
 // 1280 是"反馈怎么摆"的拐点而不是 768 —— 理由见 useResponsive 的注释。
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '@/stores/task'
 import { useSessionStore } from '@/stores/session'
@@ -15,6 +15,7 @@ import * as api from '@/services/api/tasks'
 import { adaptTask } from '@/services/api/client'
 import { useSession } from '@/composables/useSession'
 import { useResponsive } from '@/composables/useResponsive'
+import { onRealtimeResync } from '@/composables/useWebSocket'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
 import { useNotificationStore } from '@/stores/notification'
 import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '@/features/session'
@@ -196,6 +197,23 @@ async function loadDetail(id: string) {
     probed.value = true
   }
 }
+
+/**
+ * WS 重连后补拉详情 —— 这是"任务完成了、详情却不刷新"的正解。
+ *
+ * 断开期间服务端把事件投给了已经 Unsubscribe 的订阅者，既不置 dropped 标记、
+ * 也没有补发（与 EventBus 缓冲满丢弃是两回事），那段时间的 task_delta 永久消失；
+ * 重连后服务端补发的 snapshot 又是轻量视图（不含 events）。两端都没有 gap 检测，
+ * 于是时间线会永久缺一段 —— 从前只有"手动刷新页面"能救。
+ *
+ * 这里复用 loadDetail：它本就是幂等全量替换 + 去重（syncFromTask 遇 undefined
+ * events 会保留本地流，带 events 才覆盖），所以补拉不会重复插入、也不会清空已有内容。
+ */
+const unregisterResync = onRealtimeResync(() => {
+  const id = taskId.value
+  if (id) void loadDetail(id)
+})
+onBeforeUnmount(unregisterResync)
 
 /** 决策请求期间的忙态：三个动作共用同一段收尾，各写一份 try/finally 才会漏掉一个 */
 async function runDecision(fn: () => Promise<void>) {

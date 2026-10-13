@@ -11,6 +11,18 @@ export interface WebSocketClientOptions {
   url: () => string
   onMessage: (data: unknown) => void
   onStateChange: (state: ConnectionState) => void
+  /**
+   * 重连成功后的补拉钩子（首次连接不触发）。
+   *
+   * 为什么必须有这个钩子：断开期间服务端事件投给了已经 Unsubscribe 的订阅者
+   * （见 internal/api/ws.go 的 defer），**不是** EventBus 的"缓冲满丢弃"，
+   * 因此既不置 dropped 标记、也没有任何补发 —— 那段时间的 task_delta 永久消失。
+   * 重连后服务端补发的 snapshot 又是轻量视图（不含 events），
+   * 于是时间线会永久缺一段，直到用户手动刷新页面。
+   *
+   * 这个钩子就是那条缺失的补拉路径：重连后由调用方重新拉取当前详情（幂等全量替换）。
+   */
+  onReconnected?: () => void
 }
 
 export class WebSocketClient {
@@ -19,6 +31,8 @@ export class WebSocketClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   /** 手动断开后不再自动重连 */
   private manualClose = false
+  /** 是否曾经成功连上过（区分首次连接与重连，见 onopen） */
+  private hasConnectedBefore = false
 
   constructor(private opts: WebSocketClientOptions) {}
 
@@ -35,8 +49,15 @@ export class WebSocketClient {
       return
     }
     this.ws.onopen = () => {
+      // 是否"重连"要在 reset 之前判定：reset 会把 attempts 清零，
+      // 之后就无法区分首次连接与重连了。
+      const isReconnect = this.hasConnectedBefore
+      this.hasConnectedBefore = true
       this.policy.reset()
       this.setState('connected')
+      // 首次连接不补拉：服务端紧接着就会发首帧 snapshot（且此时详情页自己会按需拉）。
+      // 只有重连才存在"空窗期"——见 onReconnected 的说明。
+      if (isReconnect) this.opts.onReconnected?.()
     }
     this.ws.onmessage = (e) => {
       try {
