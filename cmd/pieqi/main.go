@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -555,8 +556,74 @@ func main() {
 		go runner.ResumeInterruptedWithInitiator(ids, ver, initiator)
 	}
 
-	if err := r.Run(addr); err != nil {
+	// 先自己 bind（带退避重试），再交给 gin —— 不用 r.Run(addr)。
+	//
+	// 为什么不让 r.Run 自己 bind：它失败即 FATAL，而自重启场景下"失败"只是
+	// 旧实例还没释放端口（见 listenWithRetry 的说明）。先拿到 listener 再 serve，
+	// 就把"重启把服务弄挂"降级成"重启慢几百毫秒"。
+	ln, err := listenWithRetry(addr, bindRetryTimeout, logger)
+	if err != nil {
 		logger.Fatal("server", zap.Error(err))
+	}
+	if err := r.RunListener(ln); err != nil {
+		logger.Fatal("server", zap.Error(err))
+	}
+}
+
+// bindRetryTimeout 是 listenWithRetry 的总等待上限。
+//
+// 取值依据：旧实例收到"新实例已就绪"的误判后立即 exit(0)，其 LISTEN 释放通常在
+// 几十毫秒内完成（实测故障窗口 ~150ms）。这里给到 10s，比实际需要宽两个数量级，
+// 既足够覆盖最坏情况（旧实例在退出前还要清理 preview/桥等子进程），
+// 又不至于让"端口真被别人占着"这种配置错误拖太久才报出来。
+const bindRetryTimeout = 10 * time.Second
+
+// listenWithRetry 在端口被瞬时占用时退避重试 bind，返回已就绪的 listener。
+//
+// 为什么需要它（2026-10-13 实测事故）：自重启换二进制后，新实例绑不上端口就
+// 直接 FATAL 退出，而旧实例此时**已经退出** —— 服务彻底消失，用户看到"重启把服务
+// 弄挂了"，要等几分钟后才有人工拉起。
+//
+// 根因不是"端口真被别的程序占了"，而是**交接窗口**：
+// selfrestart 的健康判据是 canDial(addr)，而旧进程自己还监听着该端口 ⇒ 探测第一次
+// 就返回 true ⇒ 旧进程立刻 exit(0)，根本没等新实例 bind。Windows 上 Go 不设
+// SO_REUSEADDR，旧进程的 LISTEN 尚未释放 ⇒ 新实例 EADDRINUSE。
+// 实测日志特征：`new instance spawned` 与 `is serving` **同一毫秒**（真进程不可能
+// 0ms 起好），随后 `FATAL listen tcp :3000: bind: Only one usage of each socket address`。
+//
+// 所以这里**不是**在容忍配置错误，而是给"旧实例正在退出"这段必然存在的窗口留出时间。
+// 等待上限取得比旧实例退出所需的实际时间（毫秒级）宽裕得多，因此正常重启只是
+// 多花几百毫秒；真被别的程序长期占用时，仍会以原来的 FATAL 结束（不会无限等）。
+//
+// 这也顺带修好了另一个场景：外部快速 kill + 立即重启（同上竞态，旧进程未必来得及
+// 释放端口）。
+func listenWithRetry(addr string, timeout time.Duration, logger *zap.Logger) (net.Listener, error) {
+	deadline := time.Now().Add(timeout)
+	delay := 50 * time.Millisecond
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			if attempt > 1 {
+				logger.Info("bind succeeded after retry",
+					zap.String("addr", addr), zap.Int("attempt", attempt))
+			}
+			return ln, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		if attempt == 1 {
+			// 只在首次失败时记一条：这是"旧实例还没走干净"的信号，
+			// 有它才能把"重启慢了几百毫秒"与"端口真被占"区分开。
+			logger.Info("bind busy, retrying (old instance may still be shutting down)",
+				zap.String("addr", addr), zap.Error(err))
+		}
+		time.Sleep(delay)
+		if delay < 500*time.Millisecond {
+			delay *= 2
+		}
 	}
 }
 
