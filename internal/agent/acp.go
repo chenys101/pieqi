@@ -108,8 +108,9 @@ type ACPAgent struct {
 	// catalogMu/modelCatalog/catalogSrc 是 agent 最近一次建/续会话时下发的可选模型清单，
 	// 以及**它是从哪条通道读到的**。
 	//
-	// 两条通道：标准 configOptions（原生 agent，如 qodercli）与
-	// _meta["pieqi/configOptions"]（本仓库 fork 的 dsh-acp）。catalogSrc 不只是描述，
+	// 两条通道：标准 configOptions（原生 agent，如 qodercli / 官方 dsh-acp）与
+	// _meta["pieqi/configOptions"]（兜底通道；曾用于一份已弃用的本地 dsh-acp fork，
+	// 见 docs/adr/0011）。catalogSrc 不只是描述，
 	// 它决定**写**回哪条通道 —— 标准用 session/set_config_option，_meta 用请求的
 	// _meta.model。判据与理由见 model_catalog.go 的 catalogSource。
 	// 用途：GET /api/agents/:name/models 的一次性探测（见 model_catalog.go）。
@@ -184,8 +185,8 @@ type acpConn interface {
 	NewSession(ctx context.Context, params acp.NewSessionRequest) (acp.NewSessionResponse, error)
 	LoadSession(ctx context.Context, params acp.LoadSessionRequest) (acp.LoadSessionResponse, error)
 	ResumeSession(ctx context.Context, params acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error)
-	// SetSessionConfigOption 是标准通道下"切模型"的手段（原生 agent，如 qodercli）。
-	// fork 的 dsh-acp 隐藏了 configOptions，调它会抛错，故只对 catalogStandard 使用。
+	// SetSessionConfigOption 是标准通道下"切模型"的手段（原生 agent，如 qodercli / 官方 dsh-acp）。
+	// _meta 通道的 agent 隐藏了 configOptions，调它会抛错，故只对 catalogStandard 使用。
 	SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error)
 	Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error)
 	Cancel(ctx context.Context, params acp.CancelNotification) error
@@ -638,8 +639,8 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 		//
 		// dsh 实测只实现 resume（caps 无 load）。
 		//
-		// Meta 同样带上本任务的模型：改造过的 agent 会把它当作"会话没有历史路由时的兜底"
-		// （agent 自己记的上次路由优先，见 forks/dsh-acp 的 selectionFor）。原生 agent 忽略。
+		// Meta 同样带上本任务的模型：认这条扩展位的 agent 会把它当作"会话没有历史路由时的兜底"
+		// （agent 自己记的上次路由优先）。原生 agent 忽略它。
 		// 两条路径的响应都要接住清单 —— 续问时它是"这个会话能选哪些模型"的唯一来源。
 		if a.agentCaps.LoadSession {
 			resp, err := a.conn.LoadSession(sessCtx, acp.LoadSessionRequest{
@@ -674,7 +675,7 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 
 	// 新建会话路径（原逻辑）
 	// Meta 带上本任务的模型：ACP 协议没有"建会话指定模型"的字段，走标准 _meta 扩展位
-	// 传给改造过的 agent（见 agent.TurnModelSetter / forks/dsh-acp）。原生 agent 忽略它，
+	// 传给认它的 agent（见 agent.TurnModelSetter）。原生 agent 忽略它，
 	// 所以原生 agent 的模型由下面的 applyModel 经 session/set_config_option 落定。
 	resp, err := a.conn.NewSession(sessCtx, acp.NewSessionRequest{
 		Cwd:        cfg.Cwd,
@@ -684,7 +685,7 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 	if err != nil {
 		return "", fmt.Errorf("acp: new session: %w", err)
 	}
-	// 清单可能来自标准 configOptions（原生 agent）或 _meta（fork 的 dsh-acp），
+	// 清单可能来自标准 configOptions（原生 agent）或 _meta（兜底通道），
 	// 顺手记下供探测接口读 —— 读到哪条通道也决定了后面往哪条写。
 	a.rememberCatalog(resp.ConfigOptions, resp.Meta)
 	if err := a.applyModel(sessCtx, string(resp.SessionId), cfg.Model); err != nil {
@@ -699,8 +700,8 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 //
 //   - catalogStandard（原生 ACP agent，如 qodercli / **官方 dsh-acp**）→
 //     session/set_config_option；
-//   - catalogMeta（本仓库 fork 的 dsh-acp）→ **什么都不做**：建/续会话请求里已经带了
-//     `_meta.model`，那侧在 session/new 时就吃掉了它（见 forks/dsh-acp 的 selectionFor）。
+//   - catalogMeta（兜底通道）→ **什么都不做**：建/续会话请求里已经带了
+//     `_meta.model`，那侧在 session/new 时就吃掉了它。
 //     这里再发一次 set_config_option 会直接抛错（它把 configOptions 隐藏成恒空）。
 //   - catalogNone（不支持选模型）→ 静默跳过：指定了也不生效，但**不报错** ——
 //     Task.Model 此时只是一个记录值（如 claude 走桥时 SDK 层根本没有 model 字段，
@@ -775,7 +776,7 @@ func fallbackModel(cat ModelCatalog) string {
 // SetTurnModel 设定下一轮 prompt 使用的模型（空串 = 不改）。实现 agent.TurnModelSetter。
 //
 // 两条通道都支持，由清单来源决定走哪条（见 promptOnce）：
-// _meta（fork 的 dsh-acp）或标准 session/set_config_option（原生 agent，如 qodercli）。
+// _meta（兜底通道）或标准 session/set_config_option（原生 agent，如 qodercli / 官方 dsh-acp）。
 // 为什么由调用方在每轮 Run 前设置而不是挂在 SendPrompt 参数上：见 TurnModelSetter 的说明。
 func (a *ACPAgent) SetTurnModel(model string) {
 	a.turnMu.Lock()
@@ -899,8 +900,8 @@ const maxPromptImages = 8
 
 // buildPromptBlocks 把文本 + 图片组装成 ACP 的 prompt 内容块序列。
 //
-// 顺序：**文本在前，图片紧随其后**。理由：dsh-acp 的 admitAcpPrompt 按块序
-// 重建 content（见 forks/dsh-acp lib/index.js），把图放在文本之前会让模型的
+// 顺序：**文本在前，图片紧随其后**。理由：对端（dsh-acp 的 admitAcpPrompt）按块序
+// 重建 content，把图放在文本之前会让模型的语境变成"先看到图，再看到问题"；
 // 语境变成"先看到图，再看到问题"；而人写提示词的习惯就是"先说要什么，再给素材"。
 //
 // 校验在这里做（而不是只靠 agent）：mime 白名单与 base64 形状在协议层就是硬要求，
@@ -929,9 +930,9 @@ func buildPromptBlocks(text string, images []ImageInput) ([]acp.ContentBlock, er
 
 // imageMimeWhitelist 允许的图片 MIME 类型。
 //
-// 与 forks/dsh-acp 的 IMAGE_MEDIA_TYPES 保持一致 —— 那里是**唯一**的最终把关，
-// 这里提前拦只是为了给出更清楚的错误。多一种这里放行而 agent 拒收的类型，
-// 表现就是一句语焉不详的协议错误。
+// 与对端 agent 的图片类型白名单（dsh-acp 的 IMAGE_MEDIA_TYPES）保持一致 ——
+// 那里是**唯一**的最终把关，这里提前拦只是为了给出更清楚的错误。
+// 多一种这里放行而 agent 拒收的类型，表现就是一句语焉不详的协议错误。
 var imageMimeWhitelist = map[string]bool{
 	"image/png":  true,
 	"image/jpeg": true,
@@ -1047,9 +1048,9 @@ func isBase64Char(c byte) bool {
 // 按轮指定的模型（"发提示词时选"）取后即清，未指定则沿用会话当前路由。
 // 写回哪条通道看清单来源（见 catalogSource）：
 //
-//   - catalogStandard（原生 agent，如 qodercli）→ 先 session/set_config_option，
+//   - catalogStandard（原生 agent，如 qodercli / 官方 dsh-acp）→ 先 session/set_config_option，
 //     再发 prompt。顺序不能反：set 是对**会话**生效的，prompt 必须跑在设置之后。
-//   - catalogMeta / catalogNone → 走请求 _meta.model（fork 的 dsh-acp 吃这个；
+//   - catalogMeta / catalogNone → 走请求 _meta.model（兜底通道的 agent 吃这个；
 //     不支持的 agent 会忽略它，行为与改动前一致）。
 //
 // blocks 非 nil 时用它作为 prompt 内容（图文混合）；nil 表示纯文本，用 text 组块。

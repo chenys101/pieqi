@@ -17,7 +17,15 @@ pieqi 要让手机端能"发一张图给 agent 看"（截图报 bug、拍张照�
 
 把图片 base64 写进 `TaskEvent` 的话，每条带图消息会给任务文件加几 MB，而 `task_updated` 会把整份 Task 在 WS 上全量推给每个连接的客户端 —— **每发一轮图，所有在线设备都要下载一遍那几 MB**。这正是当初把 events 从列表摘掉的那个坑，只是量级更大（那时是几十 KB 的文本，这是几 MB 的二进制）。
 
-另一个不能忽略的点：**能收图这件事不是 pieqi 说了算**。它取决于对端 agent 在握手时的声明。qodercli v1.1.64 实测声明 `promptCapabilities.image = true`（见 `acp initialized` 日志的 `prompt_image` 字段）；claude 桥的 prompt 接口只有文本，恒为 false。同一条链路上两种 agent 能力不同。
+另一个不能忽略的点：**能收图这件事不是 pieqi 说了算**。它取决于对端 agent 在握手时的声明。qodercli v1.1.64 实测声明 `promptCapabilities.image = true`（见 `acp initialized` 日志的 `prompt_image` 字段）。同一条链路上不同 agent 的能力不同，且**会随实现演进而变**。
+
+> **后续修订（2026-10-13）**：本条原文写着「claude 桥的 prompt 接口只有文本，恒为 false」。
+> 那是当时的实情，但根因在 **pieqi 自己的桥**（`session.js` 把 SDK 的 `content` 写死成字符串
+> `content: item.text`），不是 Claude 没有视觉能力 —— 已装的 Agent SDK 类型与 CLI 本地 schema
+> 都证明 image content block 是一等概念。桥已打通 content blocks，claude 现在**能**收图
+> （`SupportsImagePrompt()` 返回 true；端到端实测：发纯红图，模型答"红色"）。
+> 判据也已从"前端按 agent 名硬编码"改为**服务端目录下发**（`AgentInfo.ImagePrompt`）——
+> 能力取决于配置：claude 走桥有图片通路，配成 `transport: print` 就没有。
 
 ## 决策
 

@@ -13,14 +13,19 @@
 //
 //   - **标准 `configOptions`**：ACP 协议正路。原生 agent（qodercli 实测 v1.1.64）
 //     就走这条：`session/new` 响应里带 id="model" 的 select 项。
-//   - **`_meta["pieqi/configOptions"]`**：本仓库 fork 的 dsh-acp 私有通道。它出于
-//     「不向通用客户端暴露 ACP config」的考虑把标准 configOptions 隐藏了（恒空），
-//     改把真实清单挂在这个 _meta 键上（见 forks/dsh-acp 的 A3）。
+//   - **`_meta["pieqi/configOptions"]`**：为一份**已弃用**的本地 dsh-acp fork 加的私有通道。
+//     那个 fork 出于「不向通用客户端暴露 ACP config」的考虑把标准 configOptions 隐藏成恒空，
+//     改把真实清单挂在这个 _meta 键上（A3）。fork 已删（见 docs/adr/0011），
+//     **当前没有任何 agent 走这条通道**，但分支刻意保留 —— 见下方"为什么保留"。
 //
 // 为什么要分通道而不能只读一个（2026-10-08 实证）：bd0cd28 为迁就 fork 后的 dsh
 // 把读取从标准字段整体换成 _meta，**qoder 是这次迁移的附带损伤** —— 它是原生 ACP
 // 实现，_meta 整个缺失，于是清单恒空、前端显示"该 Agent 不提供可选模型"，
 // 而它其实既下发清单（`qmodel_38max` / `qfmodel`）又接受 `session/set_config_option`。
+//
+// **为什么 fork 已删仍保留 catalogMeta 分支**：它是"标准字段恒空时怎么活"的协议容错，
+// 不是 fork 专属。删掉等于假定所有 ACP agent 都合规 —— 而 bd0cd28 已经演示过
+// 这种假定会怎样误伤一个正常 agent。将来任何不合规/被改造的 agent 都会落到这里。
 //
 // 「从哪读到」还决定「往哪写」：标准通道要用 `session/set_config_option`，
 // _meta 通道要用请求的 `_meta.model`（dsh 侧 configOptions 恒空，set_config_option
@@ -45,8 +50,8 @@ import (
 // catalogSource 说明"这份清单是从哪条通道读到的"，同时决定**写**回哪条通道。
 //
 // 读与写必须同源：标准通道的 agent 不认 `_meta.model`（原生实现会忽略扩展位），
-// 而 _meta 通道的 agent（fork 的 dsh-acp）标准 configOptions 恒空、
-// `set_config_option` 会抛错（见 forks/dsh-acp/FORK.md 的 A1）。猜错任一侧，
+// 而 _meta 通道的 agent 标准 configOptions 恒空、`set_config_option` 会抛错
+// （隐藏 configOptions 正是那条通道存在的前提）。猜错任一侧，
 // 表现都是"界面显示已切换、实际没换"——最难排查的那类静默失效。
 type catalogSource int
 
@@ -61,8 +66,10 @@ const ModelConfigID = "model"
 
 // modelCatalogMetaKey 是响应 _meta 里承载真实配置清单的键。
 //
-// 必须与 forks/dsh-acp（lib/index.js 的 catalogMeta()）保持一致 —— 那侧改键名，
-// 这里要跟着改，否则清单恒空（表现为前端没有模型下拉）。
+// 键名来自那份**已弃用**的本地 dsh-acp fork（其 lib/index.js 的 catalogMeta()）——
+// 双方改键名必须同步，否则清单恒空（表现为前端没有模型下拉）。
+// fork 已删（见 docs/adr/0011），但常量与 catalogMeta 分支**保留**：
+// 它是"标准 configOptions 恒空"时的兜底通道，见文件头的说明。
 const modelCatalogMetaKey = "pieqi/configOptions"
 
 // ModelOption 一个可被选择的模型。
@@ -156,9 +163,9 @@ func strDeref(p *string) string {
 // pickCatalog 从一次会话协商的两种来源里挑出清单，并报出它是从哪条通道来的。
 //
 // 优先级：**标准字段优先**。理由：标准字段存在即说明 agent 是原生实现、走协议正路，
-// 而走正路的 agent 支持 `set_config_option`；fork 的 dsh-acp 标准字段恒空，
-// 自然落到 _meta 分支。反过来先看 _meta 的话，一个"两者都发"的 agent 会被误判成
-// fork 通道，于是用 `_meta.model` 去设模型——原生 agent 会忽略它，静默失效。
+// 而走正路的 agent 支持 `set_config_option`；标准字段恒空的 agent 自然落到 _meta 分支。
+// 反过来先看 _meta 的话，一个"两者都发"的 agent 会被误判成 _meta 通道，
+// 于是用 `_meta.model` 去设模型——原生 agent 会忽略它，静默失效。
 func pickCatalog(opts []acp.SessionConfigOption, meta map[string]any) (ModelCatalog, catalogSource) {
 	if cat := ExtractModelCatalog(opts); len(cat.Options) > 0 {
 		return cat, catalogStandard
@@ -260,16 +267,21 @@ func probeAgentModels(ctx context.Context, agentName string) (ModelCatalog, erro
 // 原始错误只给出失效的 id，不说是哪份配置、更不说怎么修；2026-10-07 就因此
 // 从外网只能看到一个语焉不详的失败，排查成本不低。
 //
-// 注：改造过的 dsh-acp 在 acp 配置**没有** provider/model 时会回退部署默认模型
-// （agent-default-model），所以这条错误只在"pin 写了但写错"时出现。
+// 注：**pin 缺失与 pin 写错都会失败**（官方 dsh-acp 没有配置兜底）。曾经那份本地 fork
+// 的 B1 能在 pin 缺失时回退到部署默认模型（agent-default-model），它已弃用
+// （见 docs/adr/0011），所以现在 pin 必须是有效值。
 //
 // ⚠️ "没有 provider/model" 在 dsh 里**不等于"删掉 `- id: acp` 那一行"**：
 // `@deepseek-ai/dsh-acp-app` bundle 自带 `provider: deepseek-official` /
 // `model: deepseek-v4-flash`，删掉自己那行只会让 bundle 的值生效 —— 那个 provider
 // 需要 DEEPSEEK_API_KEY，本机没有，于是 `session/prompt` 报
 // `no API key for provider route "deepseek-official"`（**建会话能过，第一轮才炸**）。
-// 要真正表达「不指定」，得在 patch 里显式写空（`- id: acp` 下的两行）：
-// `provider: !!js undefined` 与 `model: !!js undefined`。
+//
+// ⚠️⚠️ **不要**再用「显式写空 `provider/model: !!js undefined`」来表达"用部署默认模型"：
+// 那条路依赖已弃用 fork 的 B1 兜底（见 docs/adr/0011）。官方 dsh-acp 下 pin 一空，
+// 会话就没有模型，首轮报
+// `prompt variable "{{model}}" has no value for this assembly`。
+// 换言之：**pin 必须写成一个有效值**，没有"交给部署默认"这个选项。
 func explainProbeErr(err error) error {
 	if err == nil || !strings.Contains(err.Error(), "has no configured model") {
 		return err
@@ -278,7 +290,8 @@ func explainProbeErr(err error) error {
 		"`- id: acp` 的 model 已不在 `llm-pi-ai` 的 models 清单中，上游下架/改名模型时会这样。"+
 		"修法：改 ~/.dsh/profiles/acp/cordis.patch.yml 的该行，改成清单里仍存在的 id"+
 		"（注意 provider 前缀：`workbuddy/` 与 `workbuddy-ai/` 是两个不同的桶）；"+
-		"想改成「用部署默认模型」就把这两行写成 `!!js undefined`（**别只删掉整行**，"+
-		"bundle 会兜回需要 DEEPSEEK_API_KEY 的 deepseek-official），再用 "+
-		"`dsh --profile acp --dump-config` 校验（清单的权威来源是网关 GET /v1/models）", err)
+		"**别把它清空或删掉整行** —— 官方 dsh-acp 没有配置兜底，pin 一空会话就没有模型"+
+		"（清空报 `{{model}} has no value`；删整行会被 bundle 兜回需要 DEEPSEEK_API_KEY 的 "+
+		"deepseek-official）。再用 `dsh --profile acp --dump-config` 校验"+
+		"（清单的权威来源是网关 GET /v1/models）", err)
 }

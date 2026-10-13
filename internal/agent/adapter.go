@@ -70,7 +70,8 @@ type SessionConfig struct {
 	// `["magpie","group/auto-deepseek-v4-1-flash"]` —— 从 GET /api/agents/{name}/models
 	// 拿到后原样回传，**不要自己拼**（拼错的下场是建会话直接失败）。
 	//
-	// 只有支持外部指定模型的 agent（本仓库 fork 过的 dsh-acp）认它；其余 agent 传了无人消费。
+	// 只有支持外部指定模型的 agent（走 ACP `_meta.model` 那条扩展位的）认它；
+	// 其余 agent 传了无人消费（原生 ACP agent 用 session/set_config_option，见 acp.go 的 applyModel）。
 	// 服务端不做「值必须在清单里」的入参校验：校验要么触发一次探测（起 agent 进程，把
 	// 请求拖到秒级），要么依赖可能过期的缓存 —— 错的取值会在建会话时**明确报错**，
 	// 失败是响亮的，不会静默跑错。
@@ -118,8 +119,9 @@ type UsageReporter interface {
 //   - ACP 的 ImageContent.data 就是无前缀 base64；
 //   - 带前缀会让对端把前缀也当数据解码，得到的字节数对不上、图片损坏。
 //
-// MimeType 必须是 image/png | image/jpeg | image/webp | image/gif（dsh-acp
-// 只认这四个，见 forks/dsh-acp 的 IMAGE_MEDIA_TYPES）。传别的会在 agent 侧报错。
+// MimeType 必须是 image/png | image/jpeg | image/webp | image/gif（对端 agent
+// 只认这四个，见 acp.go 的 imageMimeWhitelist 与 agent 侧的 IMAGE_MEDIA_TYPES）。
+// 传别的会在 agent 侧报错。
 type ImageInput struct {
 	// Data 标准 base64 编码的图片字节。
 	Data string

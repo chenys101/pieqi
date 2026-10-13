@@ -2,10 +2,13 @@
 //
 // 守的是什么（2026-10-08 的实证结论）：清单有**两条**通道，读哪条决定写哪条。
 //
-//   - 原生 agent（qodercli 实测 v1.1.64）→ 标准 `configOptions` +
+//   - 原生 agent（qodercli 实测 v1.1.64；官方 dsh-acp 同）→ 标准 `configOptions` +
 //     `session/set_config_option`；
-//   - fork 的 dsh-acp → `_meta["pieqi/configOptions"]` + 请求 `_meta.model`
-//     （它把标准 configOptions 隐藏成恒空，set_config_option 会抛错）。
+//   - _meta 通道 → `_meta["pieqi/configOptions"]` + 请求 `_meta.model`
+//     （该通道的 agent 把标准 configOptions 隐藏成恒空，set_config_option 会抛错）。
+//     它曾用于一份**已弃用的**本地 dsh-acp fork（见 docs/adr/0011），现在没有 agent 走，
+//     但分支与其用例**刻意保留** —— 它是"标准字段恒空"时的协议容错，
+//     删掉等于假定所有 ACP agent 都合规（bd0cd28 已演示过这种假定的代价）。
 //
 // 回归背景：bd0cd28 为迁就 fork 后的 dsh，把清单读取从标准字段整体换成 _meta。
 // **qoder 是那次迁移的附带损伤** —— 它是原生 ACP 实现，_meta 整个缺失，于是清单恒空、
@@ -80,7 +83,7 @@ func TestExtractModelCatalog_StandardOptions(t *testing.T) {
 }
 
 // TestPickCatalog_PrefersStandardThenMeta 挑清单的优先级：
-// 标准字段优先，没有才落到 _meta —— 反过来会把"两者都发"的原生 agent 误判成 fork 通道，
+// 标准字段优先，没有才落到 _meta —— 反过来会把"两者都发"的原生 agent 误判成兜底通道，
 // 于是用 _meta.model 去设模型，原生 agent 忽略它，静默失效。
 func TestPickCatalog_PrefersStandardThenMeta(t *testing.T) {
 	std := []acp.SessionConfigOption{modelSelect("std-model", opt("std-model", "Std", ""))}
@@ -101,7 +104,7 @@ func TestPickCatalog_PrefersStandardThenMeta(t *testing.T) {
 			t.Fatalf("Current=%q want std-model", cat.Current)
 		}
 	})
-	t.Run("只有 _meta → catalogMeta（fork 的 dsh-acp）", func(t *testing.T) {
+	t.Run("只有 _meta → catalogMeta（兜底通道）", func(t *testing.T) {
 		cat, src := pickCatalog(nil, meta)
 		if src != catalogMeta {
 			t.Fatalf("src=%v want catalogMeta", src)
@@ -130,7 +133,7 @@ func TestPickCatalog_PrefersStandardThenMeta(t *testing.T) {
 type fakeModelConn struct {
 	// newSessionResp 是 session/new / load / resume 响应的模板。
 	newSessionResp acp.NewSessionResponse
-	// setErr 非空时让 SetSessionConfigOption 返回该错误（模拟 fork 的 dsh 抛错）。
+	// setErr 非空时让 SetSessionConfigOption 返回该错误（模拟 _meta 通道的 agent 抛错）。
 	setErr error
 	// setCalls 记录每次 set_config_option 的 (sessionId, configId, value)。
 	setCalls []setCall
@@ -248,17 +251,19 @@ func TestACPAgent_NativeAgentReadsStandardConfigOptions(t *testing.T) {
 	}
 }
 
-// TestACPAgent_ForkDshKeepsMetaChannel dsh 侧不能被这次改动打破：
-// 标准 configOptions 恒空、清单只在 _meta 时，
+// TestACPAgent_MetaChannelKeepsWorking 兜底通道（标准字段恒空、清单只在 _meta）不能被打破：
 //
 //	① 清单仍要读到；
-//	② **不能**发 set_config_option（fork 隐藏了 config，调它会抛错）；
+//	② **不能**发 set_config_option（该通道隐藏了 config，调它会抛错）；
 //	③ 指定模型仍走请求 _meta.model。
-func TestACPAgent_ForkDshKeepsMetaChannel(t *testing.T) {
+//
+// 名字里不再带 fork：那份 fork 已弃用删除（docs/adr/0011），但**这条通道与其用例保留** ——
+// 它是"标准字段恒空"时的协议容错，未来任何不合规的 ACP agent 都会落到这里。
+func TestACPAgent_MetaChannelKeepsWorking(t *testing.T) {
 	conn := &fakeModelConn{
 		newSessionResp: acp.NewSessionResponse{
 			SessionId: "dsh-sess",
-			// fork 后的形态：标准字段恒空，清单挂 _meta
+			// 兜底通道的形态：标准字段恒空，清单挂 _meta
 			ConfigOptions: []acp.SessionConfigOption{},
 			Meta: map[string]any{modelCatalogMetaKey: []any{
 				map[string]any{
@@ -284,7 +289,7 @@ func TestACPAgent_ForkDshKeepsMetaChannel(t *testing.T) {
 	}
 	if len(conn.setCalls) != 0 {
 		t.Fatalf("对 _meta 通道的 agent 发了 set_config_option（%+v）——"+
-			"fork 的 dsh-acp 隐藏了 configOptions，调它会抛错", conn.setCalls)
+			"该通道的 agent 隐藏了 configOptions，调它会抛错", conn.setCalls)
 	}
 }
 
@@ -344,7 +349,7 @@ func TestACPAgent_EmptyModelFallsBackToFirstOption(t *testing.T) {
 		}
 	})
 
-	t.Run("_meta 通道 + 空 model → 不发 set（fork 会抛错）", func(t *testing.T) {
+	t.Run("_meta 通道 + 空 model → 不发 set（该通道会抛错）", func(t *testing.T) {
 		conn := &fakeModelConn{
 			newSessionResp: acp.NewSessionResponse{
 				SessionId: "s2",
@@ -366,7 +371,7 @@ func TestACPAgent_EmptyModelFallsBackToFirstOption(t *testing.T) {
 			t.Fatalf("NewSession: %v", err)
 		}
 		if len(conn.setCalls) != 0 {
-			t.Fatalf("对 _meta 通道的 agent 发了 set_config_option（%+v）—— fork 隐藏了 "+
+			t.Fatalf("对 _meta 通道的 agent 发了 set_config_option（%+v）—— 该通道隐藏了 "+
 				"configOptions，调它会抛错", conn.setCalls)
 		}
 	})
