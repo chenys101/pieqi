@@ -295,6 +295,15 @@ func (s *TaskStore) load() error {
 		// - waiting_input(choice, 路径 B)：进程本就 end_turn 退出（合法持久态），保留 waiting_input，
 		//   用户隔天仍可选项触发 Resume 续跑。
 		//
+		// ⚠️ 不变量：**waiting_input(approval) 必须有一个活着的 owner**。
+		// 卡片是"进程挂在 channel 上等人答"的可视化，owner 一死卡片就是遗物。
+		// 违反它的表现是「卡片可点，点了必然 409」（2026-10-13 线上事故）：
+		// 交接单的 affected 列表是**发起重启那一刻**的快照，而审批卡可能在此之后才
+		// 产生（该次实测：快照 12:53:32.860，卡片 12:53:36.360，相差 3.5s）——
+		// 于是这张卡既不在接续名单里、也没人清算，磁盘上留下一个 status=waiting_input
+		// 且 CurrentDecision 非空的**僵尸态**。所以下面标 failed 时必须一并清空
+		// CurrentDecision，让 UI 不再渲染那张卡。
+		//
 		// 例外（本次自重启事故的修复）：若这张任务是**计划内自重启**打断的
 		// （id 在 interruptedByRestart 里），就**保留 running**，交由启动流程
 		// 自动 resume（见 TaskRunner.ResumeInterrupted）。
@@ -302,6 +311,17 @@ func (s *TaskStore) load() error {
 		// 看到一批莫名的 failed 并被迫人工 resume —— 那正是"老是中断"的体感来源。
 		// 保留 running 也符合既有语义：Resume() 明确接受 running（排队续跑）。
 		if s.interruptedByRestart[t.ID] {
+			// 保留待接续 —— 但**只保留接续逻辑认得的形状**。
+			// ResumeInterrupted 只会处理 running / waiting_input；其余状态（终态、
+			// pending）它第一关就 continue 掉，不会有人来收尾。所以这里必须替它
+			// 把"没有 owner 的审批卡"清掉，否则那张卡会穿过整个接续流程留在盘上，
+			// 前端照样渲染、点了照样 409（与上面同一个不变量）。
+			if t.CurrentDecision != nil && t.CurrentDecision.Kind != model.DecisionKindChoice &&
+				t.Status != model.TaskWaitingInput && t.Status != model.TaskRunning {
+				t.CurrentDecision = nil
+				t.UpdatedAt = time.Now()
+				_ = s.persist(&t)
+			}
 			s.tasks[t.ID] = &t
 			continue
 		}
@@ -322,6 +342,10 @@ func (s *TaskStore) load() error {
 				if t.Error == "" {
 					t.Error = "进程被重启打断"
 				}
+				// **必须同时清掉那张审批卡**（本次事故的修复，见下方长注释）。
+				// 留着它 = 前端照常渲染出一张可点的卡，而后端 pending 表里
+				// 没有任何东西能应答 —— 用户点「批准」只会拿到 409。
+				t.CurrentDecision = nil
 				now := time.Now()
 				t.FinishedAt = &now
 				t.UpdatedAt = now

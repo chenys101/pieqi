@@ -691,6 +691,18 @@ func (tr *TaskRunner) ResumeInterruptedWithInitiator(taskIDs []string, version, 
 		if cur, ok := tr.store.Get(id); ok && cur != nil && !isResumable(cur) {
 			tr.logger.Info("resume interrupted task skipped (not resumable)",
 				zap.String("task", id), zap.String("status", string(cur.Status)))
+			// **跳过 ≠ 放着不管**（2026-10-13 事故的第二个缺口）。
+			// 走到这里的实际只有一种：waiting_input 且 CurrentDecision.Kind==approval。
+			// 在自重启语境下，它的 owner（agent 进程挂在 channel 上的那次
+			// RequestPermission）**必然已随旧进程死亡** —— isResumable 拒绝它的理由
+			// （"进程还活着等你答卡，去走 Intervene"）在此根本不成立。
+			// 于是它成了一个没人接管的中间态：磁盘 status=waiting_input、卡片还在，
+			// 但点「批准」只会在 pending 表里查无此物 ⇒ 409 no pending decision。
+			//
+			// 处置：既然它不可续、owner 又确定已死，就必须清算成终态并清掉卡片，
+			// 让用户看到"这条会话被重启打断了，需要人工重新发起"这一事实，
+			// 而不是对着一个永远点不动的按钮猜哪里坏了。
+			tr.failOrphanedApproval(id)
 			continue
 		}
 		if err := tr.Resume(id, prompt, ""); err != nil {
@@ -1771,6 +1783,22 @@ func (tr *TaskRunner) failTask(taskID, errMsg string) {
 	})
 	tr.logger.Error("task failed", zap.String("task", taskID), zap.String("err", errMsg))
 	tr.notifyFinished(updated, "❌ 任务失败: "+errMsg)
+}
+
+// failOrphanedApproval 清算"孤儿审批卡"：任务停在 waiting_input(approval)，
+// 但 owner（挂在 channel 上等答复的 agent 进程）已随重启死亡。
+//
+// 为什么需要它：这类任务既不满足 isResumable（approval 被 `Kind != choice` 排除），
+// 又不在交接单的接续名单里（名单是重启发起那一刻的快照，而卡片可能之后才产生），
+// 于是谁都不管它。留着就是一张**点了必然 409** 的僵尸卡 —— 用户无法从界面上
+// 区分"还没轮到我批"和"这张卡早就没主了"，只能反复点、反复失败。
+//
+// 与 failTask 的关系：failTask 走 transition 的终态守卫并清 CurrentDecision，
+// 语义正好。这里只负责把"为什么失败"说清楚，让用户知道下一步该做什么
+// （重新发起一轮），而不是看到一句无信息量的"进程被重启打断"。
+func (tr *TaskRunner) failOrphanedApproval(taskID string) {
+	tr.failTask(taskID, "服务自重启打断了这轮执行，挂起的审批已失效（原 agent 进程已退出）；"+
+		"请重新发起一轮继续")
 }
 
 // forceFailTask 强制把 task 置 failed（绕过 transition 的终态守卫），用于续问时原会话丢失等
