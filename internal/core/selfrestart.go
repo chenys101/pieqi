@@ -1,8 +1,11 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -57,6 +60,19 @@ type SelfRestart struct {
 	// 不加锁：它只在"收到请求 → 单次 RestartAndExit"这一条串行路径上写读，
 	// 且重启是全进程生命周期只发生一次的动作。引入互斥反而让这段更难读。
 	pendingInitiator string
+
+	// listener 是当前正在服务的监听器，由 main 在 r.RunListener 之前注入。
+	// 自重启靠 Close 它来**让出端口**（见 RestartAndExit 的顺序注释）。
+	listener net.Listener
+	// exitFn 由 RestartAndExit 记下，供后续 WaitAfterRelease 决定退出时调用。
+	exitFn func(int)
+	// rebindAndServe 由 main 注入：重新 bind 端口并继续服务。
+	//
+	// 注入而不是在 core 里做：重新接管端口意味着"再跑一次 serve 循环"，
+	// 而那需要 gin engine 与全部已接线的依赖 —— 那些都在 main 手里。
+	rebindAndServe func() error
+	// readyTimeout 允许测试缩短（0 = 用默认 restartReadyTimeout）。
+	readyTimeout time.Duration
 }
 
 // NewSelfRestart 构造自重启器。
@@ -304,20 +320,63 @@ func (s *SelfRestart) waitForListener(addr string, timeout time.Duration) bool {
 	return awaitRestartReady(s.dataRoot, timeout)
 }
 
-// RestartAndExit 是给 HTTP 层用的编排：等**响应发出之后**才退出进程。
+// restartReadyTimeout 是旧实例等新实例报到的最长时间。
+//
+// ⚠️ 与 bindRetryTimeout 的关系是**硬约束**，不是随便取的两个数：
+// 新实例必须先有机会抢到端口，旧实例才有理由等下去。两者倒挂就是
+// "新实例已放弃、旧实例还在等"的纯浪费（2026-10-13 实测：10s vs 20s 倒挂）。
+//
+// 取 25s > bindRetryTimeout(10s) + 余量：新实例会在 10s 内作出"能不能 bind"的
+// 最终判断，旧实例留足时间看到结论（报到信号，或它退出后自己重新接管）。
+const restartReadyTimeout = 25 * time.Second
+
+// SetListener 注入当前正在服务的 listener（main 在 r.RunListener 之前调用）。
+//
+// 为什么要把 listener 交给 SelfRestart：让位端口是自重启的必要动作
+// （见 RestartAndExit 的长注释），而"关掉自己那个 listener"只有持有它的人做得到。
+// 注入而不是在 core 里重建，是因为端口的所有权在 main（它才是 bind 的人）。
+func (s *SelfRestart) SetListener(ln net.Listener) { s.listener = ln }
+
+// SetRebindFunc 注入"抢回端口并继续服务"的能力（main 侧接线）。
+//
+// 不接线时 WaitAfterRelease 会以 exit(1) 收场：宁可退出让外部拉起，
+// 也不要留下一个既不服务、也不退出的僵尸进程。
+func (s *SelfRestart) SetRebindFunc(f func() error) { s.rebindAndServe = f }
+
+// IsListenerClosed 判断 RunListener 返回的错误是否只是"listener 被我们主动关了"。
+//
+// 为什么要区分：自重启让位时会 Close listener，RunListener 随即返回。
+// 若把它当普通错误 FATAL，旧实例会在新实例尚未接手时就死掉 ——
+// 那正是要消灭的"重启把服务弄挂"。
+func IsListenerClosed(err error) bool {
+	return errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed)
+}
+
+// RestartAndExit 是给 HTTP 层用的编排：等**响应发出之后**才换二进制、让位、退出。
 //
 // 时序是关键 —— 必须让调用方先收到 202，否则重启会把请求连接一起吞掉，
 // agent 无从判断是"已触发"还是"崩了"，只能瞎猜重试（这正是本次要实现的东西
 // 要消灭的那类不确定性）。
 //
-// exit 由 main 注入（os.Exit），便于测试替换。
+// ★ 顺序（2026-10-13 死锁事故的修复，务必先读懂再改）：
 //
-// 两条"失败也不退出"的分支是刻意的：旧实例还活着且仍能服务，比退出去什么都
-// 不剩要好。宁可重启没成功（调用方可以从端口/日志看出来），也不要服务消失。
+//	① Restart()：备份、换二进制、落交接单、spawn 新实例
+//	② **让出端口**（Close listener）—— 必须在等新实例之前
+//	③ 等新实例报到（写就绪文件）
+//	④ 报到 ⇒ 退出，把服务交给它；没报到 ⇒ 回滚 + 抢回端口继续服务
 //
-// 交接单（见 restart_journal.go）：**在 Restart() 里、spawn 新进程之前**就落盘，
-// 因为新进程读它的时机远早于"端口能连上"，等到 waitForListener 之后再写必然
-// 晚于读取（2026-10-06 实测的竞态，详见 Restart 第 ③ 步注释）。
+// 上一版把 ② 漏了，只做了 ①③④，于是形成闭环死锁：
+//
+//	新实例要 bind :3000 → 得等旧实例退出
+//	旧实例要退出         → 得等新实例报到（而那发生在其 bind 成功之后）
+//
+// 实测（20:52）：新实例 bind 重试 10s 后 FATAL 退出，旧实例 20s 后判超时回滚
+// —— 谁都没错，是顺序错了。**旧实例必须先让出端口，再等新实例。**
+//
+// 让位后 RunListener 会返回（listener 已 Close）。**等待与决策在后台 goroutine 里
+// 完成**（见函数末尾），不依赖调用方再回来驱动 —— 这样：
+//   - main 侧只需把 RunListener 返回当"正常让位"处理，不必自己编排状态机
+//   - 本函数的行为可被单元测试完整覆盖（否则决策逻辑要跑起整个进程才能触达）
 func (s *SelfRestart) RestartAndExit(addr string, exit func(int)) {
 	time.Sleep(500 * time.Millisecond) // 给响应留出 flush 时间
 
@@ -326,31 +385,86 @@ func (s *SelfRestart) RestartAndExit(addr string, exit func(int)) {
 		return
 	}
 
-	// 等到新实例**自己报到**（写就绪文件）。判据见 waitForListener 的注释：
-	// 绝不能用"端口能不能连"——那是同义反复，会让旧进程在新实例 bind 之前就退出。
-	//
-	// 这里刻意**不**在这里写交接单：它在 Restart() 里、spawn 之前就落盘了
-	// （新进程读单子的时机远早于开始服务，写在这里必然晚于读取）。
-	if !s.waitForListener(addr, 20*time.Second) {
-		// 新实例没能起来（端口被占、配置错、迁移 panic）。此刻二进制**已经换掉**，
-		// 若不回滚就是一个"跑不起来的版本 + 一个即将退出的旧进程"= 服务消失。
-		//
-		// 所以先把旧二进制换回来再继续服务：magpie 的 RelaunchBinary 同样是
-		// "起不来就把 old 放回去，并且**继续跑**而不是退出"。
-		// 判据与顺序：先回滚文件，再保持自己存活 —— 只要自己还活着，服务就没断。
-		if rbErr := s.rollbackBinary(); rbErr != nil {
-			s.logf("self-restart: new instance never reported ready AND rollback failed",
-				"err", rbErr.Error(), "hint", "需人工恢复 "+s.execPath+".old")
-		} else {
-			s.logf("self-restart: new instance never reported ready within 20s; rolled back to previous binary, keeping current process alive")
+	if s.listener == nil {
+		// 没注入 listener 就没法让出端口 —— 继续等只会死锁。
+		// 明确记下来并退出：让外部拉起（技能里的 §2.1 路径）兜住。
+		s.logf("self-restart: no listener injected; cannot release the port, exiting for an external restart")
+		if exit != nil {
+			exit(0)
 		}
 		return
 	}
 
-	s.logf("self-restart: new instance is serving, exiting old process")
-	if exit != nil {
-		exit(0)
+	s.exitFn = exit
+	s.logf("self-restart: releasing listening port so the new instance can bind",
+		"addr", addr)
+	// 关掉 listener ⇒ RunListener 返回 ⇒ 端口腾出来给新实例。
+	_ = s.listener.Close()
+
+	// 让位已发生：在后台完成"等新实例报到 → 退出 / 回滚 + 抢回"。
+	// 用 goroutine 是因为这里不能阻塞 HTTP 处理链（虽然此时响应已发出）。
+	go s.WaitAfterRelease()
+}
+
+// WaitAfterRelease 在 listener 已被让出之后，决定"退出让位"还是"抢回端口继续服务"。
+//
+// 调用者（main）在 RunListener 因 listener 被关而返回后调用它。三条出路：
+//   - 新实例报到 ⇒ exit(0)，把服务交给它
+//   - 新实例没起来 ⇒ 回滚二进制，**重新 bind 并继续服务**（进程不退出）
+//   - 抢不回端口 ⇒ 说明别人已经在服务，退出（避免两个实例打架）
+//
+// 这是 2026-10-13 死锁事故的修复：上一版让旧实例"等到新实例报到才退出"，
+// 但**没让它让出端口**，于是
+//     新实例要 bind → 得等旧实例退出
+//     旧实例要退出   → 得等新实例报到（发生在其 bind 成功之后）
+// 形成闭环，实测结果是新实例 10s 后 FATAL、旧实例 20s 后回滚，重启永远不成。
+//
+// 正确顺序：**先让出端口，再等新实例**。让位之后若新实例仍起不来，
+// 旧实例抢回端口继续服务 —— 最坏情况退化成"重启没成功但服务一直在"。
+func (s *SelfRestart) WaitAfterRelease() {
+	if s.shouldExitAfterRelease() {
+		if s.exitFn != nil {
+			s.exitFn(0)
+		}
+		return
 	}
+	// 抢回端口继续服务。
+	if s.rebindAndServe == nil {
+		s.logf("self-restart: no rebind hook wired; exiting so an external supervisor can restart us")
+		if s.exitFn != nil {
+			s.exitFn(1)
+		}
+		return
+	}
+	if err := s.rebindAndServe(); err != nil {
+		// 抢不回来（多半是新实例其实起来了、只是信号没写成功）。
+		// 此时最不该做的就是再抢 —— 退出，让已经在服务的那个留着。
+		s.logf("self-restart: could not re-bind the port; exiting (another instance is likely serving)",
+			"err", err.Error())
+		if s.exitFn != nil {
+			s.exitFn(1)
+		}
+	}
+}
+
+// shouldExitAfterRelease 等新实例报到；等到就回滚前先不做，直接返回 true。
+func (s *SelfRestart) shouldExitAfterRelease() bool {
+	if s.readyTimeout == 0 {
+		s.readyTimeout = restartReadyTimeout
+	}
+	if awaitRestartReady(s.dataRoot, s.readyTimeout) {
+		s.logf("self-restart: new instance reported ready, exiting old process")
+		return true
+	}
+	// 新实例没起来：先把旧二进制换回来（此刻端口是空的，换文件不影响服务）。
+	if err := s.rollbackBinary(); err != nil {
+		s.logf("self-restart: new instance never reported ready AND rollback failed",
+			"err", err.Error(), "hint", "需人工恢复 "+s.execPath+".old")
+	} else {
+		s.logf("self-restart: new instance never reported ready; rolled back to previous binary",
+			"timeout", s.readyTimeout.String())
+	}
+	return false
 }
 
 // rollbackBinary 把 <execPath>.old 换回 execPath（新实例没起来时的退路）。

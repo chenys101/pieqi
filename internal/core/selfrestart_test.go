@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -592,5 +593,199 @@ func TestCleanupStagedIfConsumed_MissingStagedIsSafe(t *testing.T) {
 	// 已安装的 exe 必须安然无恙
 	if _, err := os.Stat(execPath); err != nil {
 		t.Fatalf("exe 被误伤：%v", err)
+	}
+}
+
+// ---- 死锁回归：让出端口必须发生在等新实例**之前** ----
+//
+// 事故（2026-10-13 20:52 实测）：上一版让旧实例"等到新实例报到才退出"，
+// 却没让它让出端口，于是形成闭环：
+//
+//	新实例要 bind :3000 → 得等旧实例退出
+//	旧实例要退出         → 得等新实例报到（发生在其 bind 成功之后）
+//
+// 实测结果：新实例 bind 重试 10s 后 FATAL，旧实例 20s 后回滚 —— 重启永远不成。
+// 修法：**先关掉自己的 listener 让出端口，再等新实例**。以下测试钉住这个顺序。
+
+// TestRestartAndExit_ReleasesPortBeforeWaiting 让位必须先于等待。
+//
+// 判据：调用 RestartAndExit 后 listener 应**立即**被关闭（而不是等超时后才关）。
+// 若不成立，新实例在整个等待窗口里都 bind 不上 —— 正是死锁。
+func TestRestartAndExit_ReleasesPortBeforeWaiting(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	if err := os.WriteFile(execPath, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(dir, "pieqi.new"+exeSuffix())
+	if err := os.WriteFile(staged, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 起一个真实 listener 充当"旧实例占着的端口"。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	sr := NewSelfRestart(execPath, dir, dir, nil)
+	sr.SetListener(ln)
+	sr.readyTimeout = 300 * time.Millisecond // 缩短等待，测试不必真等 25s
+	exited := make(chan int, 1)
+	sr.SetRebindFunc(func() error { return nil }) // 抢回：本测试只关心"没退出"
+
+	// RestartAndExit 会：换二进制 → 关 listener（让位）→ 返回（不阻塞等待）。
+	sr.RestartAndExit(ln.Addr().String(), func(code int) { exited <- code })
+
+	// ★ 核心断言：端口必须**已**被让出 —— 用"能不能重新 bind 上"来验证。
+	//
+	// 为什么不直接对旧 listener 调 Accept 看它是否报错：Go 里 Close 并发进行中的
+	// Accept **不保证立即返回**（实测在 Windows 上会一直阻塞），拿它当判据会写出
+	// 一个永远卡住的测试。而"端口是否可被占用"才是真正决定新实例生死的那条性质
+	// —— 新实例要做的正是 net.Listen 同一个地址。
+	//
+	// 注：这里必须先 Close 掉测试自己持有的 ln（defer 里的那份），否则同进程内
+	// 它自己还占着地址。故先显式关，再尝试 bind。
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	rebind, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("端口未被让出（新实例会 bind 失败 ⇒ 死锁）：%v", err)
+	}
+	_ = rebind.Close()
+
+	// 等后台决策落地：新实例没报到 ⇒ 应走"抢回端口"，**不能退出**。
+	select {
+	case code := <-exited:
+		t.Fatalf("不该退出（应抢回端口继续服务），却 exit(%d)", code)
+	case <-time.After(3 * time.Second):
+		// 预期：既不退出，也已让出端口。
+	}
+}
+
+// TestWaitAfterRelease_ExitsWhenNewInstanceReportsReady 新实例报到 ⇒ 退出让位。
+//
+// 直接测 WaitAfterRelease（而非整个 RestartAndExit）：后者要真的 spawn 一个可执行
+// 子进程，在单测里只能用文本文件冒充，spawn 必然失败并**正确地**提前返回
+// （"spawn 失败就保持现状"）。决策逻辑本身在 WaitAfterRelease 里，而它不需要 spawn。
+func TestWaitAfterRelease_ExitsWhenNewInstanceReportsReady(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	if err := os.WriteFile(execPath, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(execPath+".old", []byte("older"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sr := NewSelfRestart(execPath, dir, dir, nil)
+	sr.readyTimeout = 6 * time.Second
+
+	exited := make(chan int, 1)
+	sr.exitFn = func(code int) { exited <- code }
+	sr.SetRebindFunc(func() error {
+		t.Error("新实例已报到，不该走抢回分支")
+		return nil
+	})
+
+	go sr.WaitAfterRelease()
+
+	// 让位之后，模拟"另一个进程报到"。必须用**别的** pid：
+	// awaitRestartReady 会排除自身 pid（那是防同义反复的判据之一）。
+	time.Sleep(100 * time.Millisecond)
+	foreign := RestartReady{PID: os.Getpid() + 1, At: time.Now()}
+	b, _ := json.Marshal(foreign)
+	if err := os.WriteFile(readyPath(dir), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case code := <-exited:
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0（成功让位）", code)
+		}
+	case <-time.After(9 * time.Second):
+		t.Fatal("新实例已报到，旧实例却没有退出让位")
+	}
+}
+
+// TestWaitAfterRelease_RollsBackAndKeepsServing 新实例没起来 ⇒ 回滚 + 抢回端口保活。
+//
+// 这是"最坏情况"的定义：重启没成功，但**服务一直在**。
+func TestWaitAfterRelease_RollsBackAndKeepsServing(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	if err := os.WriteFile(execPath, []byte("new-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(execPath+".old", []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs []string
+	sr := NewSelfRestart(execPath, dir, dir, func(msg string, kv ...any) {
+		logs = append(logs, fmt.Sprintf("%s %v", msg, kv))
+	})
+	sr.readyTimeout = 300 * time.Millisecond // 新实例不会报到
+
+	rebound := make(chan struct{}, 1)
+	sr.SetRebindFunc(func() error {
+		rebound <- struct{}{}
+		return nil
+	})
+	exited := make(chan int, 1)
+	sr.exitFn = func(code int) { exited <- code }
+
+	go sr.WaitAfterRelease()
+
+	select {
+	case <-rebound:
+		// 正确：抢回端口继续服务
+	case code := <-exited:
+		t.Fatalf("新实例没起来时不该退出（服务会消失），却 exit(%d)；日志=%v", code, logs)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("既没抢回端口，也没退出 —— 卡住了；日志=%v", logs)
+	}
+
+	// 二进制必须已回滚：下次重启才有得跑。
+	got, err := os.ReadFile(execPath)
+	if err != nil {
+		t.Fatalf("read execPath: %v", err)
+	}
+	if string(got) != "old-binary" {
+		t.Fatalf("execPath=%q, want 回滚成 old-binary；日志=%v", got, logs)
+	}
+}
+
+// TestWaitAfterRelease_NoRebindHookExits 没接线 rebind 时不能变成僵尸进程。
+//
+// 判据：既抢不回端口、又不退出 = 一个不再服务的进程白占着 PID，
+// 而外部监督者（技能 §2.1 的拉起路径）也无从判断该不该介入。
+func TestWaitAfterRelease_NoRebindHookExits(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	if err := os.WriteFile(execPath, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(execPath+".old", []byte("older"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sr := NewSelfRestart(execPath, dir, dir, nil)
+	sr.readyTimeout = 200 * time.Millisecond
+	// 刻意不 SetRebindFunc
+
+	exited := make(chan int, 1)
+	sr.exitFn = func(code int) { exited <- code }
+
+	go sr.WaitAfterRelease()
+
+	select {
+	case code := <-exited:
+		if code == 0 {
+			t.Fatal("没抢回端口却报 exit(0)（会让调用方以为服务已交给别人）")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("没接线 rebind 时既没抢回也没退出 —— 变成僵尸进程")
 	}
 }

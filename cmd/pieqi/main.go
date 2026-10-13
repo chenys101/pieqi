@@ -458,6 +458,10 @@ func main() {
 	// 达阈值自动重启隧道换新域名并推送）。进程生命周期运行，随 os.Exit 终止。
 	tunnelMgr.StartHealthCheck(cfg.Auth.Cloudflared.HealthCheckInterval, cfg.Auth.Cloudflared.HealthCheckFailures)
 
+	// 自重启器在下面的 API 分支里构造，但 serve 处也要用（注入 listener 与 rebind），
+	// 所以提前声明。为 nil = 没接线（API 未启用），此时不参与重启编排。
+	var selfRestart *core.SelfRestart
+
 	// API
 	if cfg.API.Enabled {
 		apiServer := api.NewServer(cfg, store, runner, hooks, bus, skills, commands)
@@ -489,7 +493,7 @@ func main() {
 		//
 		// 编排在后台 goroutine 里跑（先回 202 再退出），见 core.SelfRestart.RestartAndExit。
 		stageDir := resolveStagingDir(cfg)
-		selfRestart := core.NewSelfRestart(execPath, dataRoot, stageDir, func(msg string, kv ...any) {
+		selfRestart = core.NewSelfRestart(execPath, dataRoot, stageDir, func(msg string, kv ...any) {
 			logger.Info(msg, zap.Any("detail", kv))
 		})
 		logger.Info("self-restart staging dir resolved", zap.String("dir", stageDir))
@@ -582,6 +586,28 @@ func main() {
 		logger.Fatal("server", zap.Error(err))
 	}
 
+	// 把 listener 交给自重启编排：它需要在等新实例之前**让出端口**，
+	// 否则新实例永远 bind 不上（2026-10-13 死锁事故，见 core.RestartAndExit）。
+	// 赋值发生在 r.RunListener 之前，故不存在数据竞争。
+	//
+	// selfRestart 为 nil 表示 API 未启用 ⇒ 根本没人能触发重启，无需接线。
+	if selfRestart != nil {
+		selfRestart.SetListener(ln)
+		// 新实例起不来时，用它抢回端口继续服务
+		// （最坏情况 = "重启没成功但服务一直在"，而不是服务消失）。
+		selfRestart.SetRebindFunc(func() error {
+			ln2, err := net.Listen("tcp", addr)
+			if err != nil {
+				return err
+			}
+			logger.Info("self-restart: re-bound the port, serving with the previous binary", zap.String("addr", addr))
+			if err := r.RunListener(ln2); err != nil && !core.IsListenerClosed(err) {
+				return err
+			}
+			return nil
+		})
+	}
+
 	// ★ 报到自己已开始服务 —— 这是自重启能安全退出旧进程的**唯一**依据。
 	//
 	// 必须在 listener 已建立之后、且尽早调用：旧进程就卡在等这个信号
@@ -597,6 +623,17 @@ func main() {
 	}
 
 	if err := r.RunListener(ln); err != nil {
+		// 自重启让位时会 Close listener，RunListener 随即返回 —— 那不是错误，
+		// 而是"我正在把端口交出去"的正常路径，不能再 FATAL（那会让旧实例
+		// 在新实例尚未接手时就死掉，正是要消灭的"服务消失"）。
+		if core.IsListenerClosed(err) {
+			// 正常让位路径：RestartAndExit 已把 listener 关掉，并在后台完成了
+			// "等新实例报到 → 退出 / 回滚 + 抢回端口"的决策（见那边的说明）。
+			// 这里只需安静退出 serve 调用，**不要**再驱动一次决策
+			// （那会让两个 goroutine 同时抢端口）。
+			logger.Info("listener released for self-restart; the outcome is handled in the background")
+			select {} // 让后台决策决定生死：要么 exit，要么在 rebind 里重新 serve
+		}
 		logger.Fatal("server", zap.Error(err))
 	}
 }
