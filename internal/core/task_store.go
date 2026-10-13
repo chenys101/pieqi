@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -34,6 +35,11 @@ type TaskStore struct {
 	// 莫名其妙的 failed，还得人工 resume。由 SetInterruptedByRestart 在
 	// store 构造后、服务开始服务前注入（见 main 的接线顺序）。
 	interruptedByRestart map[string]bool
+	// badFiles 是启动时读不出来的任务文件（见 load / BadTaskFile）。
+	//
+	// 记下来而不是就地吞掉：坏文件是**数据丢失的现场**，必须能在日志与诊断导出里
+	// 看到"丢了几个、坏在哪、证据留在哪"。原先裸 continue 让这一切无声无息。
+	badFiles []BadTaskFile
 }
 
 // NewTaskStore 创建并从磁盘恢复任务索引。
@@ -278,15 +284,37 @@ func (s *TaskStore) load() error {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(s.tasksDir, e.Name()))
+		full := filepath.Join(s.tasksDir, e.Name())
+		data, err := os.ReadFile(full)
 		if err != nil {
+			// 读不到就跳过：可能是并发写期间的瞬时占用（rename 窗口）。
+			// 但要**留痕**，否则一个持续读不出来的文件等于静默丢任务。
+			s.recordBadTaskFile(e.Name(), fmt.Sprintf("读文件失败：%v", err))
 			continue
 		}
 		var t model.Task
 		if json.Unmarshal(data, &t) != nil {
+			// ★ 解析失败**不能静默跳过**（2026-10-13 修）。
+			//
+			// 原先这里是裸 `continue`：文件坏了就当作"没有这个任务"，不打日志、
+			// 不计数、不保留 —— 用户看到的是"任务凭空消失"，而日志里一个字都没有。
+			// 最可能的坏法正是**全长零字节**：rename 已改目录项、数据还在页缓存时
+			// 断电（与 magpie issue #1505 同一失效模式，见 persist 的说明），
+			// 而零字节 JSON 必然解析失败。
+			//
+			// 现在的处置（对齐 magpie internal/lastgood 的"a file that is there but
+			// not valid is unknown, never empty"）：
+			//   1. 把坏文件**另存**为 <name>.bad-<时间>，绝不就地丢弃
+			//      —— 它是唯一可能事后恢复的证据；
+			//   2. 记进 badFiles，由调用方在启动日志里显式报出来。
+			// 仍然跳过（不阻塞启动）：一个坏文件不该让整个服务起不来。
+			s.recordBadTaskFile(e.Name(), describeBadJSON(data))
+			s.quarantineBadTaskFile(full, e.Name())
 			continue
 		}
 		if t.ID == "" {
+			s.recordBadTaskFile(e.Name(), "缺少 id 字段")
+			s.quarantineBadTaskFile(full, e.Name())
 			continue
 		}
 		// 进程重启后 claude 子进程已死。
@@ -384,7 +412,7 @@ func renameWithRetry(rename func() error) error {
 	return err
 }
 
-// persist 原子落盘：写 tmp 再 rename。
+// persist 原子落盘：写 tmp → **刷盘** → rename。
 //
 // 调用方**必须**持有 s.mu（Create/Update/Delete 都在锁内调用；load 只在
 // NewTaskStore 里单线程跑）。tmp 名带 pid：进程内已由写锁串行化，这个后缀防的是
@@ -395,6 +423,25 @@ func renameWithRetry(rename func() error) error {
 // 并发写串行化之后，单线程纯循环 400 次仍会失败 3~5 次（ERROR_ACCESS_DENIED，
 // temp 与非 temp 目录都有），来源于杀软/索引器对刚落盘的目标文件的瞬时持有；
 // 不加这层重试，生产上照样会间歇性丢一条干预/事件。
+//
+// ⚠️ 为什么必须在 rename **之前** fsync（2026-10-13 补）：
+//
+// rename 只是一个目录项改动，它**到盘的时刻由 OS 自行安排，而它背后的数据更晚**。
+// 于是存在一个致命的中间态：目录项已指向新文件，而新文件的数据块还留在页缓存里。
+// 此刻断电/蓝屏 ⇒ 得到一个**长度正确、内容全是 0** 的文件。
+//
+// 这不是理论担忧：magpie 记录过一模一样的事故（issue #1505，其 internal/steady
+// 包的注释）—— 机器在 write 与 rename 之间down掉，`logins.json` 变成"全长零字节"，
+// 程序读出"零个账号"，**下一次写入把这个状态固化**，账号就此丢失。
+//
+// pieqi 的暴露面完全相同，且后果更隐蔽：坏掉的 `<id>.json` 会被 load 静默跳过
+// （见 load 里对 Unmarshal 失败的处理），用户看到的是"任务凭空消失"，而日志里
+// 一个字都没有。
+//
+// 所以顺序写死为 write → Sync → close → rename：Sync 保证数据先落盘，
+// 之后 rename 才可能把目录项指过去。宁可每次多花一次 fsync 的代价
+// （本地 SSD 上亚毫秒级，而这是**事件流落盘**的必经路径），也不要一个
+// "看起来正常、实际全零"的任务文件。
 func (s *TaskStore) persist(t *model.Task) error {
 	data, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
@@ -402,9 +449,14 @@ func (s *TaskStore) persist(t *model.Task) error {
 	}
 	path := s.path(t.ID)
 	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+
+	// 手写而不是 os.WriteFile：后者内部 create→write→close 一气呵成，
+	// 拿不到中间的文件句柄，也就没机会在 close 前 Sync。
+	if err := writeFileSynced(tmp, data, 0644); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
+
 	errRename := renameWithRetry(func() error { return os.Rename(tmp, path) })
 	if errRename != nil {
 		// 落盘失败别把 tmp 留在目录里（load 只认 *.json，无害但会越积越多）。
@@ -413,6 +465,90 @@ func (s *TaskStore) persist(t *model.Task) error {
 	return errRename
 }
 
+// writeFileSynced 写文件并确保内容**真的落盘**（close 之前 fsync）。
+//
+// 抽成独立函数是为了让"必须先 Sync 再 rename"这条纪律有一个可测试的落点
+// —— 见 task_store_sync_test.go。
+func writeFileSynced(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	// Sync 失败**必须**当作写入失败：它意味着数据可能没落盘，
+	// 此时若继续 rename，就等于亲手把目录项指向一个内容不可信的文件。
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 func (s *TaskStore) path(id string) string {
 	return filepath.Join(s.tasksDir, id+".json")
+}
+
+// BadTaskFile 描述一个启动时读不出来的任务文件。
+//
+// 存在的理由：这类失败**必须可见**。原先 load 对坏文件是裸 continue，
+// 表现是"任务凭空消失"而日志全干净 —— 排查时无从下手（不知道有几个、坏在哪）。
+type BadTaskFile struct {
+	// Name 是文件名（<taskid>.json）。
+	Name string
+	// Reason 是人读的坏因（空的 / 全零 / 解析失败 / 缺 id）。
+	Reason string
+	// KeptAs 是坏文件被另存的路径（"" = 另存失败，原文件仍在原处）。
+	KeptAs string
+}
+
+// recordBadTaskFile 记下一个坏任务文件（load 期间单线程调用，无需加锁）。
+func (s *TaskStore) recordBadTaskFile(name, reason string) {
+	s.badFiles = append(s.badFiles, BadTaskFile{Name: name, Reason: reason})
+}
+
+// quarantineBadTaskFile 把坏文件另存为 <name>.bad-<时间>，并让原名消失。
+//
+// 为什么是"另存 + 移除原名"而不是只打日志：原名留着会让每次启动都重复报同一个错
+// （噪音淹没真问题），而直接删掉则丢掉唯一可能事后恢复的证据。
+// 另存解决了这个两难 —— 错只报一次，证据还在。
+//
+// 后缀 `.bad-<时间>` 不含 `.json`，所以不会被 load 再次当成任务文件捡起来。
+func (s *TaskStore) quarantineBadTaskFile(full, name string) {
+	kept := fmt.Sprintf("%s.bad-%s", full, time.Now().Format("20060102-150405"))
+	if err := os.Rename(full, kept); err != nil {
+		// 另存失败（权限/占用）不致命：文件仍在原处，只是每次启动会再报一次。
+		return
+	}
+	s.badFiles[len(s.badFiles)-1].KeptAs = kept
+}
+
+// BadFiles 返回启动时读不出来的任务文件（供 main 记日志/诊断导出）。
+//
+// 返回副本：调用方不该改内部切片。
+func (s *TaskStore) BadFiles() []BadTaskFile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.badFiles)
+}
+
+// describeBadJSON 说明一份解析不了的 JSON 坏在哪，用于日志与诊断。
+//
+// 特意把"全长零字节"单独识别出来：它是最需要警惕的一种坏法 —— 不是文件写错，
+// 而是**掉电/蓝屏**在 rename 与数据落盘之间留下的痕迹（见 persist 的说明），
+// 意味着磁盘上可能还有别的文件处于同样状态。含糊地报"解析失败"会让人往
+// "数据格式不对"的方向找，而真相在存储层。
+func describeBadJSON(b []byte) string {
+	switch {
+	case len(b) == 0:
+		return "文件为空（0 字节）"
+	case len(bytes.Trim(b, "\x00")) == 0:
+		// 全长但每个字节都是 0x00：掉电特征，与 magpie issue #1505 同一模式。
+		return fmt.Sprintf("%d 字节但全为 0x00（掉电/蓝屏留下的空块特征）", len(b))
+	case len(bytes.TrimSpace(b)) == 0:
+		return "文件只有空白字符"
+	}
+	return "JSON 解析失败"
 }

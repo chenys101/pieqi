@@ -38,7 +38,7 @@ type RestartJournal struct {
 	// 新进程算出自己的 exe 摘要与之相等 ⇒ 切换确实发生了，且跑起来的就是新版本。
 	//
 	// 为什么用内容摘要而不是「端口通了」：Restart() 的三步里，spawn 成功 ≠ 启动成功。
-	// waitForListener 超时时旧进程会**保持存活**（根本不退出），那种情况压根不该有交接单。
+	// 旧进程等不到新实例的就绪信号时会**保持存活并回滚二进制**，那种情况不该有交接单。
 	// 换言之，只要新进程读到了这张单子且 hash 对得上，重启就 100% 成功了。
 	StagedSHA256 string `json:"staged_sha256"`
 	// AffectedTaskIDs 是被这次重启打断的会话。旧进程退出前从 store 里现取，
@@ -48,7 +48,7 @@ type RestartJournal struct {
 	//
 	// 为什么必须单独记它：发起者不在 AffectedTaskIDs 里，而原因是时序 ——
 	// 它调用 POST /api/admin/restart 之后，AgentedTaskIDs 的收集发生在
-	// waitForListener 成功之后，此刻发起者那一轮早已随 agent 子进程死去，
+	// 等新实例就绪成功之后，此刻发起者那一轮早已随 agent 子进程死去，
 	// 状态不再是 running，于是被 LiveTaskIDs 漏掉。结果是它永远拿不到
 	// "重启已完成"这个它本来无法同步获取的信号，也不知道自己触发的动作成了没有。
 	//
@@ -89,10 +89,15 @@ func journalPath(dataRoot string) string {
 	return filepath.Join(dataRoot, restartJournalFile)
 }
 
-// writeRestartJournal 落盘一张交接单（原子写：先临时文件再 rename）。
+// writeRestartJournal 落盘一张交接单（原子写：先临时文件、**刷盘**、再 rename）。
 //
 // 必须原子：新进程可能在任何时刻读它，读到半个 JSON 会解析失败，
 // 进而把一个成功的重启误判成「未成功」——那正是我们要消灭的不确定性。
+//
+// 也必须在 rename 前 fsync：交接单决定"一批 running 会话是保留接续还是判 failed"。
+// 若目录项已指向新文件而数据还在页缓存里，此刻断电就会留下一个**全长零字节**的
+// 单子，新进程解析失败 ⇒ 一批本可接续的会话被判 failed。
+// 同样的失效模式见 TaskStore.persist 与 magpie issue #1505。
 //
 // 复用 TaskStore.persist 同一套 renameWithRetry：Windows 上刚落盘的目标文件
 // 会被杀软/索引器瞬时持有（ERROR_ACCESS_DENIED），不重试就会间歇性写不出交接单，
@@ -104,7 +109,7 @@ func writeRestartJournal(dataRoot string, j *RestartJournal) error {
 	}
 	path := journalPath(dataRoot)
 	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := writeFileSynced(tmp, data, 0o644); err != nil {
 		return fmt.Errorf("write restart journal tmp: %w", err)
 	}
 	if err := renameWithRetry(func() error { return os.Rename(tmp, path) }); err != nil {
@@ -231,10 +236,119 @@ func ResolveRestartHandoffWith(dataRoot, execPath string, attempts int, interval
 	return out
 }
 
+// selfExecutable 返回当前进程的可执行文件路径（算自身摘要用）。
+//
+// 包装 os.Executable 而不直接调用：它失败时返回空串即可 —— 摘要只是信号文件里的
+// 附带信息（供旧进程确认"起的是新版本"），拿不到不该让 MarkRestartReady 失败，
+// 更不该影响新实例启动。真正决定成败的是 PID 与文件是否存在。
+func selfExecutable() string {
+	p, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
 // shortSHA 把摘要截成前 12 位，仅用于日志与界面展示。
 func shortSHA(s string) string {
 	if len(s) > 12 {
 		return s[:12]
 	}
 	return s
+}
+
+// restartReadyFile 是「新实例已开始服务」的信号文件（见 MarkRestartReady）。
+//
+// ⚠️ 为什么必须由**新进程**来写这个文件（这是坑 7 的正解）：
+//
+// 旧实现在旧进程里 waitForListener → canDial(addr) 判断"新实例起来了没有"。
+// 这个判据是**同义反复** —— 旧进程自己就监听着那个端口，于是第一次探测就返回
+// true，旧进程立刻 exit(0)，而新实例 150ms 后才 bind，撞上 EADDRINUSE 而死。
+// 结果：旧的走了、新的死了，**服务彻底消失**（2026-07-07 首次记录，
+// 2026-10-13 12:31 再次复现）。
+//
+// 根因不在"超时太短"，而在**信号源错了**：端口通不通无法区分"新实例在监听"
+// 与"我（旧实例）还在监听"。而"我已经开始服务"这件事只有新进程自己知道。
+// 所以改成单向信号文件：新进程 bind 成功后写它，旧进程等它出现。
+// 文件不存在 = 新进程没起来，旧进程就不退出（保住服务）。
+const restartReadyFile = "restart-ready.json"
+
+// RestartReady 记录新实例"已开始服务"的事实（由新进程写入）。
+type RestartReady struct {
+	// PID 是写下这个信号的新进程 pid。旧进程据此确认"是**别的**进程写的"
+	// —— 这是整个判据的关键：自己的 pid 出现在这里说明读到了上一轮的陈旧文件。
+	PID int `json:"pid"`
+	// At 是写入时刻，纯为排查取证。
+	At time.Time `json:"at"`
+	// SHA256 是新进程自己的 exe 摘要，让旧进程能顺手确认"起的是新版本"。
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+// readyPath 返回信号文件在数据目录下的完整路径。
+func readyPath(dataRoot string) string {
+	return filepath.Join(dataRoot, restartReadyFile)
+}
+
+// MarkRestartReady 由**新实例**在开始服务之后调用，落盘"我起来了"的信号。
+//
+// 调用时机：必须晚于"能对外服务"（listener 已建立），否则旧进程会在新实例
+// 尚不能处理请求时就退出，请求会打空。见 main 里的调用点。
+//
+// 失败不致命：这只是给旧进程的提示，写不出来最坏是旧进程等不到而继续存活
+// （服务不中断）。所以返回 error 供调用方记日志，但不影响启动。
+func MarkRestartReady(dataRoot string) error {
+	// 摘要算不出来就留空：它只是给旧进程的附带信息，不该拖垮"报到我起来了"
+	// 这件正事（旧进程真正依赖的判据是 PID ≠ 自己 + 文件存在）。
+	sum := ""
+	if exe := selfExecutable(); exe != "" {
+		sum, _ = exeSHA256(exe)
+	}
+	p := RestartReady{PID: os.Getpid(), At: time.Now(), SHA256: sum}
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal restart ready: %w", err)
+	}
+	path := readyPath(dataRoot)
+	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+	if err := writeFileSynced(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write restart ready tmp: %w", err)
+	}
+	// 复用同一套 renameWithRetry：Windows 上刚落盘的文件会被杀软瞬时持有。
+	if err := renameWithRetry(func() error { return os.Rename(tmp, path) }); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("install restart ready: %w", err)
+	}
+	return nil
+}
+
+// clearRestartReady 删除信号文件。不存在时不算错误（幂等）。
+func clearRestartReady(dataRoot string) error {
+	if err := os.Remove(readyPath(dataRoot)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// awaitRestartReady 等**别的**进程写下就绪信号，等到返回 true。
+//
+// 判定必须排除"文件是上一轮留下的"以及"是我自己写的"，否则又会退化成
+// 同义反复（读到一个陈旧文件就以为新实例起来了）。两个排除条件：
+//   - PID 必须 ≠ 自己
+//   - 文件必须是本次等待期间出现的（先清掉再等）
+func awaitRestartReady(dataRoot string, timeout time.Duration) bool {
+	// 先清掉可能存在的陈旧信号：否则上一轮留下的文件会让本次等待立即"成功"。
+	_ = clearRestartReady(dataRoot)
+
+	deadline := time.Now().Add(timeout)
+	self := os.Getpid()
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(readyPath(dataRoot)); err == nil {
+			var r RestartReady
+			if json.Unmarshal(b, &r) == nil && r.PID != 0 && r.PID != self {
+				return true
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
 }

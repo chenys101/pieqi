@@ -3,12 +3,10 @@
 package core
 
 import (
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
-	"time"
 )
 
 // spawnDetached 启动新实例并使其脱离当前进程（Unix 侧）。
@@ -33,18 +31,4 @@ func (s *SelfRestart) spawnDetached() error {
 		return err
 	}
 	return cmd.Process.Release()
-}
-
-// canDial 探测端口是否已有监听者。
-func canDial(addr string) bool {
-	host := "127.0.0.1"
-	if len(addr) > 0 && addr[0] != ':' {
-		host = ""
-	}
-	conn, err := net.DialTimeout("tcp", host+addr, 300*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }

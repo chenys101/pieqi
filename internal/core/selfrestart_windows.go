@@ -3,12 +3,10 @@
 package core
 
 import (
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
-	"time"
 )
 
 // spawnDetached 启动新实例，并让它**脱离**当前进程树。
@@ -45,19 +43,4 @@ func (s *SelfRestart) spawnDetached() error {
 	// 不 Wait：新进程必须独立存活。释放句柄即可（Windows 上不 Wait 会留僵尸句柄，
 	// 故显式 Release）。
 	return cmd.Process.Release()
-}
-
-// canDial 探测端口是否已有监听者（新实例是否真的起来了）。
-func canDial(addr string) bool {
-	// addr 形如 ":3000" —— 补上本地回环主机再拨。
-	host := "127.0.0.1"
-	if len(addr) > 0 && addr[0] != ':' {
-		host = ""
-	}
-	conn, err := net.DialTimeout("tcp", host+addr, 300*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }

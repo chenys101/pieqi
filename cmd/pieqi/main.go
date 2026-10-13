@@ -134,6 +134,22 @@ func main() {
 	if err != nil {
 		logger.Fatal("init task store", zap.Error(err))
 	}
+	// 启动时读不出来的任务文件必须**显式报出来**（原先是被静默跳过的）。
+	//
+	// 为什么值得单独一段日志：这类失败的表现是"任务凭空消失"，而此前日志里
+	// 一个字都没有 —— 排查时无从下手。特别是"全长全零"那种，它是掉电/蓝屏在
+	// rename 与数据落盘之间留下的痕迹，意味着磁盘上可能还有别的文件同样受损，
+	// 需要人知道（见 core.describeBadJSON 与 TaskStore.persist 的说明）。
+	if bad := store.BadFiles(); len(bad) > 0 {
+		for _, b := range bad {
+			logger.Error("task file unreadable at startup; task dropped",
+				zap.String("file", b.Name),
+				zap.String("reason", b.Reason),
+				zap.String("kept_as", b.KeptAs))
+		}
+		logger.Warn("some task files could not be read; see the errors above",
+			zap.Int("count", len(bad)))
+	}
 
 	bus := core.NewEventBus()
 	worktreeBase := cfg.Pieqi.WorktreeBase
@@ -565,6 +581,21 @@ func main() {
 	if err != nil {
 		logger.Fatal("server", zap.Error(err))
 	}
+
+	// ★ 报到自己已开始服务 —— 这是自重启能安全退出旧进程的**唯一**依据。
+	//
+	// 必须在 listener 已建立之后、且尽早调用：旧进程就卡在等这个信号
+	// （见 core.SelfRestart.RestartAndExit → awaitRestartReady）。
+	// 早于此（如 spawn 后就写）等于告诉旧进程"可以退了"，而此时新实例还不能
+	// 处理请求；晚太多则旧进程白等。listener 就绪、serve 未起，正是那个点。
+	//
+	// 普通启动（非自重启）也会写：无人等待，多一个几十字节的文件，无害。
+	// 失败只记日志不阻断：最坏是旧进程等不到而继续存活（服务不中断），
+	// 比"因为写不出信号就拒绝启动"好得多。
+	if err := core.MarkRestartReady(dataRoot); err != nil {
+		logger.Warn("mark restart ready failed; an awaiting old process will keep serving", zap.Error(err))
+	}
+
 	if err := r.RunListener(ln); err != nil {
 		logger.Fatal("server", zap.Error(err))
 	}
@@ -572,31 +603,32 @@ func main() {
 
 // bindRetryTimeout 是 listenWithRetry 的总等待上限。
 //
-// 取值依据：旧实例收到"新实例已就绪"的误判后立即 exit(0)，其 LISTEN 释放通常在
-// 几十毫秒内完成（实测故障窗口 ~150ms）。这里给到 10s，比实际需要宽两个数量级，
+// 取值依据：自重启换二进制时，旧实例可能尚未释放端口（它的 LISTEN 需要一点时间
+// 才随进程退出而释放）。这里给到 10s，比实际需要宽两个数量级，
 // 既足够覆盖最坏情况（旧实例在退出前还要清理 preview/桥等子进程），
 // 又不至于让"端口真被别人占着"这种配置错误拖太久才报出来。
+//
+// 注：2026-10-13 起，旧实例**只在收到新实例的就绪信号后**才退出
+// （见 core.MarkRestartReady / awaitRestartReady），所以这个竞态窗口已从
+// "必然发生"降级为"理论上的窄窗口"。本重试保留为纯安全网 —— 它不再承担
+// 修复职责，但仍能覆盖外部快速 kill + 立即重启等本进程无法协调的场景。
 const bindRetryTimeout = 10 * time.Second
 
 // listenWithRetry 在端口被瞬时占用时退避重试 bind，返回已就绪的 listener。
 //
 // 为什么需要它（2026-10-13 实测事故）：自重启换二进制后，新实例绑不上端口就
-// 直接 FATAL 退出，而旧实例此时**已经退出** —— 服务彻底消失，用户看到"重启把服务
-// 弄挂了"，要等几分钟后才有人工拉起。
+// 直接 FATAL 退出，而旧实例此时**已经退出** —— 服务彻底消失。
 //
-// 根因不是"端口真被别的程序占了"，而是**交接窗口**：
-// selfrestart 的健康判据是 canDial(addr)，而旧进程自己还监听着该端口 ⇒ 探测第一次
-// 就返回 true ⇒ 旧进程立刻 exit(0)，根本没等新实例 bind。Windows 上 Go 不设
-// SO_REUSEADDR，旧进程的 LISTEN 尚未释放 ⇒ 新实例 EADDRINUSE。
+// 当时的根因（现已在 selfrestart 侧修掉）：旧实例的健康判据是
+// canDial(addr)，而它自己还监听着该端口 ⇒ 探测第一次就返回 true ⇒ 旧实例
+// 立刻 exit(0)，根本没等新实例 bind。Windows 上 Go 不设 SO_REUSEADDR，
+// 旧实例的 LISTEN 尚未释放 ⇒ 新实例 EADDRINUSE。
 // 实测日志特征：`new instance spawned` 与 `is serving` **同一毫秒**（真进程不可能
 // 0ms 起好），随后 `FATAL listen tcp :3000: bind: Only one usage of each socket address`。
 //
-// 所以这里**不是**在容忍配置错误，而是给"旧实例正在退出"这段必然存在的窗口留出时间。
-// 等待上限取得比旧实例退出所需的实际时间（毫秒级）宽裕得多，因此正常重启只是
-// 多花几百毫秒；真被别的程序长期占用时，仍会以原来的 FATAL 结束（不会无限等）。
-//
-// 这也顺带修好了另一个场景：外部快速 kill + 立即重启（同上竞态，旧进程未必来得及
-// 释放端口）。
+// **正解是换掉那个同义反复的信号源**（新实例写就绪文件报到，见
+// core.awaitRestartReady），而不是靠这里重试兜住。本重试作为第二道防线保留：
+// 真被别的程序长期占用时，仍会以原来的 FATAL 结束（不会无限等）。
 func listenWithRetry(addr string, timeout time.Duration, logger *zap.Logger) (net.Listener, error) {
 	deadline := time.Now().Add(timeout)
 	delay := 50 * time.Millisecond

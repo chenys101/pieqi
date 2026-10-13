@@ -1,6 +1,8 @@
 package core
 
 import (
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,8 +137,7 @@ func TestSelfRestart_StagingFallsBackToDataRoot(t *testing.T) {
 }
 // TestSelfRestart_BacksUpRunningBinary 备份是"改了就跑不起来"时的唯一退路：
 // 必须先把原文件改名成 .old，成功与否都要能找回旧版本。
-func TestSelfRestart_BacksUpRunningBinary(t *testing.T) {
-	dir := t.TempDir()
+func TestSelfRestart_BacksUpRunningBinary(t *testing.T) {	dir := t.TempDir()
 	execPath := filepath.Join(dir, "pieqi.exe")
 	if err := os.WriteFile(execPath, []byte("old-binary"), 0o755); err != nil {
 		t.Fatal(err)
@@ -328,5 +329,268 @@ func TestRestart_NoHandoffLeftBehindWhenSpawnFails(t *testing.T) {
 	// spawn 失败 ⇒ 重启没有发生 ⇒ 盘上不应有交接单。
 	if _, statErr := os.Stat(journalPath(dir)); !os.IsNotExist(statErr) {
 		t.Errorf("spawn 失败后残留了交接单，stat err = %v", statErr)
+	}
+}
+
+// ---- 就绪信号（坑 7 的核心回归）----
+//
+// 事故：旧进程用 canDial(addr) 判断"新实例起来了没有"，而它自己就监听着该端口
+// ⇒ 第一次探测即 true ⇒ 立刻 exit(0) ⇒ 新实例 150ms 后才 bind ⇒ EADDRINUSE
+// ⇒ 服务彻底消失。2026-07-07 首次记录，2026-10-13 12:31 再次复现。
+//
+// 修法：信号只能来自**新进程**（它写就绪文件报到），且必须排除"我自己写的"
+// 与"上一轮遗留的"。以下测试逐条钉住这三个判据。
+
+// TestAwaitRestartReady_NotFooledByStaleFile 陈旧信号文件不得让等待立即成功。
+//
+// 这是"同义反复"的新形态：若不清掉上一轮留下的文件，旧进程会读到一个 PID 属于
+// 早已退出的进程的文件，误判"新实例起来了"而退出 —— 与端口探测犯的是同一个错。
+func TestAwaitRestartReady_NotFooledByStaleFile(t *testing.T) {
+	dir := t.TempDir()
+	// 伪造一个"上一轮"留下的信号（PID 故意不同于当前进程）
+	stale := RestartReady{PID: os.Getpid() + 100000, At: time.Now().Add(-time.Hour)}
+	data, _ := json.Marshal(stale)
+	if err := os.WriteFile(readyPath(dir), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 短超时：陈旧文件**必须**被清掉，因此这里应等到超时返回 false。
+	if awaitRestartReady(dir, 300*time.Millisecond) {
+		t.Fatal("陈旧的就绪信号让等待立即成功 —— 这正是同义反复的复发形态")
+	}
+}
+
+// TestAwaitRestartReady_NotFooledByOwnSignal 自己写的信号不算"新实例报到"。
+func TestAwaitRestartReady_NotFooledByOwnSignal(t *testing.T) {
+	dir := t.TempDir()
+	// MarkRestartReady 用的是当前进程 pid —— 等自己写的信号是纯粹的同义反复。
+	if err := MarkRestartReady(dir); err != nil {
+		t.Fatal(err)
+	}
+	if awaitRestartReady(dir, 300*time.Millisecond) {
+		t.Fatal("把**自己**写的就绪信号当成了新实例报到 —— 判据必须排除自身 PID")
+	}
+}
+
+// TestAwaitRestartReady_SucceedsOnForeignSignal 别的进程写了信号 ⇒ 等待成功。
+func TestAwaitRestartReady_SucceedsOnForeignSignal(t *testing.T) {
+	dir := t.TempDir()
+
+	// 模拟"新实例"：另一个 pid 在 200ms 后写下信号。
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		foreign := RestartReady{PID: os.Getpid() + 1, At: time.Now()}
+		data, _ := json.Marshal(foreign)
+		_ = os.WriteFile(readyPath(dir), data, 0o644)
+	}()
+
+	if !awaitRestartReady(dir, 3*time.Second) {
+		t.Fatal("等到了超时，但新实例确实写下了就绪信号")
+	}
+}
+
+// TestAwaitRestartReady_TimesOutWithoutSignal 新实例没起来时不能谎报成功。
+//
+// 谎报的代价是灾难性的：旧进程会退出，而新实例并不存在 ⇒ 服务消失。
+func TestAwaitRestartReady_TimesOutWithoutSignal(t *testing.T) {
+	dir := t.TempDir()
+	if awaitRestartReady(dir, 300*time.Millisecond) {
+		t.Fatal("没有任何进程写信号，却报告就绪")
+	}
+}
+
+// TestAwaitRestartReady_CorruptSignalIgnored 损坏的信号文件不能当成"已就绪"。
+func TestAwaitRestartReady_CorruptSignalIgnored(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(readyPath(dir), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if awaitRestartReady(dir, 300*time.Millisecond) {
+		t.Fatal("损坏的信号文件被当成了已就绪")
+	}
+}
+
+// TestMarkRestartReady_WritesParseablePID 信号文件必须带可解析的 PID ——
+// 判据完全依赖它（PID ≠ 自己），写不出来等于判据失效。
+func TestMarkRestartReady_WritesParseablePID(t *testing.T) {
+	dir := t.TempDir()
+	if err := MarkRestartReady(dir); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(readyPath(dir))
+	if err != nil {
+		t.Fatalf("信号文件未落盘：%v", err)
+	}
+	var r RestartReady
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatalf("信号文件不可解析：%v", err)
+	}
+	if r.PID != os.Getpid() {
+		t.Fatalf("PID=%d, want %d（当前进程）", r.PID, os.Getpid())
+	}
+}
+
+// TestRollbackBinary_RestoresPreviousBuild 新实例没起来时必须能把旧二进制换回来。
+//
+// 这是"起不来的版本 + 即将退出的旧进程 = 服务消失"的最后一道防线：
+// 二进制已经换成新的了，新版本又跑不起来，不回滚就真的没得跑了。
+func TestRollbackBinary_RestoresPreviousBuild(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	// 现状：路径上是"起不来的新版本"，.old 是可用的旧版本
+	if err := os.WriteFile(execPath, []byte("broken-new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(execPath+".old", []byte("good-old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sr := NewSelfRestart(execPath, dir, dir, nil)
+
+	if err := sr.rollbackBinary(); err != nil {
+		t.Fatalf("rollbackBinary: %v", err)
+	}
+
+	// 路径上必须是旧版本 —— 下次重启才有得跑。
+	got, err := os.ReadFile(execPath)
+	if err != nil {
+		t.Fatalf("read execPath: %v", err)
+	}
+	if string(got) != "good-old" {
+		t.Fatalf("execPath=%q, want %q", got, "good-old")
+	}
+	// 起不来的新版本应被挪到 .failed 保留（供事后排查为什么不起来），而不是删掉。
+	failed, err := os.ReadFile(execPath + ".failed")
+	if err != nil {
+		t.Fatalf("失败版本未保留在 .failed：%v", err)
+	}
+	if string(failed) != "broken-new" {
+		t.Fatalf(".failed=%q, want %q", failed, "broken-new")
+	}
+}
+
+// TestRollbackBinary_NoBackupReportsError 没有备份时必须明确报错，
+// 而不是静默"回滚成功"让调用方以为还有退路。
+func TestRollbackBinary_NoBackupReportsError(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	if err := os.WriteFile(execPath, []byte("only-one"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sr := NewSelfRestart(execPath, dir, dir, nil)
+
+	if err := sr.rollbackBinary(); err == nil {
+		t.Fatal("没有 .old 备份却报告回滚成功")
+	}
+	// 原文件必须原样留着（回滚失败不能把仅有的二进制也搞丢）。
+	got, _ := os.ReadFile(execPath)
+	if string(got) != "only-one" {
+		t.Fatalf("回滚失败后 execPath=%q, want 原内容保留", got)
+	}
+}
+
+// TestWaitForListener_UsesReadySignalNotPort 回归：等待判据必须是"新进程报到"，
+// **不能**退回按端口探测。
+//
+// 这里起一个真实监听同一端口的 listener 来模拟"旧进程自己还在监听"——
+// 旧实现会因此立即返回 true（同义反复），新实现必须仍然等到超时。
+func TestWaitForListener_UsesReadySignalNotPort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	// 持续接受连接，模拟"端口是通的"
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	dir := t.TempDir()
+	sr := NewSelfRestart(filepath.Join(dir, "pieqi.exe"), dir, dir, nil)
+	addr := ln.Addr().String()
+
+	// 端口是通的，但没有新进程写就绪信号 ⇒ 必须返回 false。
+	// 旧实现（canDial）在这里会返回 true，这正是把它改成信号判据的原因。
+	if sr.waitForListener(addr, 400*time.Millisecond) {
+		t.Fatal("端口通就报告新实例就绪 —— 同义反复回归！等待判据必须只看新进程的报到信号")
+	}
+}
+
+// ---- staged 文件的自动清理（对齐 magpie 的 RemoveStaleNew）----
+
+// TestCleanupStagedIfConsumed_RemovesIdentical staged 与已安装内容一致 ⇒ 删掉。
+//
+// 不清理的后果：GET /api/admin/restart 永远报 staged:true，而"待应用的新版本"
+// 其实早就装上了。更糟的是它会给下一次重启埋雷 —— 某次构建后忘记重新投递，
+// 磁盘上却还躺着上一版的同名文件，一次误触就把旧版本换了上去（等于回退）。
+func TestCleanupStagedIfConsumed_RemovesIdentical(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	staged := filepath.Join(dir, "pieqi.new.exe")
+	content := []byte("identical-build")
+	if err := os.WriteFile(execPath, content, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staged, content, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sr := NewSelfRestart(execPath, dir, dir, nil)
+
+	sr.cleanupStagedIfConsumed(staged)
+
+	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+		t.Fatalf("内容一致的 staged 文件未被清理，stat err = %v", err)
+	}
+	// 已安装的 exe 绝不能被误删。
+	if _, err := os.Stat(execPath); err != nil {
+		t.Fatalf("清理误伤了已安装的 exe：%v", err)
+	}
+}
+
+// TestCleanupStagedIfConsumed_KeepsDifferent staged 与已安装内容**不同** ⇒ 必须留着。
+//
+// 这是本函数最重要的保护：不同的内容意味着**有第三方正在交付另一个版本**
+// （并行会话的 agent 刚写好新文件）。此时删掉就是替别人丢掉他的构建产物，
+// 而对方无从得知 —— 他的重启会以"staged binary not found"失败。
+func TestCleanupStagedIfConsumed_KeepsDifferent(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	staged := filepath.Join(dir, "pieqi.new.exe")
+	if err := os.WriteFile(execPath, []byte("installed-build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staged, []byte("someone-elses-new-build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sr := NewSelfRestart(execPath, dir, dir, nil)
+
+	sr.cleanupStagedIfConsumed(staged)
+
+	got, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("内容不同的 staged 文件被误删了（会替并行会话丢掉构建产物）：%v", err)
+	}
+	if string(got) != "someone-elses-new-build" {
+		t.Fatalf("staged 内容被改动：%q", got)
+	}
+}
+
+// TestCleanupStagedIfConsumed_MissingStagedIsSafe staged 不存在时不得 panic 或报错。
+func TestCleanupStagedIfConsumed_MissingStagedIsSafe(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	if err := os.WriteFile(execPath, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sr := NewSelfRestart(execPath, dir, dir, nil)
+	sr.cleanupStagedIfConsumed(filepath.Join(dir, "does-not-exist.exe"))
+	// 已安装的 exe 必须安然无恙
+	if _, err := os.Stat(execPath); err != nil {
+		t.Fatalf("exe 被误伤：%v", err)
 	}
 }

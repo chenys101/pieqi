@@ -167,6 +167,23 @@ func (s *SelfRestart) Restart(stagedPath string) error {
 	}
 	s.logf("self-restart: binary swapped", "exec", s.execPath, "backup", backup)
 
+	// ②b 消费掉 staged 文件。**必须在这里做，且必须按内容比对**。
+	//
+	// 为什么需要它：staged 文件此前从不清理，于是 GET /api/admin/restart 永远报
+	// staged:true（"有待应用的新版本"），而那个版本其实早就装上了。后果不只是
+	// 状态显示不准 —— 它会给下一次重启埋雷：某次构建后忘记重新投递，磁盘上却
+	// 还躺着**上一版的同名文件**，一次误触 restart 就把旧版本换了上去（等于回退）。
+	//
+	// 为什么按内容比对（对齐 magpie 的 RemoveStaleNew）而不是直接删：
+	// 只有当 staged 与"刚装上去的 exe"**内容一致**时才说明它确实被消费了，
+	// 删它是安全的。若两者不同，说明有第三方正在交付另一个版本（并行会话的
+	// agent 刚写好新文件），此时删掉等于替别人丢掉他的构建产物 —— 不能删。
+	//
+	// 失败只记日志：清理是善后，不该让一次已经成功的二进制切换变成失败。
+	if stagedPath != s.execPath {
+		s.cleanupStagedIfConsumed(stagedPath)
+	}
+
 	// ③ 落交接单。**必须在 spawn 之前** —— 这是本文件最反直觉、也最容易写错的一步。
 	//
 	// 曾经的顺序是「spawn → waitForListener → writeHandoff」，它有一个必然发生
@@ -206,6 +223,36 @@ func (s *SelfRestart) Restart(stagedPath string) error {
 	return nil
 }
 
+// cleanupStagedIfConsumed 在 staged 文件与新装的 exe **内容一致**时删掉它。
+//
+// 判据是内容摘要相等，不是"文件名对得上"：
+//   - 相等 ⇒ 它已确实被消费（就是刚装上去那份），删掉是纯善后
+//   - 不等 ⇒ 有人正在交付**另一个**版本，不能替他丢掉
+//
+// 只在重启成功后调用（调用点紧跟 copyFile 成功之后），失败仅记日志。
+func (s *SelfRestart) cleanupStagedIfConsumed(stagedPath string) {
+	stagedSum, err := exeSHA256(stagedPath)
+	if err != nil {
+		// 读不到就什么都不做：宁可不清理，也不能误删。
+		return
+	}
+	execSum, err := exeSHA256(s.execPath)
+	if err != nil {
+		return
+	}
+	if stagedSum != execSum {
+		s.logf("self-restart: staged file differs from installed binary; keeping it",
+			"staged", stagedPath)
+		return
+	}
+	if err := os.Remove(stagedPath); err != nil {
+		// 删不掉不影响服务：只是下次仍会报 staged:true。
+		s.logf("self-restart: could not remove consumed staged file", "err", err.Error())
+		return
+	}
+	s.logf("self-restart: removed consumed staged file", "staged", stagedPath)
+}
+
 // copyFile 复制并保留可执行权限。
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
@@ -237,20 +284,24 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// waitForListener 轮询端口，确认新实例真的起来了。
+// waitForListener 等新实例**报到自己已开始服务**。
 //
-// 存在的理由：spawn 成功 ≠ 启动成功（端口被占、配置错、迁移 panic 都会让新实例
-// 立刻死掉）。如果不等就退出，旧实例一走服务就彻底没了 —— 使用者看到的是
-// "重启把服务弄挂了"。等不到就由调用方回滚（见 RestartAndExit）。
-func waitForListener(addr string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if canDial(addr) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return false
+// ⚠️ 历史（务必先读懂再改，这里踩过一次生产事故）：
+//
+// 本函数原先的实现是轮询 canDial(addr) —— 探测"端口能不能连上"。那是**同义反复**：
+// 旧进程自己就监听着那个端口，于是第一次探测必然返回 true，旧进程立刻 exit(0)，
+// 而新实例还要 ~150ms 才 bind，撞上 EADDRINUSE 直接 FATAL。
+// 结果「旧的走了、新的死了」，服务彻底消失（2026-07-07 首次记录，
+// 2026-10-13 12:31 再次复现，日志里的判据是 spawn 与 is-serving 同一毫秒）。
+//
+// 根因不是超时太短，而是**信号源错了**：端口通不通区分不了"新实例在监听"与
+// "我自己还在监听"。改成由新进程写就绪文件（MarkRestartReady），信号只能来自
+// 新进程，同义反复从结构上不可能再发生。
+//
+// addr 保留在签名里是为了让调用方不必改（且日志里仍有端口信息），但**不再用它判定**。
+func (s *SelfRestart) waitForListener(addr string, timeout time.Duration) bool {
+	_ = addr // 见上：不再依据端口判定，保留形参仅为调用方兼容
+	return awaitRestartReady(s.dataRoot, timeout)
 }
 
 // RestartAndExit 是给 HTTP 层用的编排：等**响应发出之后**才退出进程。
@@ -275,12 +326,24 @@ func (s *SelfRestart) RestartAndExit(addr string, exit func(int)) {
 		return
 	}
 
-	// 到这里切换已确认成功（新实例正监听），可以安全退出了。
+	// 等到新实例**自己报到**（写就绪文件）。判据见 waitForListener 的注释：
+	// 绝不能用"端口能不能连"——那是同义反复，会让旧进程在新实例 bind 之前就退出。
 	//
-	// 交接单**不在这里写** —— 它在 Restart() 里、spawn 之前就落盘了（见那边的
-	// 注释：新进程读单子的时机远早于端口就绪，写在这里必然晚于读取）。
-	if !waitForListener(addr, 20*time.Second) {
-		s.logf("self-restart: new instance not serving within 20s; keeping current process alive")
+	// 这里刻意**不**在这里写交接单：它在 Restart() 里、spawn 之前就落盘了
+	// （新进程读单子的时机远早于开始服务，写在这里必然晚于读取）。
+	if !s.waitForListener(addr, 20*time.Second) {
+		// 新实例没能起来（端口被占、配置错、迁移 panic）。此刻二进制**已经换掉**，
+		// 若不回滚就是一个"跑不起来的版本 + 一个即将退出的旧进程"= 服务消失。
+		//
+		// 所以先把旧二进制换回来再继续服务：magpie 的 RelaunchBinary 同样是
+		// "起不来就把 old 放回去，并且**继续跑**而不是退出"。
+		// 判据与顺序：先回滚文件，再保持自己存活 —— 只要自己还活着，服务就没断。
+		if rbErr := s.rollbackBinary(); rbErr != nil {
+			s.logf("self-restart: new instance never reported ready AND rollback failed",
+				"err", rbErr.Error(), "hint", "需人工恢复 "+s.execPath+".old")
+		} else {
+			s.logf("self-restart: new instance never reported ready within 20s; rolled back to previous binary, keeping current process alive")
+		}
 		return
 	}
 
@@ -288,6 +351,35 @@ func (s *SelfRestart) RestartAndExit(addr string, exit func(int)) {
 	if exit != nil {
 		exit(0)
 	}
+}
+
+// rollbackBinary 把 <execPath>.old 换回 execPath（新实例没起来时的退路）。
+//
+// 只改文件、不重启：调用方仍在运行（旧二进制的内容还在它自己的内存/句柄里，
+// 把路径上的文件换回去不影响当前进程继续服务），下次重启自然用的就是旧版本。
+//
+// 三步都幂等、且失败会明确报出来：这条路上"静默半成功"比失败更危险 ——
+// 会留下一个路径与预期不符的 exe，而没人知道。
+func (s *SelfRestart) rollbackBinary() error {
+	backup := s.execPath + ".old"
+	if _, err := os.Stat(backup); err != nil {
+		return fmt.Errorf("backup %s not available: %w", backup, err)
+	}
+	// 当前路径上是要被丢弃的新版本：先挪开而不是直接覆盖，
+	// 保留它便于事后排查"为什么这个版本起不来"。
+	failed := s.execPath + ".failed"
+	_ = os.Remove(failed)
+	if err := os.Rename(s.execPath, failed); err != nil {
+		return fmt.Errorf("move failed build aside: %w", err)
+	}
+	if err := os.Rename(backup, s.execPath); err != nil {
+		// 回滚失败：尽量把现状还原成"路径上有个 exe"，避免路径空缺。
+		if rbErr := os.Rename(failed, s.execPath); rbErr != nil {
+			return fmt.Errorf("restore backup: %w (AND re-restore failed: %v)", err, rbErr)
+		}
+		return fmt.Errorf("restore backup: %w", err)
+	}
+	return nil
 }
 
 // writeHandoff 落盘交接单，交给即将接管端口的新进程。
