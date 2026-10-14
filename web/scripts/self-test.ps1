@@ -23,9 +23,28 @@ $ErrorActionPreference = 'Stop'
 $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 if (-not (Test-Path $chrome)) { throw "找不到 Chrome：$chrome" }
 
-$root = Split-Path -Parent $PSScriptRoot
-$work = Join-Path $root 'build\selftest'
+# 一次性产物（Chrome profile / 中间 html）落在**系统临时目录**里，不落仓库。
+#
+# 为什么不再放 <repo>/web/build/selftest（2026-10-14 改）：
+#   · 每次跑都新建一个 chrome-prof-<id>，且**从不清理** —— 实测攒了 41 个、约 425MB；
+#   · 它躺在工作区里，就要额外写 .gitignore 规则去挡它，属于"用忽略规则给坏习惯兜底"；
+#   · 这类产物天生一次性，交给操作系统的临时目录回收才是正确归属。
+# 注：只用 $env:TEMP（会话私有、可写）。不使用仓库内路径，避免污染工作区。
+$work = Join-Path ([System.IO.Path]::GetTempPath()) "pieqi-selftest-$([guid]::NewGuid().ToString('N').Substring(0,8))"
 New-Item -ItemType Directory -Force -Path $work | Out-Null
+
+# 本次运行的所有一次性产物都在这一个目录下，结束时整目录删除。
+$cleanup = {
+  if ($work -and (Test-Path -LiteralPath $work)) {
+    Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+# 正常出口（脚本末尾）显式调用 & $cleanup；异常出口靠这个 trap 兜住 ——
+# 脚本设了 $ErrorActionPreference='Stop'，中途任何错误都会终止脚本，若无 trap
+# 就会把 profile 留在临时目录里（虽然 OS 终究会回收，但"跑一次攒一个"正是
+# 本次要修的病，不能在异常路径上复发）。
+trap { & $cleanup; break }
 
 # 每次跑都换一个 Chrome profile 目录：复用同一个 profile 会命中 HTTP/SW 缓存，
 # 表现为"换了 URL 却拿到上一次的结果"（实测踩过，且它**静默**，比报错更危险）。
@@ -212,6 +231,9 @@ foreach ($e in $obj.errs) { Write-Output ("   " + $e) }
 
 $blank = ($obj.textLen -eq 0) -or ($obj.hasTimeline -and -not $obj.timelineVisible) -or ($obj.domNodes -lt 20)
 Write-Output ("白屏判定     : " + $(if ($blank) { 'BLANK / 白屏' } else { 'OK' }))
+
+# 一次性产物清理：三个出口都在这一句之后，所以一定会走到。
+& $cleanup
 if ($blank) { exit 1 }
 if ($obj.errs.Count -gt 0) { exit 1 }
 exit 0
