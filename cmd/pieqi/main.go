@@ -485,17 +485,27 @@ func main() {
 		// 令牌约束，天生有这些权限。于是"agent 改完代码怎么重启服务"的答案是：
 		// 交给服务自己。
 		//
-		// 分工：agent 把编译产物丢进**运行产物旁边**的约定文件名（它写得到，
-		// 因为运行产物就在工作区内的 build/），pieqi 负责把它搬到位并接管端口。
+		// 分工：agent 把编译产物丢进**仓库内约定的交付目录**（它写得到，因为工作区
+		// 就是仓库子树），pieqi 负责把它搬到位（仓库外的运行位）并接管端口。
 		//
 		// 编排在后台 goroutine 里跑（先回 202 再退出），见 core.SelfRestart.RestartAndExit。
-		// 交付目录 = 运行产物所在目录（见 resolveStagingDir：由 execPath 推导，
-		// 不再是配置项）。两者同目录由编译规范保证。
+		// 交付目录优先取 $PIEQI_STAGING_DIR（启动脚本注入），否则退回运行产物所在
+		// 目录 —— 后者在"运行位在仓库外"的正确部署下是算错的，见 resolveStagingDir。
 		stageDir := resolveStagingDir(execPath)
 		selfRestart = core.NewSelfRestart(execPath, dataRoot, stageDir, func(msg string, kv ...any) {
 			logger.Info(msg, zap.Any("detail", kv))
 		})
-		logger.Info("self-restart staging dir resolved", zap.String("dir", stageDir))
+		if raw := strings.TrimSpace(os.Getenv(stagingDirEnv)); raw != "" && stageDir == "" {
+			// 配了却不可用：**显式报错**，不退化成"运行产物旁边"那个必然错误的路径。
+			// 这条告警是刻意的 —— 静默退化的表现是 staged 恒 false，没人能看出
+			// 是配置问题还是功能坏了。
+			logger.Error("self-restart disabled: "+stagingDirEnv+" is set but not a usable directory",
+				zap.String("value", raw),
+				zap.String("hint", "交付目录必须是已存在的普通目录（不接受符号链接/junction）；请修正启动脚本里的该变量"))
+		}
+		logger.Info("self-restart staging dir resolved",
+			zap.String("dir", stageDir),
+			zap.String("source", stagingDirSource()))
 		// 交接单要记的"被打断的会话"由 runner 提供：只有它知道哪些任务真的
 		// 挂在本进程上（running / 等 approval）。running 中的 ACP 会话与
 		// claude 子进程都随本进程 exit 一起死，所以这就是受影响的全集。
@@ -695,43 +705,96 @@ func listenWithRetry(addr string, timeout time.Duration, logger *zap.Logger) (ne
 	}
 }
 
-// resolveStagingDir 解析自重启的交付目录：**与运行产物同一个目录**。
+// stagingDirEnv 是"交付目录"的环境变量名，由启动脚本注入（restart.bat 设成
+// 仓库内的 build/）。存在的理由见 resolveStagingDir 的分工说明。
+const stagingDirEnv = "PIEQI_STAGING_DIR"
+
+// resolveStagingDir 解析自重启的**交付目录**（agent 往哪投递 pieqi.new[.exe]）。
 //
-// 由 os.Executable() 推导，**没有配置项，也没有回退链** —— 因为"交付产物与运行
-// 产物同目录"这件事已经由**编译规范**保证，不需要（也不应该）由配置或运行时猜测
-// 来表达：
+// 两条来源，优先级从高到低：
 //
-//	build/pieqi.exe       运行产物（唯一真相；只由 svchost/Explorer 启动）
-//	build/pieqi.new.exe   编译产物（agent 投递到这里，见编译规范）
+//	① $PIEQI_STAGING_DIR —— 启动脚本注入的显式交付目录（推荐，见下）
+//	② filepath.Dir(execPath) —— 运行产物旁边（单机开发、未注入时的回退）
 //
-// 为什么删掉了原来的 `pieqi.self_update_dir`（2026-10-14 定案）：
+// # 为什么必须有 ①（2026-10-14 修订；此前只有 ②，在正确部署下恒错）
 //
-//  1. **它是个绝对路径配置项**，把环境耦合写进了配置。同一个二进制换个机器/换个
-//     检出目录就得改配置，而配置写错的表现是**静默失败** —— 原注释自己承认：
-//     "agent 只会看到一个 staged:false，然后以为是功能坏了"。
-//  2. 它当初存在的理由已经消失。原注释写"常驻服务从 <dataRoot>/bin 启动，cwd 不是
-//     项目目录"，所以要另配一个 agent 写得到的目录 —— 那是**运行产物在 ~/.pieqi/bin
-//     （工作区外）**时代的产物。现在运行产物就在工作区内的 build/，交付落点与它
-//     同目录即可，而那个目录本来就是 agent 写得到的。
-//  3. 由 execPath 推导是**同义反复地正确**的：服务一定知道自己在哪，把它旁边那个
-//     约定文件名当作交付落点，就不存在"配的目录和实际运行目录不一致"这种状态。
+// ② 只在"运行产物与交付产物同目录"时成立，而**这两者恰恰必须分开**：
 //
-// ⚠️ 编译规范（见 AGENTS.md）与此**强耦合**，改一边必须改另一边：
+//	agent  持受限令牌（Windows 上 Low 完整性），只能写工作区
+//	服务   持正常令牌，写得了 ~/.pieqi，因而**必须**在仓库外运行
+//
+// 仓库目录本身带 Low 强制完整性标签（icacls 可见 Mandatory Label\Low
+// Mandatory Level:(OI)(CI)(NW)），区内新建的每个文件都继承它；而新进程的完整性
+// = min(父令牌, **镜像文件标签**) ⇒ 跑仓库内的 exe 必然是 Low 进程 ⇒ 写不了
+// ~/.pieqi（POST /api/tasks 500、日志零增长）。所以：
+//
+//	运行产物必须在仓库外  %USERPROFILE%\.pieqi\bin\pieqi.exe   （见 restart.bat）
+//	交付产物必须在仓库内  <repo>\build\pieqi.new.exe           （agent 写得进去）
+//
+// 两个需求指向**不同**目录，所以 ② 在正确部署下永远算错：它会算出
+// ~/.pieqi\bin\pieqi.new.exe —— 那正是 agent 写不到的地方。症状是静默的：
+// agent 投递失败 → GET /api/admin/restart 恒为 staged:false → 看起来"功能坏了"。
+// 因此配了 ① 就必须生效，**绝不静默退回 ②**。
+//
+// # 为什么是环境变量而不是配置项
+//
+// 原来的 `pieqi.self_update_dir` 配置项已删除（2026-10-14），理由是"绝对路径配置项
+// 把环境耦合写进配置，配错即静默失败"。那条理由针对**配置项**成立，但交付目录本身
+// 无法从运行时可靠推导（①/② 之争就是证明），必须有人告诉服务。环境变量由启动脚本
+// 注入、与"在哪台机器、哪个检出目录"天然同步，不会像配置文件那样被复制到别的机器
+// 后悄悄失配 —— 这正是它比配置项合适的地方。
+//
+// # 校验（宁可关闭功能，也不要指向一个假目录）
+//
+// 配了但不可用时返回空串，由调用方明确报错并关闭自重启（而不退化成 ② 那个必然
+// 错误的路径）。三条判据见 usableStagingDir。
+//
+// ⚠️ 编译规范与此**强耦合**，改一边必须改另一边（见 AGENTS.md）：
 //
 //	go build -o build/pieqi.new.exe ./cmd/pieqi   ← 只写 .new，**绝不**直接写 pieqi.exe
-//	cp build/pieqi.new.exe build/pieqi.exe        ← 也禁止；替换只由 selfrestart 做
 //
-// 运行产物 `pieqi.exe` 的**唯一写者**是 core.SelfRestart（它负责改名备份 → 落新文件
-// → 失败回滚）。若构建直接覆盖 pieqi.exe，会让"回滚备份"保存的是刚编出来的那份，
+// 运行产物 pieqi.exe 的**唯一写者**是 core.SelfRestart（改名备份 → 落新文件 →
+// 失败回滚）。若构建直接覆盖 pieqi.exe，会让"回滚备份"保存的是刚编出来的那份，
 // 而不是"上次跑成功的那份"。
-//
-// 返回空串表示无法确定（os.Executable 失败）—— 调用方据此关闭该功能并明确报错，
-// 绝不静默退化成一个瞎猜的目录。
 func resolveStagingDir(execPath string) string {
+	if raw := strings.TrimSpace(os.Getenv(stagingDirEnv)); raw != "" {
+		return usableStagingDir(raw)
+	}
 	if strings.TrimSpace(execPath) == "" {
 		return ""
 	}
 	return filepath.Dir(execPath)
+}
+
+// stagingDirSource 说明交付目录是从哪条来源解析出来的，仅供日志取证。
+//
+// 存在的理由：排查"agent 投递了但服务说 staged:false"时，第一件要问的事就是
+// "服务到底在看哪个目录、依据是什么"。把来源打进启动日志，这个问题就无需再猜。
+func stagingDirSource() string {
+	if strings.TrimSpace(os.Getenv(stagingDirEnv)) != "" {
+		return "env:" + stagingDirEnv
+	}
+	return "fallback:dir(executable)"
+}
+
+// usableStagingDir 校验显式交付目录是否可用；不可用返回空串（调用方据此明确报错）。
+//
+// 抽成独立函数是为了让"配了但不可用 ⇒ 返回空"这条判据能被单元测试直接钉住 ——
+// 它是本文件最容易写错、且错了完全静默的一点。
+//
+// Lstat 而非 Stat：要识破符号链接/junction **本身**（Stat 会跟过去，看不出差别）。
+// 沙箱按解析后的最终路径判定写权限，经链接绕道会把交付物写到预期之外的地方，
+// 并连带丢掉完整性标签语义，所以链接一律不接受。
+func usableStagingDir(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	st, err := os.Lstat(abs)
+	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return ""
+	}
+	return abs
 }
 
 // loadLarkChannelConfig 从凭据配置文件（~/.pieqi/lark_credentials.json）加载

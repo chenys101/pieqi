@@ -2,24 +2,59 @@
 /bin/
 /pieqi.exe
 /pieqi
-build/
 web/dist/
 web/node_modules/
 # TS 增量编译缓存
 *.tsbuildinfo
 
-# 自重启的交付落点：agent 把新二进制放这里，服务自己搬走并重启
-# （见 internal/core/selfrestart.go 的 stagingPath 说明）。/bin/ 已覆盖它，
-# 这条留着是为了让"这个路径是有约定的"在 .gitignore 里也能被看见。
+# ── build/ ：跟踪脚本与说明，**绝不**跟踪构建产物 ──────────────────────────
+# 目录被跟踪（原来是整目录忽略 `build/`）是为了让 restart.bat 等运维脚本随仓库
+# 走版本、可 review、可回滚。但 build/ 同时是编译落点与验证沙盒，里面会不断出现
+# 几十 MB 的 exe、Go/npm 缓存与一次性探针目录 —— 这些必须继续忽略。
+#
+# 规则顺序即语义：先忽略一切，再逐个放行**脚本与文档类**（`!` 只能救回被忽略的
+# 路径，所以白名单必须写在黑名单之后）。放行判据是"人类写的、有 review 价值的
+# 文本"，不是"看起来像源码"。新增脚本时追加一条 ! 即可，产物无需维护。
+/build/*
+!/build/*.bat
+!/build/*.ps1
+!/build/*.sh
+!/build/*.md
+!/build/.gitignore
+# 注意：**不要**放行 build/ 下的任何子目录 —— 历史探针目录（baseline2/、stage/、
+# selftest/、verify-home/ …）与缓存（.gocache/、gocache/、gotmp/、tmp/、npm-cache/）
+# 全在里面。脚本迁移是**平铺**到 build/ 根下的，正是为了让这条规则成立。
+/build/**/
+# 一次性验证留下的**实例配置**：它们与 config.yaml 同构（含端口/凭据字段），
+# 是某次隔离验证的现场快照，不是项目文件 —— 即使当前值全空，也绝不该进仓库
+# （只要有人往里面填过真凭据，入库即泄露）。脚本模板请放 config.example.yaml。
+build/accept-config.yaml
+build/verify-config.yaml
+# 同类的验证报告是一次性证据，不入库（长期结论应沉淀到 docs/ 或 CONTEXT.md）。
+build/dsh-acp-official-verification-report.md
+
+# 自重启的交付落点（由 $PIEQI_STAGING_DIR 指向 build/，见 cmd/pieqi 的
+# resolveStagingDir）。.new 二进制与 .old 回滚备份都在这里，几十 MB 且是产物 ——
+# 上面的 /build/* 已覆盖，这两条写出来只为让"这个约定存在"在 .gitignore 里可见。
+build/pieqi.new
+build/pieqi.new.exe
+build/pieqi.exe
+build/pieqi.exe.old
+
+# 过时的旧落点（2026-10-14 起运行位在 %USERPROFILE%\.pieqi\bin，交付位在 build/）。
+# 保留忽略以防旧检出里还有残留。
 bin/pieqi.new
 bin/pieqi.new.exe
-# 实际交付落点由 pieqi.self_update_dir 配置（本机是 /selfupdate/），上面的
-# bin/pieqi.new* 只是未配置时的回退。两处都要忽略，否则暂存的几十 MB 二进制
-# 会一直把工作区弄脏、并有被误提交的风险。
 /selfupdate/
 
 # 测试产物
 internal/core/data/
+# web 侧自测（web/scripts/self-test.ps1）的 Chrome profile 残留：每次跑都新建一个
+# chrome-prof-<hash>[-direct]，累积起来是几十上百个目录，且**每次内容都不同**，
+# 一旦被跟踪就会污染每一次 git status。放在这里而不是写死路径名，是因为前缀稳定、
+# 后缀随机。
+web/build/
+web/scripts/**/chrome-prof-*/
 
 # 探针程序的编译产物（probe_* 源码要入库当证据，exe 不入库）
 /probe_*.exe
