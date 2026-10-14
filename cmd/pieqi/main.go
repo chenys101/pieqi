@@ -481,18 +481,17 @@ func main() {
 		//
 		// 为什么必须由 pieqi 自己做：工作区里跑的 agent 会话持受限令牌（Windows
 		// 上是 Low 完整性），它起的任何子进程都继承该令牌 —— 写不了 ~/.pieqi、
-		// 也管不了工作区外的进程。而 pieqi 自身以正常身份跑在工作区外，天生有
-		// 这些权限。于是"agent 改完代码怎么重启服务"的答案是：交给服务自己。
+		// 也管不了工作区外的进程。而 pieqi 自身由 svchost/Explorer 启动，不受该
+		// 令牌约束，天生有这些权限。于是"agent 改完代码怎么重启服务"的答案是：
+		// 交给服务自己。
 		//
-		// 分工：agent 把编译产物丢进**项目工作区**的约定路径（它写得到），
-		// pieqi 负责搬到自己的位置并接管端口（它才有权限）。
-		//
-		// 交付目录取配置里的项目根，**不能取 os.Getwd()** —— 常驻服务从
-		// <dataRoot>/bin 启动，cwd 是那里而不是项目目录；取 cwd 会让交付落点
-		// 跑回沙箱外，正好是 agent 写不到的地方（实测踩过）。
+		// 分工：agent 把编译产物丢进**运行产物旁边**的约定文件名（它写得到，
+		// 因为运行产物就在工作区内的 build/），pieqi 负责把它搬到位并接管端口。
 		//
 		// 编排在后台 goroutine 里跑（先回 202 再退出），见 core.SelfRestart.RestartAndExit。
-		stageDir := resolveStagingDir(cfg)
+		// 交付目录 = 运行产物所在目录（见 resolveStagingDir：由 execPath 推导，
+		// 不再是配置项）。两者同目录由编译规范保证。
+		stageDir := resolveStagingDir(execPath)
 		selfRestart = core.NewSelfRestart(execPath, dataRoot, stageDir, func(msg string, kv ...any) {
 			logger.Info(msg, zap.Any("detail", kv))
 		})
@@ -696,23 +695,43 @@ func listenWithRetry(addr string, timeout time.Duration, logger *zap.Logger) (ne
 	}
 }
 
-// resolveStagingDir 解析自重启的交付目录（agent 侧可写的目录）。
+// resolveStagingDir 解析自重启的交付目录：**与运行产物同一个目录**。
 //
-// 为什么要显式配置而不是"猜一个"：交付目录必须是 **agent 进程写得到**的地方，
-// 而那取决于沙箱策略（工作区可写、~/.pieqi 不可写），服务自己无从推断 ——
-// 用 os.Getwd() 猜更是错的（常驻服务从 <dataRoot>/bin 启动，cwd 不是项目目录）。
-// 猜错的后果是静默的：落点跑到写不进去的地方，agent 只会看到一个
-// "staged:false"，然后以为是功能坏了。所以宁可要求显式配置。
+// 由 os.Executable() 推导，**没有配置项，也没有回退链** —— 因为"交付产物与运行
+// 产物同目录"这件事已经由**编译规范**保证，不需要（也不应该）由配置或运行时猜测
+// 来表达：
 //
-// 回退顺序：配置 → 当前工作目录（开发态直接 `go run ./cmd/pieqi` 时 cwd 就是仓库）。
-func resolveStagingDir(cfg *config.Config) string {
-	if d := strings.TrimSpace(cfg.Pieqi.SelfUpdateDir); d != "" {
-		return d
+//	build/pieqi.exe       运行产物（唯一真相；只由 svchost/Explorer 启动）
+//	build/pieqi.new.exe   编译产物（agent 投递到这里，见编译规范）
+//
+// 为什么删掉了原来的 `pieqi.self_update_dir`（2026-10-14 定案）：
+//
+//  1. **它是个绝对路径配置项**，把环境耦合写进了配置。同一个二进制换个机器/换个
+//     检出目录就得改配置，而配置写错的表现是**静默失败** —— 原注释自己承认：
+//     "agent 只会看到一个 staged:false，然后以为是功能坏了"。
+//  2. 它当初存在的理由已经消失。原注释写"常驻服务从 <dataRoot>/bin 启动，cwd 不是
+//     项目目录"，所以要另配一个 agent 写得到的目录 —— 那是**运行产物在 ~/.pieqi/bin
+//     （工作区外）**时代的产物。现在运行产物就在工作区内的 build/，交付落点与它
+//     同目录即可，而那个目录本来就是 agent 写得到的。
+//  3. 由 execPath 推导是**同义反复地正确**的：服务一定知道自己在哪，把它旁边那个
+//     约定文件名当作交付落点，就不存在"配的目录和实际运行目录不一致"这种状态。
+//
+// ⚠️ 编译规范（见 AGENTS.md）与此**强耦合**，改一边必须改另一边：
+//
+//	go build -o build/pieqi.new.exe ./cmd/pieqi   ← 只写 .new，**绝不**直接写 pieqi.exe
+//	cp build/pieqi.new.exe build/pieqi.exe        ← 也禁止；替换只由 selfrestart 做
+//
+// 运行产物 `pieqi.exe` 的**唯一写者**是 core.SelfRestart（它负责改名备份 → 落新文件
+// → 失败回滚）。若构建直接覆盖 pieqi.exe，会让"回滚备份"保存的是刚编出来的那份，
+// 而不是"上次跑成功的那份"。
+//
+// 返回空串表示无法确定（os.Executable 失败）—— 调用方据此关闭该功能并明确报错，
+// 绝不静默退化成一个瞎猜的目录。
+func resolveStagingDir(execPath string) string {
+	if strings.TrimSpace(execPath) == "" {
+		return ""
 	}
-	if wd, err := os.Getwd(); err == nil {
-		return wd
-	}
-	return ""
+	return filepath.Dir(execPath)
 }
 
 // loadLarkChannelConfig 从凭据配置文件（~/.pieqi/lark_credentials.json）加载

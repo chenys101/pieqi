@@ -91,14 +91,7 @@ type PieqiConfig struct {
 	MaxConcurrentPerProject int           `mapstructure:"max_concurrent_per_project"` // 每项目并发上限，默认 4
 	BaseBranch              string        `mapstructure:"base_branch"`                // worktree 基准分支，默认 "main"
 	BotsDir                 string        `mapstructure:"bots_dir"`                   // IM 机器人绑定记录目录；空 = ~/.pieqi/bots
-	// SelfUpdateDir 是自重启的**交付落点**：agent 把编译好的新二进制放到
-	// <dir>/pieqi.new[.exe]，再调 POST /api/admin/restart，服务会用它替换自身并重启。
-	//
-	// 必须是 **agent 进程写得到的目录**（通常就是项目工作区）。不要把服务自己的
-	// 运行目录（~/.pieqi/bin）填进来：那正是 agent 因沙箱写不到的地方，填了就白搭。
-	// 空 = 关闭该功能（端点返回 409 并提示未配置）。
-	SelfUpdateDir string `mapstructure:"self_update_dir"`
-	ACP           ACPConfig `mapstructure:"acp"` // ACP 协议配置（Phase 2 引入；use_acp=false 时走 Phase 1 PrintAgent 路径）
+	ACP                     ACPConfig `mapstructure:"acp"` // ACP 协议配置（Phase 2 引入；use_acp=false 时走 Phase 1 PrintAgent 路径）
 }
 
 // ACPConfig ACP 协议（Agent Client Protocol）相关配置。
@@ -449,6 +442,21 @@ func Load(configPath string) (*Config, error) {
 	if v.InConfig("pieqi.auto_approve_tools") {
 		cfg.Deprecations = append(cfg.Deprecations,
 			"pieqi.auto_approve_tools 已移除（它从未生效）：免审名单请在设置页用 auto_approve_l0 / auto_approve_l1 开关控制")
+	}
+
+	// 2b) pieqi.self_update_dir 已删除（2026-10-14 定案）：交付落点改由代码从
+	//     os.Executable() 推导（= 运行产物所在目录），见 cmd/pieqi 的 resolveStagingDir。
+	//
+	//     删除理由：它是**绝对路径配置项**，把环境耦合写进配置（换机器/换检出目录就得改），
+	//     且配错的表现是静默失败（agent 只看到 staged:false，误以为功能坏了）。而它当初
+	//     存在的理由——"运行产物在 ~/.pieqi/bin（工作区外），所以要另配一个 agent 写得
+	//     到的目录"——已随布局变更为 build/ 而消失。
+	//
+	//     这里只告警不改行为：填了也不再生效（字段已不存在），用户必须知道落点变了。
+	if v.InConfig("pieqi.self_update_dir") {
+		cfg.Deprecations = append(cfg.Deprecations,
+			"pieqi.self_update_dir 已删除（不再生效）：交付落点现在恒为**运行产物所在目录**下的 pieqi.new[.exe]，"+
+				"由代码从 os.Executable() 推导；编译请用 `go build -o build/pieqi.new.exe ./cmd/pieqi`")
 	}
 
 	// 3) qoder 兼容回填：agents.qoder.acp 未显式配置（新节任一字段都不在配置文件里）
