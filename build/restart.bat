@@ -141,7 +141,13 @@ echo.
 echo Starting pieqi.exe from %RUNDIR% ...
 echo.
 cd /d "%RUNDIR%"
+REM PIEQI_CONFIG is the ONLY thing the service needs to locate the repo: the
+REM delivery (staging) directory is DERIVED from it by convention --
+REM   dir(config.yaml) + \build
+REM so there is deliberately NO staging variable to set here. Setting one would
+REM be a stale knob the code ignores (that bug already happened once: the old
+REM PIEQI_STAGING_DIR was set by this script while the code never read it).
+REM Keep this in sync with cmd/pieqi/main.go resolveStagingDir.
 set "PIEQI_CONFIG=%REPO%config.yaml"
-set "PIEQI_STAGING_DIR=%STAGEDIR%"
 "%EXE%"
 pause
