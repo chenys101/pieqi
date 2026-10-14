@@ -33,13 +33,25 @@ build/verify-config.yaml
 # 同类的验证报告是一次性证据，不入库（长期结论应沉淀到 docs/ 或 CONTEXT.md）。
 build/dsh-acp-official-verification-report.md
 
-# 自重启的交付落点（由 $PIEQI_STAGING_DIR 指向 build/，见 cmd/pieqi 的
-# resolveStagingDir）。.new 二进制与 .old 回滚备份都在这里，几十 MB 且是产物 ——
-# 上面的 /build/* 已覆盖，这两条写出来只为让"这个约定存在"在 .gitignore 里可见。
+# ── 交付位与运行位的产物（都不入库）───────────────────────────────────────
+# 分工（2026-10-14 定，别合并）：
+#
+#   <repo>\build\pieqi.new.exe           编译/交付产物（agent 写得进）—— build/ 里
+#                                        唯一的二进制，restart.bat 消费后即删
+#   ~\.pieqi\bin\pieqi.exe               **运行产物**（服务真正在跑的那个，在仓库外，
+#                                        否则继承仓库的 Low 标签、写不了 ~/.pieqi）
+#   ~\.pieqi\bin\pieqi.exe.old           回滚备份（selfrestart.go 的 execPath+".old"）
+#   ~\.pieqi\bin\pieqi.exe.failed        起不来的版本留证（execPath+".failed"）
+#
+# ⇒ **.old / .failed 只属于运行位**，由服务自己写；build/ 下不再有它们
+#   （旧版 restart.bat 曾在此另生一份 .old，导致"哪个才是真回滚"没有唯一答案）。
+#   上面的 /build/* 已覆盖 build/ 里的一切，这几条写出来只为让约定在 .gitignore
+#   里可见。~/.pieqi 本来就在仓库外，无需忽略。
 build/pieqi.new
 build/pieqi.new.exe
 build/pieqi.exe
 build/pieqi.exe.old
+build/pieqi.exe.failed
 
 # 过时的旧落点（2026-10-14 起运行位在 %USERPROFILE%\.pieqi\bin，交付位在 build/）。
 # 保留忽略以防旧检出里还有残留。

@@ -98,32 +98,66 @@ for /f "tokens=5" %%a in ('netstat -ano -p TCP ^| findstr ":3000 " ^| findstr "L
 REM 2) Give the OS a moment to release the exe file lock (~2s).
 ping -n 3 127.0.0.1 >nul
 
-REM 3) Install the compiled artifact as the in-repo build artifact.
-REM    Build convention:  go build -o build/pieqi.new.exe ./cmd/pieqi
-REM    (never build straight to build/pieqi.exe -- see AGENTS.md)
-if exist "%STAGEDIR%\pieqi.new.exe" (
-  if exist "%STAGEDIR%\pieqi.exe" copy /Y "%STAGEDIR%\pieqi.exe" "%STAGEDIR%\pieqi.exe.old" >nul
-  move /Y "%STAGEDIR%\pieqi.new.exe" "%STAGEDIR%\pieqi.exe" >nul && echo installed new build from pieqi.new.exe || echo WARN: install failed, using existing build
-) else (
-  echo no pieqi.new.exe found; using the existing build
+REM 3) The in-repo staging area holds EXACTLY ONE file: pieqi.new.exe (the
+REM    delivery). There is deliberately NO copy step and NO .old backup here.
+REM
+REM    Why (2026-10-14 correction): ".new" and ".old" are RUNTIME staging --
+REM    they only make sense next to the binary that is actually executing, and
+REM    the service's own self-restart already puts them there, exactly once:
+REM        internal/core/selfrestart.go:168   backup := s.execPath + ".old"
+REM        internal/core/selfrestart.go:484   failed := s.execPath + ".failed"
+REM    i.e. %USERPROFILE%\.pieqi\bin\pieqi.exe.old / .failed.
+REM
+REM    An earlier version of this script ALSO produced <repo>\build\pieqi.exe
+REM    and build\pieqi.exe.old. That duplicated the rollback backup in two
+REM    places with two writers -- so "which one is the real rollback?" had no
+REM    single answer, and build/ accumulated binaries nobody could attribute.
+REM    Keep build/ = delivery only (one file); runtime state lives with the
+REM    running binary.
+REM
+REM    Do NOT "restore" the removed copy step: pieqi.exe.old under
+REM    %USERPROFILE%\.pieqi\bin is the ONLY rollback artifact, and it is
+REM    written by the service, not by this script. (This script does still make
+REM    a pre-install safety copy at step 4 -- see the note there.)
+if not exist "%STAGEDIR%\pieqi.new.exe" (
+  echo no pieqi.new.exe found in %STAGEDIR%
+  echo Build it first:   go build -o build/pieqi.new.exe ./cmd/pieqi
+  echo (For the release layout: put pieqi.exe next to this script.)
+  REM Fall back to a shipped binary in the release layout, so a release package
+  REM still runs. We copy it to a TEMPORARY name only to feed the install path
+  REM below, then remove it -- build/ must end up with just pieqi.new.exe.
+  if exist "%REPO%pieqi.exe" (
+    echo adopting %REPO%pieqi.exe as the artifact
+    copy /Y "%REPO%pieqi.exe" "%STAGEDIR%\pieqi.new.exe" >nul
+  ) else if exist "%REPO%pieqi-windows-amd64.exe" (
+    echo adopting %REPO%pieqi-windows-amd64.exe as the artifact
+    copy /Y "%REPO%pieqi-windows-amd64.exe" "%STAGEDIR%\pieqi.new.exe" >nul
+  )
 )
 
-if not exist "%STAGEDIR%\pieqi.exe" (
-  echo ERROR: "%STAGEDIR%\pieqi.exe" not found. Build it first:
-  echo     go build -o build/pieqi.new.exe ./cmd/pieqi
+if not exist "%STAGEDIR%\pieqi.new.exe" (
+  echo ERROR: nothing to install: "%STAGEDIR%\pieqi.new.exe" not found.
   pause
   exit /b 1
 )
 
 REM 4) THE KEY STEP: copy the artifact OUT of the Low-labelled repo.
 REM    Plain "copy" (not xcopy/robocopy) so no SACL travels with it.
+REM
+REM    Safety copy before overwriting the runtime binary: this is a
+REM    HUMAN-initiated pre-install snapshot, and it intentionally uses the SAME
+REM    name the service uses (.old) so that only one rollback file exists and it
+REM    always means "the version that ran before the most recent swap".
 if exist "%EXE%" copy /Y "%EXE%" "%EXE%.old" >nul
-copy /Y "%STAGEDIR%\pieqi.exe" "%EXE%" >nul
+copy /Y "%STAGEDIR%\pieqi.new.exe" "%EXE%" >nul
 if errorlevel 1 (
   echo ERROR: could not copy the artifact to "%EXE%"
   pause
   exit /b 1
 )
+
+REM Consume the delivery: build/ must be left holding nothing (see step 3).
+del /Q "%STAGEDIR%\pieqi.new.exe" >nul 2>&1
 
 REM 5) Guard: refuse to launch a Low-integrity image -- that IS the failure
 REM    this script exists to prevent. (icacls prints the label in ASCII even on
