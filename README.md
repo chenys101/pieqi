@@ -102,12 +102,28 @@ pieqi/
 ├── services/claude-sdk-bridge/ # Node 常驻桥：Claude Agent SDK HTTP+SSE 封装
 ├── web/                       # PWA 前端（Vite），embed.go 嵌入二进制
 ├── docs/                      # 设计文档与规划（见下文文档索引）
-├── build.sh                   # 构建 + 发布包脚本
+├── build/                     # 交付位 + 运维脚本（见下方「目录职责」）
 ├── config.example.yaml        # 配置模板：全字段 + 注释，复制成 config.yaml 后修改
 └── config.yaml                # 本地实际配置（含个人域名/端口/凭据，.gitignore 忽略，不入库）
 ```
 
-运行时数据在 `~/.pieqi/`（可用环境变量 `PIEQI_HOME` 覆盖）：`tasks/`、`worktrees/`、`sessions/`、`feishu_binding.json`、`lark_credentials.json` 等，不入仓库。
+**目录职责（三个位置，别混）**：
+
+| 路径 | 放什么 | 谁能写 |
+|---|---|---|
+| `<repo>/build/` | 运维脚本 + `pieqi.new.exe`（**唯一**的编译/交付产物） | agent（会话可写工作区） |
+| `%USERPROFILE%\.pieqi\bin\` | `pieqi.exe`（**运行产物**）+ `.old` 回滚备份 + `.failed` 失败证据 | `build/restart.bat` / 服务自重启 |
+| `~/.pieqi/`（`PIEQI_HOME` 可覆盖） | 运行时数据：`tasks/`、`worktrees/`、`checkpoints/`、`logs/`、`previews/`、`feishu_binding.json`、`lark_credentials.json` 等 | 服务 |
+
+> ⚠️ **运行产物必须在仓库外**。仓库目录带 Windows Low 完整性标签，区内 exe 起的进程继承它，
+> 于是能读 `~/.pieqi` 却**写不了**（症状：创建任务 500、日志零增长）。安装一律用 `build/restart.bat`
+> （它用 `copy` 把产物拷到区外，`copy` 会丢掉 Low 标签）。
+
+**自重启的交付落点没有配置项，也没有环境变量**——由约定推导：`<config.yaml 所在目录>/build`。
+（`config.yaml` 是启动本来就必需的输入，且与 `go.mod` 同级 = 仓库根，所以无需另配。）
+
+> 注：会话（session）记录**不在** `~/.pieqi/` 下。pieqi 只把会话 id 存进 `tasks/<id>.json`，
+> 真正的会话实体由外部 agent 自己保管（例如 dsh 在 `~/.dsh/storages/` 下）。
 
 ***
 
@@ -119,15 +135,21 @@ pieqi/
 # 准备配置（首次运行必做；模板已含可跑默认值）
 cp config.example.yaml config.yaml
 
-# 构建二进制（产物在 bin/）
-mkdir -p bin && go build -o bin/pieqi ./cmd/pieqi
+# 构建二进制 —— 落点必须是 build/pieqi.new.exe（**只写 .new**，见「目录职责」）
+go build -o build/pieqi.new.exe ./cmd/pieqi
 
-# 或直接运行
+# 安装运行副本并启动（把产物拷到仓库外，再以正常身份运行）
+pwsh -File build/restart.bat        # Windows
+
+# 或直接运行（开发用；注意这会以当前身份启动，不经仓库外安装）
 go run ./cmd/pieqi
 
 # 测试
 go test ./internal/...
 ```
+
+> ⚠️ **别把产物编到 `bin/` 或直接覆盖 `build/pieqi.exe`**：
+> 前者是历史上的 ACL 缺口目录，后者会让自重启的"回滚备份"保存成刚编出来的那份（回滚即失效）。
 
 ### 前端
 
@@ -228,14 +250,16 @@ auth:
 ## 发布 / 打包
 
 ```bash
-./build.sh    # 前端构建 → Go 编译 → 二进制 + config.yaml + README + 启动脚本 打 zip/tar.gz
+# 打包发布物（脚本住在 build/ 下；产物落 build/release/，不污染交付位）
+bash build/build.sh [版本号]
 
-# 手动交叉编译
-GOOS=linux   GOARCH=amd64 go build -o build/pieqi-linux-amd64 ./cmd/pieqi
-GOOS=windows GOARCH=amd64 go build -o build/pieqi-windows-amd64.exe ./cmd/pieqi
+# 手动交叉编译（落点同样只写自己的文件名，不要碰 pieqi.new.exe / pieqi.exe）
+GOOS=linux   GOARCH=amd64 go build -o build/release/pieqi-linux-amd64 ./cmd/pieqi
+GOOS=windows GOARCH=amd64 go build -o build/release/pieqi-windows-amd64.exe ./cmd/pieqi
 ```
 
-* Windows：双击 `start.bat`（`restart.bat` 重启）。
+* Windows：双击 `build/restart.bat`（**不要**直接双击 `pieqi.exe`，理由见「目录职责」）。
+  发布包内脚本与 `pieqi.exe` 平铺同级，`restart.bat` 会自动识别这种布局。
 
 * Linux：systemd 托管。
 

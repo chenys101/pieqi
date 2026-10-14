@@ -60,11 +60,16 @@ pieqi:
   max_concurrent_per_project: 4      # 每项目并发上限
   base_branch: main                  # worktree 基准分支（按你仓库的主分支改：main / master）
   bots_dir: ""                       # IM 机器人绑定记录目录；空 = ~/.pieqi/bots
-  # 注：自重启的交付落点**没有配置项**（pieqi.self_update_dir 已于 2026-10-14 删除）。
-  # 落点恒为「运行产物所在目录」下的 pieqi.new[.exe]，由代码从 os.Executable() 推导。
+  # 注：自重启的交付落点**没有配置项、也没有环境变量**。
+  # 落点由**约定推导**：<本 config.yaml 所在目录>/build  （见 cmd/pieqi 的 resolveStagingDir）。
+  # 判据：config.yaml 是启动本来就必需的输入，且与 go.mod 同级（= 仓库根），
+  #       所以"仓库根"可由它推出，不需要新旋钮告诉服务。
   # 因此编译规范是：go build -o build/pieqi.new.exe ./cmd/pieqi
-  #   build/pieqi.exe     运行产物（唯一写者是服务自己的自重启逻辑）
-  #   build/pieqi.new.exe 编译产物（被自重启搬走并替换上面那个）
+  #   build/pieqi.new.exe  编译/交付产物（agent 投递到这里，build/ 里唯一的二进制）
+  #   %USERPROFILE%\.pieqi\bin\pieqi.exe       运行产物（服务真正在跑的那个，必须在仓库外）
+  #   %USERPROFILE%\.pieqi\bin\pieqi.exe.old   回滚备份（与运行产物同目录，由服务自己写）
+  # ⚠️ 不要把运行产物放进仓库：仓库目录带 Low 完整性标签，区内 exe 起的进程写不了
+  #    ~/.pieqi（症状是创建任务 500、日志零增长）。安装请用 build/restart.bat。
   # 旧的 self_update_dir 若仍写在配置里，会得到一条弃用告警且**不再生效**。
   # ⚠️ 以下 acp 节已弃用（P5 迁移到 agents.*）。显式配置会触发告警。
   #    保留在此仅为从旧配置迁移时对照，**新配置请直接改 agents 节**。

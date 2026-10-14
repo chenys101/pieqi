@@ -444,19 +444,23 @@ func Load(configPath string) (*Config, error) {
 			"pieqi.auto_approve_tools 已移除（它从未生效）：免审名单请在设置页用 auto_approve_l0 / auto_approve_l1 开关控制")
 	}
 
-	// 2b) pieqi.self_update_dir 已删除（2026-10-14 定案）：交付落点改由代码从
-	//     os.Executable() 推导（= 运行产物所在目录），见 cmd/pieqi 的 resolveStagingDir。
+	// 2b) pieqi.self_update_dir 已删除（2026-10-14 定案）：交付落点改由**约定推导**
+	//     —— <config.yaml 所在目录>/build，见 cmd/pieqi 的 resolveStagingDir。
 	//
 	//     删除理由：它是**绝对路径配置项**，把环境耦合写进配置（换机器/换检出目录就得改），
-	//     且配错的表现是静默失败（agent 只看到 staged:false，误以为功能坏了）。而它当初
-	//     存在的理由——"运行产物在 ~/.pieqi/bin（工作区外），所以要另配一个 agent 写得
-	//     到的目录"——已随布局变更为 build/ 而消失。
+	//     且配错的表现是静默失败（agent 只看到 staged:false，误以为功能坏了）。
+	//     而"交付落点在哪"本可由启动**已必需的输入**（config.yaml 的位置）推出，
+	//     所以既不需要配置项，也不需要环境变量。
+	//
+	//     ⚠️ 曾经的中间方案 PIEQI_STAGING_DIR 也已删除（同日）：它把一条本可推导的
+	//     约定变成"每个启动脚本都得记得设"的旋钮，漏设即静默退化。
 	//
 	//     这里只告警不改行为：填了也不再生效（字段已不存在），用户必须知道落点变了。
 	if v.InConfig("pieqi.self_update_dir") {
 		cfg.Deprecations = append(cfg.Deprecations,
-			"pieqi.self_update_dir 已删除（不再生效）：交付落点现在恒为**运行产物所在目录**下的 pieqi.new[.exe]，"+
-				"由代码从 os.Executable() 推导；编译请用 `go build -o build/pieqi.new.exe ./cmd/pieqi`")
+			"pieqi.self_update_dir 已删除（不再生效）：交付落点现由约定推导，"+
+				"恒为 <config.yaml 所在目录>/build；既无配置项也无环境变量。"+
+				"编译请用 `go build -o build/pieqi.new.exe ./cmd/pieqi`")
 	}
 
 	// 3) qoder 兼容回填：agents.qoder.acp 未显式配置（新节任一字段都不在配置文件里）
