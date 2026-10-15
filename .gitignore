@@ -74,6 +74,15 @@ internal/core/data/
 web/build/
 web/scripts/**/chrome-prof-*/
 
+# 自测的**同源包装页**：位置受约束，只能生成在 web/public/（会被 //go:embed 进二进制，
+# 从而让探针能同源读 iframe 的 DOM；file:// 包装页跨 http:// 会被浏览器策略挡住）。
+# ⇒ 它**不能**像 Chrome profile 那样挪到 $env:TEMP，正确做法是脚本用完即删
+# （见 self-test.ps1 的 $cleanup）。这条规则是**兜底**：万一清理失败（进程被杀等），
+# 也不至于污染 git status —— 它的内容每次不同（内嵌 cache-buster 时间戳），
+# 跟踪它毫无意义。
+web/public/_selftest.html
+web/dist/_selftest.html
+
 # 探针程序的编译产物（probe_* 源码要入库当证据，exe 不入库）
 /probe_*.exe
 
