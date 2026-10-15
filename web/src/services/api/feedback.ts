@@ -10,7 +10,7 @@
 //	GET  /api/tasks/:id/outcome           Task 结构化结果（P1）
 //	GET  /api/tasks/:id/evidence          验证证据快照（P1）
 //	POST /api/tasks/:id/continue          Evidence → Continue（P1）
-//	POST /api/tasks/:id/preview/screenshots  截图（P2；GET = 列表，GET :id.png = 文件）
+//	POST /api/tasks/:id/preview/capture   采集 console/network（P2；截图已于 2026-10-15 移除）
 //	GET  /api/tasks/:id/preview/console|network  Console/网络失败窗口（P2）
 //	POST /api/tasks/:id/rewind（scope:file）  文件级回退（P2）
 //	POST /api/tasks/:id/push              Evidence Push（P2）
@@ -20,6 +20,7 @@ import type {
   ApprovalDiffDto,
   CheckDto,
   ChecksResponseDto,
+  CaptureResponseDto,
   ConsoleSummaryDto,
   ContinueResponseDto,
   EvidenceDto,
@@ -31,8 +32,6 @@ import type {
   PreviewStatusDto,
   PushResponseDto,
   RewindResponseDto,
-  ScreenshotDto,
-  ScreenshotsResponseDto,
   TaskOutcomeDto,
 } from '@/types/api'
 
@@ -160,7 +159,6 @@ export async function getEvidence(
   return {
     ...dto,
     checks: arr(dto.checks),
-    screenshots: arr(dto.screenshots),
     diff_brief: arr(dto.diff_brief),
   }
 }
@@ -178,20 +176,18 @@ export async function continueWithEvidence(
 
 // ---------- Feedback P2（p2-design.md §9） ----------
 
-/** POST /api/tasks/:id/preview/screenshots：对运行中 preview 截图（preview 非 running → 409） */
-export async function captureScreenshot(taskId: string, fullPage = false): Promise<ScreenshotDto> {
-  return request<ScreenshotDto>(`/tasks/${encodeURIComponent(taskId)}/preview/screenshots`, {
+/**
+ * POST /api/tasks/:id/preview/capture：对运行中 preview 做一次采集，
+ * 收集 console error/warn 与网络失败并入事件窗口（preview 非 running → 409）。
+ *
+ * 原名 captureScreenshot（端点 /preview/screenshots）。截图功能已于 2026-10-15 移除
+ * （理由见 internal/core/visual.go 的 Capture 说明），端点改名以如实反映行为。
+ */
+export async function capturePreview(taskId: string): Promise<CaptureResponseDto> {
+  return request<CaptureResponseDto>(`/tasks/${encodeURIComponent(taskId)}/preview/capture`, {
     method: 'POST',
-    body: { full_page: fullPage },
+    body: {},
   })
-}
-
-/** GET /api/tasks/:id/preview/screenshots：截图列表（时间倒序） */
-export async function listScreenshots(taskId: string): Promise<ScreenshotDto[]> {
-  const res = await request<ScreenshotsResponseDto>(
-    `/tasks/${encodeURIComponent(taskId)}/preview/screenshots`,
-  )
-  return res.screenshots ?? []
 }
 
 /** GET /api/tasks/:id/preview/console：console error/warn 窗口（since 增量游标可选） */

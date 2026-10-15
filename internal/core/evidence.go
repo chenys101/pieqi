@@ -28,8 +28,7 @@ type Evidence struct {
 	Checks      []CheckSummary   `json:"checks"`
 	Errors      int              `json:"errors"` // 末轮 is_error tool_result 数
 	Changes     ChangeSummary   `json:"changes"`
-	DiffBrief   []string         `json:"diff_brief"`   // 每文件一行摘要
-	Screenshots []string         `json:"screenshots"` // P2：视觉证据（截图 URL，§6）
+	DiffBrief   []string         `json:"diff_brief"` // 每文件一行摘要
 	Console     *ConsoleSummary  `json:"console,omitempty"`
 	Network     *NetworkSummary  `json:"network,omitempty"`
 	CreatedAt   string           `json:"created_at"`
@@ -156,10 +155,11 @@ func EvidencePrompt(instruction string, ev Evidence, failedChecks []Check) strin
 		b.WriteString(fmt.Sprintf("\n- 末轮错误: %d 个工具调用失败", ev.Errors))
 	}
 
-	// P2 视觉证据（§6）：截图引用（Agent 是否看图由 provider 能力决定，这里只传引用）
-	for _, u := range ev.Screenshots {
-		b.WriteString("\n- 截图证据: " + u)
-	}
+	// P2 视觉证据（§6）：console/network 摘要。
+	//
+	// 历史上这里还有一段 "- 截图证据: <url>"（每条一行 URL）。已随截图功能移除：
+	// agent 拿到的只是一个取不到的路径字符串，除了占 prompt 不提供信息；
+	// 而下面的 console/network 是**具体文本**（报错内容、失败 URL + status），可直接据此修。
 	if ev.Console != nil && (ev.Console.Errors > 0 || ev.Console.Warnings > 0) {
 		b.WriteString(fmt.Sprintf("\n- 页面 Console: %d errors / %d warnings", ev.Console.Errors, ev.Console.Warnings))
 		for _, e := range ev.Console.Entries {

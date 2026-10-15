@@ -1,7 +1,9 @@
 // visual_test.go VisualCaptureManager 单测（p2-design.md §2）：
 // 用 fake HTTP 服务替代真 Playwright（不起 Chromium），覆盖：
-// Capture 截图落盘 + 事件窗口、ListScreenshots 倒序、ScreenshotPath 防逃逸、
-// Console/Network since 过滤、Cleanup、EnsureRunning 对外部实例的复用。
+// Capture 事件窗口、Console/Network since 过滤、Cleanup、EnsureRunning 对外部实例的复用。
+//
+// 截图相关用例（落盘 / 列表倒序 / 路径逃逸）已随功能移除（2026-10-15）；
+// 现在改为**负向断言**：采集不应再产生任何截图文件。
 package core
 
 import (
@@ -77,28 +79,20 @@ func newVisualWithFake(t *testing.T, root string) (*VisualCaptureManager, *httpt
 	return v, fake
 }
 
-func TestVisualCapture_StoresScreenshotAndEvents(t *testing.T) {
+// TestVisualCapture_StoresEvents 采集把 console/network 并入事件窗口。
+//
+// 原为 TestVisualCapture_StoresScreenshotAndEvents —— 截图断言已随功能移除
+// （2026-10-15）。这里保留"截图不再落盘"的**负向断言**：采集成功后
+// `~previews/<task>/screenshots/` 不应产生任何文件。
+func TestVisualCapture_StoresEvents(t *testing.T) {
 	root := t.TempDir()
 	v, fake := newVisualWithFake(t, root)
 	defer fake.Close()
 
-	shot, err := v.Capture(context.Background(), "task1", 3000, false)
-	if err != nil {
+	if err := v.Capture(context.Background(), "task1", 3000); err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	if shot.TaskID != "task1" || shot.PreviewID != "task1:3000" {
-		t.Fatalf("shot: %+v", shot)
-	}
-	// PNG 落盘
-	p, ok := v.ScreenshotPath("task1", shot.ID)
-	if !ok {
-		t.Fatal("screenshot file missing")
-	}
-	data, _ := os.ReadFile(p)
-	if len(data) == 0 || data[0] != 0x89 {
-		t.Fatalf("png content invalid: %d bytes", len(data))
-	}
-	// 事件窗口
+	// 事件窗口（本次采集的唯一目的）
 	cons := v.Console("task1", time.Time{})
 	if len(cons) != 2 || cons[0].Level != "error" || cons[1].Text != "careful" {
 		t.Fatalf("console: %+v", cons)
@@ -107,6 +101,10 @@ func TestVisualCapture_StoresScreenshotAndEvents(t *testing.T) {
 	if len(net) != 1 || net[0].Status != 404 {
 		t.Fatalf("network: %+v", net)
 	}
+	// 负向断言：不再生成截图目录/文件。
+	if entries, err := os.ReadDir(filepath.Join(root, "task1")); err == nil && len(entries) > 0 {
+		t.Fatalf("采集不应再落盘截图，但 %s 下有 %d 项", filepath.Join(root, "task1"), len(entries))
+	}
 }
 
 func TestVisualCapture_SinceFilter(t *testing.T) {
@@ -114,7 +112,7 @@ func TestVisualCapture_SinceFilter(t *testing.T) {
 	v, fake := newVisualWithFake(t, root)
 	defer fake.Close()
 
-	if _, err := v.Capture(context.Background(), "task1", 3000, false); err != nil {
+	if err := v.Capture(context.Background(), "task1", 3000); err != nil {
 		t.Fatalf("capture: %v", err)
 	}
 	since := time.Date(2026, 9, 4, 10, 0, 0, 500000000, time.UTC) // error(10:00:00) 之后、warn(10:00:01) 之前
@@ -126,86 +124,52 @@ func TestVisualCapture_SinceFilter(t *testing.T) {
 	}
 }
 
-func TestVisualCapture_ListAndPathSafety(t *testing.T) {
-	root := t.TempDir()
-	v, fake := newVisualWithFake(t, root)
-	defer fake.Close()
-
-	for i := 0; i < 3; i++ {
-		if _, err := v.Capture(context.Background(), "task1", 3000, false); err != nil {
-			t.Fatalf("capture %d: %v", i, err)
-		}
-		time.Sleep(5 * time.Millisecond) // ModTime 区分
-	}
-	shots := v.ListScreenshots("task1")
-	if len(shots) != 3 {
-		t.Fatalf("list: %d", len(shots))
-	}
-	// 倒序：最新在前
-	if !shots[0].CreatedAt.After(shots[2].CreatedAt) {
-		t.Fatal("list must be newest-first")
-	}
-	// 路径逃逸拒绝
-	if _, ok := v.ScreenshotPath("task1", "../../etc/passwd"); ok {
-		t.Fatal("path traversal must be rejected")
-	}
-	if _, ok := v.ScreenshotPath("task1", "zzzz"); ok {
-		t.Fatal("invalid id must be rejected")
-	}
-}
-
+// TestVisualCapture_Cleanup 事件窗口随 Cleanup 清空。
+//
+// 原测试还断言截图目录被删；截图移除后只验事件窗口（那才是现在唯一的持久化侧状态）。
 func TestVisualCapture_Cleanup(t *testing.T) {
 	root := t.TempDir()
 	v, fake := newVisualWithFake(t, root)
 	defer fake.Close()
 
-	if _, err := v.Capture(context.Background(), "task1", 3000, false); err != nil {
+	if err := v.Capture(context.Background(), "task1", 3000); err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "task1", "screenshots")); err != nil {
-		t.Fatalf("dir must exist: %v", err)
+	if got := v.Console("task1", time.Time{}); len(got) == 0 {
+		t.Fatal("precondition: events must be present before cleanup")
 	}
 	v.Cleanup("task1")
-	if _, err := os.Stat(filepath.Join(root, "task1", "screenshots")); !os.IsNotExist(err) {
-		t.Fatal("cleanup must remove dir")
-	}
 	if got := v.Console("task1", time.Time{}); len(got) != 0 {
 		t.Fatalf("cleanup must clear events: %+v", got)
+	}
+	if got := v.Network("task1", time.Time{}); len(got) != 0 {
+		t.Fatalf("cleanup must clear network: %+v", got)
 	}
 }
 
 func TestVisualCapture_NoRunningPreview(t *testing.T) {
 	v := NewVisualCaptureManager(nil, t.TempDir())
-	if _, err := v.Capture(context.Background(), "task1", 0, false); err == nil {
+	if err := v.Capture(context.Background(), "task1", 0); err == nil {
 		t.Fatal("port=0 must fail")
 	}
 }
 
 // TestVisualCapture_AttachVisual 验证 Evidence 视觉挂载（P2 §6）：
-// 截图引用（最新在前、limit 截断）+ console/network 摘要。
+// console/network 摘要（截图已移除，见 core.Capture 说明）。
 func TestVisualCapture_AttachVisual(t *testing.T) {
 	root := t.TempDir()
 	v, fake := newVisualWithFake(t, root)
 	defer fake.Close()
 
 	for i := 0; i < 4; i++ {
-		if _, err := v.Capture(context.Background(), "task1", 3000, false); err != nil {
+		if err := v.Capture(context.Background(), "task1", 3000); err != nil {
 			t.Fatalf("capture %d: %v", i, err)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
 	ev := Evidence{TaskID: "task1"}
-	v.AttachVisual(&ev, 2)
-	// limit=2：只挂最新 2 张（ListScreenshots 倒序 → 最新在前）
-	if len(ev.Screenshots) != 2 {
-		t.Fatalf("screenshots: %+v", ev.Screenshots)
-	}
-	for _, u := range ev.Screenshots {
-		if !strings.HasPrefix(u, "/api/tasks/task1/preview/screenshots/") {
-			t.Fatalf("url format: %q", u)
-		}
-	}
+	v.AttachVisual(&ev)
 	// 摘要：fake 服务每次 capture 产生 1 error + 1 warn + 1 network failure，共 4 次
 	if ev.Console == nil || ev.Console.Errors != 4 || ev.Console.Warnings != 4 {
 		t.Fatalf("console summary: %+v", ev.Console)
@@ -213,11 +177,12 @@ func TestVisualCapture_AttachVisual(t *testing.T) {
 	if ev.Network == nil || ev.Network.Failures != 4 {
 		t.Fatalf("network summary: %+v", ev.Network)
 	}
-
-	// maxShots=0：不挂截图，摘要仍在
-	ev2 := Evidence{TaskID: "task1"}
-	v.AttachVisual(&ev2, 0)
-	if len(ev2.Screenshots) != 0 || ev2.Console == nil {
-		t.Fatalf("maxShots=0: %+v", ev2)
+	// 负向：Evidence 上不再有截图字段（编译期已保证，这里钉住 JSON 输出不复活它）。
+	b, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "screenshot") {
+		t.Fatalf("Evidence JSON 不应再含 screenshot 字段: %s", b)
 	}
 }

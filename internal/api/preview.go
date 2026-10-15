@@ -29,17 +29,12 @@ import (
 
 // previewRoute ANY /api/tasks/:id/preview/*path：preview 路由统一入口。
 // gin 的 catch-all 与同前缀静态路由冲突，无法同时注册 /preview/start 与 /preview/*path，
-// 故控制端点（start/stop/status）与 P2 视觉子路径（screenshots/console/network）
+// 故控制端点（start/stop/status）与 P2 视觉子路径（capture/console/network）
 // 在 wildcard 路由内按「路径 + HTTP 方法」分发，其余路径走反向代理。
 func (s *Server) previewRoute(c *gin.Context) {
 	// c.Param("path") 形如 "/start"（含前导斜杠）
 	path := strings.TrimPrefix(c.Param("path"), "/")
 
-	// P2 视觉采集（p2-design.md §3/§4/§5）：截图文件 PNG 由 Go 直出，不代理
-	if strings.HasPrefix(path, "screenshots/") && c.Request.Method == http.MethodGet {
-		s.getScreenshotPNG(c)
-		return
-	}
 	switch path {
 	case "start":
 		if c.Request.Method == http.MethodPost {
@@ -68,16 +63,22 @@ func (s *Server) previewRoute(c *gin.Context) {
 			s.previewStatus(c)
 			return
 		}
-	case "screenshots":
-		// P2：POST = 截图采集；GET = 列表
-		switch c.Request.Method {
-		case http.MethodPost:
-			s.postScreenshot(c)
-		case http.MethodGet:
-			s.listScreenshots(c)
-		default:
-			c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
+	case "capture":
+		// P2：对运行中 preview 采集 console/network（原 screenshots POST，2026-10-15 改名）。
+		if c.Request.Method == http.MethodPost {
+			s.capturePreview(c)
+			return
 		}
+		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
+		return
+	case "screenshots":
+		// 截图功能已于 2026-10-15 移除。这里**显式**返回 410 而不是让它落到反向代理 ——
+		// 否则 /preview/screenshots 会被当作页面路径代理给 dev server，调用方拿到
+		// 一个莫名其妙的 HTML/404，无法判断是"功能没了"还是"服务坏了"。
+		c.JSON(http.StatusGone, gin.H{
+			"error": "screenshot feature removed",
+			"hint":  "改用 POST /api/tasks/:id/preview/capture 采集 console/network",
+		})
 		return
 	case "console":
 		// P2：console error/warn 窗口

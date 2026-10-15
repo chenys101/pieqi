@@ -93,15 +93,14 @@ func TestBuildEvidence_TaskScope(t *testing.T) {
 	}
 }
 
-// TestEvidencePrompt_Visual P2 §6：Continue prompt 携带视觉证据引用
-// （截图 URL + console 错误摘要 + 网络失败明细；Agent 是否看图由 provider 能力决定）。
+// TestEvidencePrompt_Visual P2 §6：Continue prompt 携带视觉证据
+// （console 错误摘要 + 网络失败明细）。
+//
+// 截图相关断言已于 2026-10-15 移除 —— prompt 里不再有 "- 截图证据: <url>" 行。
+// 这里**额外断言它不出现**，防止有人把那段加回来（那是退化：agent 取不到那个 URL）。
 func TestEvidencePrompt_Visual(t *testing.T) {
 	ev := Evidence{
 		TaskID: "t1",
-		Screenshots: []string{
-			"/api/tasks/t1/preview/screenshots/shot1.png",
-			"/api/tasks/t1/preview/screenshots/shot2.png",
-		},
 		Console: &ConsoleSummary{
 			Errors: 2, Warnings: 1,
 			Entries: []ConsoleEntry{
@@ -119,8 +118,6 @@ func TestEvidencePrompt_Visual(t *testing.T) {
 	prompt := EvidencePrompt("顶部按钮错位", ev, nil)
 	for _, want := range []string{
 		"顶部按钮错位",
-		"截图证据: /api/tasks/t1/preview/screenshots/shot1.png",
-		"截图证据: /api/tasks/t1/preview/screenshots/shot2.png",
 		"2 errors / 1 warnings",
 		"[error] Uncaught TypeError: btn is null",
 		"页面网络失败: 1 个请求",
@@ -129,6 +126,10 @@ func TestEvidencePrompt_Visual(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+	// 负向断言：截图引用必须不复存在（功能已移除，别被重新加回）。
+	if strings.Contains(prompt, "截图") || strings.Contains(prompt, "/screenshots/") {
+		t.Fatalf("prompt 不应再含截图引用（该功能已移除）:\n%s", prompt)
 	}
 }
 

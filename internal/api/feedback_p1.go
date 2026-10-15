@@ -197,12 +197,11 @@ func (s *Server) getEvidence(c *gin.Context) {
 // --- Evidence → Continue（§8 ⭐ 控制闭环） ---
 
 type continueReq struct {
-	Instruction string   `json:"instruction"`
-	Screenshots []string `json:"screenshots"` // P2 §6：指定携带的截图 id（省略 = 最新 N 张）
+	Instruction string `json:"instruction"`
 }
 
 // postContinue POST /api/tasks/:id/continue：组装当前证据为续问 prompt，走既有 Resume。
-// P2：Evidence 挂视觉证据，prompt 含截图引用（Agent 是否看图由 provider 能力决定）。
+// P2：Evidence 挂 console/network 视觉证据（截图已于 2026-10-15 移除）。
 // 返回组装文本便于审计与前端回显；task running → 409。
 func (s *Server) postContinue(c *gin.Context) {
 	task, ok := s.requireTask(c)
@@ -221,10 +220,6 @@ func (s *Server) postContinue(c *gin.Context) {
 
 	checks := s.taskChecks(task)
 	evidence := s.buildEvidenceWithVisual(task, core.ScopeTask, 0)
-	// 显式指定截图（覆盖默认最新 N 张）；id 校验防引用不存在的截图
-	if urls := s.screenshotURLsFor(task.ID, req.Screenshots); len(urls) > 0 {
-		evidence.Screenshots = urls
-	}
 	prompt := core.EvidencePrompt(req.Instruction, evidence, checks)
 
 	// 证据续问不指定模型：沿用会话当前路由（要换模型用户在会话里逐条消息选）。

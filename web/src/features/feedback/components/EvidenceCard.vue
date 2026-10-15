@@ -43,18 +43,17 @@ const hasSignal = computed(() => {
     ev.changes.files > 0 ||
     ev.checks.length > 0 ||
     ev.errors > 0 ||
-    (ev.screenshots?.length ?? 0) > 0 ||
     (ev.console?.errors ?? 0) > 0 ||
     (ev.console?.warnings ?? 0) > 0 ||
     (ev.network?.failures ?? 0) > 0
   )
 })
 
-/** 视觉信号行数（截图/console/网络），>0 时渲染视觉证据区 */
+/** 视觉信号行数（console/网络），>0 时渲染视觉证据区。（截图已随功能移除） */
 const hasVisual = computed(() => {
   const ev = evidence.value
   if (!ev) return false
-  return (ev.screenshots?.length ?? 0) > 0 || (ev.console?.errors ?? 0) + (ev.console?.warnings ?? 0) > 0 || (ev.network?.failures ?? 0) > 0
+  return (ev.console?.errors ?? 0) + (ev.console?.warnings ?? 0) > 0 || (ev.network?.failures ?? 0) > 0
 })
 
 async function refresh() {
@@ -148,22 +147,9 @@ watch(
           <div v-for="(line, i) in evidence.diff_brief" :key="i" class="truncate font-mono text-[11px]">{{ line }}</div>
         </details>
 
-        <!-- P2 视觉证据（p2-design.md §6）：截图 + console + 网络失败 -->
+        <!-- P2 视觉证据（p2-design.md §6）：console + 网络失败 -->
+        <!-- 截图缩略图已于 2026-10-15 移除（截图功能整体下线，见 internal/core/visual.go） -->
         <template v-if="hasVisual">
-          <!-- 截图缩略图（点击新标签查看原图，与 Continue 携带的引用一致） -->
-          <div v-if="evidence.screenshots?.length" class="flex flex-wrap gap-1.5 pt-0.5">
-            <a
-              v-for="u in evidence.screenshots"
-              :key="u"
-              :href="u"
-              target="_blank"
-              rel="noopener"
-              class="block overflow-hidden rounded border border-border hover:border-accent/60"
-              title="视觉证据（点击查看大图）"
-            >
-              <img :src="u" alt="截图证据" class="h-12 w-20 object-cover" loading="lazy" />
-            </a>
-          </div>
           <!-- Console 摘要（errors/warnings 计数 + 可展开明细） -->
           <details v-if="(evidence.console?.errors ?? 0) + (evidence.console?.warnings ?? 0) > 0" class="text-muted">
             <summary class="cursor-pointer select-none">

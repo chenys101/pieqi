@@ -1,15 +1,15 @@
 // feedback_p2.go Feedback P2 API（p2-design.md §9）：
 //
-//	POST /api/tasks/:id/preview/screenshots          截图（preview 非 running → 409）
-//	GET  /api/tasks/:id/preview/screenshots          截图列表（时间倒序）
-//	GET  /api/tasks/:id/preview/screenshots/:id.png  截图文件（继承 preview wildcard 鉴权）
-//	GET  /api/tasks/:id/preview/console?since=...    Console error/warn 窗口
-//	GET  /api/tasks/:id/preview/network?since=...    网络失败窗口
-//	POST /api/tasks/:id/push                         Outcome/Evidence 推送（手动）
-//	POST /api/tasks/:id/rewind（scope:file）          文件级回退（feedback.go）
+//	POST /api/tasks/:id/preview/capture           采集 console/network（preview 非 running → 409）
+//	GET  /api/tasks/:id/preview/console?since=... Console error/warn 窗口
+//	GET  /api/tasks/:id/preview/network?since=... 网络失败窗口
+//	POST /api/tasks/:id/push                      Outcome/Evidence 推送（手动）
+//	POST /api/tasks/:id/rewind（scope:file）       文件级回退（feedback.go）
 //
-// 截图子路径挂在 preview wildcard 下（与 start/stop 同套分发，见 preview.go），
-// 因此继承 ExternalAuthMiddleware 鉴权；PNG 由 Go 直出（不代理给 dev server）。
+// 截图相关的三个端点（POST/GET screenshots、GET screenshots/<id>.png）已于
+// 2026-10-15 移除 —— 理由见 internal/core/visual.go 的 Capture 说明。
+// 采集子路径挂在 preview wildcard 下（与 start/stop 同套分发，见 preview.go），
+// 因此继承 ExternalAuthMiddleware 鉴权。
 package api
 
 import (
@@ -23,17 +23,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// visualEvidenceLimit Evidence 默认挂载的最新截图数（§6：只传引用，N 张防 prompt 膨胀）。
-const visualEvidenceLimit = 3
-
-// screenshotReq POST /preview/screenshots 请求体。
-type screenshotReq struct {
-	FullPage bool `json:"full_page"` // 视口（默认）/全页
-}
-
-// postScreenshot POST /api/tasks/:id/preview/screenshots：对运行中 preview 截图。
-// 采集会话同时把 console/network 事件并入该 task 的内存窗口（§4/§5）。
-func (s *Server) postScreenshot(c *gin.Context) {
+// capturePreview POST /api/tasks/:id/preview/capture：对运行中 preview 做一次采集，
+// **只**收集 console error/warn 与网络 4xx/5xx/failed 并入事件窗口。
+//
+// 历史：本端点原名 /preview/screenshots（POST），语义是"截图 + 顺带采事件"。
+// 2026-10-15 起截图移除（理由见 core.Capture），端点随之改名为 /preview/capture ——
+// 名字如实反映现在的行为（只采集事件），避免调用方以为还能拿到图。
+func (s *Server) capturePreview(c *gin.Context) {
 	task, ok := s.requireTask(c)
 	if !ok {
 		return
@@ -50,54 +46,16 @@ func (s *Server) postScreenshot(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "preview not running"})
 		return
 	}
-	var req screenshotReq
-	if err := c.ShouldBindJSON(&req); err != nil && err.Error() != "EOF" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	shot, err := s.visual.Capture(c.Request.Context(), task.ID, port, req.FullPage)
-	if err != nil {
+	if err := s.visual.Capture(c.Request.Context(), task.ID, port); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, shot)
-}
-
-// listScreenshots GET /api/tasks/:id/preview/screenshots：该 task 的截图列表。
-func (s *Server) listScreenshots(c *gin.Context) {
-	task, ok := s.requireTask(c)
-	if !ok {
-		return
-	}
-	shots := []core.Screenshot{}
-	if s.visual != nil {
-		if list := s.visual.ListScreenshots(task.ID); list != nil {
-			shots = list
-		}
-	}
-	c.JSON(http.StatusOK, gin.H{"screenshots": shots})
-}
-
-// getScreenshotPNG GET /api/tasks/:id/preview/screenshots/<id>.png：直出 PNG。
-// c.Param("path") 形如 "/screenshots/<id>.png"；id 经 shotIDPattern 校验（防路径逃逸）。
-func (s *Server) getScreenshotPNG(c *gin.Context) {
-	task, ok := s.requireTask(c)
-	if !ok {
-		return
-	}
-	if s.visual == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "visual capture not enabled"})
-		return
-	}
-	id := strings.TrimSuffix(strings.TrimPrefix(c.Param("path"), "/screenshots/"), ".png")
-	path, found := s.visual.ScreenshotPath(task.ID, id)
-	if !found {
-		c.JSON(http.StatusNotFound, gin.H{"error": "screenshot not found"})
-		return
-	}
-	// id 唯一 → 内容不可变，允许长缓存
-	c.Header("Cache-Control", "public, max-age=86400, immutable")
-	c.File(path)
+	// 返回本次并入的窗口摘要，让调用方立刻看到"采到了什么"（而不是一个截图对象）。
+	c.JSON(http.StatusCreated, gin.H{
+		"ok":      true,
+		"console": s.visual.ConsoleSummaryOf(task.ID, time.Time{}),
+		"network": s.visual.NetworkSummaryOf(task.ID, time.Time{}),
+	})
 }
 
 // getConsole GET /api/tasks/:id/preview/console?since=<RFC3339>：console 窗口摘要。
@@ -204,10 +162,12 @@ func (s *Server) postPush(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "kind": kind, "channel": channelName})
 }
 
-// --- Screenshot → Evidence（§6） ---
+// --- Visual → Evidence（§6） ---
 
 // buildEvidenceWithVisual 派生 Evidence 并挂视觉证据：
-// 最新 N 张截图 URL + console/network 窗口摘要（visual 未接线时无视觉字段）。
+// console/network 窗口摘要（visual 未接线时无视觉字段）。
+//
+// 截图已于 2026-10-15 移除（见 core.Capture 的说明）。
 func (s *Server) buildEvidenceWithVisual(task *model.Task, scope string, turn int) core.Evidence {
 	changes := s.deriveChangesBackfilled(task)
 	evidence := core.BuildEvidence(task, changes, s.taskChecks(task), s.previewOf(task), scope, turn)
@@ -216,21 +176,7 @@ func (s *Server) buildEvidenceWithVisual(task *model.Task, scope string, turn in
 		evidence.Changes = s.cumulativeSummary(task, changes).ChangeSummary
 	}
 	if s.visual != nil {
-		s.visual.AttachVisual(&evidence, visualEvidenceLimit)
+		s.visual.AttachVisual(&evidence)
 	}
 	return evidence
-}
-
-// screenshotURLsFor Continue 指定截图 id → URL 列表（校验存在；§6 Continue 携带引用）。
-func (s *Server) screenshotURLsFor(taskID string, ids []string) []string {
-	if s.visual == nil || len(ids) == 0 {
-		return nil
-	}
-	var urls []string
-	for _, id := range ids {
-		if _, ok := s.visual.ScreenshotPath(taskID, id); ok {
-			urls = append(urls, "/api/tasks/"+taskID+"/preview/screenshots/"+id+".png")
-		}
-	}
-	return urls
 }

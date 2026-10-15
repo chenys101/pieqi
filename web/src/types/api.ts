@@ -541,8 +541,6 @@ export interface EvidenceDto {
   changes: ChangeSummaryDto
   /** 每文件一行摘要（如 "modify src/a.vue (+10 -2)"） */
   diff_brief: string[]
-  /** P2：视觉证据（截图 URL，最新 N 张） */
-  screenshots?: string[]
   /** P2：页面 console 摘要 */
   console?: ConsoleSummaryDto
   /** P2：页面网络失败摘要 */
@@ -552,20 +550,11 @@ export interface EvidenceDto {
 
 // ---------- Feedback P2（p2-design.md §9，wire 与 Go JSON tag 一致） ----------
 
-/** 一次截图记录（POST /preview/screenshots 响应 / 列表项） */
-export interface ScreenshotDto {
-  id: string
-  task_id: string
-  /** preview 实例标识（taskID:port） */
-  preview_id: string
-  /** PNG 端点（/api/tasks/:id/preview/screenshots/<id>.png） */
-  url: string
-  created_at: string
-}
-
-/** GET /api/tasks/:id/preview/screenshots 响应 */
-export interface ScreenshotsResponseDto {
-  screenshots: ScreenshotDto[]
+/** POST /api/tasks/:id/preview/capture 响应（采集 console/network 后的窗口摘要） */
+export interface CaptureResponseDto {
+  ok: boolean
+  console: ConsoleSummaryDto
+  network: NetworkSummaryDto
 }
 
 /** preview 页面 console 事件（只采 error/warn） */

@@ -80,10 +80,6 @@ _Avoid_: 续问（不含证据语义）
 
 ### 视觉反馈（P2）
 
-**Screenshot**:
-Preview 页面的截图，可直接作为视觉证据。P2 由浏览器采集服务（Playwright）生成。
-_Avoid_: 录屏
-
 **Browser Console**:
 Preview 页面运行时采集到的 console.error / console.warn。
 _Avoid_: 日志流
@@ -93,8 +89,15 @@ Preview 页面运行时的 4xx / 5xx / failed 请求。
 _Avoid_: 抓包
 
 **Visual Evidence**:
-Screenshot / Console / Network 聚合成的浏览器证据，可挂载到 Evidence 并进入 Continue。
+Console / Network 聚合成的浏览器证据，可挂载到 Evidence 并进入 Continue。
 _Avoid_: 截图文件（无证据语义）
+
+> **Screenshot 已于 2026-10-15 移除**（曾是"Preview 页面截图"这一术语）。原因：
+> ① 进 Evidence 时只是**一行 URL 字符串**（agent 取不到图，除占 prompt 无信息量）；
+> ② 只访问 preview 根路径，指定路由截不到；③ 必须 preview running + 人工点击才触发；
+> ④ 且它的失败会**连坐** console/network（PNG 解码失败即整体报错）。
+> 保留的是同一采集链路产出的 Console / Network —— 那些是**具体文本**，agent 可直接据此修。
+> 采集服务本体（Playwright）仍在，源码迁到独立工程 `pieqi-ui-test`。
 
 **Evidence Push**:
 把 Task Outcome / Evidence 推送到 IM / Webhook。通过 Notification Provider 抽象，不绑定具体 IM。

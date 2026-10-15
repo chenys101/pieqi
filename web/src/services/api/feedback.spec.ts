@@ -54,12 +54,11 @@ describe('getOutcome：null 数组合一为 []', () => {
 })
 
 describe('getEvidence：null 数组合一为 []', () => {
-  it('checks / screenshots / diff_brief 为 null 时给出空数组', async () => {
+  it('checks / diff_brief 为 null 时给出空数组', async () => {
     request.mockResolvedValueOnce({
       task_id: 't1',
       scope: 'task',
       checks: null,
-      screenshots: null,
       diff_brief: null,
       errors: 0,
       changes: { files: 0, additions: 0, deletions: 0 },
@@ -68,7 +67,6 @@ describe('getEvidence：null 数组合一为 []', () => {
 
     const e = await getEvidence('t1')
     expect(e.checks).toEqual([])
-    expect(e.screenshots).toEqual([])
     expect(e.diff_brief).toEqual([])
     expect(e.diff_brief.length).toBe(0)
   })

@@ -127,12 +127,19 @@ func doReq(r *gin.Engine, method, path string, body any) *httptest.ResponseRecor
 	return w
 }
 
-func TestAPI_P2_ScreenshotBranches(t *testing.T) {
+// TestAPI_P2_CaptureBranches 采集端点的分支：
+// visual 未接线 → 503；visual 接线但 preview 未运行 → 409。
+//
+// 原为 TestAPI_P2_ScreenshotBranches。截图三端点已于 2026-10-15 移除，
+// 端点改名 /preview/capture（语义：只采 console/network）。这里额外钉住
+// **旧路径 /preview/screenshots 必须返回 410**（而不是掉进反向代理拿到一个 HTML）——
+// 那会让老前端/老书签看到"服务坏了"而非"功能没了"。
+func TestAPI_P2_CaptureBranches(t *testing.T) {
 	_, store, r := setupP2Test(t)
 	task := seedP2Task(t, store, core.NewFeedbackStore(zap.NewNop(), t.TempDir()))
 
 	// visual 未接线：POST → 503
-	w := doReq(r, "POST", "/api/tasks/"+task.ID+"/preview/screenshots", nil)
+	w := doReq(r, "POST", "/api/tasks/"+task.ID+"/preview/capture", nil)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("no visual status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -141,21 +148,24 @@ func TestAPI_P2_ScreenshotBranches(t *testing.T) {
 	srv2, store2, r2 := setupP2Test(t)
 	task2 := seedP2Task(t, store2, core.NewFeedbackStore(zap.NewNop(), t.TempDir()))
 	srv2.SetVisualCapture(core.NewVisualCaptureManager(zap.NewNop(), t.TempDir()))
-	w = doReq(r2, "POST", "/api/tasks/"+task2.ID+"/preview/screenshots", nil)
+	w = doReq(r2, "POST", "/api/tasks/"+task2.ID+"/preview/capture", nil)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("no preview status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	// 列表（未接线）→ 200 空数组
-	w = doReq(r, "GET", "/api/tasks/"+task.ID+"/preview/screenshots", nil)
-	if w.Code != http.StatusOK || !bytes.Contains(w.Body.Bytes(), []byte(`"screenshots":[]`)) {
-		t.Fatalf("list status=%d body=%s", w.Code, w.Body.String())
+	// 旧截图路径（POST）→ 410 Gone，且带可操作 hint
+	w = doReq(r, "POST", "/api/tasks/"+task.ID+"/preview/screenshots", nil)
+	if w.Code != http.StatusGone {
+		t.Fatalf("removed screenshot POST status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("preview/capture")) {
+		t.Fatalf("410 应给出替代端点提示: %s", w.Body.String())
 	}
 
-	// PNG 不存在 → 404（visual 已接线）
-	w = doReq(r2, "GET", "/api/tasks/"+task2.ID+"/preview/screenshots/deadbeefdeadbeef.png", nil)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("png status=%d body=%s", w.Code, w.Body.String())
+	// 旧截图路径（GET 列表）→ 同为 410（不能落到反向代理）
+	w = doReq(r, "GET", "/api/tasks/"+task.ID+"/preview/screenshots", nil)
+	if w.Code != http.StatusGone {
+		t.Fatalf("removed screenshot GET status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

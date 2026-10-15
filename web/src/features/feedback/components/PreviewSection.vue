@@ -3,19 +3,18 @@
 // start → 异步启动（starting → running，轮询感知）；stop → 停止；
 // restart → 停止后重启（P1：Rewind→Verify 后 / 非 HMR 框架改动后手动刷新）；
 // attach → 外链 + 二维码（P1：隧道可达时在外部浏览器打开）；
-// capture → 截图（P2：running 时采集页面截图 + console/network 事件）；
+// capture → 采集 console/network 事件（P2；截图已于 2026-10-15 移除）；
 // running 时提供子路径代理入口（新标签打开，鉴权经 cookie/header 同源）。
 import { computed, onUnmounted, ref, watch } from 'vue'
 import {
-  captureScreenshot,
+  capturePreview,
   getPreviewAttach,
   getPreviewStatus,
-  listScreenshots,
   restartPreview,
   startPreview,
   stopPreview,
 } from '@/services/api/feedback'
-import type { PreviewAttachDto, PreviewStatusDto, ScreenshotDto } from '@/types/api'
+import type { PreviewAttachDto, PreviewStatusDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useNotificationStore } from '@/stores/notification'
@@ -32,8 +31,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 const attach = ref<PreviewAttachDto | null>(null)
 const attaching = ref(false)
 
-/** P2：截图列表（时间倒序）与采集状态 */
-const shots = ref<ScreenshotDto[]>([])
+/** P2：采集状态（截图列表已随功能移除） */
 const capturing = ref(false)
 
 const stateLabel = computed(() => {
@@ -136,32 +134,27 @@ async function onAttach() {
 }
 
 /**
- * P2：截图采集（running 时可用）。
- * 采集会话同时把 console error/warn 与 4xx/5xx/failed 请求并入事件窗口
- * （EvidenceCard 消费）；409 = preview 未运行，提示先启动。
+ * P2：采集 console/network（running 时可用）。
+ * 把 console error/warn 与 4xx/5xx/failed 请求并入事件窗口（EvidenceCard 消费）；
+ * 409 = preview 未运行，提示先启动。
+ *
+ * 原名 onCapture（截图），2026-10-15 随截图功能下线改名 —— 但**保留**这个按钮：
+ * 它现在只采事件，而 console/network 正是 agent 修前端 bug 最有用的线索。
  */
 async function onCapture() {
   capturing.value = true
   try {
-    const shot = await captureScreenshot(props.taskId)
-    shots.value = [shot, ...shots.value]
+    const res = await capturePreview(props.taskId)
+    const n = (res.console?.errors ?? 0) + (res.console?.warnings ?? 0) + (res.network?.failures ?? 0)
+    notify.success(n > 0 ? `已采集 ${n} 条问题（见证据卡）` : '采集完成：未发现问题')
   } catch (err) {
-    notify.error(err instanceof Error ? err.message : '截图失败（需预览运行中）')
+    notify.error(err instanceof Error ? err.message : '采集失败（需预览运行中）')
   } finally {
     capturing.value = false
   }
 }
 
-/** P2：拉取截图列表（截图可能在别处生成，如推送前采集） */
-async function refreshShots() {
-  try {
-    shots.value = await listScreenshots(props.taskId)
-  } catch {
-    /* 静默：截图功能不可用时折叠为空列表 */
-  }
-}
-
-// 打开时拉一次状态 + 截图列表；taskId 变化时重新拉取。
+// 打开时拉一次状态；taskId 变化时重新拉取。
 //
 // **若上来就是 starting，必须把轮询接回去** ——「预览」现在是反馈面板里的一个 Tab，
 // 用户点完「启动」切去别的 Tab 再切回来会重新挂载；只刷新不续轮询的话，
@@ -169,7 +162,6 @@ async function refreshShots() {
 async function init() {
   await refresh()
   if (isStarting.value) pollWhileStarting()
-  refreshShots()
 }
 
 watch(() => props.taskId, init, { immediate: true })
@@ -227,21 +219,6 @@ onUnmounted(stopPoll)
         <a :href="attach.url" target="_blank" rel="noopener" class="break-all text-xs text-info hover:underline">{{ attach.url }}</a>
         <button class="self-start text-[11px] text-muted hover:text-text" @click="attach = null">收起</button>
       </div>
-    </div>
-
-    <!-- P2：截图列表（缩略图，点击新标签查看原图；采集即入 Evidence 视觉证据） -->
-    <div v-if="shots.length" class="mt-2 flex flex-wrap gap-2">
-      <a
-        v-for="shot in shots"
-        :key="shot.id"
-        :href="shot.url"
-        target="_blank"
-        rel="noopener"
-        class="group relative block overflow-hidden rounded-md border border-border hover:border-accent/60"
-        :title="`截图 ${new Date(shot.created_at).toLocaleString()}（点击查看大图）`"
-      >
-        <img :src="shot.url" alt="页面截图" class="h-16 w-24 object-cover transition-opacity group-hover:opacity-90" loading="lazy" />
-      </a>
     </div>
   </div>
 </template>
