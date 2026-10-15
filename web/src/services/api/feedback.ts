@@ -20,14 +20,11 @@ import type {
   ApprovalDiffDto,
   CheckDto,
   ChecksResponseDto,
-  CaptureResponseDto,
-  ConsoleSummaryDto,
   ContinueResponseDto,
   EvidenceDto,
   EvidenceScopeDto,
   FeedbackBundleDto,
   FeedbackDiffDto,
-  NetworkSummaryDto,
   PreviewAttachDto,
   PreviewStatusDto,
   PushResponseDto,
@@ -176,31 +173,9 @@ export async function continueWithEvidence(
 
 // ---------- Feedback P2（p2-design.md §9） ----------
 
-/**
- * POST /api/tasks/:id/preview/capture：对运行中 preview 做一次采集，
- * 收集 console error/warn 与网络失败并入事件窗口（preview 非 running → 409）。
- *
- * 原名 captureScreenshot（端点 /preview/screenshots）。截图功能已于 2026-10-15 移除
- * （理由见 internal/core/visual.go 的 Capture 说明），端点改名以如实反映行为。
- */
-export async function capturePreview(taskId: string): Promise<CaptureResponseDto> {
-  return request<CaptureResponseDto>(`/tasks/${encodeURIComponent(taskId)}/preview/capture`, {
-    method: 'POST',
-    body: {},
-  })
-}
-
-/** GET /api/tasks/:id/preview/console：console error/warn 窗口（since 增量游标可选） */
-export async function getConsoleSummary(taskId: string, since?: string): Promise<ConsoleSummaryDto> {
-  const qs = since ? `?since=${encodeURIComponent(since)}` : ''
-  return request<ConsoleSummaryDto>(`/tasks/${encodeURIComponent(taskId)}/preview/console${qs}`)
-}
-
-/** GET /api/tasks/:id/preview/network：失败请求窗口（4xx/5xx/failed） */
-export async function getNetworkSummary(taskId: string, since?: string): Promise<NetworkSummaryDto> {
-  const qs = since ? `?since=${encodeURIComponent(since)}` : ''
-  return request<NetworkSummaryDto>(`/tasks/${encodeURIComponent(taskId)}/preview/network${qs}`)
-}
+// 视觉采集 API（capturePreview / getConsoleSummary / getNetworkSummary）已于 2026-10-15
+// 整体移除 —— 对应后端端点在 preview wildcard 里返回 410 Gone（ADR-0012/0013）。
+// 保留此注释是为了让"这里本来有东西"可被检索到，避免日后从 git 历史里翻出来当新需求做。
 
 /**
  * POST /api/tasks/:id/rewind（scope:file，P2 §7）：单文件回退到 Turn N 开始之前。

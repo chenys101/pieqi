@@ -3,11 +3,10 @@
 // start → 异步启动（starting → running，轮询感知）；stop → 停止；
 // restart → 停止后重启（P1：Rewind→Verify 后 / 非 HMR 框架改动后手动刷新）；
 // attach → 外链 + 二维码（P1：隧道可达时在外部浏览器打开）；
-// capture → 采集 console/network 事件（P2；截图已于 2026-10-15 移除）；
+// （原 capture → 采集截图/console/network，2026-10-15 随视觉采集层移除，见 ADR-0012/0013）
 // running 时提供子路径代理入口（新标签打开，鉴权经 cookie/header 同源）。
 import { computed, onUnmounted, ref, watch } from 'vue'
 import {
-  capturePreview,
   getPreviewAttach,
   getPreviewStatus,
   restartPreview,
@@ -30,9 +29,6 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 /** P1：Attach 结果（外链 + 二维码），null = 未拉取 */
 const attach = ref<PreviewAttachDto | null>(null)
 const attaching = ref(false)
-
-/** P2：采集状态（截图列表已随功能移除） */
-const capturing = ref(false)
 
 const stateLabel = computed(() => {
   const map: Record<string, string> = {
@@ -133,27 +129,6 @@ async function onAttach() {
   }
 }
 
-/**
- * P2：采集 console/network（running 时可用）。
- * 把 console error/warn 与 4xx/5xx/failed 请求并入事件窗口（EvidenceCard 消费）；
- * 409 = preview 未运行，提示先启动。
- *
- * 原名 onCapture（截图），2026-10-15 随截图功能下线改名 —— 但**保留**这个按钮：
- * 它现在只采事件，而 console/network 正是 agent 修前端 bug 最有用的线索。
- */
-async function onCapture() {
-  capturing.value = true
-  try {
-    const res = await capturePreview(props.taskId)
-    const n = (res.console?.errors ?? 0) + (res.console?.warnings ?? 0) + (res.network?.failures ?? 0)
-    notify.success(n > 0 ? `已采集 ${n} 条问题（见证据卡）` : '采集完成：未发现问题')
-  } catch (err) {
-    notify.error(err instanceof Error ? err.message : '采集失败（需预览运行中）')
-  } finally {
-    capturing.value = false
-  }
-}
-
 // 打开时拉一次状态；taskId 变化时重新拉取。
 //
 // **若上来就是 starting，必须把轮询接回去** ——「预览」现在是反馈面板里的一个 Tab，
@@ -186,15 +161,8 @@ onUnmounted(stopPoll)
         <a v-if="isRunning" :href="previewURL" target="_blank" rel="noopener"
            class="rounded-md border border-accent/40 px-2.5 py-1 text-xs text-accent hover:bg-accent/10"
         >打开</a>
-        <!-- P2：截图（running 时采集页面 + console/network 事件） -->
-        <Button
-          v-if="isRunning"
-          variant="ghost"
-          size="sm"
-          :loading="capturing"
-          title="采集页面截图（含 console/网络错误证据）"
-          @click="onCapture"
-        >截图</Button>
+        <!-- 「截图」按钮及其背后的视觉采集（截图/console/network）已于 2026-10-15 移除，
+             见 ADR-0012 / ADR-0013。保留 preview 的启动/重启/打开——那是 P1 能力，与采集无关。 -->
         <!-- P1：重启（停止后重启，代码改动非 HMR 时手动刷新） -->
         <Button
           v-if="!isStarting"

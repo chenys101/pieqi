@@ -93,43 +93,23 @@ func TestBuildEvidence_TaskScope(t *testing.T) {
 	}
 }
 
-// TestEvidencePrompt_Visual P2 §6：Continue prompt 携带视觉证据
-// （console 错误摘要 + 网络失败明细）。
+// TestEvidencePrompt_NoVisualResidue 视觉采集层已整体移除（ADR-0012 截图、ADR-0013 console/network），
+// prompt 里**不得**再出现任何视觉证据痕迹。
 //
-// 截图相关断言已于 2026-10-15 移除 —— prompt 里不再有 "- 截图证据: <url>" 行。
-// 这里**额外断言它不出现**，防止有人把那段加回来（那是退化：agent 取不到那个 URL）。
-func TestEvidencePrompt_Visual(t *testing.T) {
-	ev := Evidence{
-		TaskID: "t1",
-		Console: &ConsoleSummary{
-			Errors: 2, Warnings: 1,
-			Entries: []ConsoleEntry{
-				{Level: "error", Text: "Uncaught TypeError: btn is null"},
-				{Level: "warn", Text: "deprecated API"},
-			},
-		},
-		Network: &NetworkSummary{
-			Failures: 1,
-			Entries: []NetworkEntry{
-				{URL: "http://127.0.0.1:5173/api/user", Method: "GET", Status: 500},
-			},
-		},
-	}
+// 为什么写成负向断言而不是直接删掉旧测试：这三段输出（截图 URL / 页面 Console / 页面网络失败）
+// 在历史上是**逐个**加进来的，删的时候很容易漏一段、或日后被"顺手加回来"。
+// 用一条测试把"整个视觉层不出现在 prompt 里"钉住，比删掉测试更能防回归。
+func TestEvidencePrompt_NoVisualResidue(t *testing.T) {
+	ev := Evidence{TaskID: "t1"}
 	prompt := EvidencePrompt("顶部按钮错位", ev, nil)
-	for _, want := range []string{
-		"顶部按钮错位",
-		"2 errors / 1 warnings",
-		"[error] Uncaught TypeError: btn is null",
-		"页面网络失败: 1 个请求",
-		"GET http://127.0.0.1:5173/api/user (status=500)",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing %q:\n%s", want, prompt)
-		}
+
+	if !strings.Contains(prompt, "顶部按钮错位") {
+		t.Fatalf("instruction 应出现在 prompt 里:\n%s", prompt)
 	}
-	// 负向断言：截图引用必须不复存在（功能已移除，别被重新加回）。
-	if strings.Contains(prompt, "截图") || strings.Contains(prompt, "/screenshots/") {
-		t.Fatalf("prompt 不应再含截图引用（该功能已移除）:\n%s", prompt)
+	for _, banned := range []string{"截图", "/screenshots/", "页面 Console", "页面网络失败", "console", "network"} {
+		if strings.Contains(prompt, banned) {
+			t.Fatalf("prompt 不应含视觉证据痕迹 %q（该层已移除）:\n%s", banned, prompt)
+		}
 	}
 }
 

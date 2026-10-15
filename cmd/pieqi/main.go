@@ -218,10 +218,8 @@ func main() {
 		logger.Fatal("init bot store", zap.Error(err))
 	}
 
-	// Feedback P2（p2-design.md）：视觉采集（截图/console/network）+ Evidence Push。
-	// task 删除时回收截图与事件窗口；推送注册表订阅终态自动推 Outcome。
-	visualMgr := core.NewVisualCaptureManager(logger, filepath.Join(dataRoot, "previews"))
-	visualMgr.WatchBus(bus)
+	// Feedback P2（p2-design.md）：Evidence Push。
+	// （视觉采集——截图/console/network——已于 2026-10-15 整体移除，见 ADR-0012/0013。）
 	pushRegistry := core.NewPushRegistry(logger, store)
 	pushRegistry.WatchBus(bus)
 
@@ -471,7 +469,6 @@ func main() {
 		apiServer.SetAuth(authSvc, tunnelMgr)
 		apiServer.SetFeedback(feedbackStore, previewMgr)
 		apiServer.SetCheckRunner(checkRunner)
-		apiServer.SetVisualCapture(visualMgr)
 		apiServer.SetPushRegistry(pushRegistry)
 		apiServer.SetLarkReg(larkreg.NewRegistration(), cfg.Channels.Lark.CredentialsFile)
 		apiServer.SetBotStore(botStore)
@@ -559,8 +556,6 @@ func main() {
 		}
 		// Feedback P0：服务器关停回收全部 preview dev server 进程
 		previewMgr.CleanupAll()
-		// Feedback P2：关停视觉采集服务（Playwright 子进程树）
-		_ = visualMgr.Stop(context.Background())
 		os.Exit(0)
 	}()
 

@@ -191,7 +191,7 @@ func (s *Server) getEvidence(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "scope=turn requires turn"})
 		return
 	}
-	c.JSON(http.StatusOK, s.buildEvidenceWithVisual(task, scope, turn))
+	c.JSON(http.StatusOK, s.buildEvidence(task, scope, turn))
 }
 
 // --- Evidence → Continue（§8 ⭐ 控制闭环） ---
@@ -219,7 +219,7 @@ func (s *Server) postContinue(c *gin.Context) {
 	}
 
 	checks := s.taskChecks(task)
-	evidence := s.buildEvidenceWithVisual(task, core.ScopeTask, 0)
+	evidence := s.buildEvidence(task, core.ScopeTask, 0)
 	prompt := core.EvidencePrompt(req.Instruction, evidence, checks)
 
 	// 证据续问不指定模型：沿用会话当前路由（要换模型用户在会话里逐条消息选）。

@@ -63,36 +63,25 @@ func (s *Server) previewRoute(c *gin.Context) {
 			s.previewStatus(c)
 			return
 		}
-	case "capture":
-		// P2：对运行中 preview 采集 console/network（原 screenshots POST，2026-10-15 改名）。
-		if c.Request.Method == http.MethodPost {
-			s.capturePreview(c)
-			return
-		}
-		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
-		return
-	case "screenshots":
-		// 截图功能已于 2026-10-15 移除。这里**显式**返回 410 而不是让它落到反向代理 ——
-		// 否则 /preview/screenshots 会被当作页面路径代理给 dev server，调用方拿到
-		// 一个莫名其妙的 HTML/404，无法判断是"功能没了"还是"服务坏了"。
-		c.JSON(http.StatusGone, gin.H{
-			"error": "screenshot feature removed",
-			"hint":  "改用 POST /api/tasks/:id/preview/capture 采集 console/network",
-		})
-		return
-	case "console":
-		// P2：console error/warn 窗口
-		if c.Request.Method == http.MethodGet {
-			s.getConsole(c)
-			return
-		}
-	case "network":
-		// P2：失败请求窗口
-		if c.Request.Method == http.MethodGet {
-			s.getNetwork(c)
-			return
-		}
 	default:
+		// ⚠️ 视觉采集子路径（capture / console / network / screenshots）已于 2026-10-15
+		// **整体移除**（ADR-0012 移除截图，ADR-0013 移除 console/network）。
+		//
+		// 这里**显式返回 410 Gone**，而不是让它们落到下面的反向代理 ——
+		// 否则 /preview/console 之类会被当作**页面路径**代理给被预览的 dev server，
+		// 调用方拿到一个莫名其妙的 HTML/404，**分不清"功能没了"还是"服务坏了"**。
+		//
+		// ⚠️ `screenshots/<id>.png` 这类**带子路径**的也要挡住（用 HasPrefix）：
+		// 它不匹配任何精确 case，会掉进下面的 302 代理 ——
+		// 这是实测发现的（测试期望 410、实际拿到 302 跳转）。
+		if path == "capture" || path == "console" || path == "network" ||
+			path == "screenshots" || strings.HasPrefix(path, "screenshots/") {
+			c.JSON(http.StatusGone, gin.H{
+				"error": "visual capture feature removed",
+				"hint":  "视觉采集（截图/console/network）已于 2026-10-15 移除，见 docs/adr/0012 与 0013",
+			})
+			return
+		}
 		// 代理能力只保留在 /preview/:id/*（见 core.PreviewMountPrefix 说明）。
 		// 旧路径 /api/tasks/:id/preview/* 一律 302 到新挂载点并带上 query（token），
 		// 避免请求落进被预览项目自身的 /api 代理规则而形成回环。

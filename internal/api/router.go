@@ -32,10 +32,11 @@ type Server struct {
 	// P1 Checks 重跑 runner（p1-design.md §5）；nil-safe（未接线时仅事件流派生）。
 	checks *core.CheckRunner
 
-	// Feedback P2（p2-design.md）：视觉采集 + 推送注册表；
-	// wired by SetVisualCapture/SetPushRegistry; nil-safe（未接线时端点降级响应）。
-	visual *core.VisualCaptureManager
-	push   *core.PushRegistry
+	// Feedback P2（p2-design.md）：推送注册表；
+	// wired by SetPushRegistry; nil-safe（未接线时端点降级响应）。
+	//
+	// 视觉采集（console/network）已于 2026-10-15 整体移除，见 ADR-0012/0013。
+	push *core.PushRegistry
 
 	// Lark Device Flow (扫码一键创建飞书应用)。wired by SetLarkReg;
 	// nil-safe for tests that don't exercise larkreg routes.
@@ -110,11 +111,6 @@ func (s *Server) SetFeedback(fs *core.FeedbackStore, pm *core.PreviewManager) {
 // SetCheckRunner wires the check rerun runner (Feedback P1). nil-safe.
 func (s *Server) SetCheckRunner(cr *core.CheckRunner) {
 	s.checks = cr
-}
-
-// SetVisualCapture wires the visual capture manager (Feedback P2). nil-safe.
-func (s *Server) SetVisualCapture(vm *core.VisualCaptureManager) {
-	s.visual = vm
 }
 
 // SetPushRegistry wires the evidence push registry (Feedback P2). nil-safe.

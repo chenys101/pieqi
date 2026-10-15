@@ -78,26 +78,25 @@ _Avoid_: report
 用户带着当前 Evidence 让 Agent 继续的下一条消息（由后端把证据整理成 Agent Context）。
 _Avoid_: 续问（不含证据语义）
 
-### 视觉反馈（P2）
+### 视觉反馈（P2）—— 已整体移除
 
-**Browser Console**:
-Preview 页面运行时采集到的 console.error / console.warn。
-_Avoid_: 日志流
-
-**Network Error**:
-Preview 页面运行时的 4xx / 5xx / failed 请求。
-_Avoid_: 抓包
-
-**Visual Evidence**:
-Console / Network 聚合成的浏览器证据，可挂载到 Evidence 并进入 Continue。
-_Avoid_: 截图文件（无证据语义）
-
-> **Screenshot 已于 2026-10-15 移除**（曾是"Preview 页面截图"这一术语）。原因：
-> ① 进 Evidence 时只是**一行 URL 字符串**（agent 取不到图，除占 prompt 无信息量）；
-> ② 只访问 preview 根路径，指定路由截不到；③ 必须 preview running + 人工点击才触发；
-> ④ 且它的失败会**连坐** console/network（PNG 解码失败即整体报错）。
-> 保留的是同一采集链路产出的 Console / Network —— 那些是**具体文本**，agent 可直接据此修。
-> 采集服务本体（Playwright）仍在，源码迁到独立工程 `pieqi-ui-test`。
+> **本节的三个术语（Screenshot / Browser Console / Network Error / Visual Evidence）
+> 全部于 2026-10-15 移除，不再是 pieqi 的领域概念。**
+>
+> 移除顺序与判据：
+> - **Screenshot**（ADR-0012）：进 Evidence 时只是**一行 URL 字符串**（agent 取不到图，
+>   除占 prompt 无信息量）；只访问 preview 根路径，指定路由截不到；必须 preview running +
+>   人工点击才触发；且它的失败会**连坐** console/network（PNG 解码失败即整体报错）。
+> - **Browser Console / Network Error / Visual Evidence**（ADR-0013）：技术上比截图有价值
+>   （送的是具体文本：报错内容、失败 URL + status），但触发条件与截图同样苛刻
+>   （preview running + 人工点击），实际从未被使用；且整层依赖一个需 `npm install` +
+>   chromium 二进制的独立 Node 服务，维护成本与收益不成比例。
+>
+> 连带影响：`Evidence.Console` / `Evidence.Network` 字段、`EvidencePrompt` 的对应输出、
+> 四个 preview 子路径（`capture`/`console`/`network`/`screenshots`，现返回 **410 Gone**）。
+>
+> **preview 本身（把 agent 改完的代码跑起来在手机上看）不受影响** —— 那是 P1 能力。
+> 采集服务源码**留档**在独立工程 `pieqi-ui-test/services/visual-capture`。
 
 **Evidence Push**:
 把 Task Outcome / Evidence 推送到 IM / Webhook。通过 Notification Provider 抽象，不绑定具体 IM。

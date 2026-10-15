@@ -29,23 +29,12 @@ type Evidence struct {
 	Errors      int              `json:"errors"` // 末轮 is_error tool_result 数
 	Changes     ChangeSummary   `json:"changes"`
 	DiffBrief   []string         `json:"diff_brief"` // 每文件一行摘要
-	Console     *ConsoleSummary  `json:"console,omitempty"`
-	Network     *NetworkSummary  `json:"network,omitempty"`
 	CreatedAt   string           `json:"created_at"`
 }
 
-// ConsoleSummary P2 Browser Console 摘要（§4：只采 error/warn）。
-type ConsoleSummary struct {
-	Errors   int            `json:"errors"`
-	Warnings int            `json:"warnings"`
-	Entries  []ConsoleEntry `json:"entries,omitempty"`
-}
-
-// NetworkSummary P2 Network Error 摘要（§5：只采 4xx/5xx/failed）。
-type NetworkSummary struct {
-	Failures int            `json:"failures"`
-	Entries  []NetworkEntry `json:"entries,omitempty"`
-}
+// 注：P2 的 Console/Network 摘要（及更早的 Screenshot）已于 2026-10-15 整体移除，
+// 见 docs/adr/0012（截图）与 docs/adr/0013（console/network）。
+// 采集服务源码留档在独立工程 pieqi-ui-test/services/visual-capture。
 
 // BuildEvidence 聚合派生 Evidence。
 // changes 需已回填 +/- 行数（turn>0 时过滤到该 Turn）。
@@ -155,25 +144,8 @@ func EvidencePrompt(instruction string, ev Evidence, failedChecks []Check) strin
 		b.WriteString(fmt.Sprintf("\n- 末轮错误: %d 个工具调用失败", ev.Errors))
 	}
 
-	// P2 视觉证据（§6）：console/network 摘要。
-	//
-	// 历史上这里还有一段 "- 截图证据: <url>"（每条一行 URL）。已随截图功能移除：
-	// agent 拿到的只是一个取不到的路径字符串，除了占 prompt 不提供信息；
-	// 而下面的 console/network 是**具体文本**（报错内容、失败 URL + status），可直接据此修。
-	if ev.Console != nil && (ev.Console.Errors > 0 || ev.Console.Warnings > 0) {
-		b.WriteString(fmt.Sprintf("\n- 页面 Console: %d errors / %d warnings", ev.Console.Errors, ev.Console.Warnings))
-		for _, e := range ev.Console.Entries {
-			if e.Level == "error" {
-				b.WriteString("\n  - [error] " + firstLine(strings.TrimSpace(e.Text)))
-			}
-		}
-	}
-	if ev.Network != nil && ev.Network.Failures > 0 {
-		b.WriteString(fmt.Sprintf("\n- 页面网络失败: %d 个请求", ev.Network.Failures))
-		for _, e := range ev.Network.Entries {
-			b.WriteString(fmt.Sprintf("\n  - %s %s (status=%d)", e.Method, e.URL, e.Status))
-		}
-	}
+	// 注：这里曾有 P2 视觉证据两段 —— "- 截图证据: <url>"（更早移除）与
+	// "- 页面 Console / 页面网络失败"（2026-10-15 随整个视觉采集层移除，ADR-0013）。
 	return b.String()
 }
 

@@ -39,21 +39,7 @@ const checkIcon: Record<CheckSummaryDto['status'], string> = {
 const hasSignal = computed(() => {
   const ev = evidence.value
   if (!ev) return false
-  return (
-    ev.changes.files > 0 ||
-    ev.checks.length > 0 ||
-    ev.errors > 0 ||
-    (ev.console?.errors ?? 0) > 0 ||
-    (ev.console?.warnings ?? 0) > 0 ||
-    (ev.network?.failures ?? 0) > 0
-  )
-})
-
-/** 视觉信号行数（console/网络），>0 时渲染视觉证据区。（截图已随功能移除） */
-const hasVisual = computed(() => {
-  const ev = evidence.value
-  if (!ev) return false
-  return (ev.console?.errors ?? 0) + (ev.console?.warnings ?? 0) > 0 || (ev.network?.failures ?? 0) > 0
+  return ev.changes.files > 0 || ev.checks.length > 0 || ev.errors > 0
 })
 
 async function refresh() {
@@ -147,34 +133,7 @@ watch(
           <div v-for="(line, i) in evidence.diff_brief" :key="i" class="truncate font-mono text-[11px]">{{ line }}</div>
         </details>
 
-        <!-- P2 视觉证据（p2-design.md §6）：console + 网络失败 -->
-        <!-- 截图缩略图已于 2026-10-15 移除（截图功能整体下线，见 internal/core/visual.go） -->
-        <template v-if="hasVisual">
-          <!-- Console 摘要（errors/warnings 计数 + 可展开明细） -->
-          <details v-if="(evidence.console?.errors ?? 0) + (evidence.console?.warnings ?? 0) > 0" class="text-muted">
-            <summary class="cursor-pointer select-none">
-              Console：<span :class="evidence.console?.errors ? 'text-error' : ''">{{ evidence.console?.errors }} errors</span>
-              / {{ evidence.console?.warnings }} warnings
-            </summary>
-            <div
-              v-for="(e, i) in evidence.console?.entries ?? []"
-              :key="i"
-              class="truncate font-mono text-[11px]"
-              :class="e.level === 'error' ? 'text-error' : 'text-warning'"
-              :title="e.text"
-            >[{{ e.level }}] {{ e.text }}</div>
-          </details>
-          <!-- 网络失败摘要（4xx/5xx/failed；status=0 = 请求失败） -->
-          <details v-if="(evidence.network?.failures ?? 0) > 0" class="text-muted">
-            <summary class="cursor-pointer select-none text-error">网络失败：{{ evidence.network?.failures }} 个请求</summary>
-            <div
-              v-for="(e, i) in evidence.network?.entries ?? []"
-              :key="i"
-              class="truncate font-mono text-[11px]"
-              :title="`${e.method} ${e.url}`"
-            >{{ e.method }} {{ e.url }}（status={{ e.status }}）</div>
-          </details>
-        </template>
+        <!-- 视觉证据区（截图 → 2026-10-15；console/网络 → 同日，见 ADR-0012/0013）已整体移除 -->
       </div>
     </template>
 

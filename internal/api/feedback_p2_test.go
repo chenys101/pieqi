@@ -127,64 +127,57 @@ func doReq(r *gin.Engine, method, path string, body any) *httptest.ResponseRecor
 	return w
 }
 
-// TestAPI_P2_CaptureBranches 采集端点的分支：
-// visual 未接线 → 503；visual 接线但 preview 未运行 → 409。
+// TestAPI_P2_VisualSubpathsGone 视觉采集子路径**全部**返回 410 Gone。
 //
-// 原为 TestAPI_P2_ScreenshotBranches。截图三端点已于 2026-10-15 移除，
-// 端点改名 /preview/capture（语义：只采 console/network）。这里额外钉住
-// **旧路径 /preview/screenshots 必须返回 410**（而不是掉进反向代理拿到一个 HTML）——
-// 那会让老前端/老书签看到"服务坏了"而非"功能没了"。
-func TestAPI_P2_CaptureBranches(t *testing.T) {
+// 背景：截图（ADR-0012）与 console/network（ADR-0013）先后移除，
+// 四个 preview 子路径（capture / console / network / screenshots）都没了实现。
+//
+// 为什么必须钉住 410 而不是"删掉这些 case 让它 404"：
+// `previewRoute` 是 catch-all，未命中的路径会走 **default 分支的反向代理**，
+// 于是 `/preview/console` 会被当作**页面路径**代理给被预览的 dev server ——
+// 调用方拿到一个莫名其妙的 HTML/404，**分不清"功能没了"还是"服务坏了"**。
+// 410 Gone 语义正确（曾经存在、现已移除）且带可操作 hint。
+func TestAPI_P2_VisualSubpathsGone(t *testing.T) {
 	_, store, r := setupP2Test(t)
 	task := seedP2Task(t, store, core.NewFeedbackStore(zap.NewNop(), t.TempDir()))
 
-	// visual 未接线：POST → 503
-	w := doReq(r, "POST", "/api/tasks/"+task.ID+"/preview/capture", nil)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("no visual status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	// visual 接线但 preview 未运行 → 409（设计 §3.1）
-	srv2, store2, r2 := setupP2Test(t)
-	task2 := seedP2Task(t, store2, core.NewFeedbackStore(zap.NewNop(), t.TempDir()))
-	srv2.SetVisualCapture(core.NewVisualCaptureManager(zap.NewNop(), t.TempDir()))
-	w = doReq(r2, "POST", "/api/tasks/"+task2.ID+"/preview/capture", nil)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("no preview status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	// 旧截图路径（POST）→ 410 Gone，且带可操作 hint
-	w = doReq(r, "POST", "/api/tasks/"+task.ID+"/preview/screenshots", nil)
-	if w.Code != http.StatusGone {
-		t.Fatalf("removed screenshot POST status=%d body=%s", w.Code, w.Body.String())
-	}
-	if !bytes.Contains(w.Body.Bytes(), []byte("preview/capture")) {
-		t.Fatalf("410 应给出替代端点提示: %s", w.Body.String())
-	}
-
-	// 旧截图路径（GET 列表）→ 同为 410（不能落到反向代理）
-	w = doReq(r, "GET", "/api/tasks/"+task.ID+"/preview/screenshots", nil)
-	if w.Code != http.StatusGone {
-		t.Fatalf("removed screenshot GET status=%d body=%s", w.Code, w.Body.String())
+	for _, tc := range []struct{ method, path string }{
+		{"POST", "/preview/capture"},
+		{"GET", "/preview/console"},
+		{"GET", "/preview/network"},
+		{"POST", "/preview/screenshots"},
+		{"GET", "/preview/screenshots"},
+		{"GET", "/preview/screenshots/deadbeefdeadbeef.png"},
+	} {
+		w := doReq(r, tc.method, "/api/tasks/"+task.ID+tc.path, nil)
+		if w.Code != http.StatusGone {
+			t.Fatalf("%s %s: status=%d want 410, body=%s", tc.method, tc.path, w.Code, w.Body.String())
+		}
+		if !bytes.Contains(w.Body.Bytes(), []byte("removed")) {
+			t.Fatalf("%s %s: 410 应说明功能已移除, body=%s", tc.method, tc.path, w.Body.String())
+		}
 	}
 }
 
-func TestAPI_P2_ConsoleNetworkDegraded(t *testing.T) {
+// TestAPI_P2_ConsoleNetworkDegraded 原断言"未接线 → 200 零值摘要""方法不匹配 → 405"。
+//
+// 这两个端点已随视觉采集层整体移除（ADR-0013），行为变成 **410 Gone**
+// （无论方法、无论是否带 ?since=）。410 语义比 405 更准确：功能不再存在，
+// 而不是"这个方法不允许"。此用例现已并入 TestAPI_P2_VisualSubpathsGone，
+// 但**保留一条带 query 的用例**——411/410 分支不应因 query 参数而改变行为。
+func TestAPI_P2_VisualGoneWithQuery(t *testing.T) {
 	_, store, r := setupP2Test(t)
 	task := seedP2Task(t, store, core.NewFeedbackStore(zap.NewNop(), t.TempDir()))
 
-	// 未接线 → 200 零值摘要（前端渲染「无错误」）
 	for _, path := range []string{"console", "network"} {
 		w := doReq(r, "GET", "/api/tasks/"+task.ID+"/preview/"+path+"?since=2026-09-04T00:00:00Z", nil)
-		if w.Code != http.StatusOK {
-			t.Fatalf("%s status=%d body=%s", path, w.Code, w.Body.String())
+		if w.Code != http.StatusGone {
+			t.Fatalf("%s（带 since）status=%d want 410, body=%s", path, w.Code, w.Body.String())
 		}
 	}
-
-	// 方法不匹配 → 405
-	w := doReq(r, "POST", "/api/tasks/"+task.ID+"/preview/console", nil)
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("console POST status=%d", w.Code)
+	// 方法不匹配也不再是 405：功能没了就是 410。
+	if w := doReq(r, "POST", "/api/tasks/"+task.ID+"/preview/console", nil); w.Code != http.StatusGone {
+		t.Fatalf("console POST status=%d want 410", w.Code)
 	}
 }
 
