@@ -7,6 +7,7 @@ import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Select from '@/components/ui/Select.vue'
 import PromptInput from '@/features/session/components/PromptInput.vue'
+import ContentColumn from '@/components/layout/ContentColumn.vue'
 import ModelPicker from '@/features/session/components/ModelPicker.vue'
 import ImagePicker from '@/features/session/components/ImagePicker.vue'
 import type { PendingImage } from '@/features/session/imageAttach'
@@ -189,91 +190,98 @@ async function submit() {
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <!-- Header（与 SessionHeader 同骨架）：返回 + 标题 -->
       <header class="border-b border-border bg-surface/60 px-3 py-2.5 md:px-4">
-        <div class="mx-auto flex max-w-3xl items-center gap-2">
-          <button
-            class="rounded-md px-1.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-text"
-            title="返回仪表盘"
-            aria-label="返回"
-            @click="router.push('/dashboard')"
-          >
-            <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
-              <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </button>
-          <h1 class="min-w-0 flex-1 truncate text-sm font-semibold">新建任务</h1>
-        </div>
+        <ContentColumn :resizable="false">
+          <div class="flex items-center gap-2">
+            <button
+              class="rounded-md px-1.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-text"
+              title="返回仪表盘"
+              aria-label="返回"
+              @click="router.push('/dashboard')"
+            >
+              <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
+            <h1 class="min-w-0 flex-1 truncate text-sm font-semibold">新建任务</h1>
+          </div>
+        </ContentColumn>
       </header>
 
       <!-- 主区（对应详情页 Timeline 位置）：项目选择 -->
       <div class="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-4">
-        <div class="mx-auto flex max-w-3xl flex-col gap-2" data-testid="page-content">
-          <div class="rounded-lg border border-border bg-surface p-3">
-            <div class="mb-1.5 text-xs font-medium text-muted">项目</div>
-            <div class="flex gap-2">
-              <template v-if="mode === 'select'">
-                <Select v-model="selectedPath" class="min-w-0 flex-1">
-                  <option v-for="p in projects" :key="groupKey(p.projectPath)" :value="p.projectPath">
-                    {{ p.projectId || p.projectPath }}
-                  </option>
-                  <option v-if="!projects.length" value="" disabled>暂无历史项目 — 请自定义路径</option>
-                </Select>
-                <Button size="sm" @click="mode = 'path'">自定义路径</Button>
-              </template>
-              <template v-else>
-                <Input
-                  v-model="customPath"
-                  class="min-w-0 flex-1"
-                  placeholder="输入绝对路径，如 G:\workspace\erp"
-                />
-                <Button v-if="projects.length" size="sm" @click="mode = 'select'">选项目</Button>
-              </template>
+        <ContentColumn pad="" data-testid="page-content-wrap">
+          <div class="flex flex-col gap-2" data-testid="page-content">
+            <div class="rounded-lg border border-border bg-surface p-3">
+              <div class="mb-1.5 text-xs font-medium text-muted">项目</div>
+              <div class="flex gap-2">
+                <template v-if="mode === 'select'">
+                  <Select v-model="selectedPath" class="min-w-0 flex-1">
+                    <option v-for="p in projects" :key="groupKey(p.projectPath)" :value="p.projectPath">
+                      {{ p.projectId || p.projectPath }}
+                    </option>
+                    <option v-if="!projects.length" value="" disabled>暂无历史项目 — 请自定义路径</option>
+                  </Select>
+                  <Button size="sm" @click="mode = 'path'">自定义路径</Button>
+                </template>
+                <template v-else>
+                  <Input
+                    v-model="customPath"
+                    class="min-w-0 flex-1"
+                    placeholder="输入绝对路径，如 G:\workspace\erp"
+                  />
+                  <Button v-if="projects.length" size="sm" @click="mode = 'select'">选项目</Button>
+                </template>
+              </div>
             </div>
+            <div class="rounded-lg border border-border bg-surface p-3">
+              <div class="mb-1.5 text-xs font-medium text-muted">执行 Agent</div>
+              <Select v-model="agent" aria-label="执行 Agent" data-testid="agent-select">
+                <option v-for="a in agentStore.catalog" :key="a.id" :value="a.id">{{ a.name }}</option>
+              </Select>
+              <!-- 选中项的说明随选择变化：换 agent 是"换执行者"，用户需要知道换了什么 -->
+              <p class="mt-1.5 text-xs text-muted">
+                {{ selectedAgent?.description || '选择由哪个 coding agent 执行本任务' }}
+              </p>
+            </div>
+            <!-- 模型选择器嵌在底部输入框内（与详情页同一套 ModelPicker），
+                 不再在主区单开一块「模型」卡片 ——
+                 「项目 / Agent」是**这个任务的属性**，而模型是**发这条消息时的选择**，
+                 两者不在同一个决策时刻，摆在一起反而让人以为改模型等于改任务。
+                 该 Agent 不下发清单时，弹层里有一句说明（ModelPicker 的空清单分支）。 -->
+            <p class="px-1 text-xs text-muted">选择项目与 Agent 后，在下方描述要做什么，创建后进入会话。</p>
           </div>
-          <div class="rounded-lg border border-border bg-surface p-3">
-            <div class="mb-1.5 text-xs font-medium text-muted">执行 Agent</div>
-            <Select v-model="agent" aria-label="执行 Agent" data-testid="agent-select">
-              <option v-for="a in agentStore.catalog" :key="a.id" :value="a.id">{{ a.name }}</option>
-            </Select>
-            <!-- 选中项的说明随选择变化：换 agent 是"换执行者"，用户需要知道换了什么 -->
-            <p class="mt-1.5 text-xs text-muted">
-              {{ selectedAgent?.description || '选择由哪个 coding agent 执行本任务' }}
-            </p>
-          </div>
-          <!-- 模型选择器嵌在底部输入框内（与详情页同一套 ModelPicker），
-               不再在主区单开一块「模型」卡片 ——
-               「项目 / Agent」是**这个任务的属性**，而模型是**发这条消息时的选择**，
-               两者不在同一个决策时刻，摆在一起反而让人以为改模型等于改任务。
-               该 Agent 不下发清单时，弹层里有一句说明（ModelPicker 的空清单分支）。 -->
-          <p class="px-1 text-xs text-muted">选择项目与 Agent 后，在下方描述要做什么，创建后进入会话。</p>
-        </div>
+        </ContentColumn>
       </div>
 
       <!-- 底部输入条（对应详情页 InterveneInput 位置）：prompt + 嵌在输入框右下角的创建按钮
-           内层 max-w-3xl 与上方 header / 主区的正文左边界对齐（AC-R8-01）；
-           PC 与移动端共用这一套 DOM，按钮位置两端一致 -->
+           内层交给 ContentColumn，与上方 header / 主区共用同一条正文左边界（AC-R8-01）；
+           PC 与移动端共用这一套 DOM，按钮位置两端一致。
+           `resizable=false` —— 调宽手柄只在会话时间线上出现一次。 -->
       <div class="border-t border-border bg-surface/80 px-3 py-2.5 backdrop-blur md:px-4" data-testid="composer-bar">
-        <div class="mx-auto w-full max-w-3xl" data-testid="composer-inner">
-          <PromptInput
-            v-model="prompt"
-            :rows="3"
-            aria-label="任务描述"
-            placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"            @submit="submit"
-            @paste="onPaste"
-          >
-            <template #lead>
-              <!-- 加图入口：与详情页同一套 ImagePicker。位置与理由同 InterveneInput ——
-                   必须放 #lead 而不是 #actions（后者整行 justify-end，会被推到最右与创建按钮挤在一起）。
-                   显隐依据见 canAttachImages 的注释（只有 ACP 系 agent 才可能收图）。 -->
-              <ImagePicker v-if="canAttachImages" ref="imagePicker" v-model="images" :disabled="creating" />
-              <ModelPicker
-                v-if="agent"
-                :model="model"
-                :models="models"
-                :models-loaded="modelsLoaded"
-                data-testid="new-task-model-picker"
-                @update:model="model = $event"
-              />
-            </template>
+        <ContentColumn :resizable="false">
+          <div class="w-full" data-testid="composer-inner">
+            <PromptInput
+              v-model="prompt"
+              :rows="3"
+              aria-label="任务描述"
+              placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"
+              @submit="submit"
+              @paste="onPaste"
+            >
+              <template #lead>
+                <!-- 加图入口：与详情页同一套 ImagePicker。位置与理由同 InterveneInput ——
+                     必须放 #lead 而不是 #actions（后者整行 justify-end，会被推到最右与创建按钮挤在一起）。
+                     显隐依据见 canAttachImages 的注释（只有 ACP 系 agent 才可能收图）。 -->
+                <ImagePicker v-if="canAttachImages" ref="imagePicker" v-model="images" :disabled="creating" />
+                <ModelPicker
+                  v-if="agent"
+                  :model="model"
+                  :models="models"
+                  :models-loaded="modelsLoaded"
+                  data-testid="new-task-model-picker"
+                  @update:model="model = $event"
+                />
+              </template>
 
             <template #actions>
               <!-- 视觉 36×36，命中区用伪元素外扩到 ≥44px 高（AC-R8-04） -->
@@ -306,7 +314,8 @@ async function submit() {
           >
             该 Agent 不提供可选模型，将使用它自身的默认模型。
           </p>
-        </div>
+          </div>
+        </ContentColumn>
       </div>
     </div>
   </div>

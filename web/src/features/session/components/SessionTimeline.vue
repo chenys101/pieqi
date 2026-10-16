@@ -29,6 +29,7 @@ import type { AgentEvent, AgentEventType } from '@/types/event'
 import TimelineEventView from '@/features/timeline/components/TimelineEventView.vue'
 import ThinkingBadge from '@/features/timeline/components/ThinkingBadge.vue'
 import TextBubble from '@/features/timeline/components/TextBubble.vue'
+import ContentColumn from '@/components/layout/ContentColumn.vue'
 import TurnRail from './TurnRail.vue'
 
 const props = defineProps<{
@@ -460,7 +461,8 @@ function jumpToLatest() {
         data-testid="session-timeline"
         @scroll.passive="onScrollAll"
       >
-        <div class="mx-auto flex max-w-3xl flex-col gap-2.5">
+        <ContentColumn>
+          <div class="flex flex-col gap-2.5">
           <!-- 需求 2：默认只挂载最近 MOUNT_WINDOW 个 Turn，更早的收进
                「更早的 N 轮」按需补挂。被收起的轮**真的不在 DOM 里**（v-if），
                这才是省下首次渲染代价的地方（折叠只藏过程，不省 DOM）。 -->
@@ -548,6 +550,8 @@ function jumpToLatest() {
           <!-- 旧任务兜底：直接展示累积输出 -->
           <TextBubble v-if="outputFallback" :text="task!.output!" />
           <ThinkingBadge v-if="showThinking" />
+          </div>
+        </ContentColumn>
 
           <!-- 需求 3：上拉翻历史时浮出「回到最新」小箭头。
                ⚠️ 位置有讲究，三处都不能改：
@@ -559,7 +563,10 @@ function jumpToLatest() {
                3. **自身尺寸交给内容**：`justify-center` / `md:justify-end` 只决定水平位置，
                   绝不给外层 `w-full` —— 那正是上次把它撑满的写法。
                按用户的定案，它就是一个**小箭头**，不是一条文案按钮：
-               文案会横跨内容区、压住正在读的正文。 -->
+               文案会横跨内容区、压住正在读的正文。
+               ⚠️ 它**刻意留在 ContentColumn 之外**：这枚箭头是"容器级"的浮层，
+               贴的是滚动区右沿；若放进正文列，调窄正文后它会跟着缩到正文里，
+               离手指更远、也不再贴边。 -->
           <div
             v-if="showJumpLatest"
             class="pointer-events-none sticky bottom-0 z-10 flex justify-center md:justify-end"
@@ -586,7 +593,6 @@ function jumpToLatest() {
               </svg>
             </button>
           </div>
-        </div>
       </div>
     </div>
   </div>

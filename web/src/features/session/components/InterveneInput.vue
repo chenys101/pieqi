@@ -2,9 +2,10 @@
 // 干预输入区（方案 §21）：底部输入框，模型选择器与动作按钮一起嵌在框内。
 // 运行中（pending/running/waiting_input）→ ■ 中止；终态 → ✈ 发送（续问 Resume）。
 //
-// 布局（R8 AC-R8-01）：外条满宽承载 border-top / 底色，内层再用 `max-w-3xl` 约束，
-// 与 SessionHeader / SessionTimeline 的正文左边界**同一条线**。
-// PC 与移动端是同一套 DOM（不做 md: 分支），按钮位置在两端一致。
+// 布局（R8 AC-R8-01）：外条满宽承载 border-top / 底色，内层交给 ContentColumn ——
+// 与 SessionHeader / SessionTimeline 共用**同一条**左边界（宽屏左对齐 + 可拖拽调宽；
+// 平板/移动端居中 max-w-3xl）。这里刻意 `resizable=false`：调宽手柄只在时间线上
+// 出现一次（拖这里时看不到正文变化，输入框在最下面），同一动作不该给两个入口。
 //
 // 模型选择器：**嵌在输入框内**（PromptInput 的 #lead 插槽，与发送按钮同一行，
 // 在左），点开是**自下而上**的弹层（ModelPicker）。选完立即落库 —— 会话级切换，
@@ -13,6 +14,7 @@ import { computed, ref } from 'vue'
 import PromptInput from './PromptInput.vue'
 import ModelPicker from './ModelPicker.vue'
 import ImagePicker from './ImagePicker.vue'
+import ContentColumn from '@/components/layout/ContentColumn.vue'
 import { useNotificationStore } from '@/stores/notification'
 import type { AgentModelDto } from '@/types/api'
 import type { PendingImage } from '../imageAttach'
@@ -104,34 +106,39 @@ function onPaste(data: DataTransfer | null) {
 
 <template>
   <div class="border-t border-border bg-surface/80 px-3 py-2.5 backdrop-blur md:px-4" data-testid="composer-bar">
-    <div class="mx-auto w-full max-w-3xl" data-testid="composer-inner">
-      <PromptInput
-        v-model="text"
-        :rows="2"
-        aria-label="补充指令"
-        :placeholder="canCancel ? '运行中… 可中止' : '发送补充… 输入 / 触发命令/Skill'"
-        :disabled="canCancel"
-        @submit="!canCancel && onSend()"
-        @paste="onPaste"
-      >
-        <!-- #lead 行：加图按钮 + 模型选择器（都靠左，与右侧发送/中止同一行）。
-             ⚠️ 必须放在 #lead 而不是 #actions：#actions 整行是 justify-end，
-             塞进去会被推到最右、和发送按钮挤在一起。 -->
-        <template #lead>
-          <ImagePicker
-            v-if="canAttachImages && !canCancel"
-            ref="imagePicker"
-            v-model="images"
-            :disabled="submitting"
-          />
-          <ModelPicker
-            :model="currentModel"
-            :models="models"
-            :models-loaded="modelsLoaded"
-            :disabled="switchDisabled || switching"
-            @update:model="onPick"
-          />
-        </template>
+    <!-- 宽度口径由 ContentColumn 统一给（宽屏左对齐 + 可调，窄屏居中 max-w-3xl），
+         与 SessionHeader / SessionTimeline 共用同一条左边界（AC-R8-01）。
+         手柄只在时间线上出现一次 —— 输入框这里再摆一个会是同一动作两个入口，
+         且拖这里时用户看不到正文变化（输入框在最下面）。 -->
+    <ContentColumn :resizable="false">
+      <div class="w-full" data-testid="composer-inner">
+        <PromptInput
+          v-model="text"
+          :rows="2"
+          aria-label="补充指令"
+          :placeholder="canCancel ? '运行中… 可中止' : '发送补充… 输入 / 触发命令/Skill'"
+          :disabled="canCancel"
+          @submit="!canCancel && onSend()"
+          @paste="onPaste"
+        >
+          <!-- #lead 行：加图按钮 + 模型选择器（都靠左，与右侧发送/中止同一行）。
+               ⚠️ 必须放在 #lead 而不是 #actions：#actions 整行是 justify-end，
+               塞进去会被推到最右、和发送按钮挤在一起。 -->
+          <template #lead>
+            <ImagePicker
+              v-if="canAttachImages && !canCancel"
+              ref="imagePicker"
+              v-model="images"
+              :disabled="submitting"
+            />
+            <ModelPicker
+              :model="currentModel"
+              :models="models"
+              :models-loaded="modelsLoaded"
+              :disabled="switchDisabled || switching"
+              @update:model="onPick"
+            />
+          </template>
 
         <!-- 双态按钮：中止 ■ / 发送 ✈，嵌在输入框内右下角
              视觉 36×36，命中区用伪元素外扩到 44×44（AC-R8-04 允许视觉 36） -->
@@ -172,6 +179,7 @@ function onPaste(data: DataTransfer | null) {
       >
         该 Agent 不提供可选模型{{ currentModel ? '，沿用其默认模型' : '' }}。
       </p>
-    </div>
+      </div>
+    </ContentColumn>
   </div>
 </template>

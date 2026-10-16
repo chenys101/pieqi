@@ -22,6 +22,7 @@ import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '
 import { FeedbackPanel } from '@/features/feedback'
 import type { PendingImage } from '@/features/session/imageAttach'
 import Drawer from '@/components/ui/Drawer.vue'
+import ContentColumn from '@/components/layout/ContentColumn.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Button from '@/components/ui/Button.vue'
 
@@ -248,9 +249,11 @@ async function doRemove() {
 
 <template>
   <div v-if="task" class="flex h-full flex-col">
-    <!-- 宽屏用 grid（宽度由 grid-template-columns 驱动，展开/收起只切 class，
+    <!-- 宽屏用 grid（**反馈栏**宽度由 grid-template-columns 驱动，展开/收起只切 class，
          动画交给浏览器排版 —— 不写内联宽度、不测量像素，SPEC §5.2.1）；
-         其余档位是普通 flex 排布。 -->
+         其余档位是普通 flex 排布。
+         注：**正文列**的宽度口径不在这里，在 ContentColumn（宽屏左对齐 + 可拖拽调宽）。
+         两者是正交的两件事：grid 管"反馈栏占多宽"，ContentColumn 管"正文能多宽"。 -->
     <div class="min-h-0 flex-1" :class="isWide ? ['se-grid', { 'is-fb-collapsed': fbPanel.collapsed }] : 'flex'">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
         <SessionHeader
@@ -267,12 +270,14 @@ async function doRemove() {
         <!-- 移动端切到「变更反馈」时，时间线整段让位（v-show：不卸载，切回来保留滚动位置） -->
         <div v-show="!isMobile || mobilePane === 'timeline'" class="flex min-h-0 flex-1 flex-col">
           <!-- 内联确认条：紧贴任务头部，用户看着任务名确认删的是不是它 -->
-          <div v-if="removeConfirming" class="mx-auto w-full max-w-3xl shrink-0 px-3 pb-2 md:px-4">
-            <div class="flex flex-wrap items-center gap-2 rounded-lg border border-error/40 bg-error/5 px-3 py-2">
-              <span class="min-w-0 flex-1 text-xs text-error">删除该任务？删除后不可恢复。</span>
-              <Button variant="ghost" size="sm" @click="removeConfirming = false">取消</Button>
-              <Button variant="danger" size="sm" @click="doRemove">删除</Button>
-            </div>
+          <div v-if="removeConfirming" class="shrink-0 px-3 pb-2 md:px-4">
+            <ContentColumn :resizable="false">
+              <div class="flex flex-wrap items-center gap-2 rounded-lg border border-error/40 bg-error/5 px-3 py-2">
+                <span class="min-w-0 flex-1 text-xs text-error">删除该任务？删除后不可恢复。</span>
+                <Button variant="ghost" size="sm" @click="removeConfirming = false">取消</Button>
+                <Button variant="danger" size="sm" @click="doRemove">删除</Button>
+              </div>
+            </ContentColumn>
           </div>
 
           <SessionTimeline :task-id="task.id" :consume-force-scroll="consumeForceScroll" />
@@ -281,16 +286,18 @@ async function doRemove() {
                shrink-0 必需：横幅里的审批摘要展开后可能很高，不加它会被 flex 压缩
                （内容被裁、按钮被挤走）；同时给它限高 + 内部滚动，
                保证「批准/拒绝」与下方输入框始终留在可视区。 -->
-          <div v-if="decision" class="mx-auto w-full max-w-3xl shrink-0 px-3 pb-2 md:px-4">
-            <div class="max-h-[45vh] overflow-y-auto overscroll-contain">
-              <ApprovalBanner
-                :decision="decision"
-                :loading="approvalBusy"
-                @approve="onApprove"
-                @approve-session="onApproveSession"
-                @deny="onDeny"
-              />
-            </div>
+          <div v-if="decision" class="shrink-0 px-3 pb-2 md:px-4">
+            <ContentColumn :resizable="false">
+              <div class="max-h-[45vh] overflow-y-auto overscroll-contain">
+                <ApprovalBanner
+                  :decision="decision"
+                  :loading="approvalBusy"
+                  @approve="onApprove"
+                  @approve-session="onApproveSession"
+                  @deny="onDeny"
+                />
+              </div>
+            </ContentColumn>
           </div>
 
           <InterveneInput

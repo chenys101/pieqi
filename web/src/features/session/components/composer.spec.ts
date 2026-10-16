@@ -139,14 +139,20 @@ describe('PromptInput（斜杠补全）', () => {
 })
 
 describe('InterveneInput', () => {
-  it('内层与正文同宽（max-w-3xl）且水平居中 —— AC-R8-01 的结构前提', () => {
+  it('宽度口径交给 ContentColumn（唯一一处定义），外条仍满宽承载 border-top —— AC-R8-01', () => {
     const { host } = mount(InterveneInput, { canCancel: false, canSend: true })
-    const inner = host.firstElementChild!.firstElementChild!
-    expect(inner.className).toContain('mx-auto')
-    expect(inner.className).toContain('max-w-3xl')
-    expect(inner.className).toContain('w-full')
-    // 外条负责满宽 border-top / 底色，内层只管对齐
+    // 内层不再是「自己 mx-auto + max-w-3xl」——那正是 5 处硬编码各自漂移的来源。
+    // 现在宽度由 ContentColumn 统一给（宽屏左对齐 + 可调，窄屏居中 max-w-3xl），
+    // 断言改为"接线正确"：内层挂在 ContentColumn 里。
+    const col = host.querySelector('[data-testid="content-column"]')
+    expect(col).not.toBeNull()
+    const inner = host.querySelector('[data-testid="composer-inner"]')!
+    expect(col!.contains(inner)).toBe(true)
+    // 外条负责满宽 border-top / 底色
     expect(host.firstElementChild!.className).toContain('border-t')
+    // 输入框这一处**不该**再长出拖拽手柄：手柄只在时间线上出现一次，
+    // 同一动作给两个入口会让用户拖了输入框却看不到正文变化（它在最下面）。
+    expect(host.querySelector('[data-testid="content-resizer"]')).toBeNull()
   })
 
   it('双态按钮：视觉 36 但命中区外扩到 ≥44（after:-inset-1 = 4px×2）', () => {

@@ -19,6 +19,7 @@
 import { useRouter } from 'vue-router'
 import StatusBadge from '@/components/task/StatusBadge.vue'
 import Button from '@/components/ui/Button.vue'
+import ContentColumn from '@/components/layout/ContentColumn.vue'
 import UsageBadge from './UsageBadge.vue'
 import type { Task } from '@/types/task'
 import { timeAgo } from '@/utils/date'
@@ -69,66 +70,70 @@ function goBack() {
 
 <template>
   <header class="border-b border-border bg-surface/60 px-3 py-2 md:px-4">
-    <div class="mx-auto flex max-w-3xl items-center gap-2">
-      <button
-        class="shrink-0 rounded-md px-1.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-text"
-        title="返回"
-        aria-label="返回"
-        @click="goBack"
-      >
-        <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
-          <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
-      </button>
-
-      <h1 class="min-w-0 flex-1 truncate text-sm font-semibold" :title="task.prompt">
-        {{ task.title }}
-      </h1>
-
-      <StatusBadge :status="task.status" />
-      <!-- 上下文用量：**只在该 agent 上报过时才显示**（task.usage 为 undefined 就整块不渲染）。
-           移动端走 dense（只有条 + 百分比）—— 头部这一行是常驻 chrome，token 数不值得
-           占掉标题的宽度；桌面有整行元信息位，就放在那里给全数字。 -->
-      <UsageBadge v-if="task.usage && compact" :usage="task.usage" dense class="text-xs text-muted" />
-      <!-- 变更反馈入口：移动端图标（＋上－下 = diff），其余档文字按钮 -->
-      <button
-        v-if="compact"
-        class="shrink-0 rounded-md px-1.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-text aria-pressed:bg-elevated aria-pressed:text-accent"
-        :aria-pressed="feedbackActive"
-        title="变更反馈"
-        aria-label="变更反馈"
-        @click="emit('feedback')"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          class="h-4 w-4"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          aria-hidden="true"
+    <!-- 正文列口径由 ContentColumn 统一给（宽屏左对齐 + 可调宽度，窄屏居中 max-w-3xl）。
+         头部两行必须与时间线/输入框共用同一条左边界 —— 这正是"错位"的修复点。 -->
+    <ContentColumn :resizable="false">
+      <div class="flex items-center gap-2">
+        <button
+          class="shrink-0 rounded-md px-1.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-text"
+          title="返回"
+          aria-label="返回"
+          @click="goBack"
         >
-          <path d="M12 4v7" />
-          <path d="M8.5 7.5h7" />
-          <path d="M8.5 18h7" />
-        </svg>
-      </button>
-      <Button v-else-if="showFeedback" variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
-      <!-- 中止按钮**不在这里**：与输入框内那枚 ■ 重叠（详情页 UI 优化 · 需求 2） -->
-      <!-- 删除只在非移动端常驻：不可恢复的动作不该出现在拇指最容易碰到的地方 -->
-      <Button v-if="!compact" variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
-    </div>
+          <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
 
-    <!-- 元信息行：移动端只在有 error 时出现（#id 没有可操作性，项目名与时间在手机上不值得再占一行） -->
-    <div v-if="!compact || task.error" class="mx-auto mt-1 flex max-w-3xl items-center gap-2 pl-8 text-xs text-muted">
-      <template v-if="!compact">
-        <span class="font-mono">#{{ shortId(task.id) }}</span>
-        <span class="truncate" :title="task.projectPath">{{ task.project }}</span>
-        <span>{{ timeAgo(task.updatedAt || task.createdAt) }}前</span>
-      </template>
-      <!-- 桌面：用量跟在时间后面（同一行，同一层级的信息） -->
-      <UsageBadge v-if="task.usage && !compact" :usage="task.usage" />
-      <span v-if="task.error" class="min-w-0 truncate text-error" :title="task.error">{{ task.error }}</span>
-    </div>
+        <h1 class="min-w-0 flex-1 truncate text-sm font-semibold" :title="task.prompt">
+          {{ task.title }}
+        </h1>
+
+        <StatusBadge :status="task.status" />
+        <!-- 上下文用量：**只在该 agent 上报过时才显示**（task.usage 为 undefined 就整块不渲染）。
+             移动端走 dense（只有条 + 百分比）—— 头部这一行是常驻 chrome，token 数不值得
+             占掉标题的宽度；桌面有整行元信息位，就放在那里给全数字。 -->
+        <UsageBadge v-if="task.usage && compact" :usage="task.usage" dense class="text-xs text-muted" />
+        <!-- 变更反馈入口：移动端图标（＋上－下 = diff），其余档文字按钮 -->
+        <button
+          v-if="compact"
+          class="shrink-0 rounded-md px-1.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-text aria-pressed:bg-elevated aria-pressed:text-accent"
+          :aria-pressed="feedbackActive"
+          title="变更反馈"
+          aria-label="变更反馈"
+          @click="emit('feedback')"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            class="h-4 w-4"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M12 4v7" />
+            <path d="M8.5 7.5h7" />
+            <path d="M8.5 18h7" />
+          </svg>
+        </button>
+        <Button v-else-if="showFeedback" variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
+        <!-- 中止按钮**不在这里**：与输入框内那枚 ■ 重叠（详情页 UI 优化 · 需求 2） -->
+        <!-- 删除只在非移动端常驻：不可恢复的动作不该出现在拇指最容易碰到的地方 -->
+        <Button v-if="!compact" variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
+      </div>
+
+      <!-- 元信息行：移动端只在有 error 时出现（#id 没有可操作性，项目名与时间在手机上不值得再占一行） -->
+      <div v-if="!compact || task.error" class="mt-1 flex items-center gap-2 pl-8 text-xs text-muted">
+        <template v-if="!compact">
+          <span class="font-mono">#{{ shortId(task.id) }}</span>
+          <span class="truncate" :title="task.projectPath">{{ task.project }}</span>
+          <span>{{ timeAgo(task.updatedAt || task.createdAt) }}前</span>
+        </template>
+        <!-- 桌面：用量跟在时间后面（同一行，同一层级的信息） -->
+        <UsageBadge v-if="task.usage && !compact" :usage="task.usage" />
+        <span v-if="task.error" class="min-w-0 truncate text-error" :title="task.error">{{ task.error }}</span>
+      </div>
+    </ContentColumn>
   </header>
 </template>
