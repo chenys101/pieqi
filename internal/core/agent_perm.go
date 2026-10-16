@@ -82,6 +82,12 @@ type permPending struct {
 	options   []agent.PermissionOption // 记录的 ACP 选项，供 Resolve 映射 approve/deny
 	timer     *time.Timer              // 超时定时器；到期调 adapter.Deny
 	done      bool                     // 已被 Resolve 或超时处理（先到先得，另一方放弃）
+	// shownAt 是本请求**真正展示给用户**的时刻（show() 里赋值）。
+	//
+	// 为什么需要它（而不是复用 setWaitingApproval 的时间）：排队中的请求不会被立刻展示，
+	// 它可能等前一张卡处理完才提升。用"入队时刻"算等待时长会把队列等待也算进去，
+	// 掩盖"卡片到底什么时候才可见"。只用于日志与诊断。
+	shownAt time.Time
 }
 
 // WirePermission 把一个 AgentAdapter 的 OnPermissionRequest 回调接到任务状态机 + EventBus + IM 通知。
@@ -256,18 +262,51 @@ func (pw *PermissionWire) show(reqID, toolTitle, toolKind, summary string) bool 
 	pw.notifyApproval(updated)
 
 	// 启动超时定时器：到期 Deny + IM 通知超时 + task 回 running/提升下一个。
+	shownAt := time.Now()
 	pw.mu.Lock()
 	if pw.closed {
 		pw.mu.Unlock()
 		return true
 	}
-	if entry, ok := pw.pending[reqID]; ok && entry.timer == nil {
-		entry.timer = time.AfterFunc(pw.timeout, func() {
-			pw.handleTimeout(reqID)
-		})
+	if entry, ok := pw.pending[reqID]; ok {
+		entry.shownAt = shownAt // 只有真正展示的这一条才记时刻（排队提升也走这里）
+		if entry.timer == nil {
+			entry.timer = time.AfterFunc(pw.timeout, func() {
+				pw.handleTimeout(reqID)
+			})
+		}
 	}
+	queued := len(pw.queue)
 	pw.mu.Unlock()
+
+	// ── 审批生命周期日志①：发起 ──────────────────────────────────────────────
+	//
+	// 为什么用 Info 而不是 Debug（这是刻意的）：这三个时点（发起 / 确认 / 失败）是
+	// "审批点了没反应"这类问题的**唯一可观测面**，而 release 模式下 Debug 不落盘
+	// （见 logging.NewLogger）。事件频率低（每次人工审批三条），Info 的代价可忽略。
+	//
+	// 为什么要带 timeout/queued：排查"等太久"时必须能一眼区分两种情况 ——
+	//   ① 卡片早就显示了，只是没人点（timeout 到点才失败）；
+	//   ② 卡片卡在队列里根本没显示（queued>0），那用户"等"的其实不是他自己。
+	pw.logger.Info("approval shown (waiting for human decision)",
+		zap.String("task", pw.taskID),
+		zap.String("req", reqID),
+		zap.String("tool_kind", toolKind),
+		zap.String("tool", toolTitle),
+		zap.String("decision_id", decisionIDOf(updated)),
+		zap.Duration("timeout", pw.timeout),
+		zap.Int("queued_behind", queued),
+		zap.Time("shown_at", shownAt),
+	)
 	return true
+}
+
+// decisionIDOf 取任务当前决策的 id（无决策时返回空串）。仅用于日志，nil-safe。
+func decisionIDOf(t *model.Task) string {
+	if t == nil || t.CurrentDecision == nil {
+		return ""
+	}
+	return t.CurrentDecision.ID
 }
 
 // setWaitingApproval 把 task 置 waiting_input(approval) 并建 CurrentDecision。
@@ -327,14 +366,45 @@ func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary
 // 成功后 task 回 running（清 CurrentDecision + Publish task_updated），停掉超时定时器。
 // reqID 已不存在或已被 Resolve/超时处理时返回错误。
 func (pw *PermissionWire) Resolve(decisionID, choice string) error {
+	startedAt := time.Now()
 	pw.mu.Lock()
 	entry, ok := pw.pending[decisionID]
 	if !ok {
+		// ── 审批生命周期日志③（失败）：无此 pending ───────────────────────────
+		// 这是用户看到"点了批准却没反应"的**直接原因**，必须留证。
+		// 带上 shown_at（若能查到）与 pending 表当前键，便于判断是"超时清掉了"
+		// 还是"本来就投错了 id"（后者是前端拿到陈旧 decision_id）。
+		pendingIDs := make([]string, 0, len(pw.pending))
+		for k := range pw.pending {
+			pendingIDs = append(pendingIDs, k)
+		}
+		displayed := pw.displayed
+		queueLen := len(pw.queue)
+		closed := pw.closed
 		pw.mu.Unlock()
+		pw.logger.Warn("approval resolve FAILED: no pending permission for decision",
+			zap.String("task", pw.taskID),
+			zap.String("decision_id", decisionID),
+			zap.String("choice", choice),
+			zap.Strings("pending_now", pendingIDs),
+			zap.String("displayed_now", displayed),
+			zap.Int("queue_len", queueLen),
+			zap.Bool("wire_closed", closed),
+			zap.Time("resolved_at", startedAt),
+		)
 		return fmt.Errorf("no pending permission for decision %q", decisionID)
 	}
 	if entry.done {
+		// ── 审批生命周期日志③（失败）：已被处理过（重复点击 / 与超时竞态） ──
 		pw.mu.Unlock()
+		pw.logger.Warn("approval resolve FAILED: already resolved or timed out",
+			zap.String("task", pw.taskID),
+			zap.String("decision_id", decisionID),
+			zap.String("choice", choice),
+			zap.Time("shown_at", entry.shownAt),
+			zap.Time("resolved_at", startedAt),
+			zap.Duration("since_shown", startedAt.Sub(entry.shownAt)),
+		)
 		return fmt.Errorf("permission %q already resolved or timed out", decisionID)
 	}
 	// 先到先得：标记 done 并摘除 entry，停定时器，确保超时回调不会重复驱动 adapter。
@@ -343,6 +413,8 @@ func (pw *PermissionWire) Resolve(decisionID, choice string) error {
 		entry.timer.Stop()
 	}
 	delete(pw.pending, decisionID)
+	shownAt := entry.shownAt
+	wasDisplayed := pw.displayed == decisionID
 	// 若投递的是排队中（尚未展示）的请求：同样把它移出 queue，避免 advance 之后又把它
 	// 提升展示成一个已被处理过的空决策卡（stale client 防御）。
 	if pw.displayed != decisionID {
@@ -387,6 +459,19 @@ func (pw *PermissionWire) Resolve(decisionID, choice string) error {
 		return fmt.Errorf("adapter: %w", adapterErr)
 	}
 
+	// ── 审批生命周期日志②（成功）：人类确认 ─────────────────────────────────
+	// 与"发起"配对，两端相减即"人等了多久"。这个数字是判断
+	// "是不是因为人看到得太晚才超时"的关键 —— 也是本次加日志的首要目的。
+	pw.logger.Info("approval resolved by human",
+		zap.String("task", pw.taskID),
+		zap.String("decision_id", decisionID),
+		zap.String("choice", choice),
+		zap.Bool("was_displayed", wasDisplayed),
+		zap.Time("shown_at", shownAt),
+		zap.Time("resolved_at", startedAt),
+		zap.Duration("waited", startedAt.Sub(shownAt)),
+	)
+
 	// 推进：有排队审批则提升下一个继续展示（task 仍 waiting_input），否则 task 回 running。
 	pw.advance(decisionID)
 	return nil
@@ -403,7 +488,22 @@ func (pw *PermissionWire) handleTimeout(reqID string) {
 	}
 	entry.done = true
 	delete(pw.pending, reqID)
+	shownAt := entry.shownAt
 	pw.mu.Unlock()
+
+	// ── 审批生命周期日志③（失败）：超时 ─────────────────────────────────────
+	// 这条是"卡片还在、点下去却报 no pending"的**直接前因**：超时把 pending 摘掉了，
+	// 而 CurrentDecision 由 advance→backToRunning 清理（若推进失败则残留）。
+	// 记 waited 便于与 idle_timeout（会话回收阈值）对照 —— 两者若接近，
+	// 说明"人还没点，会话先被 reaper 关了"。
+	pw.logger.Warn("approval TIMED OUT (no human decision within timeout)",
+		zap.String("task", pw.taskID),
+		zap.String("req", reqID),
+		zap.Time("shown_at", shownAt),
+		zap.Time("timed_out_at", time.Now()),
+		zap.Duration("waited", time.Since(shownAt)),
+		zap.Duration("timeout", pw.timeout),
+	)
 
 	// Deny agent（→ Cancelled），让 RequestPermission 不再死等。
 	if err := pw.callAdapterDeny(reqID); err != nil {
@@ -414,6 +514,11 @@ func (pw *PermissionWire) handleTimeout(reqID string) {
 	updated, applied := pw.advance(reqID)
 	if applied {
 		pw.notifyTimeout(updated)
+	} else {
+		// 推进失败 = CurrentDecision 可能残留（卡片还在但 pending 已空）。
+		// 这正是"死按钮"的成因，必须留证而不是静默。
+		pw.logger.Warn("approval timeout could not advance; decision may be left stale",
+			zap.String("task", pw.taskID), zap.String("req", reqID))
 	}
 }
 
