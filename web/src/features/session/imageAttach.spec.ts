@@ -8,7 +8,9 @@ import {
   ALLOWED_IMAGE_TYPES,
   MAX_IMAGES,
   MAX_IMAGE_BYTES,
+  clipboardImageFiles,
   formatBytes,
+  loadClipboardImages,
   loadImageFile,
   toBase64,
 } from './imageAttach'
@@ -113,5 +115,127 @@ describe('loadImageFile', () => {
     const r = await loadImageFile(f)
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.image.bytes).toBe(5)
+  })
+})
+
+// ---- 剪贴板取图：截图直接粘贴的主路径 ----
+//
+// ⚠️ 这些用例守的是**取值路径**，不是"真机截图能贴上"—— 后者需要一个真实的
+// 剪贴板事件，只能过 web 的自测脚本（见 AGENTS.md 的 UI 验收纪律）。
+// 但"读 items 还是读 files"这个判据是纯逻辑，正好是回归价值最高的地方：
+// 飞书/企微截图（Windows 走 CF_DIBV5）普遍**只给 items、不给 files**，
+// 漏掉 items 这条就等于整个功能不存在，而单测能钉死它。
+
+/** 构造一个「只在 items 里、files 为空」的剪贴板 —— 截图工具的真实形态 */
+function clipboardFromItems(...items: File[]): DataTransfer {
+  return {
+    files: [] as unknown as FileList,
+    items: items.map((f) => ({
+      kind: 'file',
+      type: f.type,
+      getAsFile: () => f,
+    })),
+  } as unknown as DataTransfer
+}
+
+/** 构造一个「files 里有」的剪贴板 —— 从资源管理器复制图片文件的形态 */
+function clipboardFromFiles(...files: File[]): DataTransfer {
+  return {
+    files: files as unknown as FileList,
+    items: [] as unknown as DataTransferItemList,
+  } as unknown as DataTransfer
+}
+
+const png = (name = 'image.png', bytes = 8) =>
+  new File([new Uint8Array(bytes)], name, { type: 'image/png' })
+
+describe('clipboardImageFiles', () => {
+  it('items 里有图、files 为空时也能取到（截图工具的主路径）', () => {
+    const f = png()
+    const got = clipboardImageFiles(clipboardFromItems(f))
+    expect(got).toHaveLength(1)
+    expect(got[0].type).toBe('image/png')
+  })
+
+  it('files 里有图时能取到（从资源管理器复制文件）', () => {
+    const got = clipboardImageFiles(clipboardFromFiles(png()))
+    expect(got).toHaveLength(1)
+  })
+
+  it('两路同时给同一张图时只算一张（去重，否则会粘出两张）', () => {
+    const f = png()
+    const dt = {
+      files: [f] as unknown as FileList,
+      items: [{ kind: 'file', type: f.type, getAsFile: () => f }],
+    } as unknown as DataTransfer
+    expect(clipboardImageFiles(dt)).toHaveLength(1)
+  })
+
+  it('纯文本粘贴得到空数组（不能把文本当图）', () => {
+    const dt = {
+      files: [] as unknown as FileList,
+      items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+    } as unknown as DataTransfer
+    expect(clipboardImageFiles(dt)).toEqual([])
+  })
+
+  it('null / 空剪贴板不抛', () => {
+    expect(clipboardImageFiles(null)).toEqual([])
+    expect(clipboardImageFiles({} as DataTransfer)).toEqual([])
+  })
+
+  it('空 type 的空壳项被丢弃（有的浏览器会塞无类型项）', () => {
+    const junk = new File([new Uint8Array(3)], 'x', { type: '' })
+    expect(clipboardImageFiles(clipboardFromItems(junk))).toEqual([])
+  })
+
+  it('截图的无名图被赋予可读名（缩略图 title 与报错都引用它）', () => {
+    // 截图来源的名字通常是 image.png 或空串，直接显示对用户没有信息量
+    expect(clipboardImageFiles(clipboardFromItems(png('')))[0].name).toBe('粘贴的图片')
+    expect(clipboardImageFiles(clipboardFromItems(png('image.png')))[0].name).toBe('粘贴的图片')
+  })
+
+  it('有真实文件名的图保留原名（用户认得出自己贴的是哪个文件）', () => {
+    expect(clipboardImageFiles(clipboardFromItems(png('design-v2.png')))[0].name).toBe('design-v2.png')
+  })
+})
+
+describe('loadClipboardImages', () => {
+  it('产出纯 base64（与选图同一条校验/读取路径）', async () => {
+    const r = await loadClipboardImages(clipboardFromItems(png()), MAX_IMAGES)
+    expect(r.images).toHaveLength(1)
+    expect(r.error).toBeUndefined()
+    expect(r.images[0].data).not.toContain('data:')
+    expect(r.images[0].previewUrl.startsWith('data:image/png;base64,')).toBe(true)
+  })
+
+  it('白名单外的类型被拒并给出原因（HEIC 截图不能静默丢掉）', async () => {
+    const bad = new File([new Uint8Array(4)], 'shot.heic', { type: 'image/heic' })
+    const r = await loadClipboardImages(clipboardFromItems(bad), MAX_IMAGES)
+    expect(r.images).toEqual([])
+    expect(r.error).toContain('不支持')
+  })
+
+  it('没图时不产生任何错误（正常的文本粘贴不该弹提示）', async () => {
+    const dt = { files: [] as unknown as FileList, items: [] } as unknown as DataTransfer
+    const r = await loadClipboardImages(dt, MAX_IMAGES)
+    expect(r.images).toEqual([])
+    expect(r.error).toBeUndefined()
+  })
+
+  it('超出剩余额度时**报错**（粘贴被截断必须说出来，不能静默丢）', async () => {
+    // 额度只剩 1 张，却贴了 3 张
+    const r = await loadClipboardImages(
+      clipboardFromItems(png(), png('b.png'), png('c.png')),
+      1,
+    )
+    expect(r.images).toHaveLength(1)
+    expect(r.error).toContain(`最多 ${MAX_IMAGES} 张`)
+  })
+
+  it('额度为 0（已满 8 张）时不收图且报错', async () => {
+    const r = await loadClipboardImages(clipboardFromItems(png()), 0)
+    expect(r.images).toEqual([])
+    expect(r.error).toContain('不能再加了')
   })
 })

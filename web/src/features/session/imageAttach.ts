@@ -51,6 +51,98 @@ export interface PendingImage {
 /** 选图/压缩的结果：成功给图片，失败给可读原因（给用户看，不是给日志看）。 */
 export type ImageLoadResult = { ok: true; image: PendingImage } | { ok: false; error: string }
 
+/** 一次取图的批量结果（一次粘贴可能同时带多张图） */
+export interface ImageCollectResult {
+  /** 成功取到的图片（可能为空） */
+  images: PendingImage[]
+  /** 收集失败或**被截断**的原因：必须显式告知用户。
+   *  静默丢图是最坏的一种（见 agent/session.go 的同名取舍）。 */
+  error?: string
+}
+
+/** 粘贴来源的展示名。剪贴板里的图**没有文件名**，不给名字缩略图 title 就是空的。 */
+const PASTE_NAME = '粘贴的图片'
+
+/**
+ * 从剪贴板事件里取出**图片文件**（同步，纯取值；异步的读取见 loadClipboardImages）。
+ *
+ * ★ 两条取值路径**都必须留着**，它们是不同来源的覆盖关系，不是新旧替代：
+ *
+ * 1. `clipboardData.files` —— 系统文件管理器里**复制图片文件**走这条
+ *    （Windows 资源管理器是 CF_HDROP，浏览器铺成 File 列表）。
+ * 2. `clipboardData.items` —— **截图工具往剪贴板塞位图**走这条
+ *    （飞书/企微/微信截图、Win+Shift+S、Snipaste）。这条路上常常
+ *    **只有 items 没有 files**，所以漏了它等于漏了本功能的主用例。
+ *
+ * 两路都读并在类型层去重（同一张图在 Windows 上可能两路都出现），
+ * 不按"谁优先"短路 —— 短路会让"files 有、但只有一部分"的情况丢图。
+ *
+ * ★ 不读 `clipboardData.getData('text/plain')`：截图工具常同时塞一个
+ *   `file:///C:/.../image.png` 的文件路径文本，按文本处理就会把**路径**当成
+ *   用户要粘贴的内容塞进输入框。只认二进制，让 textarea 走浏览器默认的文本粘贴。
+ */
+export function clipboardImageFiles(data: DataTransfer | null): File[] {
+  if (!data) return []
+
+  const files: File[] = []
+  const seen = new Set<string>()
+  const push = (f: File) => {
+    // 剪贴板里的空壳项（type 为空的 File）不算图
+    if (!f.type) return
+    const key = `${f.type}:${f.size}:${f.name}`
+    if (seen.has(key)) return
+    seen.add(key)
+    files.push(f)
+  }
+
+  for (const f of Array.from(data.files ?? [])) push(f)
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind !== 'file') continue
+    const f = item.getAsFile()
+    if (f) push(f)
+  }
+
+  // 截图来源统一改名：`image.png` / 空名对用户没有信息量，
+  // 而缩略图的 title 与错误文案都要引用它。
+  return files.map((f) =>
+    f.name && f.name !== 'image.png' ? f : new File([f], PASTE_NAME, { type: f.type }),
+  )
+}
+
+/**
+ * 把剪贴板取到的文件读成可发送的图片，并按 `budget`（还能收几张）截断。
+ *
+ * 与 ImagePicker 的选图共用 `loadImageFile`，因此**校验/压缩/上限完全同源** ——
+ * 粘贴进来的图和选进来的图走同一条路，不存在"粘贴绕过了压缩"这种偏差。
+ *
+ * 与选图的差别只有一处：**超预算必须报错**。选图时用户刚在系统对话框里勾了几张，
+ * 忽略多余的还算合理；而粘贴是"我以为贴进来了"，静默丢弃会让用户以为发全了。
+ */
+export async function loadClipboardImages(
+  data: DataTransfer | null,
+  budget: number,
+): Promise<ImageCollectResult> {
+  const files = clipboardImageFiles(data)
+  if (files.length === 0) return { images: [] }
+  if (budget <= 0) {
+    return { images: [], error: `最多 ${MAX_IMAGES} 张，不能再加了` }
+  }
+
+  const images: PendingImage[] = []
+  const errors: string[] = []
+  for (const f of files) {
+    if (images.length >= budget) {
+      errors.push(`最多 ${MAX_IMAGES} 张，本次粘贴的图片未全部加入`)
+      break
+    }
+    const r = await loadImageFile(f)
+    if (r.ok) images.push(r.image)
+    else errors.push(r.error)
+  }
+
+  return { images, error: errors.length ? errors.join('；') : undefined }
+}
+
 /** 人类可读的文件大小 */
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`

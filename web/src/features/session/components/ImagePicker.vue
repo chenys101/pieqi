@@ -8,7 +8,13 @@
 //   - 删除就是纯内存操作。
 // 套一个上传组件反而要造假对象来满足它的接口。
 import { computed, ref } from 'vue'
-import { loadImageFile, formatBytes, MAX_IMAGES, type PendingImage } from '../imageAttach'
+import {
+  loadImageFile,
+  loadClipboardImages,
+  formatBytes,
+  MAX_IMAGES,
+  type PendingImage,
+} from '../imageAttach'
 
 const props = withDefaults(
   defineProps<{
@@ -25,6 +31,35 @@ const inputRef = ref<HTMLInputElement | null>(null)
 const error = ref('')
 const loading = ref(false)
 
+/**
+ * 粘贴失败的提示与选图失败**分开两个 ref**。
+ *
+ * 合成一个的话就会互相踩：粘贴一句"最多 8 张"，随后选一张格式不对的图，
+ * 前一句被顶掉是对的；但反过来——选图报错后成功粘了一张——会把**早已过时**的
+ * 选图错误重新显示出来。两个来源各自持有自己的错误，语义才不串。
+ */
+const pasteError = ref('')
+
+/**
+ * 「粘贴截图」这条提示只在桌面端显示。
+ *
+ * 判据是**输入形态**而不是设备名：这条路径的前提是"手边有一台能截图的 PC"，
+ * 而触屏上长按输入框的粘贴菜单只会给文本，提示一句话就是纯噪音 ——
+ * 手机屏幕高度尤其紧张（与"入口按钮本身两端都留着"是两回事：按钮点得到，
+ * 粘贴提示用不上）。
+ *
+ * ⚠️ 这也只是**提示**：粘贴处理是绑在输入框 paste 事件上的，与它无关。
+ * 触屏设备真带图粘贴（外接键盘、平板生产力模式）照样收得到 ——
+ * 别把这条 showPasteHint 反过来当功能开关用。
+ */
+const showPasteHint = ref(false)
+if (typeof window !== 'undefined' && window.matchMedia) {
+  const mq = window.matchMedia('(hover: hover) and (pointer: fine)')
+  showPasteHint.value = mq.matches
+  // 二合一设备（Surface 这类）拔插键鼠会切过来，所以跟着变
+  mq.addEventListener?.('change', (e) => (showPasteHint.value = e.matches))
+}
+
 /** 还能再选几张 */
 const remaining = computed(() => MAX_IMAGES - props.modelValue.length)
 const full = computed(() => remaining.value <= 0)
@@ -32,7 +67,45 @@ const full = computed(() => remaining.value <= 0)
 function openFileDialog() {
   if (props.disabled || full.value) return
   error.value = ''
+  pasteError.value = ''
   inputRef.value?.click()
+}
+
+/**
+ * 给父组件用的**命令式入口**：把粘贴交给 ImagePicker 自己处理。
+ *
+ * 为什么不让父组件（InterveneInput / NewTaskPage）接 paste 事件：
+ * 图片是 ImagePicker 的 v-model，只有它知道"已经选了几张、还差几张"。
+ * 父组件接 paste 就得自己算剩余额度、自己调 loadImageFile、自己维护错误文案
+ * —— 等于把 ImagePicker 的逻辑抄一份，两份必然漂移。
+ *
+ * 用 `open()` 而不是子组件直接 `window.addEventListener('paste')` 的理由是
+ * **作用域**：全局监听会在页面上任何输入框里粘贴都往这个 composer 塞图；
+ * 绑在 textarea 的 paste 上（由 PromptInput 转发）才限定在"用户正在这个框里输入"。
+ */
+function open(data: DataTransfer) {
+  if (props.disabled || full.value) return
+  error.value = ''
+  void addFromClipboard(data)
+}
+
+/**
+ * 处理粘贴进来的图片。
+ *
+ * 判据是**文本里有没有图**，有图就本次粘贴只当图处理 —— 理由见下方 preventDefault
+ * 的注释（截图工具会同时塞一段误发的路径文本）。
+ */
+async function addFromClipboard(data: DataTransfer) {
+  loading.value = true
+  try {
+    const r = await loadClipboardImages(data, remaining.value)
+    if (r.images.length > 0) emit('update:modelValue', [...props.modelValue, ...r.images])
+    // 没取到图时**什么都不做**（也不清错误）：这是一次正常的文本粘贴，
+    // 该由 textarea 自己处理，跟图片功能无关。
+    if (r.images.length > 0 || r.error) pasteError.value = r.error ?? ''
+  } finally {
+    loading.value = false
+  }
 }
 
 /**
@@ -77,6 +150,8 @@ function remove(id: string) {
     props.modelValue.filter((i) => i.id !== id),
   )
 }
+
+defineExpose({ open })
 </script>
 
 <template>
@@ -133,5 +208,23 @@ function remove(id: string) {
     />
 
     <p v-if="error" class="text-[11px] text-error" data-testid="composer-image-error">{{ error }}</p>
+
+    <!-- 粘贴截图的可发现性提示。
+         功能做在输入框的 paste 上（零点击、直接可用），但**零点击等于零发现**：
+         没有这行字，用户不会知道这里能贴图，只会去找"上传"。
+         只在桌面端出现（判据与理由见 showPasteHint），且不可点、不占位。 -->
+    <p
+      v-if="showPasteHint && modelValue.length === 0 && !error && !pasteError"
+      class="text-[11px] leading-tight text-muted"
+      data-testid="composer-paste-hint"
+    >
+      截图后按 Ctrl+V 直接粘贴到输入框
+    </p>
+
+    <!-- 粘贴失败（类型不支持 / 超限）与选图失败共用一套文案样式，但**各自独立**：
+         混成一个 ref 时，先报错的来源会被后到的成功操作顶掉或错误地复活（见 pasteError 注释）。 -->
+    <p v-if="pasteError" class="text-[11px] text-error" data-testid="composer-paste-error">
+      {{ pasteError }}
+    </p>
   </div>
 </template>

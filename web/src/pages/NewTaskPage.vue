@@ -26,6 +26,7 @@ const notify = useNotificationStore()
 const prompt = ref('')
 /** 已选图片（v-model 给 ImagePicker）。发送后清空 —— 图片是**按轮**载荷。 */
 const images = ref<PendingImage[]>([])
+const imagePicker = ref<{ open: (data: DataTransfer) => void } | null>(null)
 const mode = ref<'select' | 'path'>('select')
 const selectedPath = ref('')
 const customPath = ref('')
@@ -127,9 +128,23 @@ const canSubmit = computed(() => {
  */
 const canAttachImages = computed(() => selectedAgent.value?.imagePrompt === true)
 
+/**
+ * 输入框里的粘贴：把事件转交给 ImagePicker（截图直接贴进来）。
+ *
+ * 与 `v-if="canAttachImages"` 刻意不同的一点：**不做能力分支**。
+ * 这里的 canAttachImages 有两个来源（agent 目录的 imagePrompt、目录还没到时的
+ * undefined→false），后者是"暂时不知道"而不是"确定不支持"。把它当成不支持来
+ * 拒绝粘贴，用户会在页面刚打开的一瞬间被莫名挡掉；而先收进缩略图条、真不支持时
+ * 在 submit 里给一句明确的人话，体验与判据都更干净（那段兜底已经存在，见 submit）。
+ *
+ * picker 为 null（入口没渲染 / 已满 8 张）时什么都没发生。
+ */
+function onPaste(data: DataTransfer | null) {
+  if (data) imagePicker.value?.open(data)
+}
+
 /** 当前生效的项目路径 */
-function effectivePath(): string | null {
-  if (mode.value === 'path') return customPath.value.trim() || null
+function effectivePath(): string | null {  if (mode.value === 'path') return customPath.value.trim() || null
   return selectedPath.value || null
 }
 
@@ -243,12 +258,13 @@ async function submit() {
             :rows="3"
             aria-label="任务描述"
             placeholder="描述要做什么… 输入 / 触发命令/Skill，Ctrl+Enter 创建"            @submit="submit"
+            @paste="onPaste"
           >
             <template #lead>
               <!-- 加图入口：与详情页同一套 ImagePicker。位置与理由同 InterveneInput ——
                    必须放 #lead 而不是 #actions（后者整行 justify-end，会被推到最右与创建按钮挤在一起）。
                    显隐依据见 canAttachImages 的注释（只有 ACP 系 agent 才可能收图）。 -->
-              <ImagePicker v-if="canAttachImages" v-model="images" :disabled="creating" />
+              <ImagePicker v-if="canAttachImages" ref="imagePicker" v-model="images" :disabled="creating" />
               <ModelPicker
                 v-if="agent"
                 :model="model"

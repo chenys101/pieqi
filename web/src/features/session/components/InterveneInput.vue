@@ -13,6 +13,7 @@ import { computed, ref } from 'vue'
 import PromptInput from './PromptInput.vue'
 import ModelPicker from './ModelPicker.vue'
 import ImagePicker from './ImagePicker.vue'
+import { useNotificationStore } from '@/stores/notification'
 import type { AgentModelDto } from '@/types/api'
 import type { PendingImage } from '../imageAttach'
 
@@ -47,9 +48,12 @@ const emit = defineEmits<{
   'switch-model': [value: string]
 }>()
 
+const notify = useNotificationStore()
+
 const text = ref('')
 const images = ref<PendingImage[]>([])
 const submitting = ref(false)
+const imagePicker = ref<{ open: (data: DataTransfer) => void } | null>(null)
 
 // 有图就算有内容 —— "只发一张图、不写字"是正当用法（让 agent 描述图片）。
 const sendDisabled = computed(
@@ -73,6 +77,29 @@ async function onSend() {
 function onPick(value: string) {
   emit('switch-model', value)
 }
+
+/**
+ * 输入框里的粘贴：把事件转交给 ImagePicker（截图直接贴进来）。
+ *
+ * ★ 与 `v-if="canAttachImages && !canCancel"` **刻意不一致**，两条判据各自成立：
+ *
+ *   - `!props.canCancel`（运行中）：这里是**主动功能**。运行中输入走的是纯文本 stdin 注入，
+ *     收不了图，所以没有入口。但"想贴张图补充说明"是运行中很自然的动作 ——
+ *     此时必须给一句**可执行的解释**，而不是让粘贴静默失败（用户会以为图已经贴上了）。
+ *   - `canAttachImages`（agent 能力）：这里**不做分支**。当前该值在会话内恒定
+ *     （同一个任务的 agent 不会中途换），所以与 v-if 的差异只在"还没加载出来"
+ *     那一小段：那种情况下把图先收进缩略图条，等能力到位再发，比拒绝用户更合理，
+ *     而且下面能力不足时会明确报错、也发不出去。
+ *
+ * picker 为 null 说明入口没渲染（disabled / 已满 8 张），那就是无事发生。
+ */
+function onPaste(data: DataTransfer | null) {
+  if (props.canCancel) {
+    notify.push('运行中无法追加图片，请等本轮结束后再发送', 'info')
+    return
+  }
+  if (data) imagePicker.value?.open(data)
+}
 </script>
 
 <template>
@@ -85,12 +112,18 @@ function onPick(value: string) {
         :placeholder="canCancel ? '运行中… 可中止' : '发送补充… 输入 / 触发命令/Skill'"
         :disabled="canCancel"
         @submit="!canCancel && onSend()"
+        @paste="onPaste"
       >
         <!-- #lead 行：加图按钮 + 模型选择器（都靠左，与右侧发送/中止同一行）。
              ⚠️ 必须放在 #lead 而不是 #actions：#actions 整行是 justify-end，
              塞进去会被推到最右、和发送按钮挤在一起。 -->
         <template #lead>
-          <ImagePicker v-if="canAttachImages && !canCancel" v-model="images" :disabled="submitting" />
+          <ImagePicker
+            v-if="canAttachImages && !canCancel"
+            ref="imagePicker"
+            v-model="images"
+            :disabled="submitting"
+          />
           <ModelPicker
             :model="currentModel"
             :models="models"

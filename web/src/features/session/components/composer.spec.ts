@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type Component } from 'vue'
+import { createPinia } from 'pinia'
 import PromptInput from './PromptInput.vue'
 import InterveneInput from './InterveneInput.vue'
+import { useNotificationStore } from '@/stores/notification'
 
 // T2 出口条件：输入条与正文左边界同线 + 全站外壳规格（AC-R8-01~08）+ 斜杠补全/双态按钮不回退（AC-R8-09）。
 // 补全源用 mock：这些断言与网络无关，别让数据源失败把 R8 的判据一起拖黑。
@@ -17,12 +19,18 @@ vi.mock('@/stores/app', () => ({
   }),
 }))
 
+/** 每个挂载实例一份独立 pinia：跨用例共享会让 toast 断言互相污染 */
 function mount(comp: Component, props: Record<string, unknown> = {}) {
   const host = document.createElement('div')
   document.body.appendChild(host)
   const app = createApp({ render: () => h(comp, props) })
+  // InterveneInput 需要 pinia（运行中粘贴要给一句人话提示，走的是通知 store）。
+  // 用**真实 pinia**而不是 mock store：组件只用到 push()，而真实 store 顺带
+  // 覆盖了"这条提示确实进了 toast 队列"，mock 反而会把接线问题藏起来。
+  const pinia = createPinia()
+  app.use(pinia)
   app.mount(host)
-  return { host, app }
+  return { host, app, pinia }
 }
 
 afterEach(() => {
@@ -430,5 +438,154 @@ describe('InterveneInput 图片入口', () => {
     expect(input).not.toBeNull()
     expect(input.accept).toBe('image/png,image/jpeg,image/webp,image/gif')
     expect(input.multiple).toBe(true)
+  })
+})
+
+// ---- 截图粘贴：飞书/企微截图后 Ctrl+V ----
+//
+// ⚠️ 这里只能合成 ClipboardEvent（jsdom 没有真实剪贴板），所以守的是**接线**：
+// paste 事件是否抵达 ImagePicker、图是否进了缩略图条、运行中是否给了人话解释。
+// "真机截图确实能贴上"必须过 web 的自测脚本（AGENTS.md 的 UI 验收纪律）。
+
+/** 造一个真实可用的 ClipboardEvent —— jsdom 的构造器不吃 clipboardData，只能 defineProperty */
+function pasteEvent(dt: unknown): Event {
+  const e = new Event('paste', { bubbles: true, cancelable: true })
+  Object.defineProperty(e, 'clipboardData', { value: dt })
+  return e
+}
+
+/** 纯 items 形态（截图工具的真实形态，见 imageAttach.spec.ts 的同名说明） */
+function itemsClipboard(...files: File[]) {
+  return {
+    files: [] as unknown as FileList,
+    items: files.map((f) => ({ kind: 'file', type: f.type, getAsFile: () => f })),
+  }
+}
+
+const pngFile = (name = 'image.png') =>
+  new File([new Uint8Array([1, 2, 3, 4])], name, { type: 'image/png' })
+
+/** 等粘贴处理（异步读图 + 渲染）落定 */
+async function settle() {
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0))
+  await nextTick()
+}
+
+describe('截图粘贴进输入框', () => {
+  it('在有图入口的输入框里粘贴截图 → 图片进入待发列表', async () => {
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    ta(host).dispatchEvent(pasteEvent(itemsClipboard(pngFile())))
+    await settle()
+    expect(host.querySelector('[data-testid="composer-images"]')).not.toBeNull()
+    const thumb = host.querySelector('[data-testid="composer-images"] img') as HTMLImageElement
+    expect(thumb.src.startsWith('data:image/png;base64,')).toBe(true)
+  })
+
+  it('粘贴不吞掉文本：不调用 preventDefault（否则普通文本粘贴一起废掉）', async () => {
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    const e = pasteEvent(itemsClipboard(pngFile()))
+    ta(host).dispatchEvent(e)
+    await settle()
+    expect(e.defaultPrevented).toBe(false)
+  })
+
+  it('只发一张图不写字也能发送（粘贴是"只发图"最常见的形式）', async () => {
+    const sent: { text: string; images: unknown[] }[] = []
+    const { host } = mount(InterveneInput, {
+      canCancel: false,
+      canSend: true,
+      canAttachImages: true,
+      onSend: (text: string, images: unknown[]) => sent.push({ text, images }),
+    })
+
+    ta(host).dispatchEvent(pasteEvent(itemsClipboard(pngFile())))
+    await settle()
+    ;(host.querySelector('button[aria-label="发送"]') as HTMLButtonElement).click()
+    await nextTick()
+    expect(sent).toHaveLength(1)
+    expect(sent[0].images).toHaveLength(1)
+    expect(sent[0].text).toBe('')
+  })
+
+  it('过大的粘贴图给出可读报错（不能静默丢弃）', async () => {
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    const big = new File([new Uint8Array(6 * 1024 * 1024)], 'big.png', { type: 'image/png' })
+    ta(host).dispatchEvent(pasteEvent(itemsClipboard(big)))
+    await settle()
+    const err = host.querySelector('[data-testid="composer-paste-error"]')
+    expect(err).not.toBeNull()
+    expect(err!.textContent).toContain('过大')
+  })
+
+  // 运行中输入走纯文本 stdin 通道，收不了图 —— 与 v-if 的判据一致。
+  // 但粘贴是**用户主动动作**，静默失败会让他以为图已经贴上去了，必须给一句解释。
+  it('运行中粘贴 → 不出现缩略图，但给出解释（不是静默失败）', async () => {
+    const { host, pinia } = mount(InterveneInput, {
+      canCancel: true,
+      canSend: false,
+      canAttachImages: true,
+    })
+    ta(host).dispatchEvent(pasteEvent(itemsClipboard(pngFile())))
+    await settle()
+    expect(host.querySelector('[data-testid="composer-images"]')).toBeNull()
+    const toasts = useNotificationStore(pinia).toasts
+    expect(toasts).toHaveLength(1)
+    expect(toasts[0].message).toContain('运行中无法追加图片')
+  })
+
+  it('不带图片的文本粘贴不产生任何图片痕迹', async () => {
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    const dt = { files: [] as unknown as FileList, items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }] }
+    ta(host).dispatchEvent(pasteEvent(dt))
+    await settle()
+    expect(host.querySelector('[data-testid="composer-images"]')).toBeNull()
+    expect(host.querySelector('[data-testid="composer-paste-error"]')).toBeNull()
+  })
+})
+
+describe('粘贴提示的可发现性', () => {
+  // 功能做在 paste 上（零点击），所以必须有字告诉用户"这里能贴图"。
+  // 判据是输入形态（有精确指针=桌面端）而不是设备名 —— jsdom 的 matchMedia
+  // 默认无匹配，所以这里显式桩成桌面端/触屏两种。
+  const origMatchMedia = window.matchMedia
+  afterEach(() => {
+    window.matchMedia = origMatchMedia
+  })
+
+  function stubPointer(hover: boolean) {
+    window.matchMedia = ((q: string) => ({
+      matches: hover,
+      media: q,
+      addEventListener() {},
+      removeEventListener() {},
+    })) as unknown as typeof window.matchMedia
+  }
+
+  it('桌面端显示「Ctrl+V 粘贴」提示', () => {
+    stubPointer(true)
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    expect(host.querySelector('[data-testid="composer-paste-hint"]')).not.toBeNull()
+  })
+
+  it('触屏端不显示该提示（手机上没有这条路，提示只是噪音）', () => {
+    stubPointer(false)
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    expect(host.querySelector('[data-testid="composer-paste-hint"]')).toBeNull()
+  })
+
+  it('提示只是提示：触屏端粘贴依然能收到图（别把它当功能开关）', async () => {
+    stubPointer(false)
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    ta(host).dispatchEvent(pasteEvent(itemsClipboard(pngFile())))
+    await settle()
+    expect(host.querySelector('[data-testid="composer-images"]')).not.toBeNull()
+  })
+
+  it('已有图时收起提示（说明已完成使命，不再占地方）', async () => {
+    stubPointer(true)
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    ta(host).dispatchEvent(pasteEvent(itemsClipboard(pngFile())))
+    await settle()
+    expect(host.querySelector('[data-testid="composer-paste-hint"]')).toBeNull()
   })
 })

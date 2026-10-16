@@ -19,7 +19,18 @@ const props = withDefaults(
   }>(),
   { placeholder: '', rows: 3, disabled: false, ariaLabel: '输入指令' },
 )
-const emit = defineEmits<{ 'update:modelValue': [value: string]; submit: [] }>()
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+  submit: []
+  /**
+   * 用户在输入框里粘贴。父组件据此接住"截图直接贴进来"的图片
+   * （见 ImagePicker 的 `open()` 与 imageAttach.clipboardImageFiles）。
+   *
+   * 传 `DataTransfer | null` 而不是先探测有没有图：探测逻辑与"怎么读图"是同一件事，
+   * 放在这里等于把 imageAttach 的判据抄一份，两处必然漂移。
+   */
+  paste: [data: DataTransfer | null]
+}>()
 
 const appStore = useAppStore()
 
@@ -92,6 +103,23 @@ function onInput(val: string) {
   nextTick(() => {
     menuOpen.value = currentQuery.value !== null && matches.value.length > 0
   })
+}
+
+/**
+ * 粘贴：图片交给父组件（ImagePicker），文本**原样放行**给浏览器默认行为。
+ *
+ * ★ 这里不判断"有没有图"，一律转发 —— 判据只有一份，在 imageAttach 里。
+ *   本组件多一层判断就多一处会漂移的真相（"这里有图、那里没有"最容易出现）。
+ *
+ * ★ 绝不 preventDefault：那会连**普通文本粘贴**一起废掉。默认行为必须留着，
+ *   父组件只是在旁边把图捡走。
+ *
+ * ★ 图片与文本**可以同时成立**（截图工具常顺手塞一段路径文本），此时两张都要：
+ *   保留默认文本粘贴、同时把图加进待发列表。父组件不要为了"避免重复"去删文本 ——
+ *   用户没要求删。重复一段路径文本远好过悄悄吞掉用户粘的东西。
+ */
+function onPaste(e: ClipboardEvent) {
+  emit('paste', e.clipboardData)
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -168,6 +196,7 @@ watch(matches, (m) => {
       :class="hasFooter ? 'pb-[4.375rem]' : undefined"
       @update:model-value="onInput"
       @keydown="onKeydown"
+      @paste="onPaste"
       @blur="onBlur"
     />
     <!-- 底部动作行：整条 pointer-events-none，只有插槽内容本身可点，

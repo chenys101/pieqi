@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type Component } from 'vue'
+import { createPinia } from 'pinia'
 import TextBubble from './TextBubble.vue'
 import MarkdownBody from './MarkdownBody.vue'
 import TimelineEventView from './TimelineEventView.vue'
@@ -28,6 +29,9 @@ function mount(comp: Component, props: Record<string, unknown> = {}) {
   const host = document.createElement('div')
   document.body.appendChild(host)
   const app = createApp({ render: () => h(comp, props) })
+  // InterveneInput 在 setup 里就要 pinia（截图粘贴的运行中提示走通知 store），
+  // 缺了它整个组件都挂不起来 —— 这类"顺带的依赖"必须在这里统一满足。
+  app.use(createPinia())
   app.mount(host)
   return { host, app }
 }
