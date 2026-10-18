@@ -138,21 +138,43 @@ export const tasks = [
   },
 
   // ⑤ 大量任务（列表窗口化的形状：1000+ 才是真实量级，先给 40 条）
-  ...Array.from({ length: 40 }, (_, i) => ({
-    id: `e2e-bulk-${i}`,
-    source: 'web',
-    agent: 'claude',
-    project_id: 'pieqi-bulk',
-    project_path: 'D:/code/go/pieqi-bulk',
-    worktree_path: 'D:/code/go/pieqi-bulk',
-    claude_session_id: `sess-bulk-${i}`,
-    status: ['completed', 'running', 'pending', 'cancelled', 'failed'][i % 5],
-    prompt: `批量任务 ${i}`,
-    title: `批量任务 ${i}：用于列表滚动与窗口化验证`,
-    events: [{ seq: 1, type: 'user', text: `批量任务 ${i}`, at: ago(200 + i) }],
-    created_at: ago(200 + i),
-    updated_at: ago(200 + i),
-  })),
+  ...Array.from({ length: 40 }, (_, i) => {
+    const status = ['completed', 'running', 'pending', 'cancelled', 'failed'][i % 5]
+    // ⚠️ completed 任务必须带 finished_at（以及 started_at / diff_stat），否则
+    //   computeWeeklyInsight 会把它们**全部跳过**（判据是 `status==='completed' &&
+    //   finishedAt`，见 features/dashboard/insight.ts:97）。缺了它，Dashboard 的
+    //   "本周概览"会显示「完成任务 0」，而夹具里明明有 8 个 completed ——
+    //   夹具与产品的判断口径分叉，是"基线守住了一个假状态"的典型来源。
+    const createdMin = 200 + i
+    return {
+      id: `e2e-bulk-${i}`,
+      source: 'web',
+      agent: 'claude',
+      project_id: 'pieqi-bulk',
+      project_path: 'D:/code/go/pieqi-bulk',
+      worktree_path: 'D:/code/go/pieqi-bulk',
+      claude_session_id: `sess-bulk-${i}`,
+      status,
+      prompt: `批量任务 ${i}`,
+      title: `批量任务 ${i}：用于列表滚动与窗口化验证`,
+      events: [{ seq: 1, type: 'user', text: `批量任务 ${i}`, at: ago(createdMin) }],
+      created_at: ago(createdMin),
+      updated_at: ago(createdMin),
+      ...(status === 'completed'
+        ? {
+            // 完成时间落在**本周窗口内**（< 6 天），这样 completedCount > 0。
+            started_at: ago(createdMin + 3),
+            finished_at: ago(createdMin - 2),
+            diff_stat: { files: 2, additions: 30, deletions: 4, captured_at: ago(createdMin - 2) },
+            // 一次通过率的分母含 completed；一半给干预、一半不给，让比率不是 100%/0%
+            interventions:
+              i % 10 === 0
+                ? [{ id: `iv-${i}`, task_id: `e2e-bulk-${i}`, kind: 'decision', choice: 'approve', source: 'web', created_at: ago(createdMin + 1) }]
+                : [],
+          }
+        : {}),
+    }
+  }),
 ]
 
 /** 轻量视图（列表）：**不含 events**，带 event_count */
@@ -243,7 +265,18 @@ export const settingsResponse = {
   event_retention: 500,
 }
 
-export const authStatusResponse = { bound: false, debug: false }
+/**
+ * `bound: true` —— 刻意"已绑定"。
+ *
+ * 判据：`store/app.ts` 的 loadBootContext 在 `!bound` 时会**异步**置一条两行橙条横幅
+ * （"系统尚未绑定飞书管理员账号…"），它会把下方所有元素整体下移 12~36px。
+ * 夹具页虽然在 seed() 里清空过 banner，但 loadBootContext 是**之后**才返回的，
+ * 于是横幅又回来了 —— 视觉基线里就带着一条与业务无关、且随接口时序时有时无的条。
+ * 让 mock 回 bound:true 是从源头消除（而不是在夹具里跟时序赛跑）。
+ *
+ * 若将来要专门测"未绑定横幅"，应当单独一条用例显式覆盖它，而不是让它污染所有基线。
+ */
+export const authStatusResponse = { bound: true, debug: false }
 
 export const botsResponse = { bots: [] }
 

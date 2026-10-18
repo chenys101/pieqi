@@ -19,6 +19,7 @@ import SessionTimeline from '@/features/session/components/SessionTimeline.vue'
 import InterveneInput from '@/features/session/components/InterveneInput.vue'
 import ApprovalCard from '@/features/approval/components/ApprovalCard.vue'
 import FeedbackPanel from '@/features/feedback/components/FeedbackPanel.vue'
+import DashboardPage from '@/pages/DashboardPage.vue'
 import { useSessionStore } from '@/stores/session'
 import { useTaskStore } from '@/stores/task'
 import { useAppStore } from '@/stores/app'
@@ -63,7 +64,9 @@ function toApproval(t: TaskDto): ApprovalRequest {
 
 const Shell = defineComponent({
   setup() {
-    const mode = new URLSearchParams(location.search).get('mode') === 'approval' ? 'approval' : 'session'
+    const raw = new URLSearchParams(location.search).get('mode')
+    const mode: 'session' | 'approval' | 'dashboard' =
+      raw === 'approval' ? 'approval' : raw === 'dashboard' ? 'dashboard' : 'session'
     const decisions = FIXTURE_TASKS.filter((t) => t.current_decision)
 
     return () =>
@@ -74,7 +77,17 @@ const Shell = defineComponent({
         h(
           'main',
           { class: 'flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto', 'data-e2e': 'main' },
-          mode === 'session'
+          mode === 'dashboard'
+            ? [
+                // Dashboard 是首页，也是全产品唯一的"行动面"（SPEC §6.2）。
+                // 挂真实页面而不是重搭一份：它的两个区块（待审批 / 本周概览）的选择性渲染
+                // —— 有审批才出现待审批块、有历史才出现概览 —— 正是最需要被基线守住的东西。
+                // 依赖：approvalStore.pending 由 taskStore.tasks 派生（夹具里带 decision
+                // 的 waiting_input 任务即可），insight 由 computeWeeklyInsight 从同一份
+                // tasks 算出 —— 所以这里不需要额外喂 store。
+                h('div', { 'data-e2e': 'dashboard' }, [h(DashboardPage)]),
+              ]
+            : mode === 'session'
             ? [
                 // 必填 props 必须给真值：缺失只会是一条 Vue warning，
                 // 但"警告被当成噪声忽略"恰恰会让夹具与生产行为悄悄分叉

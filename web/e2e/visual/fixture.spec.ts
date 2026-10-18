@@ -18,6 +18,9 @@ import { stabilize, VIEWPORTS } from '../lib/measure'
 const SCENES = [
   { name: 'detail', url: '/__e2e/detail', ready: '[data-testid="session-timeline"]' },
   { name: 'approval', url: '/__e2e/detail?mode=approval', ready: '[data-e2e="approval-list"]' },
+  // 首页（SPEC §6.2）：此前零基线。它有两个"选择性渲染"的区块 ——
+  // 待审批只在有待办时出现、本周概览只在有历史时出现 —— 正是最该被像素守着的东西。
+  { name: 'dashboard', url: '/__e2e/detail?mode=dashboard', ready: '[data-e2e="dashboard"]' },
 ] as const
 
 /** 主题：双主题对等（SPEC §5.5），两种都要有基线 */

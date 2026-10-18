@@ -1,6 +1,6 @@
 {
   "approval@desktop": {
-    "domNodes": 100,
+    "domNodes": 99,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -32,7 +32,7 @@
     }
   },
   "approval@mobile": {
-    "domNodes": 78,
+    "domNodes": 77,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -58,7 +58,7 @@
     }
   },
   "approval@tablet": {
-    "domNodes": 100,
+    "domNodes": 99,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -89,8 +89,89 @@
       }
     }
   },
+  "dashboard@desktop": {
+    "domNodes": 141,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 900
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 900
+      },
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 1149,
+        "h": 900
+      },
+      "approvalList": null
+    }
+  },
+  "dashboard@mobile": {
+    "domNodes": 119,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": null,
+      "feedbackRail": null,
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 365,
+        "h": 610
+      },
+      "approvalList": null
+    }
+  },
+  "dashboard@tablet": {
+    "domNodes": 141,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 1112
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 1112
+      },
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 543,
+        "h": 1112
+      },
+      "approvalList": null
+    }
+  },
   "detail@desktop": {
-    "domNodes": 158,
+    "domNodes": 157,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -140,7 +221,7 @@
     }
   },
   "detail@mobile": {
-    "domNodes": 130,
+    "domNodes": 129,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -184,7 +265,7 @@
     }
   },
   "detail@tablet": {
-    "domNodes": 152,
+    "domNodes": 151,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,

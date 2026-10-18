@@ -36,6 +36,14 @@ const SCENES = [
     ready: '[data-e2e="approval-list"]',
     domBudget: 3000,
   },
+  {
+    scene: 'dashboard',
+    // 首页 / 全产品唯一的「行动面」（SPEC §6.2）：待审批组 + 本周概览。
+    // 此前**零基线** —— 而介入时延与验证成本这两条 SPEC 指标都落在这一屏上。
+    url: '/__e2e/detail?mode=dashboard',
+    ready: '[data-e2e="dashboard"]',
+    domBudget: 4000,
+  },
 ] as const
 
 /**
@@ -181,6 +189,43 @@ for (const sc of SCENES) {
         await expect(page.locator('[data-testid="composer-inner"]')).toBeVisible()
         // 发送按钮必须真的点得到（可操作性判据，见 measure.ts 的 INTERACTIVE）
         await expect(page.locator('button[aria-label="发送"]')).toBeVisible()
+      } else if (sc.scene === 'dashboard') {
+        /**
+         * Dashboard。它的判据与另外两屏不同 —— 这里是**扫视 + 一个动作**的页面，
+         * 所以量的是"第一张待审批卡能不能一屏内决策"，而不是"有没有输入框"。
+         *
+         * ⚠️ 新场景必须在这里加一个分支：此前 assert 只有 `detail` / else 两支，
+         * 新加的 dashboard 会掉进 else（按审批列表找元素），报一句和真实原因无关的
+         * "审批列表不存在" —— 这正是"加了场景却没人验证"的典型形态。
+         */
+        const dash = page.locator('[data-e2e="dashboard"]')
+        await expect(dash, 'Dashboard 夹具未挂载').toBeVisible()
+
+        // ① 待审批块必须出现（夹具里有两条 waiting_input + decision 的任务）。
+        //    这一块是 SPEC 定义的"唯一行动区块"，它不出现等于用户看不见待办。
+        const pendingSection = dash.locator('section', { hasText: '待审批' })
+        await expect(pendingSection, 'Dashboard 没有渲染「待审批」区块').toBeVisible()
+
+        // ② 第一张卡的「允许一次」必须完整落在视口内 —— 首页的全部价值就是
+        //    "打开就能决策，不用再进会话"。要滚动才看得见，这条价值就不成立。
+        const approve = pendingSection.locator('button', { hasText: '允许一次' }).first()
+        await expect(approve).toBeVisible()
+        const box = await approve.boundingBox()
+        expect(box, '「允许一次」没有布局盒').not.toBeNull()
+        expect(
+          box!.y >= 0 && box!.y + box!.height <= vp.height && box!.x >= 0 && box!.x + box!.width <= vp.width,
+          `Dashboard 首张待审批卡的「允许一次」不在视口内 (@${box!.x},${box!.y})，视口 ${vp.width}×${vp.height}`,
+        ).toBe(true)
+
+        // ③ 「本周概览」区块存在。
+        //
+        // ⚠️ 用**精确的 testid** 而不是文本匹配：`getByText('本周')` 会同时命中
+        //   头部那句「…· 本周 8 个任务已完成」和区块标题，Playwright 的 strict mode
+        //   直接报 "resolved to 3 elements" —— 而报错信息（strict violation）看起来
+        //   和"元素没渲染"很像，最容易误判成功能坏了。测"某个区块在不在"就一定
+        //   要有一个唯一的锚点。
+        await expect(dash.getByRole('heading', { name: '本周概览' })).toBeVisible()
+        await expect(dash.locator('[data-testid="one-shot-rate"]')).toBeVisible()
       } else {
         // 审批卡：主行动按钮必须一屏可见且可点（SPEC「One Screen, One Decision」）
         const list = m.boxes.approvalList
