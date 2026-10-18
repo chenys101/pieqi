@@ -52,6 +52,23 @@ const emit = defineEmits<{
 
 const notify = useNotificationStore()
 
+/**
+ * 输入框的高度上限（px）：两行文本 + 上下内边距（px-3 py-2 的 py 部分）。
+ *
+ * 数字跟着输入条的空间预算走：375×667（iPhone SE / 带浏览器工具栏的小屏）下
+ * 主区只有 ~141px，底栏 50px 不吃主区。两行输入 ≈ 92px 的 composer-bar，
+ * 余下的留给时间线 —— 输入条再高就是在挤会话内容。
+ * 改这个值必须重跑 layout 用例：`composerBar` 的高度是与基线逐像素比的。
+ * （实测 66px ⇒ composer-bar 74px、composer-inner 53px；见 e2e/baseline/layout-baseline.json）
+ */
+const COMPOSER_MAX_HEIGHT = 66
+
+/**
+ * 发送/中止按钮在不在输入区里：运行中（canCancel）整条输入框是禁用的，
+ * 唯一可点的东西是「■ 中止」，它必须始终在 —— 那个分支保留 `rows=2` 的旧口径。
+ */
+const sendsInFooter = computed(() => !props.canCancel)
+
 const text = ref('')
 const images = ref<PendingImage[]>([])
 const submitting = ref(false)
@@ -105,16 +122,32 @@ function onPaste(data: DataTransfer | null) {
 </script>
 
 <template>
-  <div class="border-t border-border bg-surface/80 px-3 py-2.5 backdrop-blur md:px-4" data-testid="composer-bar">
+  <!-- `shrink-0` 是**硬约束**，不是排版偏好。
+       生产里本组件是 `SessionPage` 那条 flex 列的**最后一项**：时间线吃
+       `flex-1`，输入区若允许收缩，矮视口下就会被压缩 —— 而压缩只会作用在
+       没写 shrink 的子块上：让位区不会缩、按钮行是绝对定位，于是被压掉的是
+       **发送按钮所在的那一段**，表现是按钮落到容器外、被移动端底栏的
+       `RouterLink` 拦住点击（Playwright 的 click 直接报 intercepts pointer events）。
+       浏览器工具栏占位的 375×667 下主区只有 ~141px，这条实测踩过两轮。
+       高度已经由内容自适应控制（见下方 rows/max-height），不需要再靠收缩腾地方。 -->
+  <div class="shrink-0 border-t border-border bg-surface/80 px-3 py-2.5 backdrop-blur md:px-4" data-testid="composer-bar">
     <!-- 宽度口径由 ContentColumn 统一给（宽屏左对齐 + 可调，窄屏居中 max-w-3xl），
          与 SessionHeader / SessionTimeline 共用同一条左边界（AC-R8-01）。
          手柄只在时间线上出现一次 —— 输入框这里再摆一个会是同一动作两个入口，
          且拖这里时用户看不到正文变化（输入框在最下面）。 -->
     <ContentColumn :resizable="false">
       <div class="w-full" data-testid="composer-inner">
+        <!-- 高度口径：空框一行、随内容长高、**封顶两行就停**（约 66px）。
+             为什么不是固定 `rows=2`（149px）：那 149 = 两行文本 + 70px 让位，
+             两行文案其实一行就够，多出来的 60px 在矮视口（浏览器工具栏占位后的
+             375×667、1440×900 笔记本）会直接把发送按钮推到移动端底栏下面 ——
+             实测「发送」被 `BottomNav` 的 RouterLink 拦住，用户点不动。
+             为什么封顶而不无限长高：输入条在 flex 列末尾，长高就是挤掉时间线；
+             超过两行改为框内翻页（↑↓），那比"看不见时间线"更可接受。 -->
         <PromptInput
           v-model="text"
-          :rows="2"
+          :rows="sendsInFooter ? 1 : 2"
+          :max-height="sendsInFooter ? COMPOSER_MAX_HEIGHT : undefined"
           aria-label="补充指令"
           :placeholder="canCancel ? '运行中… 可中止' : '发送补充… 输入 / 触发命令/Skill'"
           :disabled="canCancel"

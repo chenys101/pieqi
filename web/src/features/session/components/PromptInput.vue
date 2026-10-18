@@ -13,11 +13,25 @@ const props = withDefaults(
   defineProps<{
     modelValue: string
     placeholder?: string
+    /**
+     * 空框时的行数。会传 `autoResize` 的输入条一律传 **1**：
+     * 高度应当由内容决定（见下方 maxHeight），`rows` 只是量不到内容时的兜底。
+     */
     rows?: number
     disabled?: boolean
     ariaLabel?: string
+    /**
+     * 内容超过这个高度后不再长高，改为在框内滚动（不出现内层滚动条：
+     * Textarea 的 autoResize 形态是 `overflow-hidden`，长文案靠 ↑↓ 翻）。
+     *
+     * 判据是**输入区整块必须装得进矮视口**：375×667 的 iPhone（浏览器工具栏
+     * 占掉约 110px）主区只有 ~141px，输入区若固定在 170px 就会把发送按钮
+     * 顶到移动端底栏下面 —— 实测「发送」被 `BottomNav` 的 RouterLink 拦住点击
+     * （docs/testing/ui-e2e-next.md 的 P0）。66px ≈ 两行 + 内边距。
+     */
+    maxHeight?: number
   }>(),
-  { placeholder: '', rows: 3, disabled: false, ariaLabel: '输入指令' },
+  { placeholder: '', rows: 3, disabled: false, ariaLabel: '输入指令', maxHeight: undefined },
 )
 const emit = defineEmits<{
   'update:modelValue': [value: string]
@@ -42,6 +56,17 @@ const slots = useSlots()
 const hasActions = computed(() => !!slots.actions)
 const hasLead = computed(() => !!slots.lead)
 const hasFooter = computed(() => hasActions.value || hasLead.value)
+
+/**
+ * 动作行嵌在框内 ⇒ 高度必须随内容长高，否则长文本会被那 70px 的让位区盖住
+ * （textarea 自己不会长，只能在框内出现滚动条 —— 而框内滚动条正是这一行
+ * 「看起来能用、实际看不到最后几行」的来源）。
+ *
+ * 判据：**传了 maxHeight 才自动长高**。不传 = 固定 rows 的表单输入框
+ * （独立表单里长高会把下面的字段往下推，那才是不该长高的场景）。
+ * 输入条一律传 maxHeight（见 InterveneInput），因此这里不必再判断有没有 footer。
+ */
+const autoResize = computed(() => props.maxHeight !== undefined)
 
 // 只声明用得到的那一项：Textarea 通过 defineExpose 交出内部 textarea
 const taRef = ref<{ el: HTMLTextAreaElement | null } | null>(null)
@@ -189,6 +214,8 @@ watch(matches, (m) => {
       ref="taRef"
       :model-value="modelValue"
       :rows="rows"
+      :auto-resize="autoResize"
+      :max-height="maxHeight"
       :placeholder="placeholder"
       :disabled="disabled"
       :resizable="false"

@@ -97,11 +97,11 @@
     "boxes": {
       "sessionTimeline": {
         "w": 1109,
-        "h": 730
+        "h": 751
       },
       "composerBar": {
         "w": 1149,
-        "h": 170
+        "h": 149
       },
       "composerActions": {
         "w": 1117,
@@ -109,7 +109,7 @@
       },
       "composerInner": {
         "w": 1117,
-        "h": 149
+        "h": 128
       },
       "jumpLatest": null,
       "loadOlderTurns": {
@@ -147,11 +147,11 @@
     "boxes": {
       "sessionTimeline": {
         "w": 365,
-        "h": 440
+        "h": 462
       },
       "composerBar": {
         "w": 365,
-        "h": 170
+        "h": 149
       },
       "composerActions": {
         "w": 341,
@@ -159,7 +159,7 @@
       },
       "composerInner": {
         "w": 341,
-        "h": 149
+        "h": 128
       },
       "jumpLatest": null,
       "loadOlderTurns": {
@@ -191,11 +191,11 @@
     "boxes": {
       "sessionTimeline": {
         "w": 503,
-        "h": 942
+        "h": 963
       },
       "composerBar": {
         "w": 543,
-        "h": 170
+        "h": 149
       },
       "composerActions": {
         "w": 511,
@@ -203,7 +203,7 @@
       },
       "composerInner": {
         "w": 511,
-        "h": 149
+        "h": 128
       },
       "jumpLatest": null,
       "loadOlderTurns": {
