@@ -23,13 +23,17 @@
 输入区 170px 的构成：`PromptInput` 的 `rows=2` textarea（实测约 149px）
 + `pb-[4.375rem]`（70px 让位行）。
 
-**为什么本轮不修**：改它会改变竖屏手机的手感，属于产品决策；测试顺手把实现改掉
-= 用一个"测试通过"掩盖产品选择。
+**状态：实现已改（2026-10-18，并行会话），⚠️ 基线待更新。**
 
-**可选方向**（未评估，需产品参与）：
-1. textarea 改用 `autoResize` + `maxHeight`（如 `min(20dvh, 120px)`）替代固定 `rows=2`；
-2. 让输入区按剩余空间自适应（`flex-shrink` + `min-h-0`），并在极矮视口下收成单行；
-3. 移动端把 BottomNav 与 composer 合并进同一底部容器（避免两层各占一块）。
+采用方向 1：`rows` 改 `1`（运行中保留 `2`）+ `autoResize` + `maxHeight=66`，
+并给 `composer-bar` 加 `shrink-0`（硬约束：不加的话矮视口下被压掉的恰是发送按钮那一段）。
+改动文件：`Textarea.vue` / `InterveneInput.vue` / `PromptInput.vue`。
+
+> ⚠️ **验收未完成**：`e2e/baseline/layout-baseline.json` 里 `composerBar.height` 仍是
+> 旧值 `170`、`composerInner.height` 仍是 `149`。按注释里的实测（66px ⇒
+> composer-bar 74px / composer-inner 53px），几何断言**现在必然红**。
+> 补最后一步：确认数字后跑 `npm run test:e2e:update-baseline`（视觉层同跑
+> `update-snapshots`），再跑一遍全量确认 18 例全绿。
 
 **改完的验收**：现有 layout 用例里 `composerSend` 的可操作性断言会立刻验证；
 另建议补一条"点击发送后断言请求已发出"（见 P1）。

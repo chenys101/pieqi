@@ -50,7 +50,25 @@ const (
 	// 单列一个 kind 而不并进 EventTurnEnd：用量是**过程量**，一轮会来很多条，
 	// 而 TurnEnd 是"本轮结束"这一位信号 —— 混在一起会让"这轮结束了"不可判定。
 	EventUsage EventKind = "usage"
+	// EventGoalChanged goal 状态变化（当前仅 claude 桥上报；dsh/qoder 的 goal 走工具调用）。
+	//
+	// 语义提醒：claude 的 goal 是**完成条件**（condition + 迭代次数），
+	// 不是 dsh/qoder 的「目标 + 轮次上限」。三者不能共用一套文案 ——
+	// 见 docs/agents-goal-and-capabilities.md。
+	EventGoalChanged EventKind = "goal_changed"
 )
+
+// GoalSnapshot goal 状态快照（EventGoalChanged 载荷）。
+//
+// nil 与零值不同：`*GoalSnapshot == nil` 表示 **goal 已被清除**，
+// 不是"没有数据"。下游渲染"goal 结束"时必须靠这个区分。
+type GoalSnapshot struct {
+	Condition     string // 完成条件（人写的，原样展示）
+	Iterations    int    // Stop hook 判定"未满足"的次数
+	SetAt         int64  // 设定时刻（Unix 毫秒）
+	TokensAtStart int64  // 设定时的 token 起点
+	LastReason    string // 上次未满足的原因（未满足过才有值）
+}
 
 // TurnInfo TurnEnd 的载荷：本轮结束信息（带底层 resume id，供持久化/续问）。
 type TurnInfo struct {
@@ -80,6 +98,8 @@ type Event struct {
 	// 用指针区分"没有用量"与"用量是零值" —— 零值 UsageInfo 会显示成 0/0，
 	// 而 0/0 不是信息（前端据 nil 隐藏整块显示）。
 	Usage *UsageInfo
+	// Goal EventGoalChanged 载荷；nil = goal 已被清除（**不是**"没有数据"）。
+	Goal *GoalSnapshot
 }
 
 // AgentSession 中性 agent 会话接口（§3.1）。

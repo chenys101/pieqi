@@ -332,6 +332,19 @@ func (s *session) toAgentEvent(ev bridge.SSEEvent) agent.Event {
 		if ev.IsError || (ev.Subtype != "" && ev.Subtype != "success") {
 			e.Err = fmt.Errorf("claude: turn %s", ev.Subtype)
 		}
+	case "goal_changed":
+		// nil Goal = goal 被清除（SDK 的 active_goal.value === null）。
+		// 这里**刻意保持 nil**，不要塞一个零值 GoalSnapshot —— 那会让下游
+		// 把"goal 结束"渲染成"condition 为空的 goal 正在进行"。
+		if ev.Goal != nil {
+			e.Goal = &agent.GoalSnapshot{
+				Condition:     ev.Goal.Condition,
+				Iterations:    ev.Goal.Iterations,
+				SetAt:         ev.Goal.SetAt,
+				TokensAtStart: ev.Goal.TokensAtStart,
+				LastReason:    ev.Goal.LastReason,
+			}
+		}
 	case "error":
 		e.Err = fmt.Errorf("claude: %s", ev.Message)
 	case "state_changed":

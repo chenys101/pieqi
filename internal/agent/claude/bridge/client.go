@@ -251,6 +251,24 @@ type SSEEvent struct {
 	Message    string          `json:"message"`
 	ClientRef  string          `json:"clientRef"`
 	Turn       *SSETurn        `json:"turn"`
+	// Goal `goal_changed` 载荷（Claude Code 的 /goal 状态）。
+	// nil 有明确含义：goal 被**清除**（SDK 的 active_goal.value 为 null）。
+	// 所以判"有没有变化"必须看 Kind，不能用 Goal==nil 当"没数据"。
+	Goal *SSEGoal `json:"goal"`
+}
+
+// SSEGoal Claude Code 的 goal 快照（SDK `active_goal.value`）。
+//
+// 语义提醒：Claude 的 goal 是**完成条件**（condition），不是 dsh/qoder 那种
+// "目标（objective）+ 轮次上限"。三家的 goal 不能共用一套文案，见
+// docs/agents-goal-and-capabilities.md。
+type SSEGoal struct {
+	Condition     string `json:"condition"`
+	Iterations    int    `json:"iterations"`
+	SetAt         int64  `json:"set_at"`
+	TokensAtStart int64  `json:"tokens_at_start"`
+	// LastReason 上一轮 Stop hook 判"未满足"的原因（未满足过才有值）。
+	LastReason string `json:"last_reason"`
 }
 
 // SSETurn turn_end 载荷。

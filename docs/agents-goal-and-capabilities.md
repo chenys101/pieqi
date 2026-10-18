@@ -15,11 +15,37 @@
 | | **claude**（SDK Bridge） | **qoder**（qodercli --acp） | **dsh**（dsh --profile acp） |
 |---|---|---|---|
 | 存在 goal | ✅ | ✅（三者中最完整） | ✅ |
-| **经 pieqi 可用** | ◐ **部分**（命令生效，状态丢失） | ✗ **不可用** | ✓ **完整** |
+| **经 pieqi 可用** | ✓ **完整**（2026-10-18 已补转发，见 §1.1） | ✗ **不可用** | ✓ **完整** |
 | 语义 | **完成条件**（condition） | **目标**（objective）+ 轮次上限 | **目标**（objective）+ 轮次上限 |
-| 阻塞点 | 桥缺 `active_goal` 转发 | ACP 只开放 4 个斜杠命令，goal 不在其中；goal 是 SDK control request | 无 |
+| 阻塞点 | ~~桥缺 `active_goal` 转发~~ **已修** | ACP 只开放 4 个斜杠命令，goal 不在其中；goal 是 SDK control request | 无 |
 
-> 用 `✓ / ◐ / ✗` 三档，**不要写成"支持/不支持"二值** —— claude 是真实的部分可用状态。
+> 用 `✓ / ◐ / ✗` 三档，**不要写成"支持/不支持"二值** —— 状态会随对端开放范围变化。
+
+### 1.1 claude 的 goal 状态已接通（2026-10-18）
+
+原先 `services/claude-sdk-bridge/src/session.js` 的消息 switch 只有
+`system / stream_event / assistant / user`，SDK 的 `active_goal` 落进
+`default: break` 被**静默丢弃**（日志一切正常）。已补：
+
+```
+桥  session.js          case "active_goal" → 发 goal_changed（按内容去重）
+    bridge/client.go    SSEEvent.Goal *SSEGoal（nil = goal 已清除）
+agent  session.go        EventGoalChanged + GoalSnapshot
+    sessionadapter.go   OnGoalUpdate（显式实现 GoalReporter）
+core  agent_goal.go      WireGoal → EventStatus + 结构化 Input + task_updated
+```
+
+三个设计判断（都在代码注释里）：
+
+1. **不新增 TaskEventType**，复用 `status`（它本就是"状态变更 + 人读摘要"），
+   避免连带改前端渲染与视觉基线；结构化数据进 `Input`，将来做 goal 卡片可直接读。
+2. **nil 是有效载荷**：goal 清除时必须照样发事件，否则用户永远看不到"goal 已结束"。
+   载荷里另有 `{"cleared": true}`，与"摘要恰好为空"可区分。
+3. **按内容去重**：SDK 可能重复上报同一 goal，逐条进时间线会刷屏。
+
+回归测试：`internal/agent/goal_test.go`（2 例）、`internal/core/agent_goal_test.go`（3 例）、
+`services/claude-sdk-bridge/test/goal_event_test.mjs`（13 例，含一条**变异对照**——
+在内存里构造"没有 active_goal 分支"的旧实现，断言它确实会丢事件）。
 
 ---
 

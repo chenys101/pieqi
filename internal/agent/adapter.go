@@ -113,6 +113,26 @@ type UsageReporter interface {
 	OnUsageUpdate(fn UsageUpdateFunc)
 }
 
+// GoalUpdateFunc goal 状态变化回调（可选能力；当前仅 claude 桥上报）。
+//
+// 参数 g 为 nil 表示 **goal 已被清除**（`/goal` 完成或用户取消），
+// 不是"没有数据" —— 消费方必须靠这个区分来渲染"goal 结束"。
+type GoalUpdateFunc func(g *GoalSnapshot)
+
+// GoalReporter 由能上报 goal 状态的 adapter 实现。
+//
+// 为什么是可选接口（与 UsageReporter 同理）：dsh / qoder 的 goal 走**工具调用**
+// （create_goal / update_goal 作为 tool_call 出现在事件流里），不需要这条通道；
+// 只有 claude 的 goal 是 Stop hook 驱动的状态事件，必须单独接。
+//
+// 这条通道存在的判据：如果不上报，用户设了 `/goal <条件>` 之后
+// **迭代次数、"为什么还没完成"、goal 是否已结束全部不可见** ——
+// 桥会发 active_goal，但此前被丢弃（见 services/claude-sdk-bridge/src/session.js）。
+type GoalReporter interface {
+	// OnGoalUpdate 注册 goal 回调（传 nil 注销）。同 adapter 只保留最后一个回调。
+	OnGoalUpdate(fn GoalUpdateFunc)
+}
+
 // ImageInput 一张随 prompt 一起发出的内联图片（映射 ACP 的 ContentBlock::Image）。
 //
 // Data 是**标准 base64**（不是 data URL，不带 `data:image/png;base64,` 前缀）：

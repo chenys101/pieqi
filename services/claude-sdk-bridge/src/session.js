@@ -90,6 +90,8 @@ export class SessionRuntime {
     this.query = null;
     this.currentClientRef = null; // 当前正在处理的消息的 clientRef（turn_end 回带，host 精确关联）
     this.turnInFlight = false; // 有未结束的轮（cancel 据此补合成 turn_end）
+    // 上一次上报的 goal 快照（用于去重：active_goal 每条消息都可能重复，不能每次都发事件）
+    this.lastGoalJson = "";
 
     this._start();
   }
@@ -193,6 +195,28 @@ export class SessionRuntime {
               rawOutput: block.content ?? null,
             });
           }
+        }
+        break;
+      }
+      case "active_goal": {
+        // Claude Code 的 goal（`/goal <condition>`）状态事件。
+        //
+        // 为什么必须有这个 case（此前它被 switch 的 default 静默丢弃）：
+        //   SDK 会为每次 goal 变化发一条 `active_goal`，value 为
+        //   { condition, iterations, set_at, tokens_at_start, last_reason? }，
+        //   value=null 表示 goal 被清除。丢掉它 = 用户设了 `/goal` 却看不到
+        //   迭代次数、"为什么还没完成"，也看不出 goal 已结束。
+        //
+        // 复用 status 通道而不是新增事件类型：pieqi 的 TaskEvent 里 `status`
+        // 本就是"状态变更 + Text 放人读摘要"，前端已能渲染；新增一种 kind 要同时
+        // 改 Go 的事件白名单、adapter 翻译与前端渲染，成本与收益不成比例。
+        //
+        // 去重是必需的：goal 未变化时 SDK 仍可能重复上报，逐条进时间线会刷屏。
+        const g = msg.value ?? null;
+        const key = g ? JSON.stringify(g) : "null";
+        if (key !== this.lastGoalJson) {
+          this.lastGoalJson = key;
+          this._emit("goal_changed", { goal: g });
         }
         break;
       }

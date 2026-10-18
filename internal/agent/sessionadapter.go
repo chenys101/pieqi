@@ -54,6 +54,9 @@ type sessionBackedAdapter struct {
 	// 不实现这个接口，用量就会静默丢掉（2026-10-09 实测踩过：日志里 acp usage update
 	// 一直在打，任务文件里 usage 却恒为空）。
 	onUsage UsageUpdateFunc
+	// onGoal goal 状态回调（当前仅 claude 桥有该事件）。
+	// 与 onUsage 同一条纪律：WireGoal 靠类型断言找 GoalReporter，这里不实现就静默丢。
+	onGoal GoalUpdateFunc
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -221,6 +224,17 @@ func (a *sessionBackedAdapter) OnUsageUpdate(fn UsageUpdateFunc) {
 	a.mu.Unlock()
 }
 
+// OnGoalUpdate 实现 GoalReporter：转发 goal 回调。
+//
+// 与 OnUsageUpdate 同样的"链路中段"风险：TaskRunner 持有的是本类型，
+// WireGoal 对它做 `adapter.(agent.GoalReporter)` 断言；这里不实现，
+// 断言失败、WireGoal 返回 nil，goal 状态静默消失且**日志里一切正常**。
+func (a *sessionBackedAdapter) OnGoalUpdate(fn GoalUpdateFunc) {
+	a.mu.Lock()
+	a.onGoal = fn
+	a.mu.Unlock()
+}
+
 func (a *sessionBackedAdapter) Approve(ctx context.Context, reqID, optionID string) error {
 	a.mu.Lock()
 	sess := a.sess
@@ -334,6 +348,9 @@ func (a *sessionBackedAdapter) onEvent(ev Event) {
 			RawInput: p.RawInput,
 			Options:  opts,
 		})
+	case EventGoalChanged:
+		// ev.Goal 为 nil = goal 被清除，**照样要转发**（那是"goal 结束"的唯一信号）。
+		a.emitGoal(ev.Goal)
 	case EventError:
 		a.markDone()
 	}
@@ -372,6 +389,15 @@ func (a *sessionBackedAdapter) emitUsage(u UsageInfo) {
 	a.mu.Unlock()
 	if fn != nil {
 		fn(u)
+	}
+}
+
+func (a *sessionBackedAdapter) emitGoal(g *GoalSnapshot) {
+	a.mu.Lock()
+	fn := a.onGoal
+	a.mu.Unlock()
+	if fn != nil {
+		fn(g)
 	}
 }
 

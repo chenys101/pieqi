@@ -133,6 +133,8 @@ type acpWires struct {
 	tool  *ToolCallHandle
 	// usage 可能为 nil —— 该 agent 不上报上下文用量（见 WireUsage）。
 	usage *UsageHandle
+	// goal 可能为 nil —— 该 agent 没有 goal 状态事件（见 WireGoal 的选择性）。
+	goal *GoalHandle
 }
 
 // NewTaskRunner 创建 runner。
@@ -1100,7 +1102,9 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	th := WireToolCall(adapter, tr.bus, tr.store, task.ID)
 	// 用量可能为 nil（agent 不上报），setWires/Unwire 均容忍 nil。
 	uh := WireUsage(adapter, tr.bus, tr.store, task.ID)
-	tr.setWires(task.ID, dh, ph, th, uh)
+	// goal 状态（当前仅 claude 桥有该事件；dsh/qoder 的 goal 走工具调用）。
+	gh := WireGoal(adapter, tr.bus, tr.store, task.ID, tr.logger)
+	tr.setWires(task.ID, dh, ph, th, uh, gh)
 
 	// Open 成功后立即持久化真实 session ID（续问用）。
 	// ACP 路径（!fellBack）：sessionID 即真实协议资源 ID，存 ACPSessionID。
@@ -1295,6 +1299,7 @@ func (tr *TaskRunner) onAgentSessionClosed(taskID string) {
 		w.perm.Unwire()
 		w.tool.Unwire()
 		w.usage.Unwire() // nil-safe（agent 不上报用量时 wire 就是 nil）
+		w.goal.Unwire()  // nil-safe（agent 没有 goal 事件时 wire 就是 nil）
 	}
 	// 非 worktree 任务（WorktreePath==ProjectPath，如生产直接跑原目录）不清理，避免误删原项目目录。
 	if tr.cleanupWorktrees {
@@ -1314,11 +1319,11 @@ func (tr *TaskRunner) CloseAgentSession(taskID string) {
 }
 
 // setWires 登记 ACP 路径的 wire 句柄（供 Intervene 审批决策取 PermissionWire）。
-// uh（用量）可为 nil —— 该 agent 不上报用量。
-func (tr *TaskRunner) setWires(taskID string, dh *DeltaHandle, ph *PermissionWire, th *ToolCallHandle, uh *UsageHandle) {
+// uh（用量）/ gh（goal）可为 nil —— 该 agent 不上报对应信息。
+func (tr *TaskRunner) setWires(taskID string, dh *DeltaHandle, ph *PermissionWire, th *ToolCallHandle, uh *UsageHandle, gh *GoalHandle) {
 	tr.wireMu.Lock()
 	defer tr.wireMu.Unlock()
-	tr.wires[taskID] = &acpWires{delta: dh, perm: ph, tool: th, usage: uh}
+	tr.wires[taskID] = &acpWires{delta: dh, perm: ph, tool: th, usage: uh, goal: gh}
 }
 
 // clearWires 摘除 task 的 wire 句柄登记（句柄本身的 Unwire 由调用方负责）。
