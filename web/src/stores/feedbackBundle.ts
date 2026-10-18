@@ -33,6 +33,15 @@ export const useFeedbackBundleStore = defineStore('feedbackBundle', {
         .then((bundle) => {
           this.bundles[taskId] = bundle
         })
+        .catch(() => {
+          // 404 / 网络失败都会走到这里。**刻意吞掉**：
+          //   · 加载失败不是"本任务没有反馈"的合法结论，所以**不写空 bundle**
+          //     （否则面板会显示"没有变更"，把一次故障说成"改动了 0 个文件"）；
+          //   · 但也不上抛 —— 这个 store 的 load 是 fire-and-forget（Timeline 挂载即调），
+          //     上抛会变成未处理的 Promise rejection，把控制台的错误断言整体染红，
+          //     掩盖真正的问题。
+          // 调用方要感知失败，就 await 它并自行 catch（Timeline 的增量重拉已经这么做）。
+        })
         .finally(() => {
           delete this.inflight[taskId]
         })

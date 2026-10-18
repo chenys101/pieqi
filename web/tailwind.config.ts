@@ -10,7 +10,12 @@ import type { Config } from 'tailwindcss'
 // `elevated` 与 `muted` 是旧类名的兼容别名（分别指向 surface-muted / text-secondary），
 // 新代码请直接用层级名。
 export default {
-  content: ['./index.html', './src/**/*.{vue,ts}'],
+  // `./e2e/**` **必须**在里面（只影响 dev/测试，不影响生产产物）：
+  // 夹具页 e2e/fixtures/page-fixture.ts 用的 tailwind class 若不在扫描范围内，
+  // 那个 class 就**根本没有 CSS** —— 于是"我在夹具里加了个布局改动"既不会让截图变化，
+  // 也不会让尺寸变化，回归测试静默失效。实测踩过：加 `pl-[40px]` 后视觉与布局两层全绿。
+  // 生产构建里这些 class 会进 CSS（Tailwind 按内容扫描，不区分入口），代价是几十字节。
+  content: ['./index.html', './src/**/*.{vue,ts}', './e2e/**/*.{ts,mjs}'],
   // 主题靠 <html data-theme="light|dark"> 切换；不用 .dark class。
   darkMode: ['class', '[data-theme="dark"]'],
   theme: {

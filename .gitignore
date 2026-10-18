@@ -177,6 +177,21 @@ web/dist.bak.*
 /cloudflared_token
 *.tunnel_token
 
+# ---- Playwright 真机验收（web/e2e，见 docs/testing/ui-e2e.md）----
+# 运行产物（trace / 失败的 actual+diff / HTML 报告）默认落在**系统临时目录**
+# （$TMP/pieqi-e2e），本就不在仓库里。下面几条是兜底：万一有人用
+# E2E_OUTPUT_DIR 或旧配置把产物写进了仓库，也不要让它进 git。
+# 刻意入库的只有两类：视觉基线 web/e2e/visual/__screenshots__/** 与
+# 数值基线 web/e2e/baseline/*.json —— 它们是"上次验收通过的标准答案"，
+# 不入库就等于每次都在和空气比。
+web/e2e/.artifacts/
+web/e2e/.report/
+web/e2e/test-results/
+web/e2e/playwright-report/
+web/.playwright/
+web/playwright-report/
+web/test-results/
+
 # 本地实际配置：含个人域名/端口/渠道凭据，绝不入库。
 # 模板见 config.example.yaml（cp config.example.yaml config.yaml 后修改）。
 /config.yaml

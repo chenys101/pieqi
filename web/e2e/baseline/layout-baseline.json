@@ -1,0 +1,236 @@
+{
+  "approval@desktop": {
+    "domNodes": 100,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 900
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 900
+      },
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 1149,
+        "h": 900
+      },
+      "approvalList": {
+        "w": 840,
+        "h": 437
+      }
+    }
+  },
+  "approval@mobile": {
+    "domNodes": 78,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": null,
+      "feedbackRail": null,
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 365,
+        "h": 610
+      },
+      "approvalList": {
+        "w": 365,
+        "h": 471
+      }
+    }
+  },
+  "approval@tablet": {
+    "domNodes": 100,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 1112
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 1112
+      },
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 543,
+        "h": 1112
+      },
+      "approvalList": {
+        "w": 543,
+        "h": 437
+      }
+    }
+  },
+  "detail@desktop": {
+    "domNodes": 158,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": {
+        "w": 1109,
+        "h": 730
+      },
+      "composerBar": {
+        "w": 1149,
+        "h": 170
+      },
+      "composerActions": {
+        "w": 1117,
+        "h": 44
+      },
+      "composerInner": {
+        "w": 1117,
+        "h": 149
+      },
+      "jumpLatest": null,
+      "loadOlderTurns": {
+        "w": 1077,
+        "h": 34
+      },
+      "feedbackPanel": {
+        "w": 25,
+        "h": 900
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 900
+      },
+      "contentColumn": {
+        "w": 1077,
+        "h": 438
+      },
+      "contentInner": {
+        "w": 1077,
+        "h": 438
+      },
+      "main": {
+        "w": 1149,
+        "h": 900
+      },
+      "approvalList": null
+    }
+  },
+  "detail@mobile": {
+    "domNodes": 130,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": {
+        "w": 365,
+        "h": 440
+      },
+      "composerBar": {
+        "w": 365,
+        "h": 170
+      },
+      "composerActions": {
+        "w": 341,
+        "h": 44
+      },
+      "composerInner": {
+        "w": 341,
+        "h": 149
+      },
+      "jumpLatest": null,
+      "loadOlderTurns": {
+        "w": 341,
+        "h": 34
+      },
+      "feedbackPanel": null,
+      "feedbackRail": null,
+      "contentColumn": {
+        "w": 341,
+        "h": 438
+      },
+      "contentInner": {
+        "w": 341,
+        "h": 438
+      },
+      "main": {
+        "w": 365,
+        "h": 610
+      },
+      "approvalList": null
+    }
+  },
+  "detail@tablet": {
+    "domNodes": 152,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": {
+        "w": 503,
+        "h": 942
+      },
+      "composerBar": {
+        "w": 543,
+        "h": 170
+      },
+      "composerActions": {
+        "w": 511,
+        "h": 44
+      },
+      "composerInner": {
+        "w": 511,
+        "h": 149
+      },
+      "jumpLatest": null,
+      "loadOlderTurns": {
+        "w": 471,
+        "h": 34
+      },
+      "feedbackPanel": {
+        "w": 25,
+        "h": 1112
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 1112
+      },
+      "contentColumn": {
+        "w": 471,
+        "h": 438
+      },
+      "contentInner": {
+        "w": 471,
+        "h": 438
+      },
+      "main": {
+        "w": 543,
+        "h": 1112
+      },
+      "approvalList": null
+    }
+  }
+}

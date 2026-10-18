@@ -7,10 +7,17 @@
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit",
+    "typecheck": "vue-tsc --noEmit && vue-tsc --noEmit -p tsconfig.e2e.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:layout": "playwright test --project=layout",
+    "test:e2e:visual": "playwright test --project=visual",
+    "test:e2e:impact": "node e2e/impact.mjs",
+    "test:e2e:update-baseline": "node e2e/update-baseline.mjs",
+    "test:e2e:update-snapshots": "playwright test --project=visual --update-snapshots",
+    "test:e2e:install": "playwright install chromium",
+    "test:e2e:vision": "node e2e/vision.mjs --batch"
   },
   "dependencies": {
     "dompurify": "^3.4.15",

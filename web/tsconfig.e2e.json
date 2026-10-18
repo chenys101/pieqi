@@ -1,0 +1,37 @@
+{
+  // e2e 的类型检查配置（`npm run typecheck` 跑它一次：vue-tsc --noEmit -p tsconfig.e2e.json）。
+  //
+  // 为什么单独一个 tsconfig：
+  //   · e2e 跑在 Node + Playwright 里，需要 @types/node 与 playwright 的类型；
+  //   · 但它**不能并进 tsconfig.app.json** —— 那个配置是 `vue-tsc -b` 的构建输入，
+  //     并进来会把 e2e 的 node 类型泄漏进前端构建（window/node 全局混淆），
+  //     而且让 `npm run build` 依赖 e2e 目录是否存在。
+  //
+  // ⚠️ `include` 里刻意只有 e2e/**：夹具页 e2e/fixtures/page-fixture.ts 由 src/main.ts
+  //    在 DEV 下动态 import，所以它同时也是 src 侧的一部分 —— 那份检查归 tsconfig.app.json。
+  //    这里把它（以及 lib、spec）都纳入，是因为**它们各自有独立的类型面**（node API、
+  //    Playwright 的 expect）。两边都检查一遍没有坏处，漏检才有。
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // vite/client 提供 import.meta.env 的类型 —— 夹具页在 src 侧被 main.ts 引用
+    // （那里归 tsconfig.app.json 管），在本配置里被当作独立模块检查，同样需要它
+    "types": ["node", "vite/client"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+}
