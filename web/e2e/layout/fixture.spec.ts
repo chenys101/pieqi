@@ -219,6 +219,153 @@ for (const sc of SCENES) {
         await expect(page.locator('button[aria-label="发送"]')).toBeVisible()
 
         /**
+         * ★ 输入框**装得下多行内容时，文字不能被浮在框内的动作行盖住**。
+         *
+         * 为什么加这一条（2026-10-18 的漏检，教训写在 docs/testing/ui-e2e.md）：
+         *   上面那几条判据**全部是在空输入框状态下的**。而"文字被盖"只在内容
+         *   变多时才出现 —— 实测 375 宽下输入 10 行：
+         *     textarea 高 80px、可滚内容 295px、动作行 top=526、文字区底边 566
+         *     ⇒ 动作行侵入文字区 40px，**最后两行被模型选择器盖住**。
+         *   我一次都没 fill 过这个框，所以这个状态从来没被验证过。
+         *
+         * 判据（与截图无关，纯几何）：
+         *   ① 输入框**内容不溢出**（scrollHeight <= clientHeight）：这是"框够大"的直接表征；
+         *      空框时它就是 true，说明盒子在内容增多时**没有跟着长**。
+         *   ② 动作行（模型选择器/发送按钮所在的那一行）与 textarea 的**文字可见区**
+         *      不重叠 —— 只验 ① 不够，因为盒子可能够大但让位没留对。
+         *
+         * 不输入就无法暴露的问题，只能靠"真的填进去"来测。
+         */
+        const box = page.getByLabel('补充指令')
+        await box.fill(Array.from({ length: 10 }, (_, i) => `第 ${i + 1} 行内容`).join('\n'))
+        // 等文本框按内容定高（autoResize 是异步的：先 resize 再布局）
+        await page.waitForTimeout(200)
+
+        const inputGeom = await page.evaluate(() => {
+          const ta = document.querySelector('textarea[aria-label="补充指令"]') as HTMLTextAreaElement | null
+          const actions = document.querySelector('[data-testid="composer-actions"]') as HTMLElement | null
+          if (!ta || !actions) return null
+          const taR = ta.getBoundingClientRect()
+          const acR = actions.getBoundingClientRect()
+          const cs = getComputedStyle(ta)
+          // 文字可见区 = textarea 盒子减去上下 padding
+          const textTop = taR.top + parseFloat(cs.paddingTop)
+          const textBottom = taR.bottom - parseFloat(cs.paddingBottom)
+          return {
+            scrollHeight: ta.scrollHeight,
+            clientHeight: ta.clientHeight,
+            textTop,
+            textBottom,
+            actionsTop: acR.top,
+            actionsBottom: acR.bottom,
+            // 动作行压在文字区里的高度（> 0 就是盖住了）
+            intrusion: Math.round(Math.min(textBottom, acR.bottom) - Math.max(textTop, acR.top)),
+          }
+        })
+        expect(inputGeom, '找不到输入框或动作行').not.toBeNull()
+
+        /**
+         * ⚠️ 判据修正（写下来是因为第一版定错了）：
+         *
+         * 我最初想断言"内容不溢出（scrollHeight <= clientHeight）"—— 那是**错的**。
+         * `maxHeight`（66px 内容高）是**刻意的上限**：输入条不能因为多写几行就把
+         * 时间线顶走（见 InterveneInput 的 COMPOSER_MAX_HEIGHT 注释）。所以内容
+         * 超过上限后**必然**出现框内滚动，那不是缺陷。
+         *
+         * 真正的缺陷是：**滚动到底时最后一行仍被动作行盖住**。
+         * 判据因此改成两条贴住真实需求：
+         *   ① 输入框确实长高了（超过单行）—— 否则 maxHeight 形同虚设；
+         *   ② **滚动到最底后**文字区不被动作行侵占 —— 这才是用户"看不到最后几行"
+         *      的直接原因，也是 scroll-padding-bottom 要保证的那件事。
+         */
+        expect(
+          inputGeom!.clientHeight,
+          `输入 10 行后输入框没有长高（clientHeight=${inputGeom!.clientHeight}）：maxHeight 没生效或 resize 没跑`,
+        ).toBeGreaterThan(30)
+
+        // 滚到最底再量 —— 用户看最后一行时就是滚到底的状态
+        await page.evaluate(() => {
+          const ta = document.querySelector('textarea[aria-label="补充指令"]') as HTMLTextAreaElement | null
+          if (ta) ta.scrollTop = ta.scrollHeight
+        })
+        await page.waitForTimeout(100)
+
+        const scrolled = await page.evaluate(() => {
+          const ta = document.querySelector('textarea[aria-label="补充指令"]') as HTMLTextAreaElement
+          const actions = document.querySelector('[data-testid="composer-actions"]') as HTMLElement
+          const taR = ta.getBoundingClientRect()
+          const acR = actions.getBoundingClientRect()
+          const cs = getComputedStyle(ta)
+          const padTop = parseFloat(cs.paddingTop)
+          const padBottom = parseFloat(cs.paddingBottom)
+          const scrollPadBottom = parseFloat(cs.scrollPaddingBottom || '0')
+
+          /**
+           * ⚠️ 第一版判据是错的，记下来免得再犯：
+           *   "最后一行底边 = 盒子底边 - paddingBottom" —— 它**恒小于**动作行顶边，
+           *   所以断言永远通过（做变异测试时"去掉修复仍然绿"才发现是空转）。
+           *
+           * textarea 是**原生滚动元素**，文字行位置拿不到 DOM 句柄。可靠的量法是
+           * **镜像法**：造一个同样字体/行高的 div，塞进同样的文本，量它的高度
+           * = 全部内容的高度；再结合 scrollTop 推算"最后一行在视口里的位置"：
+           *
+           *   最后一行底边 = 盒子顶 + padTop + min(内容高, 可见区高) - (scrollHeight - scrollTop)
+           *
+           * 滚到底时 scrollTop = scrollHeight - clientHeight，该式化为
+           *   盒子顶 + padTop + clientHeight - padBottom … 仍然依赖 padding。
+           *
+           * ⇒ 换成**直接判"滚动到底时 scrollTop 的最大值"**：
+           *   若 scroll-padding-bottom 生效，浏览器会把可滚动的极限限制在
+           *   scrollHeight - clientHeight - scrollPadBottom 之前（Chrome 对 textarea
+           *   的 scroll-padding 实现是"滚动范围里保留这段"）。
+           *   判据：滚动到底后，**内容末尾与可见区底部之间至少留出动作行占位**。
+           */
+          const lineHeight = parseFloat(cs.lineHeight) || 21.7
+          const visibleH = ta.clientHeight - padTop - padBottom
+          const reachedBottom = ta.scrollTop + ta.clientHeight >= ta.scrollHeight - 1
+
+          // 动作行占用的高度（它就是用户看不到的那一块）
+          const actionsH = acR.height
+          // 可见文字区里，动作行盖住的像素 = 动作行与该区域的交集
+          const textTop = taR.top + padTop
+          const textBottom = taR.bottom - padBottom
+          const coveredPx = Math.max(0, Math.min(textBottom, acR.bottom) - Math.max(textTop, acR.top))
+
+          return {
+            padTop,
+            padBottom,
+            scrollPadBottom,
+            lineHeight: Math.round(lineHeight),
+            visibleH: Math.round(visibleH),
+            scrollTop: Math.round(ta.scrollTop),
+            maxScroll: Math.round(ta.scrollHeight - ta.clientHeight),
+            reachedBottom,
+            actionsH: Math.round(actionsH),
+            coveredPx: Math.round(coveredPx),
+          }
+        })
+
+        /**
+         * 判据：**滚到底时，动作行不得盖住可见文字区**。
+         *
+         * 这直接对应用户的体验："我把输入框里的内容滚到最后，还能不能看到我写的最后一行"。
+         * 覆盖像素 > 0 就意味着有文字行被压在那块浮层下面。
+         *
+         * 之前那版判据计算"最后一行底边 = 盒子底边 - padding"，那是**恒定**的
+         * （padding 是常量），恒小于动作行顶边 ⇒ 永远通过 —— 典型的空转断言。
+         */
+        expect(
+          scrolled.coveredPx,
+          `滚动到最底后，动作行仍盖住文字区 ${scrolled.coveredPx}px：` +
+            `可见文字高 ${scrolled.visibleH}px（行高约 ${scrolled.lineHeight}px，约 ${Math.floor(scrolled.visibleH / scrolled.lineHeight)} 行可见），` +
+            `动作行高 ${scrolled.actionsH}px，scrollPaddingBottom=${scrolled.scrollPadBottom}px —— ` +
+            `用户看不到被盖住的那 1~2 行`,
+        ).toBeLessThanOrEqual(0)
+
+        // 测完清空，避免影响后续断言（同一 page 上下文）
+        await box.fill('')
+
+        /**
          * 语义卡（工具语义表）：夹具在最后一轮后挂了 create_goal / todo_write /
          * exit_plan_mode 三条 + 一条 Bash 作对照。
          *

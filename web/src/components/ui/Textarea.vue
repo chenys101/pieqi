@@ -16,11 +16,17 @@ const props = withDefaults(
     /** 随内容自动长高（不出现滚动条），上限由 maxHeight 控制 */
     autoResize?: boolean
     /**
-     * autoResize 的高度上限（px）。
+     * autoResize 的高度上限（px）—— 口径是**文字区**高度，**不含 padding**。
      *
      * `rows` 只在**没能**自动量高的那条路上兜底（见下方 resize 注释），
      * 所以它必须**小于**上限 —— 否则矮视口下选中的就是那个过高的兜底值。
-     * 输入条场景传的是 `66`（两行），而默认 120 是给独立表单输入框的。
+     * 输入条场景传的是 `66`（约两行文字），默认 120 是给独立表单输入框的。
+     *
+     * ⚠️ 这个口径很关键（2026-10-18 踩过）：若把 maxHeight 当成"盒子高度"，
+     *    再叠加 PromptInput 的 `padding-bottom: 70px` 让位区，可视文字区会被
+     *    压到只剩 2px —— 用户永远只能看到半行字。所以：
+     *      · 上限按**文字区**比；
+     *      · 盒子高度 = 文字区 + padding（含让位区），由 resize 自己加回来。
      */
     maxHeight?: number
     /** 允许用户拖拽改高。输入条场景传 false —— 拖高会把时间线顶走 */
@@ -52,20 +58,48 @@ defineExpose({ el, focus: () => el.value?.focus() })
  */
 let minHeight = 0
 
-// 先置 auto 再读 scrollHeight：否则高度只增不减（内容删掉后不会缩回去）
+/**
+ * 按内容定高。
+ *
+ * ⚠️ 这里有个**必须先拆开的前提**：`scrollHeight` 是"内容 + 上下 padding"，
+ *    而 `style.height` 设的是**盒子高度**（`box-sizing: border-box` 下 padding
+ *    也被算在内）。直接把 scrollHeight 当 height 用不会出错，但把它和
+ *    **上限**比较就会错 —— 上限（如 66px）是"两行文字"的盒子高，
+ *    而同样的两行 scrollHeight 是 66 + py-2*2 = 82px。
+ *
+ *    实测的后果：`maxHeight=66` 被理解成"内容高度上限 66"，于是盒子被定在
+ *    约 80px 却没长到内容需要的高度，10 行文本塞进 78px 的可视区 ——
+ *    `scrollHeight=295 > clientHeight=78`，用户只能在小窗口里翻。
+ *    （2026-10-18 线上复量/移动端反馈的"输入框内容太多"，根因之一就是它。）
+ *
+ * 所以在比较之前先把 padding 拆出来：拿"纯内容高度"去和"纯内容上限"比。
+ */
 function resize() {
   const t = el.value
   if (!t) return
+  // 先置 auto 再读 scrollHeight：否则高度只增不减（内容删掉后不会缩回去）
   t.style.height = 'auto'
-  const content = t.scrollHeight
+  const cs = getComputedStyle(t)
+  const paddingY = parseFloat(cs.paddingTop || '0') + parseFloat(cs.paddingBottom || '0')
+  const scrollH = t.scrollHeight
+  // 纯内容高度：scrollHeight 减去 padding
+  const content = Math.max(0, scrollH - paddingY)
   // 空框 / 还没量到过：保持 auto，让高度退回 `rows`。
-  // 空框时 scrollHeight 就是"单行"高度，记下来当**非空**时的底线 ——
+  // 空框时 content 就是"单行文字高度"，记下来当**非空**时的底线 ——
   // 内容只有一行时它比 rows 矮，但不能矮过一行。
   if (!t.value || !minHeight) {
     minHeight = content
     return
   }
-  t.style.height = Math.min(Math.max(content, minHeight), props.maxHeight) + 'px'
+  // 上限是**文字区**口径（调用方传的是"能装几行字"），所以**不再减 padding**——
+  // 它和 content 已经是同一个口径，直接比。
+  // 盒子高 = 文字区 + padding（padding 含 px-3/py-2 与让位区 4.375rem）。
+  //
+  // ⚠️ 这里曾经写成 `maxHeight - paddingY`，等于把让位区从上限里又扣了一次，
+  //    再连同 padding 加回去 —— 10 行文本被塞进 78px 可视区，只剩半行可见。
+  const maxContent = props.maxHeight ?? Number.POSITIVE_INFINITY
+  const finalContent = Math.min(Math.max(content, minHeight), maxContent)
+  t.style.height = finalContent + paddingY + 'px'
 }
 
 watch(

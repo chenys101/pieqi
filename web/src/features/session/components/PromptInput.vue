@@ -52,6 +52,25 @@ const appStore = useAppStore()
 // 只有真传了 #actions 才让出底部空间，否则空一块 padding 会让输入框显得松垮。
 // #lead 是同一行的**左侧**插槽（模型选择器）：与 #actions 共用一行，
 // 所以只要 lead 或 actions 任一存在就要让出底部 padding。
+//
+// ★★ 让位（给动作行腾出 70px）**不能用 textarea 的 padding-bottom 做**。
+//
+//   2026-10-18 移动端反馈"输入框内容太多时会与模型选择器相互覆盖"，根因就在这里：
+//
+//     盒子高 80px、`padding-bottom: 70px`  ⇒ **可视文字区只剩 80 - 8 - 70 = 2px**。
+//     内容一旦超过一行就滚，而可见区只有 2px —— 用户永远只能看到半行字，
+//     其余全压在动作行那块"留白"下面。截图实测：10 行文本滚到底，只有
+//     「第 10 行内容」的上半截露出来。
+//
+//   为什么 padding 不能当让位：
+//     · textarea 的 `scrollHeight` **包含** padding，所以 padding 会同时缩小
+//       `clientHeight`（可视区）—— 它是"从可视区里扣掉"，不是"在内容之后留白"；
+//     · `scroll-padding-bottom` 实测对 textarea 的 `maxScroll` **没有影响**
+//       （三种 CSS 写法都试过，maxScroll 恒为 217），不能靠它补救。
+//
+//   正确形态：**盒子高度要包含让位区**，让可视区 = 盒子 - 动作行高，
+//   而不是让可视区被 padding 吃掉。见下方 Textarea 的 maxHeight 计算
+//   （InterveneInput 传的 66 是**文字区**高度，组件内部再补上动作行高度）。
 const slots = useSlots()
 const hasActions = computed(() => !!slots.actions)
 const hasLead = computed(() => !!slots.lead)
