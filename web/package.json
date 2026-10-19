@@ -10,7 +10,7 @@
     "typecheck": "vue-tsc --noEmit && vue-tsc --noEmit -p tsconfig.e2e.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test",
+    "test:e2e": "playwright test --project=layout --project=visual --project=interaction",
     "test:e2e:layout": "playwright test --project=layout",
     "test:e2e:visual": "playwright test --project=visual",
     "test:e2e:interaction": "playwright test --project=interaction",

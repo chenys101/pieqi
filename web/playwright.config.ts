@@ -47,6 +47,7 @@ export default defineConfig({
   testDir: './e2e',
   outputDir: OUTPUT_DIR,
 
+
   // 用例自己的超时：18s 是"页面渲染 + 量数字"的保守上限；慢到超出说明有真问题，不该等
   timeout: 18_000,
   expect: { timeout: 5_000 },
@@ -143,6 +144,23 @@ export default defineConfig({
       testDir: './e2e/online',
       fullyParallel: false,
       workers: 1,
+      /**
+       * ★ 默认**不跑**：线上复量是发版动作，不是每次改代码都跑（文档 §5 的纪律）。
+       *
+       * 实现方式换了两次，两次都失败，记下来免得下一个人再试：
+       *
+       *   ① `grepInvert: /@online/` 放在顶层 → 确实排除了默认运行，但
+       *      **`--project=online` 也一起被滤掉**（报 "No tests found"）。
+       *      我原以为"--project 时不应用 grepInvert"，**是错的**。
+       *   ② 再在 project 级加 `grepInvert: /$a^/` 抵消 → project 级的值会
+       *      **覆盖**顶层（不是合并），结果默认运行又包含了 online。
+       *
+       * ⇒ 最终方案：**不用 grep 机制**，让 `npm run test:e2e` 显式列举三个
+       *    夹具 project（见 package.json）。判据是"默认动作不该包含发版动作"，
+       *    而这用一条命令参数就能表达清楚，不需要在配置里玩正则。
+       *
+       * 用例上的 `@online` tag 保留：它让 `-g online` 之类的临时过滤仍然可用。
+       */
       // 线上可能有冷启动/隧道回源，给宽一点
       timeout: 30_000,
       use: {

@@ -255,6 +255,82 @@ export async function measure(page: Page): Promise<Metrics> {
 }
 
 /**
+ * 等布局**停止变化**（连续两帧尺寸指纹一致），最多等 timeoutMs。
+ *
+ * 为什么需要（线上复量实测踩到）：会话详情在 `session-timeline` 出现之后还会
+ * **异步**加载 feedback bundle（`bundleStore.load`）、补齐轮次、拉用量 ——
+ * 这些都会改变高度与滚动位置。若在"首个元素出现"时就量，会量到**中间态**：
+ * 实测表现为 `contentResizer` 被 `composer-bar` 覆盖（输入区还在初始位置），
+ * 而多等 1.2s 后同一页面完全正常 —— 那不是产品缺陷，是**量得太早**。
+ *
+ * 判据：不只等"某个元素出现"，还要等"没人再动"。有上限 —— 流式输出可能永不静止。
+ */
+/**
+ * ⚠️ **当前无调用方，保留作为反例**（2026-10-18）。
+ *
+ * 它想解决的是"页面异步定高期间取样会量到过渡态"，但**三次改进都不稳**
+ * （8 次跑里红 4~5 次）：尺寸指纹两帧法、加 top、加 bottom、加到连续 6 帧，
+ * 全部会漏 —— 因为"布局稳定"本身是个**猜出来的代理指标**，而异步定高的时机
+ * 与帧率不同步。
+ *
+ * 正解在 `e2e/online/pages.spec.ts` 的 R2：**直接等"我关心的那个条件"成立**
+ * （resizer 底边不再压住 composer 顶边，用 `expect.poll` 收敛）。
+ * 条件成立后立刻量，就不存在"猜何时算稳"的问题。
+ *
+ * 保留本函数的理由：下一个遇到同类问题的人会想写"等稳定"，这里先告诉他试过了。
+ */
+export async function waitLayoutStable(page: Page, timeoutMs = 3000): Promise<void> {
+  await page.evaluate(
+    (maxMs) =>
+      new Promise<void>((resolve) => {
+        const start = performance.now()
+        let last = ''
+        // ⚠️ 需要**连续 N 帧**相同才算稳定，不能两帧就收。
+        //
+        // 实测教训：输入区异步测高期间的过渡态（resizer 与 composer 重叠 4px）
+        // 持续了 3 个采样点（0/200/400ms）。两帧法会在它中途就判"稳定"，
+        // 于是约一半的运行在过渡态取样，报出"resizer 被遮挡"的假缺陷。
+        // N=6 帧（约 100ms@60Hz）能跨过这种延迟一帧的过渡。
+        const STABLE_FRAMES = 6
+        let sameCount = 0
+        const tick = () => {
+          const doc = document.documentElement
+          // 指纹 = 文档尺寸 + 主区/时间线的 client/scroll 尺寸 + **关键元素的 y 坐标**。
+          //
+          // 为什么必须含 y 坐标：实测踩到过一次 —— 会话详情的时间线是**滚动容器**，
+          // 内容补齐时 `clientHeight/scrollHeight` 可能都没变，但内部元素整体在移动
+          // （resizer 的 y 从 754 挪到 735）。只用尺寸当指纹会判定"已稳定"，
+          // 于是在中间态取样，报出"resizer 被 composer-bar 覆盖"这种**假缺陷**。
+          const parts = [`${doc.scrollWidth}x${doc.scrollHeight}`]
+          document.querySelectorAll('main, [data-testid="session-timeline"]').forEach((el) => {
+            parts.push(`${el.clientWidth}x${el.clientHeight}:${el.scrollHeight}`)
+          })
+          // ⚠️ 必须用 **bottom**（不是 top）：实测踩过 —— 输入区在异步测高完成后
+          //    resizer 的 `top` 一直不变（它挂在滚动容器顶部），变的是**高度/bottom**
+          //    （755 → 735）。用 top 当指纹会判"已稳定"，于是在那 4px 重叠的
+          //    过渡期取样，报出"resizer 被 composer-bar 覆盖"的**假缺陷**。
+          document.querySelectorAll('[data-testid="content-resizer"], [data-testid="composer-bar"]').forEach((el) => {
+            const r = el.getBoundingClientRect()
+            parts.push(`${Math.round(r.top)},${Math.round(r.bottom)}`)
+          })
+          const fp = parts.join('|')
+          sameCount = fp === last ? sameCount + 1 : 0
+          last = fp
+          // 连续 STABLE_FRAMES 帧相同 ⇒ 稳定；超时 ⇒ 放行（流式输出可能永不静止，
+          // 不能让"等稳定"本身变成挂死）。
+          if (sameCount >= STABLE_FRAMES || performance.now() - start > maxMs) {
+            resolve()
+            return
+          }
+          requestAnimationFrame(tick)
+        }
+        requestAnimationFrame(tick)
+      }),
+    timeoutMs,
+  )
+}
+
+/**
  * 稳定化：关动画 / 关过渡 / 关光标闪烁 / 锁定字体渲染参数 / 藏滚动条占位。
  * 视觉回归与尺寸量测共用的前置。
  *

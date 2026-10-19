@@ -12,7 +12,7 @@
 // 运行：ONLINE_BASE_URL=http://127.0.0.1:3000 npx playwright test --project=online
 import { test, expect } from '@playwright/test'
 
-test('R4 · 首页返回 SPA 骨架（不是空壳/错误页）', async ({ request }) => {
+test('@online R4 · 首页返回 SPA 骨架（不是空壳/错误页）', async ({ request }) => {
   const res = await request.get('/')
   expect(res.status(), '首页不是 200：可能是二进制没起来、或反向代理配置错了').toBe(200)
 
@@ -23,7 +23,7 @@ test('R4 · 首页返回 SPA 骨架（不是空壳/错误页）', async ({ reque
   expect(html, 'index.html 里没有 module 入口脚本').toMatch(/<script[^>]+type="module"/)
 })
 
-test('R4 · 前端资源可访问（从 index.html 里解析真实资源名）', async ({ request }) => {
+test('@online R4 · 前端资源可访问（从 index.html 里解析真实资源名）', async ({ request }) => {
   const html = await (await request.get('/')).text()
 
   // 先找 assets/*.js（vite 产物名带 hash，不能写死）
@@ -40,7 +40,7 @@ test('R4 · 前端资源可访问（从 index.html 里解析真实资源名）',
   expect(ct, `入口资源 ${src} 返回的是 ${ct}（不是 JS）—— 文件不存在，被 SPA fallback 兜成了 index.html`).toContain('javascript')
 })
 
-test('R4 · 接口鉴权通路正常（内网放行应返回 200）', async ({ request }) => {
+test('@online R4 · 接口鉴权通路正常（内网放行应返回 200）', async ({ request }) => {
   const res = await request.get('/api/tasks')
   expect(res.status(), 'GET /api/tasks 不是 200：鉴权通路有问题（或服务没起来）').toBe(200)
 
@@ -49,7 +49,7 @@ test('R4 · 接口鉴权通路正常（内网放行应返回 200）', async ({ r
   expect(Array.isArray(body.projects), 'projects 不是数组').toBe(true)
 })
 
-test('R4 · 未命中接口返回 404 JSON，而不是被 SPA fallback 兜成 HTML', async ({ request }) => {
+test('@online R4 · 未命中接口返回 404 JSON，而不是被 SPA fallback 兜成 HTML', async ({ request }) => {
   const res = await request.get('/api/__definitely_not_a_route__')
   expect(res.status(), '未命中的 /api 路径应返回 404（registerStatic 对 /api/ 前缀不回退 SPA）').toBe(404)
 
@@ -60,7 +60,7 @@ test('R4 · 未命中接口返回 404 JSON，而不是被 SPA fallback 兜成 HT
   expect(ct, '未命中的 /api 返回了非 JSON 内容：SPA fallback 的前缀判断被破坏').toContain('json')
 })
 
-test('R4 · 页面不得整页横向溢出（纯 HTTP 拿不到，这里只校验视口 meta）', async ({ request }) => {
+test('@online R4 · 页面不得整页横向溢出（纯 HTTP 拿不到，这里只校验视口 meta）', async ({ request }) => {
   // 说明：横向溢出必须靠真实浏览器量（layout 层做）。线上层先守住**能导致溢出的
   // 那个前置条件** —— viewport meta 存在且带 width=device-width。
   // 缺了它，移动端会按 980px 渲染整页，横向溢出必现，而桌面上看不出来。
