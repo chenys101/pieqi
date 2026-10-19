@@ -39,6 +39,68 @@ for (let t = 1; t <= LONG_TURNS; t++) {
   longEvents.push(...turnEvents(LONG_TASK_ID, t, `把第 ${t} 块的交互补上`))
 }
 
+/**
+ * 语义工具调用（goal / todo / plan）—— **插在最后一轮（Turn 12）内部**。
+ *
+ * 为什么夹具里要有：语义卡（ToolCard 的 goal/todo/plan 分支）此前零覆盖，
+ * 而"能把这几个工具画成什么样"只有截图能看出来。没有它们，视觉基线里永远
+ * 只有通用 🔧 卡，等于新功能没验证。
+ *
+ * ⚠️ 位置很关键：**必须落在已挂载的 Turn 里**，不能追加在末尾。
+ *   时间线默认只挂最近 MOUNT_WINDOW 轮，追加到末尾 = 这些卡在折叠区里，
+ *   断言能找到元素、截图却看不见 —— 那是一种"绿着但没验证"的假象。
+ *   （第一版就是这么写的，截图里果然一个语义卡都没有。）
+ *
+ * ⚠️ 也不能带 `[turn:N]` 前缀：feedbackResponse() 靠那个前缀归 Turn，
+ *   混进去会让 Turn 分组错乱。
+ */
+// seq 从最后一轮的末条 + 1 开始（Turn 12 是第 12*3=36 条，seq 34/35/36）。
+const SEM_SEQ0 = longEvents.length + 1
+const semanticToolEvents = [
+  {
+    seq: SEM_SEQ0,
+    type: 'tool_use',
+    tool_name: 'create_goal',
+    tool_use_id: 'tu-goal-1',
+    input: { objective: '把 web/e2e 的两层测试在 Dashboard 上也跑起来' },
+    at: ago(8),
+  },
+  {
+    seq: SEM_SEQ0 + 1,
+    type: 'tool_use',
+    tool_name: 'todo_write',
+    tool_use_id: 'tu-todo-1',
+    input: {
+      todos: [
+        { content: '加 dashboard 场景', status: 'completed' },
+        { content: '重拍基线', status: 'completed' },
+        { content: '补真点击用例', status: 'pending' },
+      ],
+    },
+    at: ago(7),
+  },
+  {
+    seq: SEM_SEQ0 + 2,
+    type: 'tool_use',
+    tool_name: 'exit_plan_mode',
+    tool_use_id: 'tu-plan-1',
+    input: { plan: '第一步：把输入区改成自适应高度\n第二步：重拍基线' },
+    at: ago(6),
+  },
+  // 对照组：一个**认不出**的工具，必须仍走通用 🔧 卡（防止语义表把一切都吞掉）
+  {
+    seq: SEM_SEQ0 + 3,
+    type: 'tool_use',
+    tool_name: 'Bash',
+    tool_use_id: 'tu-bash-1',
+    input: { command: 'npm run test:e2e' },
+    at: ago(5),
+  },
+]
+// 直接推进 longEvents（它们就属于 Turn 12 —— 最后一个 [turn:12] 之后，
+// 下一条 user 事件之前，所以分组会归到 Turn 12 里，而不是末尾的折叠区）。
+longEvents.push(...semanticToolEvents)
+
 export const tasks = [
   // ① 长会话 + 待审批（approval 路径，进程存活）。放第一位是因为
   //    "仪表盘的待审批组"与"会话内联决策卡"是同一种卡的两种位置，一份夹具覆盖两屏。

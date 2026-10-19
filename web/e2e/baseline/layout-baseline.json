@@ -252,7 +252,7 @@
     }
   },
   "detail@desktop": {
-    "domNodes": 158,
+    "domNodes": 198,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -288,11 +288,11 @@
       },
       "contentColumn": {
         "w": 1077,
-        "h": 438
+        "h": 614
       },
       "contentInner": {
         "w": 1077,
-        "h": 438
+        "h": 614
       },
       "main": {
         "w": 1149,
@@ -302,7 +302,7 @@
     }
   },
   "detail@mobile": {
-    "domNodes": 130,
+    "domNodes": 170,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -332,11 +332,11 @@
       "feedbackRail": null,
       "contentColumn": {
         "w": 341,
-        "h": 438
+        "h": 614
       },
       "contentInner": {
         "w": 341,
-        "h": 438
+        "h": 614
       },
       "main": {
         "w": 365,
@@ -346,7 +346,7 @@
     }
   },
   "detail@tablet": {
-    "domNodes": 152,
+    "domNodes": 192,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -382,11 +382,11 @@
       },
       "contentColumn": {
         "w": 471,
-        "h": 438
+        "h": 614
       },
       "contentInner": {
         "w": 471,
-        "h": 438
+        "h": 614
       },
       "main": {
         "w": 543,

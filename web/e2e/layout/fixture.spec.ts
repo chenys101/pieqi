@@ -217,6 +217,29 @@ for (const sc of SCENES) {
         await expect(page.locator('[data-testid="composer-inner"]')).toBeVisible()
         // 发送按钮必须真的点得到（可操作性判据，见 measure.ts 的 INTERACTIVE）
         await expect(page.locator('button[aria-label="发送"]')).toBeVisible()
+
+        /**
+         * 语义卡（工具语义表）：夹具在最后一轮后挂了 create_goal / todo_write /
+         * exit_plan_mode 三条 + 一条 Bash 作对照。
+         *
+         * 判据两条，缺一不可：
+         *   ① 三种语义卡**都渲染出来了**（否则新功能等于零覆盖）
+         *   ② 认不出的 Bash **仍走通用卡** —— 语义表不能把一切都吞掉。
+         *      这条是负向的：把表做成"默认匹配"时它会红。
+         */
+        await expect(page.locator('[data-testid="tool-semantic-goal"]'), 'goal 工具没渲染成语义卡').toHaveCount(1)
+        await expect(page.locator('[data-testid="tool-semantic-todo"]'), 'todo 工具没渲染成语义卡').toHaveCount(1)
+        await expect(page.locator('[data-testid="tool-semantic-plan"]'), 'plan 工具没渲染成语义卡').toHaveCount(1)
+        // Bash 不是语义工具：必须有且仅有 3 张语义卡（多一张就说明表把 Bash 也吞了）。
+        //
+        // ⚠️ 判据不能写成"找一张带 🔧 的 div"：DOM 是嵌套的，
+        // `div.filter({hasText: /^🔧/})` 会同时命中外层容器与卡片，
+        // 且 `^` 锚点在多行 textContent 上不可靠（实测直接 element not found）。
+        // 用"语义卡总数"当判据既唯一又不依赖 DOM 层级。
+        await expect(
+          page.locator('[data-testid^="tool-semantic-"]'),
+          '语义卡数量不对：夹具里只有 goal/todo/plan 三种，Bash 必须走通用卡',
+        ).toHaveCount(3)
       } else if (sc.scene === 'newtask') {
         /**
          * 新建任务页 —— **主流程入口**，这里坏了用户连任务都建不了。

@@ -16,7 +16,20 @@ import { test, expect } from '@playwright/test'
 import { stabilize, VIEWPORTS } from '../lib/measure'
 
 const SCENES = [
-  { name: 'detail', url: '/__e2e/detail', ready: '[data-testid="session-timeline"]' },
+  {
+    name: 'detail',
+    url: '/__e2e/detail',
+    // ⚠️ ready 必须等到**最后一轮的内容**，不能只等时间线容器。
+    //
+    // 容器先出现、Turn 再逐个渲染 —— 等容器 = 截到"轮次还没挂全"的中间态。
+    // 实测：语义卡（在 Turn 12 里）确实渲染了、位置也在视口内（探针验证过），
+    // 但截图里一张都没有，而且**截图字节与改动前完全一致** —— 说明拍的是
+    // 旧的一帧。这类"图看起来正常、其实少了一半内容"的基线最危险：
+    // 它会让你在后续改动里拿一张残图当标准答案。
+    //
+    // 判据：等 Turn 12 的最后一组语义卡出现（它就是夹具里最后渲染的东西）。
+    ready: '[data-testid="session-timeline"] [data-testid="tool-semantic-plan"]',
+  },
   { name: 'approval', url: '/__e2e/detail?mode=approval', ready: '[data-e2e="approval-list"]' },
   // 首页（SPEC §6.2）：此前零基线。它有两个"选择性渲染"的区块 ——
   // 待审批只在有待办时出现、本周概览只在有历史时出现 —— 正是最该被像素守着的东西。
