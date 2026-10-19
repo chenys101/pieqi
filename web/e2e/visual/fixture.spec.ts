@@ -27,6 +27,8 @@ const SCENES = [
     url: '/__e2e/detail?mode=agents',
     ready: '[data-e2e="agents"] [data-testid="capability-matrix"]',
   },
+  // 设置页：表单是「标签挤压 / 开关换行」的高发区，此前零覆盖。
+  { name: 'settings', url: '/__e2e/detail?mode=settings', ready: '[data-e2e="settings"]' },
 ] as const
 
 /** 主题：双主题对等（SPEC §5.5），两种都要有基线 */

@@ -21,7 +21,9 @@ import ApprovalCard from '@/features/approval/components/ApprovalCard.vue'
 import FeedbackPanel from '@/features/feedback/components/FeedbackPanel.vue'
 import DashboardPage from '@/pages/DashboardPage.vue'
 import AgentsPage from '@/pages/AgentsPage.vue'
+import SettingsPage from '@/pages/SettingsPage.vue'
 import { useAgentStore } from '@/stores/agent'
+import { getSettings } from '@/services/api/settings'
 import { useSessionStore } from '@/stores/session'
 import { useTaskStore } from '@/stores/task'
 import { useAppStore } from '@/stores/app'
@@ -68,10 +70,11 @@ function toApproval(t: TaskDto): ApprovalRequest {
 const Shell = defineComponent({
   setup() {
     const raw = new URLSearchParams(location.search).get('mode')
-    const mode: 'session' | 'approval' | 'dashboard' | 'agents' =
+    const mode: 'session' | 'approval' | 'dashboard' | 'agents' | 'settings' =
       raw === 'approval' ? 'approval'
       : raw === 'dashboard' ? 'dashboard'
       : raw === 'agents' ? 'agents'
+      : raw === 'settings' ? 'settings'
       : 'session'
     const decisions = FIXTURE_TASKS.filter((t) => t.current_decision)
 
@@ -83,7 +86,15 @@ const Shell = defineComponent({
         h(
           'main',
           { class: 'flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto', 'data-e2e': 'main' },
-          mode === 'agents'
+          mode === 'settings'
+            ? [
+                // 设置页：四组全局偏好。它依赖 getSettings() —— 那个请求回来之前
+                // 所有开关都是 disabled（代码里刻意的：不给"点了没反应"的控件）。
+                // 所以夹具在 beforeEnter 里等它落地（见 route 的注释），否则截图会
+                // 拍到一个"全部灰掉"的页面，看起来正常、实际一行设置都没验证到。
+                h('div', { 'data-e2e': 'settings' }, [h(SettingsPage)]),
+              ]
+            : mode === 'agents'
             ? [
                 // Agents 页：能力矩阵的落点。
                 //
@@ -183,6 +194,18 @@ export const fixtureRouter = createRouter({
         // 实际一个能力矩阵都没验证到（典型的静默假绿）。
         if (to.query.mode === 'agents') {
           await useAgentStore().loadCatalog(true)
+        }
+        // settings 场景同理：getSettings() 没回来之前开关全是 disabled。
+        // 这里先把它预热进 HTTP 缓存不可行（要的是组件状态），所以改成"等它成功一次"：
+        // 组件挂载时还会再发一次，但那时网络已经在途/已缓存，且我们的 ready 选择器
+        // 等的是"开关可交互"而不是"页面出现"。
+        if (to.query.mode === 'settings') {
+          try {
+            await getSettings()
+          } catch {
+            // 失败就让页面自己走它的降级路径（开关 disabled）——
+            // 那是真实行为，用例会在断言里红，而不是被夹具吞掉
+          }
         }
         return true
       },

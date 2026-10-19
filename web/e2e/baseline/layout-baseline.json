@@ -1,6 +1,6 @@
 {
   "agents@desktop": {
-    "domNodes": 207,
+    "domNodes": 208,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -29,7 +29,7 @@
     }
   },
   "agents@mobile": {
-    "domNodes": 185,
+    "domNodes": 186,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -52,7 +52,7 @@
     }
   },
   "agents@tablet": {
-    "domNodes": 207,
+    "domNodes": 208,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -81,7 +81,7 @@
     }
   },
   "approval@desktop": {
-    "domNodes": 99,
+    "domNodes": 100,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -113,7 +113,7 @@
     }
   },
   "approval@mobile": {
-    "domNodes": 77,
+    "domNodes": 78,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -139,7 +139,7 @@
     }
   },
   "approval@tablet": {
-    "domNodes": 99,
+    "domNodes": 100,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -171,7 +171,7 @@
     }
   },
   "dashboard@desktop": {
-    "domNodes": 141,
+    "domNodes": 142,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -200,7 +200,7 @@
     }
   },
   "dashboard@mobile": {
-    "domNodes": 119,
+    "domNodes": 120,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -223,7 +223,7 @@
     }
   },
   "dashboard@tablet": {
-    "domNodes": 141,
+    "domNodes": 142,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -252,7 +252,7 @@
     }
   },
   "detail@desktop": {
-    "domNodes": 157,
+    "domNodes": 158,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -302,7 +302,7 @@
     }
   },
   "detail@mobile": {
-    "domNodes": 129,
+    "domNodes": 130,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -346,7 +346,7 @@
     }
   },
   "detail@tablet": {
-    "domNodes": 151,
+    "domNodes": 152,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -388,6 +388,87 @@
         "w": 471,
         "h": 438
       },
+      "main": {
+        "w": 543,
+        "h": 1112
+      },
+      "approvalList": null
+    }
+  },
+  "settings@desktop": {
+    "domNodes": 234,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 900
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 900
+      },
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 1149,
+        "h": 900
+      },
+      "approvalList": null
+    }
+  },
+  "settings@mobile": {
+    "domNodes": 212,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": null,
+      "feedbackRail": null,
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 365,
+        "h": 610
+      },
+      "approvalList": null
+    }
+  },
+  "settings@tablet": {
+    "domNodes": 234,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 1112
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 1112
+      },
+      "contentColumn": null,
+      "contentInner": null,
       "main": {
         "w": 543,
         "h": 1112

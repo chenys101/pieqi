@@ -33,5 +33,10 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["e2e/**/*.ts", "playwright.config.ts"]
+  // ⚠️ `src/vite-env.d.ts` 必须在里面：夹具页会 import 生产页面（AgentsPage /
+  //    DashboardPage / SettingsPage），它们引用了 `__APP_VERSION__` 这个构建期常量，
+  //    而该声明只在 vite-env.d.ts 里。漏掉它 → typecheck 报
+  //    "Cannot find name '__APP_VERSION__'"，且报错位置在被 import 的页面里，
+  //    看起来像是"那个页面坏了"，实际是 e2e 配置缺一个声明文件。
+  "include": ["e2e/**/*.ts", "playwright.config.ts", "src/vite-env.d.ts"]
 }

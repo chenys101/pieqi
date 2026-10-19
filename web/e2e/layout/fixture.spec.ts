@@ -52,6 +52,16 @@ const SCENES = [
     ready: '[data-e2e="agents"] [data-testid="capability-matrix"]',
     domBudget: 4000,
   },
+  {
+    scene: 'settings',
+    // 设置页：四组全局偏好。表单是「标签挤压 / 开关换行 / 输入框被裁」的高发区，
+    // 而这一页此前完全没有 e2e 覆盖。
+    url: '/__e2e/detail?mode=settings',
+    // ready 选的是"组① 审批与自动化"的标题 —— 它是页面最上、最值钱的一组，
+    // 而"页面出现"不等于"设置加载完"（开关在 getSettings 回来前全是 disabled）。
+    ready: '[data-e2e="settings"]',
+    domBudget: 6000,
+  },
 ] as const
 
 /**
@@ -197,6 +207,43 @@ for (const sc of SCENES) {
         await expect(page.locator('[data-testid="composer-inner"]')).toBeVisible()
         // 发送按钮必须真的点得到（可操作性判据，见 measure.ts 的 INTERACTIVE）
         await expect(page.locator('button[aria-label="发送"]')).toBeVisible()
+      } else if (sc.scene === 'settings') {
+        /**
+         * 设置页：四组必须都在，且**开关真的可交互**。
+         *
+         * 判据不是"页面渲染出来了"：`SettingsPage` 在 getSettings() 回来之前
+         * 把开关全设为 disabled（代码里刻意的取舍 —— 不给"点了没反应"的控件）。
+         * 所以如果只断言标题存在，一个"全部灰掉"的页面也能通过。
+         */
+        const root = page.locator('[data-e2e="settings"]')
+        await expect(root).toBeVisible()
+
+        // 四组标题（顺序也是信息：组①「审批与自动化」排最上，因为它直接决定你被通知多少次）
+        for (const title of ['审批与自动化', '连接与账号', '外观与偏好', '数据与关于']) {
+          await expect(root.getByRole('heading', { name: title }), `缺少分组「${title}」`).toBeVisible()
+        }
+
+        /**
+         * **settings 驱动的开关**必须可用 —— 这才是"设置真的加载完成"的证据。
+         *
+         * ⚠️ 第一版断言写成"任意一个 `button[role=switch]:not([disabled])` 存在"，
+         *    实测证明它**是空转的**：模拟 getSettings 失败后仍有 1 个可用开关
+         *    （共 6 个），因为「减弱动效」是**本地偏好**（localStorage + composable），
+         *    压根不依赖 settings 请求 —— 于是加载失败也能让断言通过。
+         *
+         * 判据改为：组① 里的 L0/L1 两个开关（它们的 `:disabled="!settings"`）
+         * 必须可用。这两个恰好就是 SPEC 里"直接决定你被通知多少次"的那两个，
+         * 拿它们当锚点既准确又有业务意义。
+         */
+        const l0 = root.locator('button[role="switch"]:not([disabled])').nth(0)
+        const l1 = root.locator('button[role="switch"]:not([disabled])').nth(1)
+        await expect(l0, 'L0 开关不可用：settings 没加载成功（getSettings 失败时它是 disabled）').toBeVisible()
+        await expect(l1, 'L1 开关不可用：settings 没加载成功').toBeVisible()
+
+        // L2/L3 必须**始终**是「不可配置」——这是审批的硬边界，不该随任何开关变化。
+        // 用 disabled + 文案一起判：只判 disabled 的话，一个"因为加载失败而 disabled"
+        // 的开关也能混进来。
+        await expect(root.getByText('不可配置').first()).toBeVisible()
       } else if (sc.scene === 'agents') {
         /**
          * Agents 页：**三张卡的能力矩阵必须能看出差异**。
