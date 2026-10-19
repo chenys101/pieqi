@@ -1,4 +1,85 @@
 {
+  "agents@desktop": {
+    "domNodes": 207,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 900
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 900
+      },
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 1149,
+        "h": 900
+      },
+      "approvalList": null
+    }
+  },
+  "agents@mobile": {
+    "domNodes": 185,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": null,
+      "feedbackRail": null,
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 365,
+        "h": 610
+      },
+      "approvalList": null
+    }
+  },
+  "agents@tablet": {
+    "domNodes": 207,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": null,
+      "composerActions": null,
+      "composerInner": null,
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 1112
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 1112
+      },
+      "contentColumn": null,
+      "contentInner": null,
+      "main": {
+        "w": 543,
+        "h": 1112
+      },
+      "approvalList": null
+    }
+  },
   "approval@desktop": {
     "domNodes": 99,
     "lcpMs": null,

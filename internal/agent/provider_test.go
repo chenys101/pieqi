@@ -253,4 +253,68 @@ func TestAvailableAgents(t *testing.T) {
 			t.Fatalf("agents=%+v, want claude + dsh", got)
 		}
 	})
+
+	// ── 结构化能力（2026-10-18）─────────────────────────────────────────────
+	//
+	// 这组测试守的是一个具体的病：**三个 agent 的能力曾经完全相同**（都是
+	// 「流式输出 / 工具审批 / 续问 / 取消」），Agents 页三张卡一模一样，
+	// 用户看不出区别，换了个名字而已。
+	//
+	// 判据全是实测/文档结论（详见 docs/agents-goal-and-capabilities.md），
+	// 不是"大概是这样"：
+	//   · qoder 有 goal 但 ACP 只开放 4 个命令、且 goal 走 SDK control request
+	//     ⇒ GoalMode 必须为空（实测两组共 62 次 tool_call，goal 工具 0 次）
+	//   · claude 的 goal 是命令 + Stop hook ⇒ GoalModeCommand、无工具入口
+	//   · dsh 的 goal 是工具 ⇒ GoalModeTool，实测收到 tool_call: create_goal
+	t.Run("三个 agent 的结构化能力必须有差异", func(t *testing.T) {
+		got := AvailableAgents(config.AgentsConfig{
+			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
+			Qoder:  config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
+			Dsh:    dshConfig,
+		})
+		if len(got) != 3 {
+			t.Fatalf("agents=%+v, want 3 个", got)
+		}
+		claude, qoder, dsh := got[0], got[1], got[2]
+
+		// goal 形态：三家必须能区分开（这是用户最容易被误导的一格）
+		if claude.GoalMode != GoalModeCommand {
+			t.Errorf("claude GoalMode=%q, want %q（/goal 是 CLI 本地解析的命令）", claude.GoalMode, GoalModeCommand)
+		}
+		if !claude.GoalStateVisible {
+			t.Error("claude GoalStateVisible=false：active_goal 已在 2026-10-18 接通，谎报会让用户以为状态不可见")
+		}
+		if qoder.GoalMode != "" {
+			t.Errorf("qoder GoalMode=%q, want 空：ACP 只开放 4 个命令且 goal 是 SDK control request，"+
+				"报成 tool/command 会让用户盲打 /goal 后没反应", qoder.GoalMode)
+		}
+		if qoder.GoalStateVisible {
+			t.Error("qoder GoalStateVisible=true：ACP 路径拿不到 goal 状态")
+		}
+		if dsh.GoalMode != GoalModeTool {
+			t.Errorf("dsh GoalMode=%q, want %q（create_goal 是模型可见工具）", dsh.GoalMode, GoalModeTool)
+		}
+
+		// 同类免审：只有 ACP 系有（claude 走 PreToolUse hook，没有 approve_session）
+		if claude.SessionAlways {
+			t.Error("claude SessionAlways=true：hook 路径的 Resolve 不认 approve_session")
+		}
+		if !qoder.SessionAlways || !dsh.SessionAlways {
+			t.Error("ACP 系应支持同类免审（proceed_always / approve_session）")
+		}
+
+		// 模型可选：claude 桥不下发清单
+		if claude.ModelSelectable {
+			t.Error("claude ModelSelectable=true：桥不下发模型清单")
+		}
+		if !qoder.ModelSelectable || !dsh.ModelSelectable {
+			t.Error("ACP 系应能下发模型清单")
+		}
+
+		// 冷启动：只有 dsh 明显慢（实测 >90s，init_timeout 因此设 2m）
+		if dsh.ColdStartCold != true || claude.ColdStartCold != false || qoder.ColdStartCold != false {
+			t.Errorf("冷启动标记不对：claude=%v qoder=%v dsh=%v（dsh 实测 >90s）",
+				claude.ColdStartCold, qoder.ColdStartCold, dsh.ColdStartCold)
+		}
+	})
 }

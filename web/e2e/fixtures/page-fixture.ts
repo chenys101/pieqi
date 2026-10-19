@@ -20,6 +20,8 @@ import InterveneInput from '@/features/session/components/InterveneInput.vue'
 import ApprovalCard from '@/features/approval/components/ApprovalCard.vue'
 import FeedbackPanel from '@/features/feedback/components/FeedbackPanel.vue'
 import DashboardPage from '@/pages/DashboardPage.vue'
+import AgentsPage from '@/pages/AgentsPage.vue'
+import { useAgentStore } from '@/stores/agent'
 import { useSessionStore } from '@/stores/session'
 import { useTaskStore } from '@/stores/task'
 import { useAppStore } from '@/stores/app'
@@ -66,8 +68,11 @@ function toApproval(t: TaskDto): ApprovalRequest {
 const Shell = defineComponent({
   setup() {
     const raw = new URLSearchParams(location.search).get('mode')
-    const mode: 'session' | 'approval' | 'dashboard' =
-      raw === 'approval' ? 'approval' : raw === 'dashboard' ? 'dashboard' : 'session'
+    const mode: 'session' | 'approval' | 'dashboard' | 'agents' =
+      raw === 'approval' ? 'approval'
+      : raw === 'dashboard' ? 'dashboard'
+      : raw === 'agents' ? 'agents'
+      : 'session'
     const decisions = FIXTURE_TASKS.filter((t) => t.current_decision)
 
     return () =>
@@ -78,7 +83,16 @@ const Shell = defineComponent({
         h(
           'main',
           { class: 'flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto', 'data-e2e': 'main' },
-          mode === 'dashboard'
+          mode === 'agents'
+            ? [
+                // Agents 页：能力矩阵的落点。
+                //
+                // 它依赖 agentStore.catalog，而目录是**异步**加载的（loadCatalog 打
+                // GET /api/agents）。夹具页这里显式拉一次并等它落地，避免截到"还没加载"
+                // 的空态 —— 那种截图看起来"页面正常"，实际什么都没验证。
+                h('div', { 'data-e2e': 'agents' }, [h(AgentsPage)]),
+              ]
+            : mode === 'dashboard'
             ? [
                 // Dashboard 是首页，也是全产品唯一的"行动面"（SPEC §6.2）。
                 // 挂真实页面而不是重搭一份：它的两个区块（待审批 / 本周概览）的选择性渲染
@@ -162,8 +176,14 @@ export const fixtureRouter = createRouter({
       component: Shell,
       // beforeEnter 在组件挂载前跑：store 里先有数据，首次渲染就是"有数据"的状态，
       // 不会先闪一帧空态（那会让视觉基线随机多/少一个 0 状态断言）
-      beforeEnter: () => {
+      beforeEnter: async (to) => {
         seed()
+        // agents 场景：目录是异步拉的（GET /api/agents），**必须在挂载前拉完**。
+        // 否则会截到"暂无可用 Agent"的空态 —— 那种图看起来页面正常，
+        // 实际一个能力矩阵都没验证到（典型的静默假绿）。
+        if (to.query.mode === 'agents') {
+          await useAgentStore().loadCatalog(true)
+        }
         return true
       },
     },

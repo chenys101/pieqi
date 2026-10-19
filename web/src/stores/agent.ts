@@ -56,11 +56,21 @@ export const useAgentStore = defineStore('agent', {
       const online = sessionStore.connection === 'connected'
       return state.catalog.map((info) => {
         const own = taskStore.tasks.filter((t) => t.agent === info.id)
+        // 最近活跃时刻：用来替代那个虚假的 `🟢 Online`。
+        // 后端**不做进程探活**（AvailableAgents 的注释：探活要 spawn 子进程，
+        // 代价与副作用都不该花在渲染一个下拉框上），所以 UI 不能说"在线"。
+        // "最近活跃于 N 分钟前"是能从任务派生的**真事实**。
+        const last = own
+          .map((t) => t.updatedAt || t.createdAt)
+          .filter(Boolean)
+          .sort()
+          .pop()
         return {
           agentId: info.id,
           online,
           activeSessions: own.filter((t) => t.status === 'running' || t.status === 'waiting_input' || t.status === 'pending').length,
           totalSessions: own.length,
+          lastActiveAt: last,
         }
       })
     },
@@ -98,6 +108,13 @@ export const useAgentStore = defineStore('agent', {
           description: a.description,
           // 图片通路能力由服务端算（取决于配置，不只是 agent 名）—— 原样搬运，不推断
           imagePrompt: a.image_prompt === true,
+          // 结构化能力同样原样搬运：这些是**判据**（服务端按配置 + 实测结论算），
+          // 前端一旦自己推断就会与后端漂移 —— 正是 ImagePrompt 注释里那条教训。
+          goalMode: a.goal_mode === 'tool' || a.goal_mode === 'command' ? a.goal_mode : undefined,
+          goalStateVisible: a.goal_state_visible === true,
+          sessionAlways: a.session_always === true,
+          modelSelectable: a.model_selectable === true,
+          coldStartCold: a.cold_start_cold === true,
         }))
         this.defaultAgentId = res.default || agents[0].name
         this.loaded = true

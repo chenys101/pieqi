@@ -21,6 +21,12 @@ const SCENES = [
   // 首页（SPEC §6.2）：此前零基线。它有两个"选择性渲染"的区块 ——
   // 待审批只在有待办时出现、本周概览只在有历史时出现 —— 正是最该被像素守着的东西。
   { name: 'dashboard', url: '/__e2e/detail?mode=dashboard', ready: '[data-e2e="dashboard"]' },
+  // Agents 页：能力矩阵。守"三张卡长得不一样"（此前能力行完全相同）。
+  {
+    name: 'agents',
+    url: '/__e2e/detail?mode=agents',
+    ready: '[data-e2e="agents"] [data-testid="capability-matrix"]',
+  },
 ] as const
 
 /** 主题：双主题对等（SPEC §5.5），两种都要有基线 */

@@ -241,17 +241,57 @@ export function feedbackResponse(taskId) {
   }
 }
 
+/**
+ * Agent 目录夹具。
+ *
+ * ★ 三个 agent 的**结构化能力必须能看出差异** —— 这正是 2026-10-18 那批改动要守的：
+ * 此前三张卡的能力行完全相同，用户看不出该选谁。夹具按**实测结论**填
+ * （见 docs/agents-goal-and-capabilities.md），不是随手写的：
+ *   · claude：goal 是 `command`（/goal <条件> + Stop hook），无同类免审（走 hook）
+ *   · qoder ：goal **不可用**（ACP 只开 4 个命令、goal 走 SDK control request）
+ *   · dsh   ：goal 是 `tool`（create_goal 实测可通），冷启动 >90s
+ * 夹具若把这些抹平，截图就会退化成"三张一样的卡"，测试也就守不住差异了。
+ */
 export const agentsResponse = {
   agents: [
     {
       name: 'claude',
       display_name: 'Claude Code',
-      description: '本地 Claude Code（经 SDK 桥）',
-      transport: 'sdk-bridge',
-      capabilities: ['text', 'tool'],
+      description: 'Anthropic 官方 Agent，经 SDK 常驻桥驱动',
+      transport: 'SDK Bridge',
+      capabilities: ['流式输出', '工具审批', '续问', '取消'],
       image_prompt: true,
+      goal_mode: 'command',
+      goal_state_visible: true,
+      session_always: false,
+      model_selectable: false,
+      cold_start_cold: false,
     },
-    { name: 'qoder', display_name: 'Qoder', description: 'qodercli --acp', transport: 'acp', capabilities: ['text'] },
+    {
+      name: 'qoder',
+      display_name: 'Qoder CLI',
+      description: 'Qoder 官方 CLI（ACP 协议），可选 Qwen3.8-Flash',
+      transport: 'ACP',
+      capabilities: ['流式输出', '工具审批', '续问', '取消'],
+      image_prompt: true,
+      goal_state_visible: false,
+      session_always: true,
+      model_selectable: true,
+      cold_start_cold: false,
+    },
+    {
+      name: 'dsh',
+      display_name: 'DeepSeek Harness',
+      description: 'DeepSeek 官方 agent harness（dsh --profile acp）',
+      transport: 'ACP',
+      capabilities: ['流式输出', '工具审批', '续问', '取消'],
+      image_prompt: true,
+      goal_mode: 'tool',
+      goal_state_visible: true,
+      session_always: true,
+      model_selectable: true,
+      cold_start_cold: true,
+    },
   ],
   default: 'claude',
 }

@@ -44,6 +44,14 @@ const SCENES = [
     ready: '[data-e2e="dashboard"]',
     domBudget: 4000,
   },
+  {
+    scene: 'agents',
+    // Agents 页：能力矩阵落点。守的是"三个 agent 能看出差异"——
+    // 此前三张卡的能力行完全相同（都是「流式输出 / 工具审批 / 续问 / 取消」）。
+    url: '/__e2e/detail?mode=agents',
+    ready: '[data-e2e="agents"] [data-testid="capability-matrix"]',
+    domBudget: 4000,
+  },
 ] as const
 
 /**
@@ -189,6 +197,34 @@ for (const sc of SCENES) {
         await expect(page.locator('[data-testid="composer-inner"]')).toBeVisible()
         // 发送按钮必须真的点得到（可操作性判据，见 measure.ts 的 INTERACTIVE）
         await expect(page.locator('button[aria-label="发送"]')).toBeVisible()
+      } else if (sc.scene === 'agents') {
+        /**
+         * Agents 页：**三张卡的能力矩阵必须能看出差异**。
+         *
+         * 这是这一屏存在的全部理由 —— 此前三个 agent 的 capabilities 完全相同
+         * （「流式输出 / 工具审批 / 续问 / 取消」），三张卡长得一模一样，
+         * 用户看不出该选谁。所以断言不是"渲染出来了"，而是"**渲染出了不同的东西**"。
+         */
+        const matrices = page.locator('[data-e2e="agents"] [data-testid="capability-matrix"]')
+        await expect(matrices, '应有 3 张 agent 卡（claude / qoder / dsh）').toHaveCount(3)
+
+        // 每张卡的矩阵文本（去掉空白）应该互不相同：只要有两张一样，就说明
+        // 某项能力被抹平了（例如 goal 全写成"不可用"、或免审全写成"支持"）。
+        const texts = await matrices.evaluateAll((els) =>
+          els.map((el) => (el.textContent ?? '').replace(/\s+/g, '')),
+        )
+        expect(new Set(texts).size, `三张能力矩阵必须各不相同，实际：${JSON.stringify(texts)}`).toBe(3)
+
+        // 具体钉住最容易写错的那一格：goal。
+        //   claude → 完成条件（命令）； qoder → 不可用； dsh → 目标（工具）
+        // 判据来自 docs/agents-goal-and-capabilities.md 的实测结论。
+        const joined = texts.join('|')
+        expect(joined, 'claude 的 goal 应显示为「完成条件」（/goal 是命令，不是工具）').toContain('完成条件')
+        expect(joined, 'dsh 的 goal 应显示为「目标」（create_goal 是模型可见工具）').toContain('目标')
+        expect(joined, 'qoder 的 goal 必须显示「不可用」（ACP 未开放）').toContain('不可用')
+
+        // 不能再出现那个虚假的在线状态：后端不做进程探活。
+        await expect(page.locator('[data-e2e="agents"]').getByText('Online')).toHaveCount(0)
       } else if (sc.scene === 'dashboard') {
         /**
          * Dashboard。它的判据与另外两屏不同 —— 这里是**扫视 + 一个动作**的页面，

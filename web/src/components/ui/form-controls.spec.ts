@@ -83,9 +83,19 @@ describe('Textarea', () => {
     expect(t.className).toContain('resize-y')
   })
 
-  it('autoResize：不给 rows（高度由内容决定）、禁用手动 resize 并封顶', () => {
-    const t = mount(Textarea, { autoResize: true }).host.querySelector('textarea')!
-    expect(t.getAttribute('rows')).toBeNull()
+  // ⚠️ 2026-10-18 判据变更（修「发送按钮被底栏盖住」时改的，见 docs/testing/ui-e2e-next.md）：
+  //
+  // 以前 autoResize 会**去掉** rows，让高度完全由内容决定。现在 rows 仍在，语义变成
+  // 「量不到内容时的兜底」—— resize() 的空框分支要靠它撑出稳定起步高度
+  // （见 Textarea 里 minHeight 的注释：空框量到的是**单行**高度，
+  // 直接拿它当高度会让空框缩成一行，而输入条需要一个稳定的初始高度）。
+  //
+  // 所以断言的是「rows 保留 + 不可手拖 + 内容不溢出」；高度由内容决定这件事
+  // 由 autoResize + maxHeight 的组合保证（浏览器行为，jsdom 量不出来 ——
+  // 真正的验证在 e2e/layout 的 composerBar 尺寸断言里）。
+  it('autoResize：rows 作为兜底保留、禁用手动 resize、内容不溢出', () => {
+    const t = mount(Textarea, { autoResize: true, rows: 3 }).host.querySelector('textarea')!
+    expect(t.getAttribute('rows')).toBe('3')
     expect(t.className).toContain('resize-none')
     expect(t.className).toContain('overflow-hidden')
   })

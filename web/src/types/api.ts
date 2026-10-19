@@ -603,6 +603,23 @@ export interface AgentDto {
    * true 只表示"能把图送出去"，不保证对端模型看得见图；真发不进去时后端会明确报错。
    */
   image_prompt?: boolean
+
+  // ---- 结构化能力（后端 AgentInfo 的 JSON tag，2026-10-18）----
+  //
+  // 这些是**判据**：服务端按配置与实测结论算出，前端据此渲染（见 stores/agent 的
+  // loadCatalog 原样搬运）。不要在前端按 agent 名自己推断 —— 那正是上面 ImagePrompt
+  // 注释里记的教训（配置一改就与前端漂移）。
+
+  /** goal 形态：`tool`（模型可见工具，dsh）/ `command`（斜杠命令 + Stop hook，claude）/ 缺省（不开放，qoder） */
+  goal_mode?: 'tool' | 'command'
+  /** goal 状态在 pieqi 里能否看见 */
+  goal_state_visible?: boolean
+  /** 是否支持「本会话内同类操作免审」 */
+  session_always?: boolean
+  /** 是否会下发可选模型清单（清单本身按需拉） */
+  model_selectable?: boolean
+  /** 冷启动是否明显慢（dsh 实测 >90s） */
+  cold_start_cold?: boolean
 }
 
 /** GET /api/agents 响应 */

@@ -115,7 +115,57 @@ type AgentInfo struct {
 	// 服务端配置漂移（例如把 claude 的 transport 配成 print 后，桥的图片通路
 	// 就不存在了，而前端仍会显示入口）。目录是服务端算出来的唯一事实源。
 	ImagePrompt bool `json:"image_prompt"`
+
+	// ---- 结构化能力（2026-10-18 新增）----
+	//
+	// 为什么不再靠 Capabilities 那串文案：三个 agent 的 Capabilities 此前**完全相同**
+	// （都是「流式输出 / 工具审批 / 续问 / 取消」），等于没给任何信息 ——
+	// 用户在 Agents 页看到三张一模一样的卡，换了个名字而已。
+	//
+	// 下面的字段是**判据**，不是文案（与 ImagePrompt 同一条纪律）：前端拿它决定
+	// 怎么渲染、要不要把某个入口灰掉；改文案不会静默改变行为。
+
+	// GoalMode goal 能力的形态（见 docs/agents-goal-and-capabilities.md）：
+	//   "tool"    —— 模型可见的工具（create_goal/update_goal），ACP 实测可通
+	//   "command" —— 斜杠命令 + Stop hook（claude），命令生效但状态靠事件
+	//   ""        —— 该通道不开放 goal
+	GoalMode string `json:"goal_mode,omitempty"`
+
+	// GoalStateVisible goal 状态在 pieqi 里**能不能看见**。
+	//
+	// 与 GoalMode 分开的理由：claude 的 goal 命令可用、状态却曾经被桥丢弃
+	// （active_goal 落进 default: break）。这两件事坏在不同地方，用户能做的
+	// 补救也不同 —— 合一个字段会把"命令能设但看不到进度"表述成"不支持"。
+	GoalStateVisible bool `json:"goal_state_visible"`
+
+	// SessionAlways 是否支持「本会话内同类操作免审」（按 ToolKind 记账）。
+	//
+	// claude 走 PreToolUse hook，`Resolve` 不认 approve_session；ACP 系（qoder/dsh）
+	// 走 RequestPermission，支持。前端据此决定卡片上要不要出现「同类免审」。
+	SessionAlways bool `json:"session_always"`
+
+	// ModelSelectable 该 agent 是否会下发可选模型清单。
+	//
+	// 注意这仍是**能力声明**：清单本身按需拉（GET /api/agents/{name}/models），
+	// 因为取清单要起一次 agent 进程。这里只说明"值不值得去拉"。
+	ModelSelectable bool `json:"model_selectable"`
+
+	// ColdStartCold 冷启动是否明显慢（>30s）。目前 dsh 实测 >90s。
+	//
+	// 用途不是"显示一个数字"，而是**提醒用户别在错误的时机选它**：
+	// 新任务页选 dsh 时要预期"点了创建要等一分多钟才动"。
+	ColdStartCold bool `json:"cold_start_cold"`
 }
+
+// GoalMode 的取值。语义见 docs/agents-goal-and-capabilities.md。
+const (
+	// GoalModeTool goal 是**模型可见的工具**（create_goal / update_goal）。
+	// 即便通道没有命令平面，模型读工具说明也会自己调 —— dsh 属于这一类。
+	GoalModeTool = "tool"
+	// GoalModeCommand goal 是**斜杠命令 + Stop hook**（Claude Code 的 /goal <condition>）。
+	// 命令由 CLI 本地解析，不经模型回合。
+	GoalModeCommand = "command"
+)
 
 // AgentClaude / AgentQoder / AgentDsh 可用 agent 的常量名（避免散落的裸串拼错）。
 const (
@@ -149,6 +199,16 @@ func AvailableAgents(a config.AgentsConfig) []AgentInfo {
 		Transport:    claudeTransport,
 		Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
 		ImagePrompt:  claudeImages,
+		// goal 是**斜杠命令**（`/goal <完成条件>`，CLI 本地解析）+ Stop hook 判定；
+		// 没有 create_goal 这类模型可见的工具入口。
+		// 状态可见性在 2026-10-18 之前是 false（桥把 active_goal 丢了），已修。
+		GoalMode:         GoalModeCommand,
+		GoalStateVisible: true,
+		// 「同类免审」只有 ACP 路径有：Resolve 认 approve_session 的前提是
+		// 对端发 RequestPermission；claude 走 PreToolUse hook，选项里没有这一项。
+		SessionAlways:   false,
+		ModelSelectable: false, // 桥不下发模型清单（用 agent 自己的默认）
+		ColdStartCold:   false, // claude SDK 桥秒级起来
 	}}
 	configured := ACPProviderConfigFromAgents(a)
 	if _, ok := configured.Agents[AgentQoder]; ok {
@@ -161,6 +221,18 @@ func AvailableAgents(a config.AgentsConfig) []AgentInfo {
 			// ACP 具备图片入站通路（ACPAgent 实现 RichPromptSender），
 			// 但是否真收取决于对端握手声明 promptCapabilities.image —— 见 ImagePrompt 的说明。
 			ImagePrompt: true,
+			// qodercli **有**完整的 goal（工具 + /goal 命令 + auto-continuation，见
+			// docs/agents-goal-and-capabilities.md），但 ACP 只开放 4 个斜杠命令
+			// （/init /memory /about /help），goal 不在其中；而且它的 goal 是
+			// SDK control request，不在 ACP 路径上。**两条路都走不通** ⇒ 留空。
+			//
+			// 这里刻意不写 "tool"：实测（字面 /goal 与自然语言各一组，共 62 次 tool_call）
+			// goal 工具调用 **0 次**，模型也不会自己调 —— 谎报能力会让用户盲打 /goal。
+			GoalMode:         "",
+			GoalStateVisible: false,
+			SessionAlways:    true, // ACP：proceed_always / approve_session 都支持
+			ModelSelectable:  true, // qodercli 下发模型清单（Qwen3.8-Flash 等）
+			ColdStartCold:    false,
 		})
 	}
 	if _, ok := configured.Agents[AgentDsh]; ok {
@@ -171,6 +243,16 @@ func AvailableAgents(a config.AgentsConfig) []AgentInfo {
 			Transport:    "ACP",
 			Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
 			ImagePrompt:  true,
+			// dsh 的 goal 是**模型可见的工具**（create_goal/get_goal/update_goal）：
+			// 即便 ACP 没有命令平面，模型也会从工具说明里读出目标意图并自己调用 ——
+			// 已实测收到 tool_call: create_goal → phase=active, activation=armed。
+			GoalMode:         GoalModeTool,
+			GoalStateVisible: true, // 走 tool_call 事件，时间线直接可见
+			SessionAlways:    true,
+			ModelSelectable:  true, // acp profile 的 pin 提供模型清单
+			// dsh 冷启动实测 >90s（init_timeout 因此设为 2m）；
+			// 这条要显示出来，否则用户不知道"点了创建要等一分多钟"。
+			ColdStartCold: true,
 		})
 	}
 	return out
