@@ -53,6 +53,12 @@ function changedFiles() {
 }
 
 /**
+ * 三层全跑。作为常量而不是每处手写：新增 project 时只改这一行，
+ * 不会出现"某几条规则漏了三层里的某一层"（那种漏检是静默的）。
+ */
+const ALL = ['--project=layout', '--project=visual', '--project=interaction']
+
+/**
  * 映射表：**路径前缀 → 要跑的 project/test 过滤表达式**。
  *
  * 顺序有意义：先匹配到的赢。所以"范围大的"放后面（把全量放在兜底位）。
@@ -67,29 +73,38 @@ const RULES = [
   // 构建/样式配置：Tailwind 内容扫描、vite 代理与入口切换都在这里，影响所有页面。
   // package.json 也归这里：依赖版本变化（Tailwind / Playwright / Vue 升级）会改变渲染结果，
   // 不跑视觉层就等于"升级了但没人看"。
+  // 三层全跑：交互层依赖夹具与路由，配置/夹具变了它也必须跟着验。
   {
     match: [/^tailwind\.config\./, /^postcss\.config\./, /^vite\.config\./, /^playwright\.config\./, /^tsconfig/, /^package\.json$/, /^package-lock\.json$/],
-    targets: ['--project=layout', '--project=visual'],
+    targets: ALL,
     reason: '构建/依赖/测试配置改动',
   },
 
-  // 测试自身与夹具：跑自己的那一层（夹具改了两层都要重跑 —— 它们共用同一份数据）
-  { match: [/^e2e\/fixtures\//], targets: ['--project=layout', '--project=visual'], reason: '夹具改动影响两层' },
-  { match: [/^e2e\//], targets: ['--project=layout', '--project=visual'], reason: 'e2e 支撑代码改动' },
+  // 测试自身与夹具：三层共用同一份夹具数据，夹具改了三层都要重跑。
+  { match: [/^e2e\/fixtures\//, /^e2e\/mock-api\.mjs$/], targets: ALL, reason: '夹具/后端改动影响三层' },
+  { match: [/^e2e\//], targets: ALL, reason: 'e2e 支撑代码改动' },
 
   // 样式与设计 token：影响所有页面；视觉基线必跑（布局断言可以顺带跑）
-  { match: [/^src\/styles\//, /^tailwind\.config\./, /^src\/components\/ui\//], targets: ['--project=layout', '--project=visual'], reason: '全局样式/组件库改动，影响面=所有页面' },
+  { match: [/^src\/styles\//, /^tailwind\.config\./, /^src\/components\/ui\//], targets: ALL, reason: '全局样式/组件库改动，影响面=所有页面' },
 
-  // 按 feature 定向
-  { match: [/^src\/features\/approval\//], targets: ['--project=layout -g approval', '--project=visual -g approval'], reason: '审批卡' },
-  { match: [/^src\/features\/session\//, /^src\/features\/timeline\//], targets: ['--project=layout -g detail', '--project=visual -g detail'], reason: '会话时间线' },
+  // 按 feature 定向（交互层也带 -g：审批卡的点击路径与时间线的展开都在 interaction 里）
+  {
+    match: [/^src\/features\/approval\//],
+    targets: ['--project=layout -g approval', '--project=visual -g approval', '--project=interaction -g 审批'],
+    reason: '审批卡',
+  },
+  {
+    match: [/^src\/features\/session\//, /^src\/features\/timeline\//],
+    targets: ['--project=layout -g detail', '--project=visual -g detail', '--project=interaction'],
+    reason: '会话时间线',
+  },
   { match: [/^src\/features\/feedback\//], targets: ['--project=layout -g detail', '--project=visual -g detail'], reason: '变更反馈右栏（挂在会话详情里）' },
 
   // 适配层/类型/store：影响所有页面渲染，保守全量
-  { match: [/^src\/services\//, /^src\/stores\//, /^src\/types\//, /^src\/app\//, /^src\/main\.ts$/], targets: ['--project=layout', '--project=visual'], reason: '数据层/路由/入口改动，影响所有页面' },
+  { match: [/^src\/services\//, /^src\/stores\//, /^src\/types\//, /^src\/app\//, /^src\/main\.ts$/], targets: ALL, reason: '数据层/路由/入口改动，影响所有页面' },
 
-  // 未知目录：保守全量
-  { match: [/./], targets: ['--project=layout', '--project=visual'], reason: '未归类的改动，保守跑全量' },
+  // 未知目录：保守全量（见文件末尾的 ALL）
+  { match: [/./], targets: ALL, reason: '未归类的改动，保守跑全量' },
 ]
 
 function decide(files) {

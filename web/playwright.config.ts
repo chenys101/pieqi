@@ -112,6 +112,23 @@ export default defineConfig({
       snapshotPathTemplate: '{testDir}/__screenshots__/{projectName}/{arg}{ext}',
       use: {},
     },
+    {
+      /**
+       * ③ 交互（真点击）：**真的点下去**，断言状态变化与请求发出。
+       *
+       * 与前两层的判据不同 —— 那两个量的是"渲染结果"，这一层量的是"行为"：
+       * 按钮看得见、点得到，证明不了 onClick 绑没绑、参数对不对。
+       *
+       * 串行的原因：用例共用夹具后端的写请求流水账（/__writes），
+       * 并发会让它们互相读到对方的请求（beforeEach 的清空也会互踩）。
+       */
+      name: 'interaction',
+      testDir: './e2e/interaction',
+      fullyParallel: false,
+      workers: 1,
+      timeout: 20_000,
+      use: {},
+    },
     // 说明：三视口在用例里用 page.setViewportSize 显式设置，**不**开三个 project ——
     // 一个用例覆盖三视口 = 一次启动、三次量测；而且"同一份夹具在三种宽度下的表现"
     // 正是要放在一起对比的东西，拆成三个 project 反而要额外聚合才能比。

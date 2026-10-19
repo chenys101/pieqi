@@ -89,6 +89,9 @@ function route(url) {
   return { status: 404, body: { error: `e2e mock: unknown path ${p}` } }
 }
 
+/** 写请求的流水账（只记不放行；读回与清空见 /__writes）。 */
+const recordedWrites = []
+
 const server = createServer((req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`)
 
@@ -101,10 +104,52 @@ const server = createServer((req, res) => {
     return res.end()
   }
 
-  if (req.method !== 'GET') {
-    // 写操作在这个后端里**不存在**。e2e 若要验证干预流程，应该走"断言请求被发出"
-    // 而不是"让 mock 真的改数据"——后者会把夹具与断言的因果悄悄换掉。
-    return json(res, { error: `e2e mock is read-only (${req.method} ${url.pathname})` }, 405)
+  /**
+   * 写操作：**记录但不改数据**。
+   *
+   * 这是"真点击用例"的前提。三条判据：
+   *
+   * ① 必须能观测：点「允许一次」/「发送」之后，用例要能证明**请求真的发出去了**。
+   *    没有这条通道，就只能断言"按钮被点到了"——而那证明不了整条链通。
+   * ② **不能改数据**：mock 一旦真的改夹具，"页面为什么变成这样"就有了两个来源
+   *    （我们的点击 / mock 的副作用），断言与因果会被悄悄换掉。
+   *    所以这里只记账，状态推进由用例自己驱动 store（与生产里"WS 推回快照"等价）。
+   * ③ 记账要能被读回与清空：`GET /__writes` 取、`DELETE /__writes` 清。
+   *    用例之间必须互不干扰，否则"上一条用例的请求"会让下一条假绿。
+   */
+  //
+  // ⚠️ 顺序陷阱（实测踩过）：`/__writes` 的 GET 必须排在 DELETE 之后判断，
+  //    或者像这里一样**先看 method 再看路径**。写成"路径命中就 return"会让
+  //    `DELETE /__writes` 也走 GET 分支 —— 永远返回旧的流水账、永远清不掉，
+  //    而 beforeEach 里那句"清空后读回为 0"会一直失败，报的却是
+  //    "有别的用例在并发写"（完全指错方向）。
+  if (url.pathname === '/__writes' && req.method === 'GET') {
+    return json(res, { writes: recordedWrites })
+  }
+
+  // 清空流水账（用例 beforeEach 用）。
+  if (url.pathname === '/__writes' && req.method === 'DELETE') {
+    recordedWrites.length = 0
+    return json(res, { ok: true, cleared: true })
+  }
+
+  if (req.method !== 'GET' && req.method !== 'DELETE') {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8')
+      let body = null
+      try {
+        body = raw ? JSON.parse(raw) : null
+      } catch {
+        body = { __unparsed: raw.slice(0, 2000) }
+      }
+      recordedWrites.push({ method: req.method, path: url.pathname, body, at: Date.now() })
+      // 200 + 一个中性载荷：调用方（intervene / cancel / ...）只关心"成功"。
+      // 刻意不回夹具的新状态 —— 见上面判据 ②。
+      json(res, { ok: true, recorded: true })
+    })
+    return
   }
 
   // 健康检查：Playwright 的 webServer 以此判断"起来了"

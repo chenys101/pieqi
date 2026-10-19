@@ -142,6 +142,10 @@ export default defineConfig({
         ws: true, // WebSocket 代理（/api/ws）
       },
       '/internal': apiTarget,
+      // e2e 交互用例要读夹具后端的写请求流水账（GET /__writes；DELETE /__writes 清空）。
+      // 只在 e2e 模式（E2E_MOCK_PORT 存在）下挂 —— 生产与日常 dev 都没有这条路径，
+      // 它属于"测试专有观测口"，不该出现在真实服务上。
+      ...(E2E_MOCK_PORT ? { '/__writes': { target: apiTarget, changeOrigin: true } } : {}),
     },
   },
   build: {

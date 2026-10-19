@@ -24,6 +24,7 @@ import { useSessionStore } from '@/stores/session'
 import { useTaskStore } from '@/stores/task'
 import { useAppStore } from '@/stores/app'
 import { adaptTask } from '@/services/api/client'
+import { intervene } from '@/services/api/tasks'
 import type { TaskDto } from '@/types/api'
 import type { ApprovalRequest } from '@/types/approval'
 
@@ -100,15 +101,26 @@ const Shell = defineComponent({
                 // 不挂它，"主行动按钮在不在视口内"这条断言就没有被量的对象 ——
                 // 少了它等于把最重要的一条验收静默跳过（探针第一次跑就是栽在这里）。
                 h(InterveneInput, {
-                  // ⚠️ 竖屏手机（375×844 及以上）下这块能整个塞进视口，横屏/矮视口
-                  // （375×667 的老 iPhone、1440×900 的笔记本）塞不下 —— 实测输入区
-                  // 149px 的 textarea + 70px 让位 = 170px，而主区只剩 ~141px。
-                  // 这是下一步要处理的产品问题，见 docs/testing/ui-e2e.md「已知问题」。
                   canCancel: false,
                   // waiting_input 允许发送（与 SessionPage 的 canSendPrompt || !!decision 同义）
                   canSend: true,
                   models: [],
                   modelsLoaded: true,
+                  /**
+                   * ★ 必须接 `onSend`，否则"点发送"在夹具里**静默无效**。
+                   *
+                   * InterveneInput 的 onSend 只做 `emit('send', text)` —— 真正发请求的是
+                   * 它的父组件（生产里是 SessionPage 的 onSendPrompt → api.intervene）。
+                   * 夹具页不接这个事件，"点发送后断言请求已发出"就永远等不到请求，
+                   * 而表现只是"超时"，看不出是夹具缺了一环。实测踩过。
+                   *
+                   * 这里复刻 SessionPage 的最小语义（发 append_prompt），不复制它的
+                   * 全部逻辑（通知/清空/防重都在组件里）：
+                   * 交互用例要验证的是"点击 → 请求"这条链，而不是 SessionPage 的编排。
+                   */
+                  onSend: (text: string) => {
+                    void intervene(LONG_.id, { kind: 'append_prompt', text })
+                  },
                 }),
               ]
             : [

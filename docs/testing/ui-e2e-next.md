@@ -40,30 +40,59 @@
 
 ---
 
-## P0 · 给 Dashboard 建基线
+## ~~P0 · 给 Dashboard 建基线~~ ✅ 已完成（2026-10-18，提交 `eb73424`）
 
-Dashboard 是首页，"待审批组 + 本周概览"是最高频首屏，**目前零基线**。
-`docs/ui-design/UI-DESIGN-SPEC.md` 明确列了三条可度量指标（介入时延 / 验证成本 / 误判率），
-现在一条都还没有测试守着。
+Dashboard 是首页，"待审批组 + 本周概览"是最高频首屏，此前**零基线**。
+现在 `mode=dashboard` 挂真实 `DashboardPage`；layout 加专属断言三支
+（待审批块存在 / 首张卡「允许一次」一屏内可见 / 本周概览渲染），
+visual 加 6 张基线。全量 **27 例**（layout 9 + visual 18）连跑 2 次全绿。
 
-做法：在 `e2e/layout/fixture.spec.ts` 与 `e2e/visual/fixture.spec.ts` 的 `SCENES` 各加一条
-（夹具页需要新增 `mode=dashboard` 分支，挂真实的 Dashboard 组件 + 夹具数据）。
+顺带修了两处夹具缺陷 —— 都是"基线守住了一个假状态"的来源：
+- completed 任务缺 `finished_at`（`insight.ts:97` 的判据是 `status==='completed' &&
+  finishedAt`）⇒ 概览显示「完成任务 0」，而夹具里明明有 8 个 completed；
+- `auth/status` 返回 `bound:false` ⇒ `loadBootContext` **异步**置横幅，
+  把全屏下移 12~36px。夹具在 `beforeEnter` 里清空 banner 没用（之后又被设回来），
+  改成 mock 回 `bound:true` 从源头消除。
+
+**过程中踩到的坑（值得记）**：断言写成
+`locator('[data-testid=...]').or(getByText('本周'))` 会被 strict mode 拒绝
+（"resolved to 3 elements"——头部那句「…· 本周 8 个任务已完成」也含"本周"），
+而报错文本很像"元素没渲染"，极易误判成功能坏了。测"某区块在不在"必须用唯一锚点。
 
 ---
 
-## P1 · 补「真点击」用例（当前只做静态几何，不做行为）
+## ~~P1 · 补「真点击」用例~~ ✅ 已完成（2026-10-18，`e2e/interaction/`）
 
-现在的 18 例全是"渲染出来之后量位置/比像素"，**没有任何一条真的点下去**。
-而按钮能不能点、点了会发生什么，只靠几何采样是推不出来的（本轮已经把
-`load-older-turns` 这类**宽按钮四角落在圆角外**造成的假红从清单里剔除，
-正说明像素采样只能当"哨兵"，不能当"行为验证"）。
+新增第三层 `interaction`（4 例）。全量 **31 例**（layout 9 + visual 18 + interaction 4）全绿。
+与前两层的判据不同：前两层量"渲染结果"，这一层量"**行为**"—— 按钮看得见、点得到，
+证明不了 onClick 绑没绑、参数对不对、请求发没发。
 
-建议覆盖三条最短的幸福路径：
-1. 「更早的 N 轮」→ 点击 → 断言更早的 Turn 被挂载（DOM 数量上升、`turn-group-1` 出现）；
-2. 「允许一次」→ 点击 → 断言出现内联二次确认「确认允许」（L3 路径）；
-3. 输入框输入 → 点「发送」→ 断言 `POST /api/tasks/:id/intervene` 已发出
-   （mock 后端目前对写操作一律 405，需要给测试加**可观测**的写通道：
-   记录请求而不是真的改数据，见 `mock-api.mjs` 顶部注释）。
+| 用例 | 断言要点 |
+|---|---|
+| 「允许一次」→ 发请求 | 点前 0 请求；点后 POST intervene，`kind=decision`/`choice=approve`/带 `decision_id` |
+| **L3 二次确认** | 第一下**不发请求**（负向，安全关键）；出现「确认允许」；再点才发 |
+| 「更早的 N 轮」 | 点前 `turn-group-1` 不存在；点后挂载且总 Turn 数增加 |
+| 输入 → 「发送」 | 点前 0 请求；点后 `kind=append_prompt` 且 `text` 与输入**逐字一致** |
+
+**观测手段**：mock 后端新增 `/__writes` 流水账 —— **记录写请求但不改数据**。
+判据见 `mock-api.mjs`：一旦 mock 真的改夹具，"页面为什么变成这样"就有两个来源
+（点击 / mock 副作用），断言与因果会被悄悄换掉。状态推进由用例自己驱动 store，
+与生产里"WS 推回快照"等价。
+
+### 本批踩到的四个坑（都写进了代码注释）
+
+1. **`approval-list` 的直接子节点就是卡片**（实测 childCount=2）。写成 `> div > div`
+   会选中卡片内部子块，点击目标整个错位 —— 表现为"点了 L3 却发出 `decision_id=dec-l2`"。
+2. **跨元素的正则匹配不可靠**：卡片文本由多个子元素拼成，`hasText: /^需要授权\s*L2/`
+   直接超时。改用 `filter({ has: getByText('L2 · 执行命令', { exact: true }) })`。
+3. **`DELETE /__writes` 走进了 GET 分支**：路由先判路径再判 method，于是"清空"永远
+   返回旧流水账、永远清不掉，`beforeEach` 报的却是"有别的用例在并发写"（指错方向）。
+   改为**先判 method 再判路径**，并让清空用 `expect.poll` 收敛。
+4. **`InterveneInput` 的 `onSend` 只 `emit('send')`**：真正发请求的是父组件（生产里是
+   SessionPage）。夹具页不接这个事件，"点发送"就静默无效，表现只是超时。已补上。
+
+**变异验证**：把 `ApprovalCard.act()` 的二次确认条件临时短路 → L3 用例立刻变红
+（`waitFor` 超时）；恢复后全绿。证明这条负向断言守的是真约束。
 
 ---
 
