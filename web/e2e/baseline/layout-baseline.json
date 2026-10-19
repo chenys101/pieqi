@@ -395,6 +395,132 @@
       "approvalList": null
     }
   },
+  "newtask@desktop": {
+    "domNodes": 130,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": {
+        "w": 1149,
+        "h": 192
+      },
+      "composerActions": {
+        "w": 1117,
+        "h": 56
+      },
+      "composerInner": {
+        "w": 1117,
+        "h": 171
+      },
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 900
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 900
+      },
+      "contentColumn": {
+        "w": 1117,
+        "h": 24
+      },
+      "contentInner": {
+        "w": 1117,
+        "h": 24
+      },
+      "main": {
+        "w": 1149,
+        "h": 900
+      },
+      "approvalList": null
+    }
+  },
+  "newtask@mobile": {
+    "domNodes": 102,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": {
+        "w": 365,
+        "h": 192
+      },
+      "composerActions": {
+        "w": 341,
+        "h": 70
+      },
+      "composerInner": {
+        "w": 341,
+        "h": 171
+      },
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": null,
+      "feedbackRail": null,
+      "contentColumn": {
+        "w": 341,
+        "h": 24
+      },
+      "contentInner": {
+        "w": 341,
+        "h": 24
+      },
+      "main": {
+        "w": 365,
+        "h": 610
+      },
+      "approvalList": null
+    }
+  },
+  "newtask@tablet": {
+    "domNodes": 124,
+    "lcpMs": null,
+    "cls": 0,
+    "hOverflow": 0,
+    "boxes": {
+      "sessionTimeline": null,
+      "composerBar": {
+        "w": 543,
+        "h": 192
+      },
+      "composerActions": {
+        "w": 511,
+        "h": 56
+      },
+      "composerInner": {
+        "w": 511,
+        "h": 171
+      },
+      "jumpLatest": null,
+      "loadOlderTurns": null,
+      "feedbackPanel": {
+        "w": 25,
+        "h": 1112
+      },
+      "feedbackRail": {
+        "w": 25,
+        "h": 1112
+      },
+      "contentColumn": {
+        "w": 511,
+        "h": 24
+      },
+      "contentInner": {
+        "w": 511,
+        "h": 24
+      },
+      "main": {
+        "w": 543,
+        "h": 1112
+      },
+      "approvalList": null
+    }
+  },
   "settings@desktop": {
     "domNodes": 234,
     "lcpMs": null,

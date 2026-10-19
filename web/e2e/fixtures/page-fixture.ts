@@ -22,6 +22,7 @@ import FeedbackPanel from '@/features/feedback/components/FeedbackPanel.vue'
 import DashboardPage from '@/pages/DashboardPage.vue'
 import AgentsPage from '@/pages/AgentsPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
+import NewTaskPage from '@/pages/NewTaskPage.vue'
 import { useAgentStore } from '@/stores/agent'
 import { getSettings } from '@/services/api/settings'
 import { useSessionStore } from '@/stores/session'
@@ -43,7 +44,12 @@ function seed(): void {
   const pinia = createPinia()
   setActivePinia(pinia)
 
-  useTaskStore().tasks = FIXTURE_TASKS.map(adaptTask)
+  const taskStore = useTaskStore()
+  taskStore.tasks = FIXTURE_TASKS.map(adaptTask)
+  // `loaded` 必须显式置 true：新建任务页的判空逻辑等它（区分"还没到"与"确实没有"，
+  // 见 NewTaskPage 的 watch）。夹具是**同步**灌数据的，不像生产那样有网络往返，
+  // 不设的话页面会一直停在"项目还没到"的观感上。
+  taskStore.loaded = true
   useSessionStore().syncFromTask(LONG_)
 
   // 顶部横幅（"尚未绑定飞书管理员账号…"）是全局状态，生产里由 auth/status 拉取后设置。
@@ -70,11 +76,12 @@ function toApproval(t: TaskDto): ApprovalRequest {
 const Shell = defineComponent({
   setup() {
     const raw = new URLSearchParams(location.search).get('mode')
-    const mode: 'session' | 'approval' | 'dashboard' | 'agents' | 'settings' =
+    const mode: 'session' | 'approval' | 'dashboard' | 'agents' | 'settings' | 'newtask' =
       raw === 'approval' ? 'approval'
       : raw === 'dashboard' ? 'dashboard'
       : raw === 'agents' ? 'agents'
       : raw === 'settings' ? 'settings'
+      : raw === 'newtask' ? 'newtask'
       : 'session'
     const decisions = FIXTURE_TASKS.filter((t) => t.current_decision)
 
@@ -86,7 +93,17 @@ const Shell = defineComponent({
         h(
           'main',
           { class: 'flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto', 'data-e2e': 'main' },
-          mode === 'settings'
+          mode === 'newtask'
+            ? [
+                // 新建任务页：项目选择器 + 执行 Agent + 输入条。
+                //
+                // 它用 useRouter()（创建成功后 router.push 去会话页），所以必须在
+                // **有路由的环境**里挂 —— 夹具页的独立路由表正好提供这一点。
+                // 依赖：taskStore.loaded（判空）、agentStore.defaultAgent（默认 agent）。
+                // 前者在 seed() 里显式置 true，后者由 beforeEnter 拉目录后填充。
+                h('div', { 'data-e2e': 'newtask' }, [h(NewTaskPage)]),
+              ]
+            : mode === 'settings'
             ? [
                 // 设置页：四组全局偏好。它依赖 getSettings() —— 那个请求回来之前
                 // 所有开关都是 disabled（代码里刻意的：不给"点了没反应"的控件）。
@@ -192,7 +209,9 @@ export const fixtureRouter = createRouter({
         // agents 场景：目录是异步拉的（GET /api/agents），**必须在挂载前拉完**。
         // 否则会截到"暂无可用 Agent"的空态 —— 那种图看起来页面正常，
         // 实际一个能力矩阵都没验证到（典型的静默假绿）。
-        if (to.query.mode === 'agents') {
+        // agents 场景要目录；newtask 也要（默认执行 Agent 来自目录的 default）。
+        // 两者都在挂载前拉完，避免截到"还没加载"的状态。
+        if (to.query.mode === 'agents' || to.query.mode === 'newtask') {
           await useAgentStore().loadCatalog(true)
         }
         // settings 场景同理：getSettings() 没回来之前开关全是 disabled。

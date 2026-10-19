@@ -29,6 +29,12 @@ const SCENES = [
   },
   // 设置页：表单是「标签挤压 / 开关换行」的高发区，此前零覆盖。
   { name: 'settings', url: '/__e2e/detail?mode=settings', ready: '[data-e2e="settings"]' },
+  // 新建任务页：主流程入口（这里坏了用户连任务都建不了）。
+  {
+    name: 'newtask',
+    url: '/__e2e/detail?mode=newtask',
+    ready: '[data-e2e="newtask"] [data-testid="composer-submit"]',
+  },
 ] as const
 
 /** 主题：双主题对等（SPEC §5.5），两种都要有基线 */

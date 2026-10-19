@@ -62,6 +62,16 @@ const SCENES = [
     ready: '[data-e2e="settings"]',
     domBudget: 6000,
   },
+  {
+    scene: 'newtask',
+    // 新建任务页：项目选择器 + 执行 Agent + 输入条。
+    // 与设置页同类风险（表单），且它是**主流程入口** —— 这里坏了用户连任务都建不了。
+    url: '/__e2e/detail?mode=newtask',
+    // ready 用提交按钮：它只有在"项目已选 + 有内容"时才可用，
+    // 所以它的出现意味着选择器与输入条都已就绪（不是"页面骨架出现了"）。
+    ready: '[data-e2e="newtask"] [data-testid="composer-submit"]',
+    domBudget: 5000,
+  },
 ] as const
 
 /**
@@ -207,6 +217,39 @@ for (const sc of SCENES) {
         await expect(page.locator('[data-testid="composer-inner"]')).toBeVisible()
         // 发送按钮必须真的点得到（可操作性判据，见 measure.ts 的 INTERACTIVE）
         await expect(page.locator('button[aria-label="发送"]')).toBeVisible()
+      } else if (sc.scene === 'newtask') {
+        /**
+         * 新建任务页 —— **主流程入口**，这里坏了用户连任务都建不了。
+         *
+         * 判据按"用户能不能真的建出任务"倒推，而不是"控件在不在"：
+         *   ① 执行 Agent 已选中（默认来自服务端目录的 default）
+         *   ② 项目已选中（任务必须落在某个项目里）
+         *   ③ 输入任务描述后，创建按钮变为**可用**
+         * 「按钮存在但永远 disabled」是这一页最典型的坏法：看不出报错，
+         * 但用户点不动，且没人会想到去查"为什么不能提交"。
+         */
+        const root = page.locator('[data-e2e="newtask"]')
+        await expect(root).toBeVisible()
+
+        const submit = root.locator('[data-testid="composer-submit"]')
+        await expect(submit, '缺少「创建任务」按钮').toBeVisible()
+        // 空输入时必须 disabled（负向：防止"什么都没写也能提交"）
+        await expect(submit, '没写任务描述时「创建任务」不该可用').toBeDisabled()
+
+        // 执行 Agent 选择器必须有值（默认 agent 已落到表单上）。
+        //
+        // ⚠️ `data-testid="agent-select"` 落在 Select 组件的**外层 div** 上
+        // （Select.vue 内部是 `<div class="relative inline-flex">` + 原生 `<select>`），
+        // 直接对外层取 inputValue 会报 "Node is not an <input>, <textarea> or <select>"。
+        // 必须再往下点一层拿到真正的 select —— 这条错误信息很明确，但很容易
+        // 被误读成"选择器没渲染"。
+        const agentSelect = root.locator('[data-testid="agent-select"] select')
+        await expect(agentSelect, '缺少执行 Agent 选择器（或其内层 <select>）').toBeVisible()
+        expect(await agentSelect.inputValue(), '执行 Agent 未选中默认值').not.toBe('')
+
+        // 写一句任务描述 → 按钮应变为可用
+        await root.getByLabel('任务描述').fill('把设置页的 L2 文案改成「需人工确认」')
+        await expect(submit, '填了任务描述后「创建任务」仍然不可用（项目未选？）').toBeEnabled()
       } else if (sc.scene === 'settings') {
         /**
          * 设置页：四组必须都在，且**开关真的可交互**。
