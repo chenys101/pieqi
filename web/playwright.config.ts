@@ -129,33 +129,67 @@ export default defineConfig({
       timeout: 20_000,
       use: {},
     },
+    {
+      /**
+       * ④ 线上复量：打**真实服务**，验证"部署后这屏还能用"。
+       *
+       * 见 docs/testing/ui-e2e-online.md。三条纪律：
+       *   · **不参与默认 `npm run test:e2e`**（它是发版动作，不是每次改代码都跑）；
+       *   · 必须显式给 `ONLINE_BASE_URL`，**默认指向 127.0.0.1:3000**（本机），
+       *     不默认任何公网地址 —— 防止一次疏忽把只读用例打到公网实例；
+       *   · 只读放在**机制**上（用例内拦截所有非 GET），不靠"记得别点"。
+       */
+      name: 'online',
+      testDir: './e2e/online',
+      fullyParallel: false,
+      workers: 1,
+      // 线上可能有冷启动/隧道回源，给宽一点
+      timeout: 30_000,
+      use: {
+        baseURL: process.env.ONLINE_BASE_URL || 'http://127.0.0.1:3000',
+        // 线上复量**不做截图**：数据每天变，比像素必然全红，那种红没有信息量。
+        trace: 'off',
+        screenshot: 'off',
+        video: 'off',
+      },
+    },
     // 说明：三视口在用例里用 page.setViewportSize 显式设置，**不**开三个 project ——
     // 一个用例覆盖三视口 = 一次启动、三次量测；而且"同一份夹具在三种宽度下的表现"
     // 正是要放在一起对比的东西，拆成三个 project 反而要额外聚合才能比。
   ],
 
-  // 两个服务都常驻：dev server 只起一次，反复跑测试共用（reuseExistingServer）
-  webServer: [
-    {
-      command: `node e2e/mock-api.mjs`,
-      port: MOCK_PORT,
-      reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
-      env: { E2E_MOCK_PORT: String(MOCK_PORT) },
-      stdout: 'pipe',
-      stderr: 'pipe',
-    },
-    {
-      // --mode e2e：入口换成 e2e/boot-fixture.ts（见 vite.config.ts 的 e2eEntryPlugin）。
-      // 生产入口 src/main.ts 保持零 e2e 痕迹。
-      command: `npx vite --mode e2e --port ${VITE_PORT} --strictPort`,
-      port: VITE_PORT,
-      reuseExistingServer: !process.env.CI,
-      timeout: 90_000,
-      // 夹具后端端口注入给 vite 代理（见 vite.config.ts 的 e2e 分支）
-      env: { E2E_MOCK_PORT: String(MOCK_PORT) },
-      stdout: 'pipe',
-      stderr: 'pipe',
-    },
-  ],
+  /**
+   * 夹具层的两个服务（mock 后端 + dev server）：常驻复用。
+   *
+   * ⚠️ online project **不需要**它们（它打的是真实服务），但 Playwright 的
+   * `webServer` 是**全局**的、没有"按 project 生效"的开关 —— 单独跑 online 时
+   * 它们也会被拉起。代价是几秒启动（`reuseExistingServer` 会复用已存在的），
+   * 不会影响断言。如果哪天觉得碍事，用 `ONLINE_ONLY=1` 跳过：
+   * 判据是"跑 online 时不该需要夹具服务"，而不是"少等几秒"。
+   */
+  webServer: process.env.ONLINE_ONLY
+    ? undefined
+    : [
+        {
+          command: `node e2e/mock-api.mjs`,
+          port: MOCK_PORT,
+          reuseExistingServer: !process.env.CI,
+          timeout: 30_000,
+          env: { E2E_MOCK_PORT: String(MOCK_PORT) },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+        {
+          // --mode e2e：入口换成 e2e/boot-fixture.ts（见 vite.config.ts 的 e2eEntryPlugin）。
+          // 生产入口 src/main.ts 保持零 e2e 痕迹。
+          command: `npx vite --mode e2e --port ${VITE_PORT} --strictPort`,
+          port: VITE_PORT,
+          reuseExistingServer: !process.env.CI,
+          timeout: 90_000,
+          // 夹具后端端口注入给 vite 代理（见 vite.config.ts 的 e2e 分支）
+          env: { E2E_MOCK_PORT: String(MOCK_PORT) },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+      ],
 })
