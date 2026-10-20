@@ -85,6 +85,18 @@ const Shell = defineComponent({
       : 'session'
     const decisions = FIXTURE_TASKS.filter((t) => t.current_decision)
 
+    /**
+     * 模型清单：在 setup 里取一次 Pinia store，**在渲染函数里**把它翻译成 props。
+     *
+     * 为什么渲染函数里读（而不是 setup 里取一次固化）：beforeEnter 已经把清单拉好了，
+     * 但 agents / settings 等场景的目录是挂载后才落地的；渲染函数每次执行时读 store，
+     * 状态一变就跟着变，不会拍到"清单还没到"的中间态。
+     */
+    const agentStore = useAgentStore()
+    const modelAgent = (): string => (mode === 'newtask' ? agentStore.defaultAgent : LONG_.agent ?? agentStore.defaultAgent)
+    const modelsOfAgent = () => agentStore.modelsOf(modelAgent())
+    const modelsLoadedForAgent = () => !!agentStore.modelsLoaded[modelAgent()]
+
     return () =>
       // ⚠️ `h-dvh` 会与 AppLayout 里真实存在的移动端底栏（BottomNav）抢底部 49px：
       // 夹具页自己占满整屏，底栏被挤到视口之外且不参与滚动 ⇒ 输入区被它挡住。
@@ -146,8 +158,17 @@ const Shell = defineComponent({
                   canCancel: false,
                   // waiting_input 允许发送（与 SessionPage 的 canSendPrompt || !!decision 同义）
                   canSend: true,
-                  models: [],
-                  modelsLoaded: true,
+                  // ★ 模型清单必须**从 store 透传**，与 SessionPage 同一口径。
+                  // 早先这里写死 `models: []` + `modelsLoaded: true` —— 那是「该 Agent 不提供
+                  // 可选模型」的形态，不是用户看到的形态（用户选过模型后触发器带长名字，
+                  // 宽度差 50px 以上）。用硬编码的空数组，任何"这一行放不放得下"
+                  // 的回归都被夹具自己先抹掉了。见下方 beforeEnter 里的 loadModels。
+                  //
+                  // ⚠️ modelsOf 是 Pinia 的 getter（`modelsOf(state)` 返回取值函数），
+                  // 必须在 setup 作用域里取一次缓存，**不能塞进模板字符串当响应式源**。
+                  models: modelsOfAgent(),
+                  modelsLoaded: modelsLoadedForAgent(),
+                  currentModel: '',
                   /**
                    * ★ 必须接 `onSend`，否则"点发送"在夹具里**静默无效**。
                    *
@@ -211,8 +232,27 @@ export const fixtureRouter = createRouter({
         // 实际一个能力矩阵都没验证到（典型的静默假绿）。
         // agents 场景要目录；newtask 也要（默认执行 Agent 来自目录的 default）。
         // 两者都在挂载前拉完，避免截到"还没加载"的状态。
+        // newtask 里 NewTaskPage 自己也会 loadCatalog（幂等），这里先拉是为了
+        // "首帧就有默认 agent"，免得视觉基线拍到目录落地前的那一帧。
+        // 会话/审批场景**不能**用 loadCatalog(true)：那是 force 语义，会把 store 换一份新对象；
+        // 这里只需要"有目录"，走默认的幂等分支。
         if (to.query.mode === 'agents' || to.query.mode === 'newtask') {
           await useAgentStore().loadCatalog(true)
+        }
+        // 会话场景：生产里是 **SessionPage** 在任务到达后 `loadModels(task.agent)`，
+        // 再经 InterveneInput 把清单交给模型选择器。夹具页直接挂的是 InterveneInput，
+        // 没有这步 ⇒ `models=[]` + `modelsLoaded=true`，触发器只剩 105px 的
+        // 「Agent 默认」、框下还会多一行「该 Agent 不提供可选模型」的说明。
+        // 那不是用户的形态：真实用户一旦选过模型，触发器是「◈ DeepSeek-V4.1-Flash」
+        // （约 158px），而**宽度**恰恰是这一行最容易出事的地方。这里按生产同序补齐。
+        if (to.query.mode == null || to.query.mode === 'session' || to.query.mode === 'approval') {
+          const agentStore = useAgentStore()
+          try {
+            await agentStore.loadCatalog()
+            await agentStore.loadModels(LONG_.agent || agentStore.defaultAgent)
+          } catch {
+            // 拉不到就保持空清单：组件会走它自己的降级分支（那是真实行为）
+          }
         }
         // settings 场景同理：getSettings() 没回来之前开关全是 disabled。
         // 这里先把它预热进 HTTP 缓存不可行（要的是组件状态），所以改成"等它成功一次"：

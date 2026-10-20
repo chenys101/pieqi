@@ -17,6 +17,7 @@
 import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import {
+  agentModelsResponse,
   agentsResponse,
   authStatusResponse,
   botsResponse,
@@ -51,9 +52,25 @@ function route(url) {
 
   if (p === '/api/tasks') return { body: tasksResponse() }
   if (p === '/api/agents') return { body: agentsResponse }
-  if (p === '/api/agents/claude/models' || p === '/api/agents/qoder/models')
-    // 200 + 空 models = "该 agent 不支持选模型"，前端隐藏下拉框（不是错误）
-    return { body: { agent: p.split('/')[3], models: [] } }
+  // 模型清单：对**每个** agent 都下发夹具目录里那份（查不到就给空清单）。
+  //
+  // ⚠️ 早先这里对 claude / qoder 一律回空清单，而 claude 又是默认 agent ——
+  // 于是「输入框里的模型选择器」在**所有** e2e 场景里都只有「Agent 默认」的形态，
+  // 用户实际看到的「选了具体模型之后的长名字」从没被验过。
+  //
+  // ⚠️ 这里刻意**不按 agent 名去掉清单**（哪怕 claude 目录里是 `model_selectable:false`）：
+  // 夹具页的会话场景直接挂 InterveneInput，父组件不在（生产里是 SessionPage），
+  // 上一轮选过的模型不会自己回来 —— 要让"触发器带长名字"这个真实形态出现，
+  // 只能靠用户自己点开选择器。若 claude 回空清单，那个点开动作就没有可选项，
+  // 验收里最挤的那个形态（宽触发器 + 加图按钮 + 发送按钮同行）永远不会被渲染。
+  {
+    const m = /^\/api\/agents\/([^/]+)\/models$/.exec(p)
+    if (m) {
+      const agent = decodeURIComponent(m[1])
+      const models = agentModelsResponse[agent]?.models ?? agentModelsResponse.dsh.models
+      return { body: { agent, models } }
+    }
+  }
   if (p === '/api/settings') return { body: settingsResponse }
   if (p === '/api/auth/status') return { body: authStatusResponse }
   if (p === '/api/bots') return { body: botsResponse }

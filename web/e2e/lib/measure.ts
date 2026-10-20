@@ -32,6 +32,8 @@ export const TARGETS: Record<string, string> = {
   composerBar: '[data-testid="composer-bar"]',
   composerActions: '[data-testid="composer-actions"]',
   composerInner: '[data-testid="composer-inner"]',
+  // 输入条的「框」：textarea + 动作行共同的外层。输入区总高 = 它的高度。
+  composerFrame: '[data-testid="composer-frame"]',
   jumpLatest: '[data-testid="jump-latest"]',
   loadOlderTurns: '[data-testid="load-older-turns"]',
   feedbackPanel: '[data-testid="feedback-panel"]',
@@ -63,6 +65,17 @@ export const TARGETS: Record<string, string> = {
 export const INTERACTIVE: Record<string, string> = {
   // 发送按钮没有 testid，但它有**无障碍名**（aria-label="发送"，见 InterveneInput.vue）
   composerSend: 'button[aria-label="发送"]',
+  // 输入框里的模型选择器（触发器）：它曾被长文本/动作行压住（2026-10-19 的用户反馈），
+  // 而用户要点的正是它 —— 必须常驻可见、可点。
+  //
+  // ⚠️ 这里取的是 ModelPicker 的**根 div**（`[data-testid="model-picker"]`），不是里面
+  // 那个 `<button>`。看起来反直觉，但这是实测校准过的判据：
+  //   · ModelPicker 的 Button 是多根组件（触发器 + 弹层），`data-testid="model-picker-trigger"`
+  //     这类非 props 属性只能落到 Button 的根节点，而它的根节点就是触发器本身 ——
+  //     于是 testid 命中的 `<button>` 在 flex 行里被 `items-center` 拉伸得比外层 div 更高
+  //     （实测高 44px，外层只有 32px），四角采样点落在 div 上 ⇒ 报"被自己拦截"的假红；
+  //   · 根 div（`pointer-events-auto` 的触发器容器）才是"用户能点到的那个盒"，与视觉一致。
+  composerModelPicker: '[data-testid="model-picker"]',
   // 「回到最新」本身就是 <button>（SessionTimeline:576）
   jumpLatest: '[data-testid="jump-latest"]',
   contentResizer: '[data-testid="content-resizer"]',

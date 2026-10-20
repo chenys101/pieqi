@@ -183,3 +183,44 @@ test('输入后点「发送」→ 发出 POST intervene(append_prompt, text)', a
   expect(w.body?.kind, '发送文字必须是 append_prompt').toBe('append_prompt')
   expect(w.body?.text, '请求里的 text 必须与输入一致（不能丢字/截断）').toBe(text)
 })
+
+// ─────────────────────────────────────────────────────────────────────────
+// ⑤ 点过模型选择器之后，**接着敲的字必须进输入框**
+//
+// 实测过的真实流程：写一半 → 点模型选择器 → 关掉 → 继续敲 ⇒ 一个字都没进输入框。
+// 原因不是"被浮层盖住"，而是 mousedown 让焦点落到了 <button> 上。
+// 这条用例用**真实鼠标点击 + 真实键盘输入**复现它（jsdom 复现不了焦点转移）。
+// ─────────────────────────────────────────────────────────────────────────
+test('点模型选择器的开后/关掉之后，键盘输入仍进输入框', async ({ page }) => {
+  await page.goto(DETAIL, { waitUntil: 'commit' })
+  await page.waitForLoadState('load')
+  await expect(page.locator('[data-testid="composer-bar"]')).toBeVisible()
+  await stabilize(page)
+
+  const box = page.getByLabel('补充指令')
+  // 触发器：ModelPicker 根 div（`pointer-events-auto` 的触发器容器）。点它的中心就是点按钮。
+  // ⚠️ 不用 `[data-testid="model-picker-trigger"]`：那个 testid 落在 Button 的根节点，
+  //    即真正的 <button>；在 flex 行里它被 `items-center` 拉伸得比外层 div 还高，
+  //    用 Playwright 的 click 会因为"中心点命中外层 div"而误报 interception。见 measure.ts。
+  const trigger = page.locator('[data-testid="model-picker"]')
+  await expect(trigger, '输入框里没有模型选择器触发器').toBeVisible()
+
+  await box.click()
+  await page.keyboard.type('写一半')
+  // 点开（mousedown 会在这里发生：焦点被抢走的话就抢在这时）
+  await trigger.click()
+  await expect(page.locator('[data-testid="model-picker-popup"]')).toBeVisible()
+  // 选一个具体模型（弹层里的选项）—— 选完弹层关闭
+  const opt = page.locator('[data-testid="model-picker-popup"] [role="option"]').nth(1)
+  if (await opt.count()) await opt.click()
+  else await trigger.click()
+
+  // 再敲字：必须落在输入框里
+  await page.keyboard.type('接着写')
+  await expect(box, '选完模型之后输入的字符没有进输入框（焦点被按钮抢走了）').toHaveValue('写一半接着写')
+
+  // 再点一次触发器（关掉弹层）后**直接**敲，不先点输入框 —— 焦点应当仍在输入框上
+  await trigger.click()
+  await page.keyboard.type('尾巴')
+  await expect(box, '点开/关掉模型选择器后焦点跑到了按钮上，后续输入丢失').toHaveValue('写一半接着写尾巴')
+})

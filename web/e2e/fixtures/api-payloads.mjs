@@ -32,6 +32,21 @@ function turnEvents(taskId, turn, prompt) {
 /** 长会话：12 轮 —— 正是"挂载全部 Turn 会不会把 DOM 撑爆"的实测形状（对应 21,206 → 2,135 那条基线） */
 export const LONG_TASK_ID = 'e2e-long-12'
 
+/**
+ * 夹具目录里的**默认执行 Agent** = dsh（默认值而非列表首项）。
+ *
+ * ⚠️ ESM 的 `export const` 与 `const` 一样有 TDZ：agentsResponse 里 `default:` 引用它时
+ * 必须已经初始化 —— 所以这条声明放在文件**靠前**，不能挪到 agentsResponse 后面。
+ *
+ * 为什么要换掉原来的 `claude`：claude 的 `model_selectable: false`，模型清单恒为空，
+ * 于是输入框里的模型选择器只剩「◈ Agent 默认 ▾」（约 105px），而用户实际看到的
+ * 是**选了具体模型之后的长名字**（如「◈ DeepSeek-V4.1-Flash」约 158px）。
+ * 宽触发器 + 加图按钮 + 发送按钮共处一行时，宽度预算完全不同 ——
+ * 用 claude 当默认，等于把这一行最挤的形态排除在验收之外（2026-10-19 踩到）。
+ * claude 保留在列表里：能力矩阵仍要三张卡。
+ */
+export const FIXTURE_DEFAULT_AGENT = 'dsh'
+
 const LONG_TURNS = 12
 
 const longEvents = []
@@ -355,7 +370,40 @@ export const agentsResponse = {
       cold_start_cold: true,
     },
   ],
-  default: 'claude',
+  default: FIXTURE_DEFAULT_AGENT,
+}
+
+/**
+ * 模型清单（GET /api/agents/:name/models）。**带分组与长名字**，因为选择器的
+ * 触发器与弹层宽度都由它决定；空清单或短名字量不出真实压力。
+ */
+export const agentModelsResponse = {
+  dsh: {
+    agent: 'dsh',
+    models: [
+      { value: 'deepseek-official', name: 'DeepSeek-V4.1-Flash', description: '走官方 API，日常最快', group: 'DeepSeek' },
+      { value: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', description: '推理更强、更慢', group: 'DeepSeek' },
+      { value: 'workbuddy/glm-5.3-flash', name: 'GLM-5.3-Flash', description: '', group: '智谱' },
+      { value: 'qwen/qwen3.8-flash', name: 'Qwen3.8-Flash', description: '免费额度', group: '通义' },
+    ],
+  },
+  qoder: {
+    agent: 'qoder',
+    models: [{ value: 'Qwen3.8-Flash', name: 'Qwen3.8-Flash', description: '免费模型', group: '' }],
+  },
+  // claude 目录里是 `model_selectable: false`，但夹具**照样给清单**：
+  // 会话场景直接挂 InterveneInput，父组件（SessionPage）不在，上一轮选过的模型
+  // 不会自己回来 —— 只有让用户能在选择器里选一个，才能渲染出真实形态
+  // （「◈ DeepSeek-V4.1-Flash」约 158px 的触发器，与加图按钮、发送按钮同一行）。
+  // 那一行是不是放得下，正是本仓库 2026-10-19 那次回归的判据。
+  claude: {
+    agent: 'claude',
+    models: [
+      { value: 'sonnet', name: 'Claude Sonnet 4.5', description: '默认，均衡', group: 'Anthropic' },
+      { value: 'opus', name: 'Claude Opus 4.5', description: '最强，最慢', group: 'Anthropic' },
+      { value: 'haiku', name: 'Claude Haiku 4.5', description: '最快', group: 'Anthropic' },
+    ],
+  },
 }
 
 export const settingsResponse = {

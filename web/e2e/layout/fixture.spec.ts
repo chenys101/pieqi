@@ -282,6 +282,12 @@ for (const sc of SCENES) {
           inputGeom!.clientHeight,
           `输入 10 行后输入框没有长高（clientHeight=${inputGeom!.clientHeight}）：maxHeight 没生效或 resize 没跑`,
         ).toBeGreaterThan(30)
+        // 封顶：长文本时盒子高应停在"文字区上限 66 + 上下内边距"附近（不再是 143px 的大块）。
+        // 上界给 96 是留出不同视口下的内边距差异；超过它说明 maxHeight 没生效。
+        expect(
+          inputGeom!.clientHeight,
+          `输入 10 行后输入框高 ${inputGeom!.clientHeight}px：超过了 maxHeight 口径（文字区 ≤66px + padding ≈ 84px）`,
+        ).toBeLessThan(96)
 
         // 滚到最底再量 —— 用户看最后一行时就是滚到底的状态
         await page.evaluate(() => {
@@ -362,8 +368,126 @@ for (const sc of SCENES) {
             `用户看不到被盖住的那 1~2 行`,
         ).toBeLessThanOrEqual(0)
 
-        // 测完清空，避免影响后续断言（同一 page 上下文）
+        /**
+         * ★ 结构性判据（2026-10-19）：**动作行必须在 textarea 的盒子下方**。
+         *
+         * 上面那条 coveredPx 只证明"这一组数字下没压住"；真正要钉住的是结构 ——
+         * 动作行在 textarea 的**兄弟位置**（流式布局），而不是浮在它上面的一层。
+         * 旧形态无论怎么调 padding，两个框都会重叠；现在的形态在几何上**不可能**重叠。
+         *
+         * 另外钉两条真实事故：
+         *   ① 输入框必须真的长高过（长文本时封顶在 maxHeight 附近，而不是被压扁）；
+         *   ② 删光之后必须**缩回去**（否则输入框停在大空块上）。
+         */
+        const geometry = await page.evaluate(() => {
+          const ta = document.querySelector('textarea[aria-label="补充指令"]') as HTMLTextAreaElement
+          const actions = document.querySelector('[data-testid="composer-actions"]') as HTMLElement
+          // 量的是 ModelPicker 的根 div（为什么不是里面的 button：见 measure.ts 的注释 ——
+          // button 在 flex 行里被 items-center 拉伸得比外层高，四角采样会落到 div 上）
+          const trigger = document.querySelector('[data-testid="model-picker"]') as HTMLElement | null
+          const triggerBtn = document.querySelector('[data-testid="model-picker"] button') as HTMLElement | null
+          const cs = getComputedStyle(ta)
+          const taR = ta.getBoundingClientRect()
+          const acR = actions.getBoundingClientRect()
+          const trR = trigger?.getBoundingClientRect() ?? null
+          return {
+            sameParent: actions.parentElement === ta.parentElement,
+            actionsIsAbs: getComputedStyle(actions).position === 'absolute',
+            taPadBottom: parseFloat(cs.paddingBottom),
+            gapPx: Math.round(acR.top - taR.bottom),
+            taH: Math.round(taR.height),
+            // 触发器必须落在可视文字区**下方**（否则它就是压着文字的那一层），
+            // 且整块落在动作行里。
+            triggerBelowText:
+              trR != null && trR.top >= taR.bottom - parseFloat(cs.paddingBottom) - 0.5,
+            triggerInActions: trR != null && trR.top >= acR.top - 0.5 && trR.bottom <= acR.bottom + 0.5,
+            triggerW: trR ? Math.round(trR.width) : 0,
+            triggerBtnH: triggerBtn ? Math.round(triggerBtn.getBoundingClientRect().height) : 0,
+            actionsH: Math.round(acR.height),
+          }
+        })
+        expect(geometry.sameParent, '动作行与 textarea 不在同一个框里：结构已不是"输入框 + 下方动作行"').toBe(true)
+        expect(geometry.actionsIsAbs, '动作行又变成绝对定位了 —— 它与 textarea 会重新开始互相压').toBe(false)
+        expect(geometry.taPadBottom, `textarea 又垫了 ${geometry.taPadBottom}px 的让位 padding：可视区会被它吃掉`).toBeLessThan(16)
+        expect(geometry.gapPx, `动作行压在 textarea 盒子内部（gap=${geometry.gapPx}px）`).toBeGreaterThanOrEqual(-1)
+        expect(geometry.triggerBelowText, '模型选择器触发器落在了输入文字区域里').toBe(true)
+        expect(geometry.triggerInActions, '模型选择器触发器不在动作行里（被挤出去了？）').toBe(true)
+        // 夹具给 dsh 喂了真实长度的模型清单 ⇒ 触发器不是 105px 的「Agent 默认」形态
+        expect(geometry.triggerW, `${vp.name} 下模型选择器只有 ${geometry.triggerW}px：夹具没喂到模型清单`).toBeGreaterThan(100)
+        // ⚠️ 这里**不**断言"触发器的高度 ≤ 动作行"：加了图片入口（缩略图条 + 提示行）
+        // 之后动作行自身会被撑高到 48px+，而触发器仍是 `items-center` 里的 32px ——
+        // 这条断言曾经看着像"行内错位"的守卫，其实量的是插槽内容高度，与遮挡无关。
+        // 真正要守的是"触发器落在动作行矩形内"，上面已用 triggerInActions 钉住。
+        expect(geometry.triggerBtnH, '模型选择器触发器高度为 0：它没渲染出来').toBeGreaterThan(20)
+
+        /**
+         * ★ 模型选择器**弹层**必须贴着输入条出现，且真的点得到。
+         *
+         * 2026-10-19 踩到两个连环事故（都是"动作行挪到框内下方"之后才暴露的）：
+         *   ① 输入条外壳没有 `relative` ⇒ `absolute bottom-full` 的弹层跑去找时间线上
+         *      那个 `relative` 容器，出现在屏幕中部、盖住消息（截图里弹层浮在第 10 行左右）；
+         *   ② 盒子上有 `overflow-hidden` ⇒ 弹层被整块裁掉，用户点"模型"什么也看不到。
+         * 这两条都不会报错、也不会让任何"元素存在"的断言变红，只能用几何钉住。
+         */
+        const picker = page.locator('[data-testid="model-picker"]')
+        await picker.click()
+        const popup = page.locator('[data-testid="model-picker-popup"]')
+        await expect(popup, '点开模型选择器后没有弹层').toBeVisible()
+        const popGeo = await page.evaluate(() => {
+          const ta = document.querySelector('textarea[aria-label="补充指令"]') as HTMLElement
+          const pop = document.querySelector('[data-testid="model-picker-popup"]') as HTMLElement
+          const trg = document.querySelector('[data-testid="model-picker"]') as HTMLElement
+          const pR = pop.getBoundingClientRect()
+          const taR = ta.getBoundingClientRect()
+          const trR = trg.getBoundingClientRect()
+          // 弹层中心点是否真的落在弹层上（被裁切/被时间线盖住时，这里会命中别的元素）
+          const hit = document.elementFromPoint(pR.left + pR.width / 2, pR.top + pR.height / 2)
+          return {
+            triggerGap: Math.round(trR.top - pR.bottom),
+            aboveText: pR.top < taR.top - 8,
+            popTop: Math.round(pR.top),
+            taTop: Math.round(taR.top),
+            hitInside: !!hit && (hit === pop || pop.contains(hit)),
+            hitDesc: hit ? hit.tagName + '.' + String(hit.className).slice(0, 30) : 'none',
+          }
+        })
+        /**
+         * 判据（实测校准）：
+         *   · 弹层**底边**在触发器**上方**（`<= 6 + 1`：`bottom-full mb-1.5` ⇒ 间隙 6px）；
+         *   · 弹层**顶边**必须伸到文本框上沿**以上**（用触发器/文本框的实际位置算，
+         *     不写死像素）。这条是关键：它同时排除"弹层跑到输入框下方"和
+         *     "弹层只贴在触发器上面一小条、没把可选项顶到文字区以上"两种坏形态。
+         *
+         * ⚠️ 别拿"弹层底边 vs 文本框上沿"当判据：模型选择器在动作行里，正确形态下
+         *    弹层底边本来就比文本框上沿**低** 82px（要往上让过整个 40px 的文本框）。
+         *    第一版就这么写，把正确布局判成了失败。
+         */
+        expect(
+          popGeo.triggerGap,
+          `弹层底边没有贴着触发器上沿（间隙 ${popGeo.triggerGap}px）：它跑到输入框下方或别的地方去了`,
+        ).toBeLessThanOrEqual(7)
+        expect(popGeo.triggerGap, `弹层在触发器下方（间隙 ${popGeo.triggerGap}px）`).toBeGreaterThan(-2)
+        expect(
+          popGeo.aboveText,
+          `弹层没有伸到文本框上沿以上（弹层顶 ${popGeo.popTop}px，文本框顶 ${popGeo.taTop}px）：可选项被输入框挡住，用户看不到也点不到`,
+        ).toBe(true)
+        expect(
+          popGeo.hitInside,
+          `弹层中心点命中的是 ${popGeo.hitDesc}（不是弹层自己）：它被裁切或被时间线盖住了`,
+        ).toBe(true)
+        // 收起，避免影响后续断言
+        await picker.click()
+
+        // ② 删光之后必须缩回去（回归：曾因 resize 不重置 height 而停在大空块上）
         await box.fill('')
+        await page.waitForTimeout(150)
+        const emptiedH = await page.evaluate(
+          () => Math.round((document.querySelector('textarea[aria-label="补充指令"]') as HTMLElement).getBoundingClientRect().height),
+        )
+        expect(
+          emptiedH,
+          `清空输入框后高度仍为 ${emptiedH}px（长文本时是 ${geometry.taH}px）：输入框被钉在旧的多行高度上`,
+        ).toBeLessThan(geometry.taH)
 
         /**
          * 语义卡（工具语义表）：夹具在最后一轮后挂了 create_goal / todo_write /
@@ -420,6 +544,44 @@ for (const sc of SCENES) {
         // 写一句任务描述 → 按钮应变为可用
         await root.getByLabel('任务描述').fill('把设置页的 L2 文案改成「需人工确认」')
         await expect(submit, '填了任务描述后「创建任务」仍然不可用（项目未选？）').toBeEnabled()
+
+        /**
+         * 这一页的输入框**不传 maxHeight**（固定 rows=3），所以长文本时它自己滚动；
+         * 关键判据是"最后一行不会被动作行压住"。页面上没有会话页那条
+         * coveredPx 用例，这里用同一套几何：动作行不能在 textarea 盒子内部。
+         */
+        const desc = root.getByLabel('任务描述')
+        await desc.fill(Array.from({ length: 30 }, (_, i) => `任务第 ${i + 1} 行内容`).join('\n'))
+        await page.waitForTimeout(150)
+        const g2 = await page.evaluate(() => {
+          const ta = document.querySelector('textarea[aria-label="任务描述"]') as HTMLTextAreaElement
+          const row = [...document.querySelectorAll('[data-testid="composer-actions"]')].at(-1) as HTMLElement
+          const taR = ta.getBoundingClientRect()
+          const acR = row.getBoundingClientRect()
+          const cs = getComputedStyle(ta)
+          const textBottom = taR.bottom - parseFloat(cs.paddingBottom)
+          // 新建任务页的 ModelPicker 带的是 `new-task-model-picker` testid（落在根 div 上）——
+          // 组件里那个 `model-picker` 是写死的，但外层传入的 data-testid 会覆盖它（同一个坑：
+          // 多根组件里非 props 属性落到根节点）。用 `[data-testid$="model-picker"]` 两种都命中。
+          const picker =
+            (document.querySelector('[data-testid="new-task-model-picker"]') ??
+              document.querySelector('[data-testid="model-picker"]')) as HTMLElement | null
+          return {
+            overlap: Math.round(Math.max(0, Math.min(textBottom, acR.bottom) - Math.max(taR.top + parseFloat(cs.paddingTop), acR.top))),
+            taPadBottom: parseFloat(cs.paddingBottom),
+            gap: Math.round(acR.top - taR.bottom),
+            pickerText: picker?.textContent ?? '',
+            pickerW: picker ? Math.round(picker.getBoundingClientRect().width) : 0,
+          }
+        })
+        expect(g2.taPadBottom, `新建任务的输入框垫了 ${g2.taPadBottom}px 让位 padding`).toBeLessThan(16)
+        expect(g2.gap, `动作行压在输入框内部（gap=${g2.gap}px）`).toBeGreaterThanOrEqual(-1)
+        expect(g2.overlap, `30 行内容时动作行盖住了 ${g2.overlap}px 输入区`).toBeLessThanOrEqual(0)
+        // 夹具给了模型清单 ⇒ 框下不出现「该 Agent 不提供可选模型」的说明
+        // （那条说明会额外占一行、把输入区整体顶高，量出来的高度就不是常态）
+        await expect(root.locator('[data-testid="model-unsupported"]')).toHaveCount(0)
+        expect(g2.pickerW, `模型选择器只有 ${g2.pickerW}px，文字=${g2.pickerText}`).toBeGreaterThan(100)
+        await desc.fill('')
       } else if (sc.scene === 'settings') {
         /**
          * 设置页：四组必须都在，且**开关真的可交互**。

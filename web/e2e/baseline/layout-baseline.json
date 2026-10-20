@@ -9,6 +9,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": {
@@ -38,6 +39,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": null,
@@ -61,6 +63,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": {
@@ -90,6 +93,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": {
@@ -122,6 +126,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": null,
@@ -148,6 +153,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": {
@@ -180,6 +186,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": {
@@ -209,6 +216,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": null,
@@ -232,6 +240,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": {
@@ -259,19 +268,23 @@
     "boxes": {
       "sessionTimeline": {
         "w": 1109,
-        "h": 751
+        "h": 787
       },
       "composerBar": {
         "w": 1149,
-        "h": 149
+        "h": 113
       },
       "composerActions": {
-        "w": 1117,
-        "h": 44
+        "w": 1115,
+        "h": 50
       },
       "composerInner": {
         "w": 1117,
-        "h": 128
+        "h": 92
+      },
+      "composerFrame": {
+        "w": 1117,
+        "h": 92
       },
       "jumpLatest": null,
       "loadOlderTurns": {
@@ -309,19 +322,23 @@
     "boxes": {
       "sessionTimeline": {
         "w": 365,
-        "h": 462
+        "h": 498
       },
       "composerBar": {
         "w": 365,
-        "h": 149
+        "h": 113
       },
       "composerActions": {
-        "w": 341,
-        "h": 44
+        "w": 339,
+        "h": 50
       },
       "composerInner": {
         "w": 341,
-        "h": 128
+        "h": 92
+      },
+      "composerFrame": {
+        "w": 341,
+        "h": 92
       },
       "jumpLatest": null,
       "loadOlderTurns": {
@@ -353,19 +370,23 @@
     "boxes": {
       "sessionTimeline": {
         "w": 503,
-        "h": 963
+        "h": 999
       },
       "composerBar": {
         "w": 543,
-        "h": 149
+        "h": 113
       },
       "composerActions": {
-        "w": 511,
-        "h": 44
+        "w": 509,
+        "h": 50
       },
       "composerInner": {
         "w": 511,
-        "h": 128
+        "h": 92
+      },
+      "composerFrame": {
+        "w": 511,
+        "h": 92
       },
       "jumpLatest": null,
       "loadOlderTurns": {
@@ -396,7 +417,7 @@
     }
   },
   "newtask@desktop": {
-    "domNodes": 130,
+    "domNodes": 131,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -404,15 +425,19 @@
       "sessionTimeline": null,
       "composerBar": {
         "w": 1149,
-        "h": 192
+        "h": 188
       },
       "composerActions": {
-        "w": 1117,
-        "h": 56
+        "w": 1115,
+        "h": 62
       },
       "composerInner": {
         "w": 1117,
-        "h": 171
+        "h": 167
+      },
+      "composerFrame": {
+        "w": 1117,
+        "h": 147
       },
       "jumpLatest": null,
       "loadOlderTurns": null,
@@ -440,7 +465,7 @@
     }
   },
   "newtask@mobile": {
-    "domNodes": 102,
+    "domNodes": 103,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -448,15 +473,19 @@
       "sessionTimeline": null,
       "composerBar": {
         "w": 365,
-        "h": 192
+        "h": 230
       },
       "composerActions": {
-        "w": 341,
-        "h": 70
+        "w": 339,
+        "h": 104
       },
       "composerInner": {
         "w": 341,
-        "h": 171
+        "h": 209
+      },
+      "composerFrame": {
+        "w": 341,
+        "h": 189
       },
       "jumpLatest": null,
       "loadOlderTurns": null,
@@ -478,7 +507,7 @@
     }
   },
   "newtask@tablet": {
-    "domNodes": 124,
+    "domNodes": 125,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -486,15 +515,19 @@
       "sessionTimeline": null,
       "composerBar": {
         "w": 543,
-        "h": 192
+        "h": 188
       },
       "composerActions": {
-        "w": 511,
-        "h": 56
+        "w": 509,
+        "h": 62
       },
       "composerInner": {
         "w": 511,
-        "h": 171
+        "h": 167
+      },
+      "composerFrame": {
+        "w": 511,
+        "h": 147
       },
       "jumpLatest": null,
       "loadOlderTurns": null,
@@ -531,6 +564,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": {
@@ -560,6 +594,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": null,
@@ -583,6 +618,7 @@
       "composerBar": null,
       "composerActions": null,
       "composerInner": null,
+      "composerFrame": null,
       "jumpLatest": null,
       "loadOlderTurns": null,
       "feedbackPanel": {
