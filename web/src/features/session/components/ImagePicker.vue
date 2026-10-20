@@ -174,6 +174,7 @@ defineExpose({ open })
           :aria-label="`移除 ${img.name}`"
           :data-testid="`composer-image-remove-${img.id}`"
           @click="remove(img.id)"
+          @mousedown.prevent
         >
           ×
         </button>
@@ -181,7 +182,9 @@ defineExpose({ open })
       <span class="text-[11px] text-muted">{{ modelValue.length }}/{{ MAX_IMAGES }}</span>
     </div>
 
-    <!-- 「+」按钮：与模型选择器同在 #lead 行 -->
+    <!-- 「+」按钮：与模型选择器同在 #lead 行。
+         `@mousedown.prevent` 与 ModelPicker 同一个理由：选完图回来接着写，
+         焦点不该被这个按钮抢走（抢走之后敲的字不会进输入框）。 -->
     <button
       type="button"
       class="pointer-events-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-muted transition-colors hover:bg-elevated hover:text-text focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
@@ -190,6 +193,7 @@ defineExpose({ open })
       aria-label="添加图片"
       data-testid="composer-add-image"
       @click="openFileDialog"
+      @mousedown.prevent
     >
       <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
         <path d="M12 5v14M5 12h14" />

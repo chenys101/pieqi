@@ -53,13 +53,16 @@ const emit = defineEmits<{
 const notify = useNotificationStore()
 
 /**
- * 输入框的高度上限（px）：两行文本 + 上下内边距（px-3 py-2 的 py 部分）。
+ * 输入框的**文字区**高度上限（px，不含内边距、不含动作行）。
  *
  * 数字跟着输入条的空间预算走：375×667（iPhone SE / 带浏览器工具栏的小屏）下
- * 主区只有 ~141px，底栏 50px 不吃主区。两行输入 ≈ 92px 的 composer-bar，
+ * 主区只有 ~141px，底栏 50px 不吃主区。动作行现在排在文字区**下方**
+ * （见 PromptInput 的说明），所以整个 composer-bar ≈ 文字区 + 动作行 44 + 内边距 ~30
+ * ⇒ 三行文字时约 220px，四行以上全部封顶在 66px 文字区（约三行，其余框内滚动）。
  * 余下的留给时间线 —— 输入条再高就是在挤会话内容。
- * 改这个值必须重跑 layout 用例：`composerBar` 的高度是与基线逐像素比的。
- * （实测 66px ⇒ composer-bar 74px、composer-inner 53px；见 e2e/baseline/layout-baseline.json）
+ *
+ * 改这个值必须重跑 layout 用例：`composerBar` 的高度是与基线逐像素比的
+ * （e2e/baseline/layout-baseline.json）。
  */
 const COMPOSER_MAX_HEIGHT = 66
 
@@ -137,13 +140,11 @@ function onPaste(data: DataTransfer | null) {
          且拖这里时用户看不到正文变化（输入框在最下面）。 -->
     <ContentColumn :resizable="false">
       <div class="w-full" data-testid="composer-inner">
-        <!-- 高度口径：空框一行、随内容长高、**封顶两行就停**（约 66px）。
-             为什么不是固定 `rows=2`（149px）：那 149 = 两行文本 + 70px 让位，
-             两行文案其实一行就够，多出来的 60px 在矮视口（浏览器工具栏占位后的
-             375×667、1440×900 笔记本）会直接把发送按钮推到移动端底栏下面 ——
-             实测「发送」被 `BottomNav` 的 RouterLink 拦住，用户点不动。
+        <!-- 高度口径：空框一行、随内容长高、**文字区封顶 66px**（约三行），
+             其余在框内翻页（↑↓）。动作行在文字区**下方**、按内容自己撑高，
+             不再从文字区里"让位" —— 两处的数字不再互相牵制。
              为什么封顶而不无限长高：输入条在 flex 列末尾，长高就是挤掉时间线；
-             超过两行改为框内翻页（↑↓），那比"看不见时间线"更可接受。 -->
+             框内翻页比"看不见时间线"更可接受。 -->
         <PromptInput
           v-model="text"
           :rows="sendsInFooter ? 1 : 2"
@@ -173,8 +174,9 @@ function onPaste(data: DataTransfer | null) {
             />
           </template>
 
-        <!-- 双态按钮：中止 ■ / 发送 ✈，嵌在输入框内右下角
-             视觉 36×36，命中区用伪元素外扩到 44×44（AC-R8-04 允许视觉 36） -->
+        <!-- 双态按钮：中止 ■ / 发送 ✈，在框内**动作行**右侧
+             视觉 36×36，命中区用伪元素外扩到 44×44（AC-R8-04 允许视觉 36）。
+             `@mousedown.prevent`：点按钮不该把输入框的焦点抢走（判据见 ModelPicker）。 -->
         <template #actions>
           <button
             v-if="canCancel"
@@ -182,6 +184,7 @@ function onPaste(data: DataTransfer | null) {
             title="中止生成"
             aria-label="中止"
             @click="emit('cancel')"
+            @mousedown.prevent
           >
             <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
               <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
@@ -194,6 +197,7 @@ function onPaste(data: DataTransfer | null) {
             title="发送 (Ctrl+Enter)"
             aria-label="发送"
             @click="onSend"
+            @mousedown.prevent
           >
             <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
               <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" />

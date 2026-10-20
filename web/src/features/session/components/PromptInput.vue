@@ -5,6 +5,9 @@
 // 外壳交给 T1 的 Textarea（R8：全站输入控件共用一套外壳，见 SPEC §4.4）——
 // 本组件只负责补全逻辑，不再自己写一份输入框样式。
 // 斜杠补全依赖**真实光标位置**，故用 Textarea 暴露的内部元素（`defineExpose({ el })`）。
+//
+// 结构：外层是「框」（边线 / 底色 / 焦点环 / 圆角），框内**上下两段**：textarea + 动作行。
+// 动作行不再浮在 textarea 上 —— 为什么以及踩过什么，见下方 `hasFooter` 上方的长注释。
 import { computed, nextTick, ref, useSlots, watch } from 'vue'
 import Textarea from '@/components/ui/Textarea.vue'
 import { useAppStore } from '@/stores/app'
@@ -25,13 +28,19 @@ const props = withDefaults(
      * Textarea 的 autoResize 形态是 `overflow-hidden`，长文案靠 ↑↓ 翻）。
      *
      * 判据是**输入区整块必须装得进矮视口**：375×667 的 iPhone（浏览器工具栏
-     * 占掉约 110px）主区只有 ~141px，输入区若固定在 170px 就会把发送按钮
+     * 占掉约 110px）主区只有 ~141px，输入区若固定得太高就会把发送按钮
      * 顶到移动端底栏下面 —— 实测「发送」被 `BottomNav` 的 RouterLink 拦住点击
-     * （docs/testing/ui-e2e-next.md 的 P0）。66px ≈ 两行 + 内边距。
+     * （docs/testing/ui-e2e-next.md 的 P0）。
+     *
+     * 口径 = **文字区**高度（不含 padding）。66 ≈ 三行；框的总高还要加上动作行
+     * （它已在 textarea 下方，不再占用文字区）。从两行（44）放宽到三行，是因为
+     * 动作行挪到下方后整个框多出 ~36px，而矮视口下仍有时间线可看。
      */
     maxHeight?: number
+    /** 校验失败态：框的边线与焦点环换成 error —— 边线归外层框（见模板） */
+    invalid?: boolean
   }>(),
-  { placeholder: '', rows: 3, disabled: false, ariaLabel: '输入指令', maxHeight: undefined },
+  { placeholder: '', rows: 3, disabled: false, ariaLabel: '输入指令', maxHeight: undefined, invalid: false },
 )
 const emit = defineEmits<{
   'update:modelValue': [value: string]
@@ -48,42 +57,43 @@ const emit = defineEmits<{
 
 const appStore = useAppStore()
 
-// 动作按钮（发送/中止/创建/模型选择器）嵌在输入框内部右下角（PC 与移动端同一套结构）。
-// 只有真传了 #actions 才让出底部空间，否则空一块 padding 会让输入框显得松垮。
-// #lead 是同一行的**左侧**插槽（模型选择器）：与 #actions 共用一行，
-// 所以只要 lead 或 actions 任一存在就要让出底部 padding。
+// 动作行（发送/中止/创建/模型选择器）**排在输入框下方**，与 textarea 同一个"框"里，
+// 框画成一个圆角边线与底色，textarea 自己去掉边线（PC 与移动端同一套 DOM）。
 //
-// ★★ 让位（给动作行腾出 70px）**不能用 textarea 的 padding-bottom 做**。
+// #lead 是动作行的**左侧**插槽（加图 + 模型选择器），#actions 在右侧。
 //
-//   2026-10-18 移动端反馈"输入框内容太多时会与模型选择器相互覆盖"，根因就在这里：
+// ★★ 为什么不再"把动作行盖在 textarea 右下角"（2026-10-19 重新设计）
 //
-//     盒子高 80px、`padding-bottom: 70px`  ⇒ **可视文字区只剩 80 - 8 - 70 = 2px**。
-//     内容一旦超过一行就滚，而可见区只有 2px —— 用户永远只能看到半行字，
-//     其余全压在动作行那块"留白"下面。截图实测：10 行文本滚到底，只有
-//     「第 10 行内容」的上半截露出来。
+//   旧形态是：动作行 `absolute bottom-2.5` 浮在 textarea 上，textarea 垫
+//   `padding-bottom: 70px` 给它让位。这条路走不通 —— 不是数值没调对，是机制不对：
 //
-//   为什么 padding 不能当让位：
-//     · textarea 的 `scrollHeight` **包含** padding，所以 padding 会同时缩小
-//       `clientHeight`（可视区）—— 它是"从可视区里扣掉"，不是"在内容之后留白"；
-//     · `scroll-padding-bottom` 实测对 textarea 的 `maxScroll` **没有影响**
-//       （三种 CSS 写法都试过，maxScroll 恒为 217），不能靠它补救。
+//     · textarea 的 `scrollHeight` **包含** padding，所以让位 padding 会同时缩小
+//       `clientHeight`（可视区）：它是"从可视区里扣掉"，不是"在内容之后留白"。
+//       70px 的让位 + 上下各 8px 内边距，在 `rows=1` 的盒子里就把可视区压到 2px；
+//     · `scroll-padding-bottom` 对 textarea 的 maxScroll **没有影响**（三种写法都试过）；
+//     · 于是"输入框装得下几行"取决于"让位区占多少"，两边的数字必须手算对齐 ——
+//       而模型选择器的触发器宽度会随所选模型的名字变（105px ↔ 158px+），
+//       发送按钮又用 `after:-inset-1` 把命中区外扩 4px，任何一项改动都会
+//       让动作行重新压到文字上。用户反馈的"超过输入框内容时覆盖模型选择按钮"
+//       就是这条链的末端表现。
 //
-//   正确形态：**盒子高度要包含让位区**，让可视区 = 盒子 - 动作行高，
-//   而不是让可视区被 padding 吃掉。见下方 Textarea 的 maxHeight 计算
-//   （InterveneInput 传的 66 是**文字区**高度，组件内部再补上动作行高度）。
+//   现在的形态把这三件事解耦：文字区高度 = `maxHeight`（上限），动作行高度 = 内容
+//   自己撑开（32/44/48px 都行，永不重叠），框的总高 = 两者之和。动作行里的控件再多、
+//   名字再宽，最多把动作行挤高（`flex-wrap` 换行）或截断触发器文字，**碰不到文字区**。
+//
+//   代价：同一个框里 textarea 与动作行之间要"看起来是同一块"，所以 textarea 用
+//   `border-transparent` 把边线交给外层、`focus-within` 的高亮也画在外层。
 const slots = useSlots()
 const hasActions = computed(() => !!slots.actions)
 const hasLead = computed(() => !!slots.lead)
 const hasFooter = computed(() => hasActions.value || hasLead.value)
 
 /**
- * 动作行嵌在框内 ⇒ 高度必须随内容长高，否则长文本会被那 70px 的让位区盖住
- * （textarea 自己不会长，只能在框内出现滚动条 —— 而框内滚动条正是这一行
- * 「看起来能用、实际看不到最后几行」的来源）。
+ * 高度随内容长高，封顶在 `maxHeight`（文字区口径）。
  *
  * 判据：**传了 maxHeight 才自动长高**。不传 = 固定 rows 的表单输入框
  * （独立表单里长高会把下面的字段往下推，那才是不该长高的场景）。
- * 输入条一律传 maxHeight（见 InterveneInput），因此这里不必再判断有没有 footer。
+ * 输入条一律传 maxHeight（见 InterveneInput）。
  */
 const autoResize = computed(() => props.maxHeight !== undefined)
 
@@ -229,47 +239,61 @@ watch(matches, (m) => {
 
 <template>
   <div class="relative">
-    <Textarea
-      ref="taRef"
-      :model-value="modelValue"
-      :rows="rows"
-      :auto-resize="autoResize"
-      :max-height="maxHeight"
-      :placeholder="placeholder"
-      :disabled="disabled"
-      :resizable="false"
-      :aria-label="ariaLabel"
-      :class="hasFooter ? 'pb-[4.375rem]' : undefined"
-      @update:model-value="onInput"
-      @keydown="onKeydown"
-      @paste="onPaste"
-      @blur="onBlur"
-    />
-    <!-- 底部动作行：整条 pointer-events-none，只有插槽内容本身可点，
-         让出的底部 padding 仍然能点进 textarea。
-         justify-between：模型选择器在左、发送/中止在右，两者同处一行。
-
-         ★ 间距（数字是 headless Chrome 实测的 getBoundingClientRect，别照直觉推）：
-         按钮外框到输入框**右沿 12px、下沿 12px**，两边相等。
-           · 右沿 = 行的 px-3(12px)。行宽 = textarea 宽，故行的右内边距就是右边距。
-           · 下沿 = 行的 bottom-2.5(10px) + pb-2(8px) - 行自身高度溢出的那 6px
-             ——实测：bottom-0 + pb-2 时下沿只有 2px（行 border-box 44px 比
-             textarea 的让位区矮不了多少，底部 6px 溢到框外被吃掉），
-             而右边是 12px ⇒ 按钮"贴着底、离右边远"，就是被反馈的那个观感问题。
-             抬到 bottom-2.5 后下沿正好 12px。
-         ⚠️ 别再往 textarea 上加 pb-* 去"对齐"：那会给每个动作按钮垫一层底，
-         触发器 hover 背景与 ■ 中止的红底都会明显上浮。
-         ⚠️ 让位高度绑死：pb-[4.375rem] = 70px = 行需要占的 44px + bottom 10px + 间距 16px。
-         改行的 bottom / pb 或按钮尺寸后，**必须重新量**（可用页面上临时挂的探针），
-         否则按钮要么压住文字、要么下沿又变了。 -->
+    <!-- 「框」：textarea 在**上方**、动作行在**下方**顺序排布，共用一条边线与底色。
+         焦点高亮画在这一层（textarea 自己的边线是透明的），所以看起来仍是一个整体。
+         两条必须同时成立的定位约束（2026-10-19 实测踩到，坏了都不会报错）：
+           · `overflow-visible` —— `overflow-hidden` 会把模型选择器的弹层**整块裁掉**，
+             用户点「模型」什么也看不到。动作行的长模型名靠 `min-w-0` + `truncate`
+             自己省略，不依赖裁切；
+           · 本层**不要加 `relative`** —— 选择器根 div 自己就是 `relative`，弹层
+             `absolute bottom-full` 相对**它**定位；外面再加一层定位容器只会让定位
+             基准变复杂（实测把弹层带到输入框下方）。`overflow-visible` 之下弹层
+             本来就能正常溢出到上方。 -->
     <div
-      v-if="hasFooter"
-      class="pointer-events-none absolute inset-x-0 bottom-2.5 z-10 flex items-center gap-1.5 px-3 pb-2"
-      :class="hasLead ? 'justify-between' : 'justify-end'"
-      data-testid="composer-actions"
+      class="flex w-full min-w-0 flex-wrap overflow-visible rounded-[var(--radius-sm)] border bg-surface-subtle transition-[border-color,box-shadow] focus-within:border-accent focus-within:ring-[3px] focus-within:ring-accent/40"
+      :class="
+        invalid
+          ? 'border-error focus-within:border-error focus-within:ring-error/30'
+          : 'border-border hover:border-border-strong'
+      "
+      data-testid="composer-frame"
     >
-      <slot name="lead" />
-      <slot name="actions" />
+      <!-- textarea 去掉自己的边线与底色（边框用 transparent 而不是 border-0：
+           宽度不变，内容换行位置与"有边线"时逐像素一致，视觉基线不会整体位移）。
+           圆角归外层，内层不要圆角。 -->
+      <Textarea
+        ref="taRef"
+        :model-value="modelValue"
+        :rows="rows"
+        :auto-resize="autoResize"
+        :max-height="maxHeight"
+        :placeholder="placeholder"
+        :disabled="disabled"
+        :resizable="false"
+        :aria-label="ariaLabel"
+        class="rounded-none border-transparent bg-transparent hover:border-transparent focus-visible:ring-0"
+        @update:model-value="onInput"
+        @keydown="onKeydown"
+        @paste="onPaste"
+        @blur="onBlur"
+      />
+      <!-- 动作行：在 textarea **下面**的正常流里，不再浮在文字上 ⇒ 不可能压住内容。
+           flex-wrap：窄屏下模型名很长时宁可让它换到下一行，也不许把触发器压扁/截断到不可读。
+
+           ★ 间距（数字是 headless Chrome 实测的 getBoundingClientRect）：
+             按钮外框到框的右沿、下沿都应是 12px。
+               · 右沿 = 行的 px-3(12px)，行宽 = 框宽。
+               · 下沿 = 行的 pb-3(12px)（行在流里，不再有"溢出被吃掉"的问题）。
+             改行内边距或按钮尺寸后仍要**重新量**（同 ui-change-verification 的纪律）。 -->
+      <div
+        v-if="hasFooter"
+        class="flex w-full min-w-0 flex-wrap items-center gap-1.5 px-3 pb-3 pt-0.5"
+        :class="hasLead ? 'justify-between' : 'justify-end'"
+        data-testid="composer-actions"
+      >
+        <slot name="lead" />
+        <slot name="actions" />
+      </div>
     </div>
     <!-- 斜杠补全菜单（贴输入框上方） -->
     <div

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, type Component } from 'vue'
+import { createApp, h, nextTick, type Component } from 'vue'
 import Input from './Input.vue'
 import Textarea from './Textarea.vue'
 import Select from './Select.vue'
@@ -104,6 +104,29 @@ describe('Textarea', () => {
     const t = mount(Textarea, { invalid: true }).host.querySelector('textarea')!
     expect(t.className).toContain('border-error')
     expect(t.getAttribute('aria-invalid')).toBe('true')
+  })
+
+  /**
+   * 内容删光后高度必须退回 `auto`（= 回到 rows 那一档），而不是钉在"上一次多行"
+   * 算出来的像素值上。
+   *
+   * 旧 resize() 遇到空值时只记 minHeight 就 return，`style.height='auto'` 虽然设过，
+   * 但**下一次**输入又把它写成数字、再删光时不会清回来 —— 表现是输入框停在
+   * 144px 的大空块上。修法就是空值分支只 return，不写回数字。
+   *
+   * jsdom 量不出真实高度，但 `style.height` 是**显式赋值**与否的直接证据。
+   */
+  it('autoResize：内容清空后不得残留显式高度（会钉在旧的多行高度上）', async () => {
+    const wrap = mount(Textarea, { autoResize: true, maxHeight: 66 }, undefined)
+    const t = wrap.host.querySelector('textarea') as HTMLTextAreaElement
+    const type = async (v: string) => {
+      t.value = v
+      t.dispatchEvent(new Event('input'))
+      await nextTick()
+    }
+    await type('第一行\n第二行\n第三行')
+    await type('')
+    expect(t.style.height, '清空后仍残留显式高度：输入框会停在多行时的大空块上').toBe('auto')
   })
 })
 

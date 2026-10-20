@@ -284,7 +284,9 @@ async function submit() {
               </template>
 
             <template #actions>
-              <!-- 视觉 36×36，命中区用伪元素外扩到 ≥44px 高（AC-R8-04） -->
+              <!-- 视觉 36×36，命中区用伪元素外扩到 ≥44px 高（AC-R8-04）。
+                   `@mousedown.prevent`：与 #lead 里的模型选择器同一判据 ——
+                   不该因为"点了一下框内按钮"就把输入框的焦点弄丢。 -->
               <button
                 class="pointer-events-auto relative shrink-0 rounded-[var(--radius-sm)] bg-accent p-2.5 text-white transition-opacity after:absolute after:-inset-1 after:content-[''] hover:opacity-90 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
                 :disabled="!canSubmit"
@@ -292,6 +294,7 @@ async function submit() {
                 aria-label="创建任务"
                 data-testid="composer-submit"
                 @click="submit"
+                @mousedown.prevent
               >
                 <Spinner v-if="creating" class="h-4 w-4" />
                 <svg v-else viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">

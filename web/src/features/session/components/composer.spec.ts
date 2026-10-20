@@ -60,21 +60,36 @@ const groupLabels = (host: HTMLElement) =>
     ? [...menu(host)!.children].filter((c) => c.tagName === 'DIV').map((c) => c.textContent)
     : []
 
+/**
+ * 输入条的「框」（边线 / 底色 / 圆角 / 焦点环）。
+ *
+ * 为什么从 textarea 挪到外层：动作行现在排在 textarea **下方**（正常流），
+ * 两者要看起来是同一个框，所以框的视觉归外层，textarea 自己的边线/底色透明。
+ * 判据不变（SPEC §4.4 的外壳规格），只是落点换了 —— 这与"复用全站外壳"不矛盾：
+ * 内层的 Textarea 组件本身没有改，只是这里给它叠了 transparent 覆盖。
+ */
+const frame = (host: HTMLElement) => host.querySelector('[data-testid="composer-frame"]')!
+
 describe('PromptInput（输入条外壳）', () => {
-  it('复用 Textarea 外壳：surface-subtle / --radius-sm / 3px ring / text-tertiary / hover', () => {
-    const cls = ta(mount(PromptInput, { modelValue: '' }).host).className
+  it('框的外观落在外层 composer-frame：surface-subtle / --radius-sm / 3px ring / hover', () => {
+    const { host } = mount(PromptInput, { modelValue: '' })
+    const cls = frame(host).className
     for (const t of [
       'bg-surface-subtle',
       'rounded-[var(--radius-sm)]',
-      'focus-visible:ring-[3px]',
-      'focus-visible:ring-accent/40',
-      'placeholder:text-text-tertiary',
+      'focus-within:ring-[3px]',
+      'focus-within:ring-accent/40',
       'hover:border-border-strong',
     ])
       expect(cls, `缺少 ${t}`).toContain(t)
     // 旧的裸 textarea 写法（bg-background + rounded-lg + text-muted/60）不得残留
-    expect(cls).not.toContain('bg-background')
-    expect(cls).not.toContain('placeholder:text-muted/60')
+    expect(ta(host).className).not.toContain('bg-background')
+    expect(ta(host).className).not.toContain('placeholder:text-muted/60')
+    // textarea 自身不得再画一遍边线与底色（否则框里出现"第二个框"）
+    for (const t of ['bg-transparent', 'border-transparent', 'rounded-none'])
+      expect(ta(host).className, `textarea 缺少 ${t}`).toContain(t)
+    // 占位符仍是全站同一套
+    expect(ta(host).className).toContain('placeholder:text-text-tertiary')
   })
 
   it('输入条不给自己拖高（拖高会把时间线顶走）', () => {
@@ -138,6 +153,20 @@ describe('PromptInput（斜杠补全）', () => {
   })
 })
 
+// ---- 模型选择器：在框内动作行里，向上弹层，会话级切换 ----
+// agent 下发的是**不透明串**（dsh 是 JSON.stringify([provider,model])），前端只搬运。
+const MODELS = [
+  { value: '["magpie","workbuddy/x"]', name: 'X', group: 'magpie' },
+  { value: '["magpie","workbuddy/y"]', name: 'Y', group: 'magpie', description: '更强但更贵' },
+]
+
+/** 打开弹层（点触发器） */
+async function openPicker(host: HTMLElement) {
+  ;(host.querySelector('[data-testid="model-picker-trigger"]') as HTMLButtonElement).click()
+  await nextTick()
+}
+const pickerPopup = (host: HTMLElement) => host.querySelector('[data-testid="model-picker-popup"]')
+
 describe('InterveneInput', () => {
   it('宽度口径交给 ContentColumn（唯一一处定义），外条仍满宽承载 border-top —— AC-R8-01', () => {
     const { host } = mount(InterveneInput, { canCancel: false, canSend: true })
@@ -197,30 +226,22 @@ describe('InterveneInput', () => {
     expect((host.querySelector('button[aria-label="发送"]') as HTMLButtonElement).disabled).toBe(true)
   })
 
-// ---- 模型选择器：嵌在输入框内，自下而上弹层，会话级切换 ----
-// agent 下发的是**不透明串**（dsh 是 JSON.stringify([provider,model])），前端只搬运。
-const MODELS = [
-  { value: '["magpie","workbuddy/x"]', name: 'X', group: 'magpie' },
-  { value: '["magpie","workbuddy/y"]', name: 'Y', group: 'magpie', description: '更强但更贵' },
-]
-
-/** 打开弹层（点触发器） */
-async function openPicker(host: HTMLElement) {
-  ;(host.querySelector('[data-testid="model-picker-trigger"]') as HTMLButtonElement).click()
-  await nextTick()
-}
-const pickerPopup = (host: HTMLElement) => host.querySelector('[data-testid="model-picker-popup"]')
-
-it('选择器嵌在输入框内、与发送按钮同一行（#lead 插槽）', async () => {
+  it('选择器在框内动作行、与发送按钮同一行（#lead 插槽），且在 textarea **下方**', async () => {
   const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
   const trigger = host.querySelector('[data-testid="model-picker-trigger"]')!
   const send = host.querySelector('button[aria-label="发送"]')!
-  // 结构判据：与发送按钮共用 PromptInput 的底部动作行 —— 即"嵌在框内"
+  // 结构判据：与发送按钮共用 PromptInput 的动作行
   expect(trigger.closest('[data-testid="composer-actions"]')).toBe(send.closest('[data-testid="composer-actions"]'))
-  // 有 lead 时该行必须两端对齐，否则模型选择器会被 justify-end 推到右边和发送按钮挤一起
+  // ★ "文字被压住"的结构性免疫：动作行与 textarea 是同一框里的**兄弟节点**（后者在前），
+  //   而不是浮在 textarea 上的一层。
   const row = host.querySelector('[data-testid="composer-actions"]')!
+  expect(row.parentElement).toBe(ta(host).parentElement)
+  expect(row.className).not.toContain('absolute')
+  const kids = [...row.parentElement!.children]
+  expect(kids.indexOf(ta(host))).toBeLessThan(kids.indexOf(row))
+  // 有 lead 时该行必须两端对齐，否则模型选择器会被 justify-end 推到右边和发送按钮挤一起
   expect(row.className).toContain('justify-between')
-  // 整行 pointer-events-none，所以触发器要自己把事件打开，否则点不动
+  // 触发器要自己把事件打开（动作行本身不铺满，但插槽内容必须可点）
   expect(trigger.closest('[data-testid="model-picker"]')!.className).toContain('pointer-events-auto')
 })
 
@@ -325,7 +346,62 @@ it('运行中禁用切换（这一轮的模型已定死），不摆一个按了�
 })
 })
 
-/** 带 #actions 的 PromptInput（动作按钮嵌在输入框内右下角） */
+// ---- 焦点：点过框内的控件之后，接着敲的字必须进输入框 ----
+//
+// 实测过的真实流程（375×667 / 1440×900 都一样）：写一半 → 点模型选择器 → 关掉/选完 →
+// 继续敲字 ⇒ **一个字都没进输入框**。原因是 mousedown 在 textarea 上先触发 blur、
+// 焦点落到刚被点的 <button> 上，之后的键盘事件就与 textarea 无关了。
+//
+// jsdom 不实现真实的焦点转移（mousedown 默认行为），所以这里无法"复现 bug 再修"，
+// 能守的是**机制本身**：这些控件必须声明 `@mousedown.prevent`（阻止焦点被抢），
+// 点击行为本身仍要正常（不能在 prevent 的同时把 click 弄丢）。
+describe('框内控件不抢输入框焦点（mousedown.prevent）', () => {
+  // ⚠️ 用 `querySelector` 拿的是**第一个**匹配；同一份 DOM 里只有一个输入条，
+  //    但"发送/中止"是 v-if/v-else 二选一 —— 两个态都要覆盖，所以分别挂载着查。
+  const controls = (host: HTMLElement) =>
+    [
+      host.querySelector('[data-testid="model-picker-trigger"]'),
+      host.querySelector('[data-testid="composer-add-image"]'),
+      host.querySelector('button[aria-label="发送"]'),
+      host.querySelector('button[aria-label="中止"]'),
+    ].filter(Boolean) as HTMLElement[]
+
+  it('「中止」按钮同样不抢焦点（运行中用户看着流式输出）', () => {
+    const { host } = mount(InterveneInput, { canCancel: true, canSend: false })
+    const cancel = host.querySelector('button[aria-label="中止"]')!
+    const ev = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    cancel.dispatchEvent(ev)
+    expect(ev.defaultPrevented, '中止按钮没拦 mousedown：点它会抢走输入框焦点').toBe(true)
+  })
+
+  it('模型选择器触发器 / 加图按钮 / 发送按钮都拦下 mousedown，点击照常生效', async () => {
+    const onPick = vi.fn()
+    const { host } = mount(InterveneInput, {
+      canCancel: false,
+      canSend: true,
+      models: MODELS,
+      canAttachImages: true,
+      'onSwitch-model': onPick,
+      'onUpdate:model': onPick,
+    })
+    for (const el of controls(host)) {
+      // dispatchEvent 返回 false ⇔ preventDefault 被调用过
+      const ev = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+      el.dispatchEvent(ev)
+      expect(ev.defaultPrevented, `${el.getAttribute('data-testid') || el.getAttribute('aria-label')} 没拦 mousedown：点它会抢走输入框焦点`).toBe(true)
+    }
+    // 弹层里的「Agent 默认」也一样：选完要能接着写
+    await openPicker(host)
+    const def = pickerPopup(host)!.querySelector('[data-testid="model-picker-default"]')!
+    const ev = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    def.dispatchEvent(ev)
+    expect(ev.defaultPrevented).toBe(true)
+    ;(def as HTMLButtonElement).click()
+    expect(onPick).toHaveBeenCalledWith('')
+  })
+})
+
+/** 带 #actions 的 PromptInput（创建/发送按钮在框内**动作行**上） */
 const WithActions = defineComponent({
   render: () =>
     h(
@@ -335,7 +411,7 @@ const WithActions = defineComponent({
     ),
 })
 
-/** 带 #lead 的 PromptInput（模型选择器嵌在输入框内左下角，与动作按钮同一行） */
+/** 带 #lead 的 PromptInput（模型选择器在动作行**左侧**，与发送按钮同一行） */
 const WithLead = defineComponent({
   render: () =>
     h(
@@ -348,61 +424,57 @@ const WithLead = defineComponent({
     ),
 })
 
-describe('输入框内嵌动作按钮（PC 与移动端同一套 DOM）', () => {
-  it('动作区与 textarea 同父、绝对定位贴右下角', () => {
+/**
+ * 动作行在**框内**、但在 textarea **下面**（正常流）—— 2026-10-19 的结构。
+ *
+ * 这一组断言守的是"文字永远不会被压住"这个**结构性**保证：
+ * 旧形态里动作行 `absolute` 浮在 textarea 上，靠 padding 让位，两边数字必须手算对齐，
+ * 一旦模型名变长/按钮变大就重新压到文字上（用户反馈的问题）。
+ * 现在的判据不是"偏移量调对了"，而是"动作行根本不在 textarea 的盒子里"。
+ */
+describe('动作行在框内、textarea 下方（PC 与移动端同一套 DOM）', () => {
+  it('动作行与 textarea 同属 composer-frame，且**不是**绝对定位', () => {
     const { host } = mount(WithActions)
     const actions = host.querySelector('[data-testid="composer-actions"]')!
     const t = ta(host)
-    // "嵌在框内" 的结构性判据：与 textarea 共用那个 relative 容器
-    expect(actions.parentElement).toBe(t.parentElement)
-    expect(actions.parentElement!.className).toContain('relative')
-    // ⚠️ 这里只验证"贴着右下角"这一结构事实，**具体偏移值不在这里钉**：
-    // 下沿几何由下方那条几何用例负责（它要求 `bottom-2.5` 且**明确禁止** `bottom-0`）。
-    // 早期这里写死 `bottom-0`，与那条用例互相矛盾 —— 41f8d7f 把行从 bottom-0 抬到
-    // bottom-2.5（下沿才等于 12px）时只改了代码没改这里，于是同一份断言集里
-    // 「必须含 bottom-0」和「必须不含 bottom-0」同时成立，测试永远红。
-    for (const cls of ['absolute', 'inset-x-0', 'bottom-', 'justify-end', 'pointer-events-none'])
-      expect(actions.className, `缺少 ${cls}`).toContain(cls)
+    expect(actions.parentElement).toBe(frame(host))
+    expect(t.parentElement).toBe(frame(host))
+    // 旧形态的全部痕迹都不允许复活：绝对定位、让位 padding、右上角的 relative 容器
+    expect(actions.className).not.toContain('absolute')
+    expect(actions.className).not.toContain('bottom-')
+    expect(actions.className).not.toContain('inset-x-0')
+    expect(t.className).not.toContain('pb-[4.375rem]')
+    // 整行可点（动作按钮自己再打开 pointer-events）—— 保持原来的插槽约定
+    expect(actions.className).not.toContain('pointer-events-none')
   })
 
-  it('有动作区时 textarea 让出底部空间，没有则不留空 padding', () => {
-    expect(ta(mount(WithActions).host).className).toContain('pb-[4.375rem]')
-    expect(ta(mount(PromptInput, { modelValue: '' }).host).className).not.toContain('pb-')
+  it('没有 #lead / #actions 时不渲染动作行（空框不留一块空行）', () => {
+    const { host } = mount(PromptInput, { modelValue: '' })
+    expect(host.querySelector('[data-testid="composer-actions"]')).toBeNull()
   })
 
-  // 按钮外框到输入框**右沿与下沿都必须是 12px**（headless Chrome 实测基准）。
-  // 只靠 class 断言守不住几何：曾经 px-3/pb-2/bottom-0 看着"下沿=pb-2=8px"，
-  // 实测却是 2px —— 行的 border-box 比让位区矮不了多少，底部 6px 溢到框外被吃掉了，
-  // 于是右边 12px、下边 2px，按钮显得"贴底、离右边远"。
-  // 所以这里既钉 class，也钉"行必须在框内、且让位高度自洽"这两条推导链。
-  it('按钮右/下留白同值：行 px-3 + 行落在框内 + 让位高度自洽', () => {
+  // 按钮外框到框的**右沿与下沿都是 12px**：行在流里，横向靠 px-3、纵向靠 pb-3。
+  // 这条能过，是因为"下沿溢出被吃掉"那个老坑已经随绝对定位一起去掉了。
+  it('按钮右/下留白同值：行 px-3 + pb-3，行宽 = 框宽', () => {
     const { host } = mount(WithLead)
     const row = host.querySelector('[data-testid="composer-actions"]')!
-    const t = ta(host)
-    // 横向：行宽 = textarea 宽，行的 px-3(12px) 就是右边距
     expect(row.className).toContain('px-3')
-    // 纵向：行**不能**贴 textarea 下沿（bottom-0）——那样 pb-2 会被溢出吃掉，
-    // 实测下沿只剩 2px。必须留出 bottom-2.5(10px) 把行抬进框内，下沿才等于 12px。
-    expect(row.className).toContain('bottom-2.5')
-    expect(row.className).not.toContain('bottom-0')
-    expect(row.className).toContain('pb-2')
-    // 让位高度绑死：70px = 行占位 44px(按钮 36 + 行 pb 8) + bottom 10px + 余量 16px。
-    // 改行的 bottom/pb 或按钮尺寸后必须重新量，否则按钮压住文字。
-    expect(t.className).toContain('pb-[4.375rem]')
+    expect(row.className).toContain('pb-3')
+    expect(row.className).toContain('w-full')
+    // 行内换行而不是压缩：窄屏下宁可让控件换到下一行，也不许把模型名挤没
+    expect(row.className).toContain('flex-wrap')
   })
 
-  it('只有 #lead（模型选择器）时也让出底部空间，且该行两端对齐', () => {
+  it('只有 #lead（模型选择器）时同样两端对齐，且与动作按钮同处一行', () => {
     const { host } = mount(WithLead)
-    expect(ta(host).className).toContain('pb-[4.375rem]')
     const row = host.querySelector('[data-testid="composer-actions"]')!
     expect(row.className).toContain('justify-between')
-    // 结构判据：lead 与 actions 同处一行
     const lead = host.querySelector('[data-testid="lead-btn"]')!
     expect(lead.parentElement).toBe(row)
     expect(row.children.length).toBe(2)
   })
 
-  it('详情页发送按钮同样嵌在框内（与新建任务页一致，不按断点分两套）', () => {
+  it('详情页发送按钮同样在框内动作行（与新建任务页一致，不按断点分两套）', () => {
     const { host } = mount(InterveneInput, { canCancel: false, canSend: true })
     const send = host.querySelector('button[aria-label="发送"]')!
     expect(send.parentElement!.getAttribute('data-testid')).toBe('composer-actions')
@@ -448,6 +520,11 @@ describe('InterveneInput 图片入口', () => {
 })
 
 // ---- 截图粘贴：飞书/企微截图后 Ctrl+V ----
+//
+// 这一段原本紧跟上一个 describe（结构上是“平铺”的，不是被包在它里面）——
+// 2026-10-19 加"焦点"用例时误把多出的一个 `})` 留在了旧位置，导致**整个文件**
+// Transform 失败（esbuild: Unexpected end of file）、composer 相关用例一条都没跑。
+// 教训：vitest 里"某个 spec 文件解析失败"不会让其它文件红，很容易被当成"全绿"。
 //
 // ⚠️ 这里只能合成 ClipboardEvent（jsdom 没有真实剪贴板），所以守的是**接线**：
 // paste 事件是否抵达 ImagePicker、图是否进了缩略图条、运行中是否给了人话解释。
