@@ -1,6 +1,6 @@
 // 真机验收（Playwright）配置。
 //
-// 设计判据（为什么每一项是现在这个值）见 docs/testing/ui-e2e.md。三条硬约束：
+// 设计判据（为什么每一项是现在这个值）见 docs/testing/ui-e2e.md。四条硬约束：
 //
 // ① **隔离端口**：baseURL 指向 :3100 的 vite + :3101 的夹具后端。
 //    绝不指向 :3000 的现场 —— 现场有真任务与真 agent 进程，一次误点审批就是
@@ -9,10 +9,14 @@
 //    这是"每次改动都要重新截图、图还进上下文"的成本开关。
 // ③ **视觉用例串行、数值用例并行**：截图对并发敏感（抖动会让 diff 假红），
 //    而 DOM/LCP 断言互不干扰，可以吃满 CPU。
+// ④ **结论只有一份**（2026-10-19 新增）：所有失败收敛到 `SUMMARY.md` 的一段文字，
+//    按签名聚合 + 与上一轮对比（已修好 / 仍红 / 新挂）。跑完测试**只读它**，
+//    不去翻几十段终端输出，也不要先去截图。实现见 e2e/reporter.ts。
 
 import { defineConfig } from '@playwright/test'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { JSON_REPORT_PATH, REPORT_DIR } from './e2e/lib/report'
 
 /**
  * 运行产物（trace / 失败的 actual+diff / HTML 报告）的落点：**系统临时目录**。
@@ -26,7 +30,6 @@ import { join } from 'node:path'
  * 需要保留时：设 `E2E_OUTPUT_DIR` 指向你想放的地方。
  */
 const OUTPUT_DIR = process.env.E2E_OUTPUT_DIR || join(tmpdir(), 'pieqi-e2e')
-
 const VITE_PORT = Number(process.env.E2E_VITE_PORT || 3100)
 const MOCK_PORT = Number(process.env.E2E_MOCK_PORT || 3101)
 
@@ -57,9 +60,17 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   // 默认 reporter 是 list：数字直接打在终端上，"结论就是输出"，不需要开 HTML 报告。
   // CI 才额外产出 html（放临时目录，不进仓库）。
+  //
+  // ★ json 是给 e2e/reporter.ts 吃的（结论聚合 + 跨轮对比），它必须**始终存在**；
+  //   它落在 OUTPUT_DIR 里的固定文件名，每次运行被 reporter 自己删掉重写。
   reporter: process.env.CI
-    ? [['github'], ['html', { open: 'never', outputFolder: join(OUTPUT_DIR, 'report') }]]
-    : [['list']],
+    ? [
+        ['list'],
+        ['json', { outputFile: JSON_REPORT_PATH }],
+        ['./e2e/reporter.ts'],
+        ['html', { open: 'never', outputFolder: join(REPORT_DIR, 'html-report') }],
+      ]
+    : [['list'], ['json', { outputFile: JSON_REPORT_PATH }], ['./e2e/reporter.ts']],
 
   use: {
     baseURL: `http://127.0.0.1:${VITE_PORT}`,
@@ -87,6 +98,25 @@ export default defineConfig({
   },
 
   projects: [
+    {
+      /**
+       * ⓪ **环境分诊**：在跑任何断言之前，先证明夹具环境是活的。
+       *
+       * 判据来自 2026-10-19 的复盘：那次修一个输入框遮挡，模型把"vite/mock 没起来"
+       * "浏览器 spawn 被拒"当成产品缺陷追了几十轮。环境坏了就该**红在这里**，
+       * 而且错误信息直接说"这是环境问题，不是你的改动"（见 e2e/health/env.spec.ts）。
+       *
+       * ⚠️ 它**不**被 `npm run test:e2e` 默认包含：那三个 project 才是"验证改动"；
+       *    诊断环境用 `--project=health`，红了的结论是"先修环境，别改代码"。
+       */
+      name: 'health',
+      testDir: './e2e/health',
+      fullyParallel: false,
+      workers: 1,
+      timeout: 20_000,
+      // 环境分诊失败**不**留 trace/截图：它本来就不是在测页面，产物只有噪音
+      use: { trace: 'off', screenshot: 'off', video: 'off' },
+    },
     {
       // ① 数值断言：**不产图**，只回传数字
       name: 'layout',

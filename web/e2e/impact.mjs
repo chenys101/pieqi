@@ -17,9 +17,10 @@
 // 输出的是**可直接执行的命令**，不自己 spawn playwright ——
 // 这样 CI / 本地 / 人手动都能复用同一决定，而且失败能原样重跑。
 
-import { execSync } from 'node:child_process'
+import { execSync, spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const WEB_ROOT = resolve(HERE, '..')
@@ -134,10 +135,48 @@ if (files.length > 20) console.log(`  … 其余 ${files.length - 20} 个`)
 console.log(`[impact] 判据：${d.reason}`)
 console.log(`[impact] 执行：${cmd}`)
 
+/**
+ * 从选中的 targets 里抽出"最近的那条 -g 表达式"与它所属的 project。
+ * 形如 `--project=layout -g detail` → { project: '--project=layout', grep: 'detail' }。
+ */
+function locateGrep(targets) {
+  for (const t of targets) {
+    const m = t.match(/^(--project=\S+)\s+-g\s+(.+)$/)
+    if (m) return { project: m[1], grep: m[2].trim() }
+  }
+  return null
+}
+
 if (printOnly) process.exit(0)
 
 // 用 inherit：把子进程输出直接交给终端，失败码原样透传（不要在捕获里抹掉）
-const { spawnSync } = await import('node:child_process')
 const [bin, ...rest] = cmd.split(' ')
 const r = spawnSync(bin, rest, { cwd: WEB_ROOT, stdio: 'inherit', shell: process.platform === 'win32' })
+
+/**
+ * 跑完**立刻**把"回到全绿"的那条命令打出来（2026-10-19 复盘新增）。
+ *
+ * 那次修一个输入框遮挡，真正烧掉时间的不是找一个红，而是**每改一点就把同一组用例
+ * 再整跑一遍**（`fixture.spec.ts` 被改了 18 次、`measure.spec.ts` 16 次，而每次重跑
+ * 都要重新读一遍输出）。收敛循环应该是：
+ *   ① 只跑**刚红的那几条**（`-g` 精确到用例名，几秒）；
+ *   ② 绿了以后才跑**一次**完整的影响面集合；
+ *   ③ 结论读 SUMMARY.md（含"已修好/仍红/新挂"），不读逐条输出。
+ *
+ * 这里把 ① 的命令直接打印出来，省掉"自己去拼 -g 表达式"——拼错的那次会白跑一轮。
+ */
+const g = locateGrep(d.targets)
+if (g) {
+  // 把表达式里的正则元字符转义：它是"按名字找用例"，不是拿它当正则用
+  const literal = g.grep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  console.log(
+    `\n[impact] 失败时的定位命令（只跑匹配的那几条，**别**重跑全量）：\n` +
+      `    npx playwright test ${g.project} -g "${literal}"`,
+  )
+}
+const summaryFile = join(
+  process.env.E2E_OUTPUT_DIR || join(process.env.TEMP || tmpdir(), 'pieqi-e2e'),
+  'SUMMARY.md',
+)
+console.log(`[impact] 结论只看这里：${summaryFile}`)
 process.exit(r.status ?? 1)

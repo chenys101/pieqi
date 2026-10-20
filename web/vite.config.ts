@@ -154,6 +154,9 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    include: ['src/**/*.spec.ts'],
+    // src 下是组件/逻辑的单元测试；`e2e/lib/**` 是**纯 Node 的纯函数**（失败结论聚合、
+    // 基线读写）。后者是一段"只有红的时候才执行"的代码，必须由单元测试兜住 ——
+    // 放进 src 不合适（它不属于产品代码），所以这里显式多收一个目录。
+    include: ['src/**/*.spec.ts', 'e2e/lib/**/*.spec.ts'],
   },
 })

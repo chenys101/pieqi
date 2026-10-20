@@ -52,6 +52,44 @@
 | ① 截图 → 图片 token | **默认不截图**：DOM / 遮挡 / 溢出 / LCP 全用数值断言；必须看图时走 `vision.mjs` 旁路（只把一句结论带回上下文） | `e2e/lib/measure.ts`、`e2e/vision.mjs` |
 | ② 多次修改重复截图 | 基线进 git + `toHaveScreenshot` 自动 diff（机器判"变了没有"）；影响面脚本只跑相关用例；通过的用例零截图产物 | `e2e/visual/`、`e2e/impact.mjs`、`playwright.config.ts` |
 | ③ 效率 | dev server 常驻复用（`reuseExistingServer`）；数值层三视口并行；视觉层串行（稳定优先）；失败只留 trace | `playwright.config.ts` |
+| ④ **结论只有一份** | 所有失败收敛成 `SUMMARY.md`：按签名聚合 + 与上一轮对比（已修好 / 仍红 / 新挂 / 保持绿）。**跑完只读它** | `e2e/lib/report.ts`、`e2e/reporter.ts`、`e2e/show-summary.mjs` |
+| ⑤ **环境先分诊** | `--project=health` 先证明夹具后端 / dev server / 浏览器是活的；红在这一层 = **环境问题，不要改源码** | `e2e/health/env.spec.ts`、`e2e/safe-run.mjs` |
+
+### 2.1 为什么需要 ④⑤（2026-10-19 复盘）
+
+修一个「输入框被模型选择器遮住」的 UI 问题，实际消耗了 **473 次模型调用、近 1 亿 token**。
+逐条归因（从会话事件流里量出来的，不是估计）：
+
+| 归因 | 占全部消耗 |
+|---|---|
+| 同一组工具调用**连续重试**（`edit` 连打 13 次、`playwright` 连打 10 次、`vitest` 9 次…） | **45.8%** |
+| 把**环境故障**当成产品缺陷（30 分钟超时 ×133 次、`spawn EPERM`、vite/mock 没起来） | 大量墙钟 + 多轮改错方向 |
+| 反复读**同一批测试输出** | 每次都带着 20–30 万上下文重读 |
+
+结论：重复的根源不是截图，是**反馈的单位是一条命令的输出**。于是：
+
+```bash
+npm run test:e2e:safe     # ① health 分诊（4 秒）→ 绿了才跑三层
+npm run test:e2e:summary  # ② 只读这一段结论
+```
+
+`SUMMARY.md` 长这样（6 个用例失败，收敛成 2 条）：
+
+```markdown
+# e2e FAIL  12/18 通过 | 2 条失败签名 / 6 个用例 | 已修好 0 / 仍红 0 / 新挂 2
+
+## 失败（按签名聚合）
+- 动作行压在输入框内部（gap=-103px）
+  - 出现 3 次：newtask @ mobile (375×667)、newtask @ tablet (834×1112)、newtask @ desktop (1440×900)
+  - 出处 e2e/layout/fixture.spec.ts:578
+```
+
+**迭代循环的纪律**（`impact.mjs` 会把第 ① 步的命令直接打出来，不用自己拼 `-g`）：
+
+1. 只跑**刚红的那几条**（`-g` 精确到用例名，几秒）；
+2. 绿了以后才跑**一次**完整的影响面集合；
+3. 读 `SUMMARY.md` 的"已修好 / 仍红 / 新挂"，不要读逐条输出；
+4. **只有**数字看着对、但画面确实不对时，才看**一张**失败截图。
 
 ---
 
@@ -143,8 +181,14 @@ cd web
 npm run test:e2e:install          # 可选：装 chromium（约 130MB）。默认用系统 Chrome，不需要它
 npm run test:e2e:layout           # 数值层（快，最常跑）
 npm run test:e2e:visual           # 视觉回归（需已有基线）
-npm run test:e2e                  # 两层全跑
+npm run test:e2e                  # 三层全跑
 npm run test:e2e:impact          # 按本次改动选跑哪些（推荐日常用这个）
+
+# ★ 2026-10-19 新增（复盘出来的两条，日常用这两条）
+npm run test:e2e:safe             # 先 health 分诊（4s），绿了才跑三层 —— 环境坏时不要改源码
+npm run test:e2e:health           # 只做环境分诊：夹具后端 / dev server / 浏览器
+npm run test:e2e:summary          # 打印上一轮的结论（SUMMARY.md），不必记路径
+
 node e2e/impact.mjs --print       # 只看会跑什么，不执行
 node e2e/impact.mjs --base=main   # 相对某个 ref 的改动
 npm run test:e2e:vision           # 视觉旁路（需 VISION_API_KEY，见 §7）

@@ -13,6 +13,8 @@
 // 更新基线：`npm run test:e2e:update-snapshots` —— 审过 diff 之后才跑。
 
 import { test, expect } from '@playwright/test'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { stabilize, VIEWPORTS } from '../lib/measure'
 
 const SCENES = [
@@ -55,6 +57,9 @@ const THEMES = ['light', 'dark'] as const
 
 const MAX_DIFF_PIXEL_RATIO = 0.005 // 0.5% 以内算过（抗锯齿/字体渲染差异）
 
+/** 失败产物落点（与 playwright.config.ts 的 OUTPUT_DIR 一致，仅用于报错里给出路径） */
+const OUTPUT_PREFIX = process.env.E2E_OUTPUT_DIR || join(tmpdir(), 'pieqi-e2e')
+
 test.describe.configure({ mode: 'serial' })
 
 for (const sc of SCENES) {
@@ -76,14 +81,50 @@ for (const sc of SCENES) {
         // 确认主题真的生效 —— 否则"深色基线"实际是浅色，回归就永远抓不到深色的问题
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
 
-        await expect(page).toHaveScreenshot(`${sc.name}-${vp.name}-${theme}.png`, {
-          maxDiffPixelRatio: MAX_DIFF_PIXEL_RATIO,
-          // threshold：单像素颜色差异容忍（抗锯齿）；它与 maxDiffPixelRatio 是两个维度
-          threshold: 0.2,
-          // 动图/视频类元素不参与（当前没有，但显式声明意图）
-          animations: 'disabled',
-          caret: 'hide',
-        })
+        /**
+         * ★ 视觉失败要回答"**哪里**变了"，而不只是"变了"。
+         *
+         * `toHaveScreenshot(maxDiffPixelRatio)` 的默认报错会给出上中下三段裁剪
+         * （Playwright 1.4x 的 "Expected/Actual" 缩略 + diff 区域），但那是**图**，
+         * 要人去看。这里再把它换算成**文字**：哪一块矩形、占页面多少、涉及什么元素。
+         *
+         * 判据：截图从"第一眼证据"降级为"文字说不清时才看的最后手段"。
+         * 本次实现只做**降级路径**：toHaveScreenshot 失败时先打一张文本结论，
+         * 让 SUMMARY 里那一条至少带一个可读的差异比例与区域。
+         */
+        const shotName = `${sc.name}-${vp.name}-${theme}.png`
+        let shotError: Error | null = null
+        try {
+          await expect(page).toHaveScreenshot(shotName, {
+            maxDiffPixelRatio: MAX_DIFF_PIXEL_RATIO,
+            // threshold：单像素颜色差异容忍（抗锯齿）；它与 maxDiffPixelRatio 是两个维度
+            threshold: 0.2,
+            // 动图/视频类元素不参与（当前没有，但显式声明意图）
+            animations: 'disabled',
+            caret: 'hide',
+          })
+        } catch (e) {
+          shotError = e as Error
+        }
+        if (shotError) {
+          // 差异区域：让 Playwright 把 "N pixels differ" 那行原样带到结论里，
+          // 再补一句"看哪里的建议顺序"，避免直接跳去看图。
+          const raw = shotError.message
+          const diffLine = raw
+            .split('\n')
+            .map((l) => l.trim())
+            .find((l) => /pixels? (are )?different|diff/i.test(l) && /\d/.test(l))
+          const where = `场景=${sc.name} 视口=${vp.width}×${vp.height} 主题=${theme}`
+          throw new Error(
+            `视觉基线不一致（${where}）\n` +
+              `  ${diffLine ?? '（Playwright 未给出像素差异行，看下面的原始报错）'}\n` +
+              `  建议顺序：① 先确认这是**设计变更**还是**回归**（改的是这一个场景吗？）；\n` +
+              `            ② 是设计变更才跑 \`npm run test:e2e:update-snapshots\` 更新基线；\n` +
+              `            ③ **只有** 上两步都无法从数字/文字判断时，才看一张 ` +
+              `${OUTPUT_PREFIX}/${shotName.replace('.png', '')} 的 diff 图。\n` +
+              `  原始报错首行：${raw.split('\n')[0]}`,
+          )
+        }
       })
     }
   }
