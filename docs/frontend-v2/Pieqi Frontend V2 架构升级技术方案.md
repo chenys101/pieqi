@@ -1,5 +1,19 @@
 # Pieqi Frontend V2 架构升级技术方案
 
+> ⚠️ **本文是历史提案（2026-09-01 已按此方案落地完成），不是现行规范。**
+>
+> 从仓库根目录迁入此处归档。**现行事实以代码与 [`migration-report.md`](migration-report.md) / [`baseline.md`](baseline.md) 为准。**
+> 下文有若干设计与最终实现**不一致**，照抄会写出错误代码，已知差异：
+>
+> | 本文写法 | 实际实现 |
+> |---|---|
+> | §6 有 `ApprovalsPage.vue` / `ProjectsPage.vue`，§26 有 `/approvals`、`/projects` 两个路由 | **都不存在**。`/approvals` 重定向到 `/dashboard`（无独立审批中心）；无 Projects 页。见 `web/src/app/router.ts` |
+> | §6 未包含 `features/` 的若干域 | 实际 8 个域：`agent / approval / dashboard / feedback / session / settings / task / timeline` |
+> | §6 目录里没有反馈体系 | `features/feedback/` 与 `/api/tasks/:id/feedback*` 是后来新增的核心能力，本文成文时尚未有 |
+> | §23 集中审批页 | 已否决：待审批组放在仪表盘（本仓 `web/src/features/dashboard/`） |
+>
+> 现状入口见 [`web/README.md`](../../web/README.md) 与 [`docs/README.md`](../README.md)。
+
 > **状态：Proposal / Ready for Implementation**
 >
 > **目标：** 将 Pieqi 当前 PWA 前端直接重构为 Vue 3 + Vite + TypeScript + Tailwind CSS + Pinia 架构，并以 Agent Control / Agent Observability 为下一阶段产品演进基础。

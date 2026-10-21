@@ -1,6 +1,6 @@
 # Pieqi Feedback P0 设计
 
-> Status: Design (对应 `Pieqi「反馈体系」功能点规划.md` 的 P0 范围)
+> Status: Design (对应 [`functional-plan.md`](functional-plan.md)（原《Pieqi「反馈体系」功能点规划》）的 P0 范围)
 > Updated: 2026-09-03
 > 关联：`CONTEXT.md`（词汇表）、`docs/adr/0001~0003`（架构决策）
 

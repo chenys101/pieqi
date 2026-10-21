@@ -1,5 +1,8 @@
 # Pieqi「反馈体系」功能点规划
 
+> 文件名：`functional-plan.md`（2026-10-21 从 `Pieqi「反馈体系」功能点规划.md` 改名而来的。
+> 原文件名带全角引号与空格，在各种 shell / glob / 链接自动识别下都不稳定。）
+>
 > Status: Draft  
 > Scope: Feedback & Control Plane  
 > Positioning: Agent 工作结果的观察、验证、回退与干预  
