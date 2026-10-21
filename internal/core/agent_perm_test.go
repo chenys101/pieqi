@@ -636,6 +636,38 @@ func TestWirePermission_BuildPermSummary(t *testing.T) {
 		{"title 原样全文", permReq("r", "Bash", "execute", nil), "Bash"},
 		{"长命令不截断", agent.PermissionRequest{ReqID: "r", ToolTitle: strings.Repeat("a", 500)}, strings.Repeat("a", 500)},
 		{"title only", agent.PermissionRequest{ReqID: "r", ToolTitle: "Write"}, "Write"},
+
+		// ---- title 与命令**必须同时出现**（2026-10-21 移动端"审批卡没有具体命令"） ----
+		// 根因：旧实现 title 非空就 return，而 dsh 的 title 恒为工具名，命令被抢掉。
+		{
+			"title + 单行 command → 同行",
+			agent.PermissionRequest{ReqID: "r", ToolTitle: "pwsh", RawInput: json.RawMessage(`{"command":"git status"}`)},
+			"pwsh：git status",
+		},
+		{
+			"title + 多行 command → 换行接（不用全角冒号）",
+			agent.PermissionRequest{ReqID: "r", ToolTitle: "pwsh", RawInput: json.RawMessage(
+				`{"command":"Set-Location 'D:\\code\\go\\pieqi'\ngit status -sb"}`)},
+			"pwsh\nSet-Location 'D:\\code\\go\\pieqi'\ngit status -sb",
+		},
+		{
+			"description 与 command 都在时两者都留",
+			agent.PermissionRequest{ReqID: "r", ToolTitle: "pwsh", RawInput: json.RawMessage(
+				`{"command":"Get-ChildItem $p","description":"Check if task file exists"}`)},
+			"pwsh：Check if task file exists：Get-ChildItem $p",
+		},
+		{
+			"编辑类带 justification/sandbox_permissions 一并露出",
+			agent.PermissionRequest{ReqID: "r", ToolTitle: "edit", RawInput: json.RawMessage(
+				`{"file_path":"C:\\Users\\x\\.dsh\\AGENTS.md","justification":"工作区外需提权","sandbox_permissions":"danger-full-access"}`)},
+			"edit\nC:\\Users\\x\\.dsh\\AGENTS.md\njustification: 工作区外需提权\nsandbox_permissions: danger-full-access",
+		},
+		{
+			"编辑类只有路径 → 单行",
+			agent.PermissionRequest{ReqID: "r", ToolTitle: "edit", RawInput: json.RawMessage(`{"file_path":"a.go"}`)},
+			"edit：a.go",
+		},
+
 		{"kind only → 人读标签", agent.PermissionRequest{ReqID: "r", ToolKind: "execute"}, "执行命令"},
 		// 不认识的字段（没有 command/description/...）才退到原始 JSON。
 		{"raw input fallback", agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"cmd":"ls"}`)}, `{"cmd":"ls"}`},
@@ -671,9 +703,15 @@ func TestWirePermission_BuildPermSummary(t *testing.T) {
 			"func main",
 		},
 		{
-			"dsh：description 优先于 file_path",
+			// 编辑类按路径优先：description（这里恰好是路径）不再抢位。
+			"dsh：file_path 优先于 description",
 			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(
-				`{"description":"读取配置","file_path":"config.yaml"}`)},
+				`{"description":"config.yaml","file_path":"config.yaml"}`)},
+			"config.yaml",
+		},
+		{
+			"dsh：没有 file_path 时 description 兜底",
+			agent.PermissionRequest{ReqID: "r", RawInput: json.RawMessage(`{"description":"读取配置"}`)},
 			"读取配置",
 		},
 		{
@@ -715,7 +753,8 @@ func TestBuildPermSummary_DshRealPayload(t *testing.T) {
 	if !strings.Contains(got, "Test-Path $p") {
 		t.Errorf("摘要丢了 command：%q", got)
 	}
-	// 不该出现 JSON 的字段名与结构噪声。
+	// 不该出现 JSON 的字段名与结构噪声（`sandbox_permissions:` 这种人读带上是允许的，
+	// 所以只禁带引号的 JSON 形态）。
 	for _, bad := range []string{`"command"`, `"sandbox_permissions"`, `\"`, "{\""} {
 		if strings.Contains(got, bad) {
 			t.Errorf("摘要里仍有 JSON 噪声 %q：%q", bad, got)
@@ -724,6 +763,57 @@ func TestBuildPermSummary_DshRealPayload(t *testing.T) {
 	// justification 是给审计看的理由，不该顶替正文（它没有 command 具体）。
 	if strings.HasPrefix(got, "沙箱两次拒绝") {
 		t.Errorf("摘要不该以 justification 开头：%q", got)
+	}
+}
+
+// TestBuildPermSummary_DshTitleIsToolName 是 2026-10-21 移动端事故的回归。
+//
+// 现场（日志 acp.go:1658 → core/agent_perm.go:291）：
+//
+//	acp permission backfilled from tool call {"title": true, "raw_input": true, "command": "git push origin main\n..."}
+//	approval shown {"tool_kind": "execute", "tool": "pwsh", ...}
+//
+// 命令确实回填进了 rawInput，但 buildPermSummary 的第一道 `if ToolTitle != "" { return ToolTitle }`
+// 直接把它挡掉了 —— dsh 的 title 恒为工具名（toolCallUpdate 里 `title: event.data.name`），
+// 于是移动端卡片上一片只有 "pwsh"，用户不知道批的是什么。
+//
+// 判据不是"包含 pwsh"（那旧版也过），而是**命令原文必须在摘要里**。
+func TestBuildPermSummary_DshTitleIsToolName(t *testing.T) {
+	raw := `{"command":"$OutputEncoding=[Text.Encoding]::UTF8; [Console]::OutputEncoding=[Text.Encoding]::UTF8\ngit push origin main\nWrite-Output \"exit=$LASTEXITCODE\"","description":"Push commits"}`
+	got := buildPermSummary(agent.PermissionRequest{
+		ReqID: "call_00_x", ToolTitle: "pwsh", ToolKind: "execute", RawInput: json.RawMessage(raw),
+	})
+
+	if !strings.Contains(got, "git push origin main") {
+		t.Fatalf("摘要里没有命令原文（这就是「审批卡没有具体命令」）：%q", got)
+	}
+	if !strings.HasPrefix(got, "pwsh") {
+		t.Errorf("摘要丢了工具名：%q", got)
+	}
+	// 多行命令不能用 `pwsh：` 同行接（冒号后面直接换行看起来像被截断）。
+	if strings.HasPrefix(got, "pwsh：\n") {
+		t.Errorf("多行命令应用换行接：%q", got)
+	}
+}
+
+// TestWirePermission_CardCarriesCommand 端到端守到 CurrentDecision：卡上必须同时有
+// 工具名和命令。头两道门（applyToolKindFix / DowngradeReadonlyPermission）不参与判断，
+// 这里只问"用户点批准前能不能看到要执行什么"。
+func TestWirePermission_CardCarriesCommand(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	req := permReq("req-cmd", "pwsh", "execute", standardOptions())
+	req.RawInput = json.RawMessage(`{"command":"git push origin main","description":"Push commits"}`)
+	fa.emitPerm(req)
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+
+	tt, _ := store.Get(taskID)
+	if tt.CurrentDecision == nil {
+		t.Fatal("CurrentDecision nil")
+	}
+	if !strings.Contains(tt.CurrentDecision.Summary, "git push origin main") {
+		t.Errorf("decision.Summary 没有命令原文：%q", tt.CurrentDecision.Summary)
 	}
 }
 

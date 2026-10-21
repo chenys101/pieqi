@@ -686,7 +686,12 @@ func (pw *PermissionWire) callAdapterDeny(reqID string) error {
 // 文本下面 —— 在这里截断等于让人盲批。长度问题交给前端折叠展示（ApprovalCard/Banner 的
 // "展开全文"），不靠删内容解决。
 //
-// 优先级：ToolTitle → 从 RawInput 抽出的人读内容（命令/描述）→ KindLabel → 原始 JSON → ID。
+// 拼装：`ToolTitle：<RawInput 的人读内容>`（多行时换行接），两者缺一个就只给有的那个；
+// 都没有才退到 KindLabel → 原始 JSON → ID。
+//
+// ⚠️ 不能写成"ToolTitle 非空就直接 return"（2026-10-21 的移动端事故）：
+// dsh 的 `tool_call.title` 恒为**工具名**（pwsh / edit），于是那一版卡片上只有 "pwsh"，
+// 真正要批的命令原文明明已经在 RawInput 里回填好了，却被这一行抢掉。
 //
 // **RawInput 不能直接原样倒出来**：那是给机器看的 JSON，用户看到的是
 // `{"command":"$p=\"$env:USERPROFILE\\...\"","description":"Check if task file exists",
@@ -694,10 +699,18 @@ func (pw *PermissionWire) callAdapterDeny(reqID string) error {
 // 转义后的乱码（转义符、字段名、英文说明混在一起，看不到"要执行什么"）。
 // dsh 的 ACP 实现恰好不发 title 也不发 kind，一旦走到兜底分支，卡片上就只剩这串 JSON。
 func buildPermSummary(req agent.PermissionRequest) string {
+	// 工具名和命令**必须都在**卡片上（2026-10-21 用户反馈"移动端审批卡还是看不到具体命令"）：
+	// 此前 title 非空就直接 return，而 dsh 的 title 恒为工具名（`pwsh` / `edit`），
+	// 于是命令原文虽已回填进 RawInput，却被这一行抢掉了 —— 卡片上只剩"pwsh"三个字母。
+	// 现在：title 非空时把 RawInput 的人读内容接在后面（`pwsh：<命令>`）；
+	// 接上不了（编辑类没有 command、或不认识的字段）就原样返回 title，行为与旧版一致。
 	if req.ToolTitle != "" {
+		if s := summaryFromRawInput(req.RawInput); s != "" && s != req.ToolTitle {
+			return joinToolAndInput(req.ToolTitle, s)
+		}
 		return req.ToolTitle
 	}
-	// ToolTitle 缺失（dsh 常态）：从 RawInput 里挑人读的内容。
+	// ToolTitle 缺失：从 RawInput 里挑人读的内容。
 	if s := summaryFromRawInput(req.RawInput); s != "" {
 		return s
 	}
@@ -726,6 +739,8 @@ func buildPermSummary(req agent.PermissionRequest) string {
 //
 // 拼装规则：取到 command 时若同时有 description，把 description 作为前缀
 // （"检查任务文件是否存在：<命令>"）—— 说明文字比命令原文更能一眼读懂意图。
+// 只有 `file_path` 的编辑类工具把 justification / sandbox_permissions 一起带上
+// （"改哪个文件" + "它要求的权限"），其余按 path/filename/pattern/query/url 依次兜底。
 // 都不认识则返回空串，由调用方回退到原始 JSON（不认识就不猜）。
 func summaryFromRawInput(raw []byte) string {
 	if len(raw) == 0 {
@@ -749,12 +764,46 @@ func summaryFromRawInput(raw []byte) string {
 		}
 		return command
 	}
-	for _, k := range []string{"description", "file_path", "path", "pattern", "query", "url"} {
+	// 编辑类工具：优先给"改哪个文件"，但 edit 常同时带 justification / sandbox_permissions
+	// （"为什么改""以什么权限改"），那是审批**要看**的信息 —— 只给路径等于把
+	// "它凭什么要绕过沙箱"藏起来。多行展示（卡片折叠 3 行 + 展开全文）。
+	if fp := str("file_path"); fp != "" {
+		d := str("path")
+		if d == "" || d == fp {
+			d = str("filename")
+		}
+		var extra []string
+		if d != "" && d != fp {
+			extra = append(extra, d)
+		}
+		for _, k := range []string{"justification", "sandbox_permissions"} {
+			if v := str(k); v != "" {
+				extra = append(extra, k+": "+v)
+			}
+		}
+		if len(extra) == 0 {
+			return fp
+		}
+		return fp + "\n" + strings.Join(extra, "\n")
+	}
+	for _, k := range []string{"description", "path", "filename", "pattern", "query", "url", "justification"} {
 		if v := str(k); v != "" {
 			return v
 		}
 	}
 	return ""
+}
+
+// joinToolAndInput 把工具名与它的入参拼成卡片摘要。
+//
+// 单行命令用全角冒号接在工具名后面（`pwsh：git status`）：手机上省一行，
+// 而"这是什么工具"与"它要做什么"本来就该在同一行读完。
+// 多行命令换行接（`pwsh` 单独一行）：全角冒号后面紧跟换行会显得像被截断。
+func joinToolAndInput(tool, input string) string {
+	if strings.ContainsAny(input, "\r\n") {
+		return tool + "\n" + input
+	}
+	return tool + "：" + input
 }
 
 // permLabelMaxRunes 审批卡标题的长度上限。超过就不如不说 —— 换成人读操作类型。
