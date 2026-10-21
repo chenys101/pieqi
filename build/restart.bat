@@ -94,12 +94,17 @@ for /f "tokens=5" %%a in ('netstat -ano -p TCP ^| findstr ":3000 " ^| findstr "L
   if not errorlevel 1 set "KILLED=1"
 )
 
-if "%KILLED%"=="1" (
-  REM Give the OS a moment to release the exe file lock (~2s).
-  ping -n 3 127.0.0.1 >nul
-) else (
-  echo no running instance found on :3000 ^(starting fresh^)
-)
+REM GOTO, not an IF/ELSE block: a literal "(starting fresh)" inside an echo
+REM inside parentheses still closes the block early -- the "^(" escape only
+REM works outside blocks, and a stray ")" there makes cmd die with
+REM "was unexpected at this time". Labels are immune to that class of bug.
+if not "%KILLED%"=="1" goto not_running
+REM Give the OS a moment to release the exe file lock (~2s).
+ping -n 3 127.0.0.1 >nul
+goto after_kill
+:not_running
+echo no running instance found on :3000 -- starting fresh
+:after_kill
 
 REM ---------------------------------------------------------------------------
 REM STEP 2 -- install the artifact, but ONLY in swap mode.
@@ -107,33 +112,44 @@ REM
 REM "restart only" deliberately skips this whole block: no copy, no .old
 REM snapshot, no deletion. The exe that was already running is the exe that
 REM starts again -- that is what "just restart" means to the caller.
+REM
+REM Written with GOTO labels instead of IF/ELSE blocks on purpose: this file
+REM has already been bitten by a literal ")" inside an echo inside a block
+REM (the "^(" escape does not help there, cmd reports "was unexpected at this
+REM time"). Labels have no such failure mode and read top-to-bottom.
 REM ---------------------------------------------------------------------------
-if /I "%MODE%"=="swap-and-restart" (
-  REM Safety copy before overwriting: a HUMAN-initiated pre-install snapshot.
-  REM It intentionally reuses the service's own ".old" name so that only ONE
-  REM rollback file exists and it always means "the version that ran before the
-  REM most recent swap". The runtime state (.old/.failed) lives next to the
-  REM running binary -- never inside build\ (see the 2026-10-14 correction).
-  if exist "%EXE%" copy /Y "%EXE%" "%EXE%.old" >nul
-  copy /Y "%ARTIFACT%" "%EXE%" >nul
-  if errorlevel 1 (
-    echo ERROR: could not copy the artifact to "%EXE%"
-    pause
-    exit /b 1
-  )
-  echo installed %ARTIFACT% -> %EXE%
-  REM Consume the delivery: build\ goes back to "clean, nothing pending".
-  REM (Only in repo layout -- in release layout ARTIFACT *is* the source file.)
-  if exist "%REPO%go.mod" del /Q "%ARTIFACT%" >nul 2>&1
-) else (
-  if not exist "%EXE%" (
-    echo ERROR: no artifact to install AND no runtime copy at "%EXE%".
-    echo        Compile one first:  go build -o build/pieqi.new.exe ./cmd/pieqi
-    pause
-    exit /b 1
-  )
-  echo keeping the current runtime binary ^(no new artifact to install^)
-)
+if /I not "%MODE%"=="swap-and-restart" goto restart_only
+
+REM Safety copy before overwriting: a HUMAN-initiated pre-install snapshot.
+REM It intentionally reuses the service's own ".old" name so that only ONE
+REM rollback file exists and it always means "the version that ran before the
+REM most recent swap". The runtime state (.old/.failed) lives next to the
+REM running binary -- never inside build\ (see the 2026-10-14 correction).
+if exist "%EXE%" copy /Y "%EXE%" "%EXE%.old" >nul
+copy /Y "%ARTIFACT%" "%EXE%" >nul
+if errorlevel 1 goto copy_failed
+echo installed %ARTIFACT% --^> %EXE%
+REM Consume the delivery: build\ goes back to "clean, nothing pending".
+REM (Only in repo layout -- in release layout ARTIFACT *is* the source file.)
+if exist "%REPO%go.mod" del /Q "%ARTIFACT%" >nul 2>&1
+goto after_install
+
+:copy_failed
+echo ERROR: could not copy the artifact to "%EXE%"
+pause
+exit /b 1
+
+:restart_only
+if exist "%EXE%" goto keep_binary
+echo ERROR: no artifact to install AND no runtime copy at "%EXE%".
+echo        Compile one first:  go build -o build/pieqi.new.exe ./cmd/pieqi
+pause
+exit /b 1
+
+:keep_binary
+echo keeping the current runtime binary -- no new artifact to install
+
+:after_install
 
 REM ---------------------------------------------------------------------------
 REM STEP 3 -- guard: refuse to launch a Low-integrity image. That IS the
@@ -201,12 +217,15 @@ exit /b 1
 
 :ready
 echo.
-echo Pieqi is up on :3000  ^(mode=%MODE%^).
-if /I "%MODE%"=="swap-and-restart" (
-  echo Rollback copy kept at "%EXE%.old".
-) else (
-  echo Binary unchanged -- this was a plain restart.
-)
+echo Pieqi is up on :3000 -- mode=%MODE%
+if /I not "%MODE%"=="swap-and-restart" goto ready_no_swap
+echo Rollback copy kept at "%EXE%.old".
+goto ready_end
+
+:ready_no_swap
+echo Binary unchanged -- this was a plain restart.
+
+:ready_end
 echo.
 echo This window closes in 5 seconds.
 ping -n 6 127.0.0.1 >nul
