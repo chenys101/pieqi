@@ -73,6 +73,24 @@ type SelfRestart struct {
 	rebindAndServe func() error
 	// readyTimeout 允许测试缩短（0 = 用默认 restartReadyTimeout）。
 	readyTimeout time.Duration
+
+	// swapped 记录**本次进程生命周期里是否真的换过二进制**。
+	//
+	// 为什么需要它（2026-10-21 实测踩到）：Start.AndExit 失败的老路径是
+	// "新实例没报到 ⇒ 回滚 + 抢回端口继续服务"。对**换版**重启这是对的
+	// （新版本起不来，退回旧版继续跑）。但对**只重启**（RestartAndExitNoSwap）
+	// 就错了：不会写入任何 .old，于是 rollbackBinary 报
+	// `backup pieqi.exe.old not available`，把 `pieqi.exe.failed` 清掉、
+	// 留下一条误导性的错误日志 —— 而真正的问题是"新进程没起来"。
+	// 有了它，只重启的回滚分支能明说"这次没换过二进制，无需回滚"。
+	swapped bool
+	// handoffDone 标记本次进程是否已落过交接单。
+	//
+	// 同一进程里允许再发起一次重启：第一次超时后旧进程抢回端口继续服务，
+	// 此时它会带着上一次留下的"未交付成"的交接单。新一进程启动时会先读到
+	// 那张旧单（摘要对不上 ⇒ 判"未成功"），再被后来写的新单覆盖成"成功"。
+	// 不清掉就出现"哪个才算数"的歧义，所以重启前先清一次（见 restartAndExit）。
+	handoffDone bool
 }
 
 // NewSelfRestart 构造自重启器。
@@ -196,6 +214,8 @@ func (s *SelfRestart) restartWith(stagedPath string, swap bool) error {
 	if err := os.Rename(s.execPath, backup); err != nil {
 		return fmt.Errorf("self-restart: backup running binary %s: %w", s.execPath, err)
 	}
+	// 从这一刻起，磁盘上确实有过一次替换动作 —— 失败时的回滚才是必要的。
+	s.swapped = true
 
 	// ② 把新二进制放到原路径。用 copy 而非 rename：staged 文件可能位于
 	// 另一个卷（E:\ 与 C:\ 之间 rename 会失败），copy+删除更稳。
@@ -238,6 +258,8 @@ func (s *SelfRestart) spawnAndHandoff() error {
 	if s.execPath == "" {
 		return fmt.Errorf("self-restart: empty executable path")
 	}
+	// 单子一旦落盘（哪怕随后 spawn 成不成功），本进程就进入了"有未交付的交接"状态。
+	s.handoffDone = true
 	// ③ 落交接单。**必须在 spawn 之前** —— 这是本文件最反直觉、也最容易写错的一步。
 	//
 	// 曾经的顺序是「spawn → waitForListener → writeHandoff」，它有一个必然发生
@@ -430,6 +452,16 @@ func (s *SelfRestart) RestartAndExitNoSwap(addr string, exit func(int)) {
 
 // restartAndExit RestartAndExit / RestartAndExitNoSwap 的共同实现。
 func (s *SelfRestart) restartAndExit(addr string, exit func(int), swap bool) {
+	// 同一进程再次发起重启时，先清掉上一轮可能残留的交接单。
+	//
+	// ⚠️ 只清一次、且只在"此前已经落过单"时清：首次重启路上**绝不做任何 delete**，
+	// 因为目录里可能是活跃进程正在用的那张（Clean-Just-Before-Write 才是安全的，
+	// 且首次重启的写入会自己覆盖它）。
+	if s.handoffDone {
+		if err := clearRestartJournal(s.dataRoot); err != nil {
+			s.logf("self-restart: could not clear the stale handoff from the previous attempt", "err", err.Error())
+		}
+	}
 	time.Sleep(500 * time.Millisecond) // 给响应留出 flush 时间
 
 	var err error
@@ -513,6 +545,15 @@ func (s *SelfRestart) shouldExitAfterRelease() bool {
 	if awaitRestartReady(s.dataRoot, s.readyTimeout) {
 		s.logf("self-restart: new instance reported ready, exiting old process")
 		return true
+	}
+	if !s.swapped {
+		// 只重启：这次没有换过二进制，磁盘上也就没有 .old 可回滚。
+		// 这里绝不能走 rollbackBinary —— 它会报 "backup ... not available" 并把
+		// pieqi.exe.failed 清掉，日志把人引向"回滚坏了"，而真正的问题是
+		// "新进程没起来"。直接说清楚，然后交给调用方抢回端口继续服务。
+		s.logf("self-restart: new instance never reported ready; nothing to roll back (this was a restart-only, the binary was never replaced)",
+			"timeout", s.readyTimeout.String())
+		return false
 	}
 	// 新实例没起来：先把旧二进制换回来（此刻端口是空的，换文件不影响服务）。
 	if err := s.rollbackBinary(); err != nil {

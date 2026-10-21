@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -139,6 +140,75 @@ func TestRestartAndExitNoSwap_ReleasesPortWithoutSwapping(t *testing.T) {
 	case code := <-exited:
 		t.Fatalf("不该退出（应抢回端口继续服务），却 exit(%d)", code)
 	case <-time.After(2 * time.Second):
+	}
+}
+
+// TestShouldExitAfterRelease_NoSwapSkipsRollback 只重启失败时**不得**走回滚。
+//
+// 这条是 2026-10-21 实测问题的回归：只重启不会产生 .old，而统一的失败分支
+// 会调 rollbackBinary ⇒ 日志报 `backup pieqi.exe.old not available`
+// （把人引向"回滚坏了"），还会顺手清掉 pieqi.exe.failed。
+// 判据：只重启路径下 .failed 必须原样保留、.old 不得凭空出现。
+func TestShouldExitAfterRelease_NoSwapSkipsRollback(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	if err := os.WriteFile(execPath, []byte("current-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 上一次换版失败留下的证据：只重启不得碰它。
+	failed := execPath + ".failed"
+	if err := os.WriteFile(failed, []byte("crashed-build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs []string
+	sr := NewSelfRestart(execPath, dir, dir, func(msg string, kv ...any) {
+		logs = append(logs, msg)
+	})
+	sr.readyTimeout = 50 * time.Millisecond // 没有新实例，必然等到超时
+	sr.swapped = false                     // 只重启：没换过二进制
+
+	if sr.shouldExitAfterRelease() {
+		t.Fatal("没有新实例报到时不应判定为退出")
+	}
+	if got, err := os.ReadFile(failed); err != nil || string(got) != "crashed-build" {
+		t.Fatalf(".failed 被改动了（err=%v, content=%q）—— 只重启不该碰回滚产物", err, got)
+	}
+	if _, err := os.Stat(execPath + ".old"); err == nil {
+		t.Fatal(".old 凭空出现：只重启不应产生任何回滚备份")
+	}
+	found := ""
+	for _, l := range logs {
+		if strings.Contains(l, "nothing to roll back") {
+			found = l
+		}
+	}
+	if found == "" {
+		t.Fatalf("必须明说'没东西可回滚'，实际日志=%v", logs)
+	}
+}
+
+// TestShouldExitAfterRelease_SwapStillRollsBack 换版路径的回滚行为必须保持原样。
+func TestShouldExitAfterRelease_SwapStillRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "pieqi.exe")
+	// 模拟"新版本已装上去"：execPath 是新内容，.old 是旧内容。
+	if err := os.WriteFile(execPath, []byte("new-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(execPath+".old", []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sr := NewSelfRestart(execPath, dir, dir, nil)
+	sr.readyTimeout = 50 * time.Millisecond
+	sr.swapped = true
+
+	if sr.shouldExitAfterRelease() {
+		t.Fatal("没有新实例报到时不应判定为退出")
+	}
+	if got, _ := os.ReadFile(execPath); string(got) != "old-binary" {
+		t.Fatalf("换版失败后 execPath 应为旧版本，实际 %q", got)
 	}
 }
 
