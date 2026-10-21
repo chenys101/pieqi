@@ -135,26 +135,48 @@ test('L3 审批 → 先内联二次确认，再发请求', async ({ page }) => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────
-// ③ 更早的 Turn：点「更早的 N 轮」→ 被收起的 Turn 真的挂进 DOM
+// ③ 更早的 Turn：点「加载更早的 N 轮」→ **逐页向前**补挂被收起的 Turn
+//
+// 多轮会话的定案：点一次只往前补一页（MOUNT_WINDOW = 2 轮），
+// 不是一次把全部历史灌进 DOM。所以断言两条：
+//   正向 —— 每次点击挂载数**确实增加**、更早的轮真的进了 DOM；
+//   负向 —— 点击次数还没到顶时，**最开头那一轮仍不在 DOM 里**
+//           （旧实现 expandAll=true 会在第一次点击后就让 turn-group-1 出现）。
 // ─────────────────────────────────────────────────────────────────────────
-test('点「更早的 N 轮」→ 更早的 Turn 被挂载', async ({ page }) => {
+test('点「加载更早」→ 逐页向前补挂，不是一次全挂', async ({ page }) => {
   await page.goto(DETAIL, { waitUntil: 'commit' })
   await page.waitForLoadState('load')
   await expect(page.locator('[data-testid="session-timeline"]')).toBeVisible()
   await stabilize(page)
 
   const loadOlder = page.locator('[data-testid="load-older-turns"]')
-  await expect(loadOlder, '长会话（12 轮）应出现「更早的 N 轮」按钮；没有说明窗口化没生效').toBeVisible()
+  await expect(loadOlder, '长会话（12 轮）应出现「加载更早的 N 轮」按钮；没有说明窗口化没生效').toBeVisible()
 
   // 被收起时，第 1 轮**不该在 DOM 里**（v-if 而非显隐）—— 这正是省渲染代价的地方。
   await expect(page.locator('[data-testid="turn-group-1"]')).toHaveCount(0)
 
-  const before = await page.locator('[data-testid^="turn-group-"]').count()
-  await loadOlder.click()
-  await expect(page.locator('[data-testid="turn-group-1"]'), '点了之后第 1 轮仍未挂载').toHaveCount(1)
+  const groups = page.locator('[data-testid^="turn-group-"]')
+  const before = await groups.count()
 
-  const after = await page.locator('[data-testid^="turn-group-"]').count()
-  expect(after, `点「更早的 N 轮」后挂载的 Turn 数没有增加（${before} → ${after}）`).toBeGreaterThan(before)
+  await loadOlder.click()
+  await expect.poll(async () => groups.count(), { message: '点了一次，挂载的 Turn 数没有增加' }).toBeGreaterThan(
+    before,
+  )
+
+  // 12 轮 ⇒ 首屏 2 轮 + 一页 2 轮 = 4，离到顶还远：第 1 轮**仍然不该**在 DOM 里。
+  await expect(
+    page.locator('[data-testid="turn-group-1"]'),
+    '点一次就把最早一轮挂上了 —— 说明又变成"一次全挂"',
+  ).toHaveCount(0)
+  expect(await groups.count(), '一页挂载的轮数超出了步长').toBeLessThanOrEqual(6)
+
+  // 一直点到顶：最早一轮最终必须挂载，按钮消失
+  for (let i = 0; i < 10 && (await loadOlder.count()); i++) {
+    await loadOlder.click()
+    await page.waitForTimeout(50)
+  }
+  await expect(page.locator('[data-testid="turn-group-1"]'), '点到底了第 1 轮仍未挂载').toHaveCount(1)
+  await expect(loadOlder).toHaveCount(0)
 })
 
 // ─────────────────────────────────────────────────────────────────────────

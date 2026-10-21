@@ -3,14 +3,15 @@
 // 出口条件：
 //   需求 2（按需挂载更早的 Turn）：
 //     · 短会话（≤ 2 轮）**不截断** —— 省不下 DOM 却让用户白点一次，不值；
-//     · 长会话只挂最近两轮，更早的收进「更早的 N 轮」；
-//     · 点开后全部挂载，且**正在读的那一轮永远不被卸载**（否则轨道跳转
-//       找不到节点、滚动位置也会跳）。
+//     · 长会话只挂最近两轮，更早的收进「加载更早的 N 轮」；
+//     · **逐页向前**：每点一次只补 MOUNT_WINDOW 轮，连点到顶才全部挂载
+//       （多轮会话里一次全灌进 DOM = 把首屏省下的渲染代价在点击时原样还回去）；
+//     · 途中**正在读的那一轮永远不被卸载**（否则轨道跳转找不到节点、滚动位置也会跳）。
 //   需求 3（直达最新输出）：
 //     · 离开底部才出现，贴底时不出现（没得滚的会话同样不出现）；
 //     · 点击回到最新。
 import { afterEach, describe, expect, it } from 'vitest'
-import { createApp, h, nextTick } from 'vue'
+import { createApp, h, nextTick, ref } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import SessionTimeline from './SessionTimeline.vue'
 import { useSessionStore } from '@/stores/session'
@@ -21,10 +22,10 @@ import type { FeedbackBundleDto, TurnInfoDto } from '@/types/api'
 
 const TID = 'long'
 
-function ev(seq: number, type: AgentEvent['type'], text?: string): AgentEvent {
+function ev(seq: number, type: AgentEvent['type'], text?: string, taskId = TID): AgentEvent {
   return {
-    id: `${TID}:${seq}`,
-    taskId: TID,
+    id: `${taskId}:${seq}`,
+    taskId,
     type,
     timestamp: new Date(0).toISOString(),
     payload: text !== undefined ? { text } : {},
@@ -69,14 +70,45 @@ function setup(turns: number, status = 'completed', perTurn = 3) {
     checkpoints: [],
   } satisfies FeedbackBundleDto
 
+  // 第二个 10 轮会话：给"换会话必须复位阅读位置"那条用（同组件实例切 taskId）。
+  // ⚠️ 它只在 `setup(10)`（长会话）里造：`mountWindow` 判据是**整个会话**的分组数
+  // 与事件数，10 轮会污染"短会话不该截断"那条（3 轮用例突然变成 13 组）。
+  if (turns >= 10) seedOtherSession(session, bundleStore, taskStore, status)
+
   const host = document.createElement('div')
   document.body.appendChild(host)
+  const taskId = ref(TID)
   const app = createApp({
-    render: () => h(SessionTimeline, { taskId: TID, consumeForceScroll: () => false }),
+    render: () => h(SessionTimeline, { taskId: taskId.value, consumeForceScroll: () => false }),
   })
   app.use(pinia)
   app.mount(host)
-  return { host, app, session, taskStore }
+  return { host, app, session, taskStore, taskId }
+}
+
+/** 第二个 10 轮会话（'other'）：换会话复位的回归用例用 */
+function seedOtherSession(
+  session: ReturnType<typeof useSessionStore>,
+  bundleStore: ReturnType<typeof useFeedbackBundleStore>,
+  taskStore: ReturnType<typeof useTaskStore>,
+  status: string,
+) {
+  const events2: AgentEvent[] = []
+  const turnInfos2: TurnInfoDto[] = []
+  let seq2 = 1
+  for (let t = 1; t <= 10; t++) {
+    turnInfos2.push(info(t, seq2))
+    events2.push(ev(seq2++, 'user_message', `做${t}`, 'other'))
+    events2.push(ev(seq2++, 'text_delta', `结果${t}`, 'other'))
+  }
+  session.eventsBySession.other = events2
+  bundleStore.bundles.other = {
+    task_id: 'other',
+    turns: turnInfos2,
+    cumulative: { files: 0, additions: 0, deletions: 0 },
+    checkpoints: [],
+  } satisfies FeedbackBundleDto
+  taskStore.tasks.push({ id: 'other', status } as never)
 }
 
 /** 已挂载的 Turn 分组序号（从 DOM 反推，不读内部状态） */
@@ -107,7 +139,9 @@ describe('需求 2：只挂载最近两个 Turn', () => {
     const more = host.querySelector<HTMLButtonElement>('[data-testid="load-older-turns"]')!
     expect(more).not.toBeNull()
     // window 从 groups.length - 2 = 1 开始 ⇒ 只挂 turn 2/3，turn 1 收起
-    expect(more.textContent).toContain('更早的 1 轮')
+    expect(more.dataset.olderCount).toBe('1')
+    expect(more.textContent).toContain('加载更早的 1 轮')
+    expect(more.textContent).toContain('还有 1 轮更早')
     expect(mountedTurns(host)).toEqual([2, 3])
   })
 
@@ -120,19 +154,102 @@ describe('需求 2：只挂载最近两个 Turn', () => {
     // 10 轮就是 10 个分组，窗口保留最后 2 ⇒ 收起 8。
     // （注意别照搬"含前导区就 +1"的经验：前导组只在首条 user_message 之前
     //   有系统事件时才存在，是**数据形状**决定的，不是轮数的函数。）
-    expect(more.textContent).toContain('更早的 8 轮')
+    expect(more.dataset.olderCount).toBe('8')
+    expect(more.textContent).toContain('还有 8 轮更早')
     expect(mountedTurns(host)).toEqual([9, 10])
     // 被收起的轮**不在 DOM 里**（这才是省下渲染的地方；折叠只藏过程、不省 DOM）
     expect(host.querySelector('[data-testid="turn-group-1"]')).toBeNull()
   })
 
-  it('点「更早的 N 轮」→ 全部挂载，按钮消失', async () => {
+  // 需求 1（多轮会话）：点「加载更早」**只往前补一页**，不是一次全灌进 DOM。
+  //
+  // 出口条件：每点一次，挂载集合向前扩 MOUNT_WINDOW(2) 组；已挂载的保持挂载；
+  // 按钮文案与真实步长一致；最后一步只补剩下的，补完按钮消失。
+  // 反例（曾经的实现）：`expandAll = true` ⇒ 一次点击把 10 轮全挂上，
+  // 首屏省下的渲染代价在点击那一刻原样还回去。
+  it('点「加载更早」→ 每次只往前补 2 轮（不一次全挂）', async () => {
     const { host } = setup(10)
+    await nextTick()
+    expect(mountedTurns(host)).toEqual([9, 10])
+
+    const click = async () => {
+      host.querySelector<HTMLButtonElement>('[data-testid="load-older-turns"]')!.click()
+      await nextTick()
+    }
+
+    await click()
+    expect(mountedTurns(host)).toEqual([7, 8, 9, 10])
+    expect(host.querySelector<HTMLElement>('[data-testid="load-older-turns"]')!.dataset.olderCount).toBe('6')
+
+    await click()
+    expect(mountedTurns(host)).toEqual([5, 6, 7, 8, 9, 10])
+    // 已被卸载过的轮**不会**反过来被卸载：只增不减
+    expect(host.querySelector('[data-testid="turn-group-10"]')).not.toBeNull()
+  })
+
+  it('连点到最前：最后一步只补剩下的轮，补完按钮消失', async () => {
+    const { host } = setup(10)
+    await nextTick()
+
+    // 10 轮 ⇒ 首屏 2 轮，剩 8 轮，步长 2 ⇒ 点 4 次到顶
+    for (let n = 0; n < 4; n++) {
+      const btn = host.querySelector<HTMLButtonElement>('[data-testid="load-older-turns"]')!
+      expect(btn, `第 ${n + 1} 次点击前按钮应还在`).not.toBeNull()
+      btn.click()
+      await nextTick()
+    }
+    expect(host.querySelector('[data-testid="load-older-turns"]')).toBeNull()
+    expect(mountedTurns(host)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+  })
+
+  it('剩 3 轮时按钮只承诺补 3 轮（步长取剩余），点完到顶', async () => {
+    const { host } = setup(5)
+    await nextTick()
+    expect(mountedTurns(host)).toEqual([4, 5])
+
+    let btn = host.querySelector<HTMLButtonElement>('[data-testid="load-older-turns"]')!
+    expect(btn.textContent).toContain('加载更早的 2 轮')
+    expect(btn.textContent).toContain('还有 3 轮更早')
+    btn.click()
+    await nextTick()
+
+    btn = host.querySelector<HTMLButtonElement>('[data-testid="load-older-turns"]')!
+    expect(btn.textContent).toContain('加载更早的 1 轮')
+    expect(btn.textContent).toContain('还有 1 轮更早')
+    btn.click()
+    await nextTick()
+
+    expect(host.querySelector('[data-testid="load-older-turns"]')).toBeNull()
+    expect(mountedTurns(host)).toEqual([1, 2, 3, 4, 5])
+  })
+
+  // 回归：点「加载更早」**不能**同时 `pin(最后一轮)`。
+  // pinnedTurn 的语义是"用户跳到过的轮"，`isMounted` 对 `turn <= pinnedTurn` 一律放行；
+  // 点这一下时窗口里本来就含最后一轮 ⇒ pin 会把窗口整个废掉，一次点击全挂上。
+  // （这条曾被 showOlder 里的 `pin(railTurns.at(-1))` 触发，由本用例抓出。）
+  it('点「加载更早」不顺手把窗口整个放行', async () => {
+    const { host } = setup(12)
     await nextTick()
     host.querySelector<HTMLButtonElement>('[data-testid="load-older-turns"]')!.click()
     await nextTick()
-    expect(host.querySelector('[data-testid="load-older-turns"]')).toBeNull()
-    expect(mountedTurns(host)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    // 12 轮：首屏 [11,12] + 一页 2 轮 ⇒ [9,10,11,12]，绝不能是全部 12 轮
+    expect(mountedTurns(host)).toEqual([9, 10, 11, 12])
+  })
+
+  // 回归：`windowStart` 是"上一个任务读到哪一轮"的阅读位置，换会话必须复位。
+  // 不复位 ⇒ 换个任务进来看见它凭空多挂了 2 轮历史，按钮文案却写"还有 6 轮"。
+  it('换会话时复位「往前翻到哪」', async () => {
+    const { host, taskId } = setup(10)
+    await nextTick()
+    host.querySelector<HTMLButtonElement>('[data-testid="load-older-turns"]')!.click()
+    await nextTick()
+    expect(mountedTurns(host)).toEqual([7, 8, 9, 10])
+
+    // 同一组件实例切到另一个 10 轮会话（生产里就是侧栏点另一条任务）
+    taskId.value = 'other'
+    await nextTick()
+    expect(mountedTurns(host)).toEqual([9, 10])
+    expect(host.querySelector<HTMLElement>('[data-testid="load-older-turns"]')!.dataset.olderCount).toBe('8')
   })
 
   it('轮数少但事件量极大（>160）同样截断 —— 判据是"重不重"，不是只看轮数', async () => {
@@ -291,3 +408,5 @@ describe('白屏回归：滚动监听的作用域与重入', () => {
     expect(host.querySelector('[data-testid="jump-latest"]')).toBeNull()
   })
 })
+
+

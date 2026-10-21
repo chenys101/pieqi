@@ -40,7 +40,14 @@ export const useTaskStore = defineStore('task', {
       for (const t of this.tasks) c[t.status]++
       return c
     },
-    /** 项目分组（路径归一；组内按活跃时间倒序；含活跃任务的组排前） */
+    /**
+     * 项目分组（路径归一；组内按活跃时间倒序；含活跃任务的组排前）。
+     *
+     * ⚠️ 组与组之间**保持"首见顺序"**（即 `tasks` 里的位置）—— 这里刻意**不**
+     * 重排成"最近活跃的项目在前"。分组页上用户正看着某个项目，底下它因为
+     * 别处的一个任务被续问而整体跳走，是比"顺序不够新"更糟的体验；
+     * `upsertTask` 现在会把刚被续问的任务提到最前，那个项目自然也随之前移。
+     */
     groupsByProject(state): TaskGroup[] {
       const m = new Map<string, TaskGroup>()
       for (const t of state.tasks) {
@@ -106,11 +113,41 @@ export const useTaskStore = defineStore('task', {
       this.loaded = true
     },
 
-    /** WS task_created / task_updated：不存在则插入，存在则替换 */
+    /**
+     * WS task_created / task_updated：不存在则插入，存在则替换。
+     *
+     * **活跃任务（pending / running / waiting_input）一律提到最前**。
+     * 判据是「它还需要人参与」：续问之后用户就在这个会话里等输出，
+     * 侧栏树 / 任务页 / 选择器里它却排在更新时间更晚的已完结任务后面 ——
+     * 补一句「继续」然后要在列表里找自己，是不必要的负担。
+     *
+     * 状态进终态（completed 等）**不**前移：终态是"这件事结束了"，
+     * 不该把它顶到用户眼前抢位置；它仍留在原处，顺序由组内的 updatedAt 排序负责。
+     *
+     * ⚠️ 只是把数组这一项挪到头部，数组本身的顺序**不是**"最近更新"的真相源：
+     * 列表按 field 派生（groupsByProject / recentProjects 都按 updatedAt 排），
+     * 这里的前移只影响"没有其它排序口径、直接按首见顺序渲染"的地方
+     * （项目分组的组间顺序、`GET /api/tasks` 返回的项目顺序）。
+     */
     upsertTask(task: Task) {
       const i = this.tasks.findIndex((t) => t.id === task.id)
       if (i >= 0) this.tasks[i] = task
       else this.tasks.push(task)
+      this.promoteActive(task)
+    },
+
+    /**
+     * 把仍有用户参与的任务挪到 `tasks` 头部（已是头部则不动，避免无谓响应式触发）。
+     *
+     * 公开成 action 是因为 createTask 走的是同一份列表：新建的任务不在
+     * `upsertTask` 之外还有第二条入口，但确认时 `tasks[0]` 应是它 —— 见 task.spec。
+     */
+    promoteActive(task: Task) {
+      if (!['pending', 'running', 'waiting_input'].includes(task.status)) return
+      const i = this.tasks.findIndex((t) => t.id === task.id)
+      if (i <= 0) return
+      const [t] = this.tasks.splice(i, 1)
+      this.tasks.unshift(t)
     },
 
     removeTask(id: string) {

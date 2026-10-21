@@ -42,6 +42,60 @@ describe('TaskStore', () => {
     expect(s.tasks[0].status).toBe('completed')
   })
 
+  // 需求 2（补充会话后当前会话在最上）：有活跃任务再更新时，它要挪到列表最前。
+  // 判据是「还需要人参与」—— 用户刚补了一句「继续」，就要在这个会话里等输出，
+  // 不该把它留在几条已完结任务的后面。
+  it('upsertTask：活跃任务（running / waiting_input / pending）提到列表最前', () => {
+    const s = useTaskStore()
+    s.applySnapshot([
+      task({ id: 'a', status: 'completed', updatedAt: '2026-01-01T03:00:00Z' }),
+      task({ id: 'b', status: 'completed', updatedAt: '2026-01-01T02:00:00Z' }),
+      task({ id: 'c', status: 'completed', updatedAt: '2026-01-01T01:00:00Z' }),
+    ])
+    expect(s.tasks.map((t) => t.id)).toEqual(['a', 'b', 'c'])
+
+    // 续问推回来的 task_updated（active）→ c 提到最前
+    s.upsertTask(task({ id: 'c', status: 'running' }))
+    expect(s.tasks.map((t) => t.id)).toEqual(['c', 'a', 'b'])
+    // 已替换成新内容（不是只换位置）
+    expect(s.byId('c')!.status).toBe('running')
+
+    s.upsertTask(task({ id: 'b', status: 'waiting_input' }))
+    expect(s.tasks.map((t) => t.id)).toEqual(['b', 'c', 'a'])
+
+    s.upsertTask(task({ id: 'a', status: 'pending' }))
+    expect(s.tasks.map((t) => t.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  // 反例守卫：终态**不**前移。终态是"这件事结束了"，把它顶到用户眼前抢位置
+  // 会让"最近完成的一条"看起来像"还要我处理的一条"。
+  it('upsertTask：终态不前移（原位替换）', () => {
+    const s = useTaskStore()
+    s.applySnapshot([
+      task({ id: 'a', status: 'running' }),
+      task({ id: 'b', status: 'running' }),
+      task({ id: 'c', status: 'running' }),
+    ])
+    s.upsertTask(task({ id: 'c', status: 'completed' }))
+    expect(s.tasks.map((t) => t.id)).toEqual(['a', 'b', 'c'])
+    expect(s.byId('c')!.status).toBe('completed')
+  })
+
+  // 分组页看的是"项目组"，需求 2 在那一层的表现是：活跃任务所在项目随之前移。
+  it('groupsByProject：活跃任务前移后，它所属项目也排到最前', () => {
+    const s = useTaskStore()
+    s.applySnapshot([
+      task({ id: 'x1', projectPath: 'G:/ws/alpha', status: 'completed' }),
+      task({ id: 'x2', projectPath: 'G:/ws/beta', status: 'completed' }),
+      task({ id: 'x3', projectPath: 'G:/ws/gamma', status: 'completed' }),
+    ])
+    expect(s.groupsByProject.map((g) => g.key)).toEqual(['g:/ws/alpha', 'g:/ws/beta', 'g:/ws/gamma'])
+
+    // gamma 里补了一句 → 推到最前
+    s.upsertTask(task({ id: 'x3', projectPath: 'G:/ws/gamma', status: 'running' }))
+    expect(s.groupsByProject.map((g) => g.key)).toEqual(['g:/ws/gamma', 'g:/ws/alpha', 'g:/ws/beta'])
+  })
+
   it('applySnapshot：全量替换', () => {
     const s = useTaskStore()
     s.upsertTask(task())

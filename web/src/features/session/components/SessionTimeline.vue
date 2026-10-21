@@ -170,9 +170,18 @@ watch(
 )
 
 // ---- 需求 2：只挂载最近两个 Turn ----
+//
+// ⚠️ **声明顺序有硬约束**：`groups` / `railTurns` / `activeTurn` 这一组声明在本节
+// **之后**（它们和左侧轨道跟踪放在一起），而本节一开始的常量与 computed 就引用
+// `groups`。computed 的 getter 是惰性求值 —— 只要第一次求值发生在组件渲染时
+// （那时 setup 早已结束）就没问题；但任何在 setup 期间**立即**读它的东西
+// （模块级常量求值、`watch(…, { immediate: true })`、或渲染之外的直接调用）
+// 都会撞上 `Cannot access 'groups' before initialization`。
+// 历史教训：这里曾有一个"按轮数/事件数决定要不要截断"的 computed，它把这类
+// 初始化顺序错误吞成了"窗口不生效"，而不是抛 ReferenceError —— 查起来极慢。
 
 /**
- * 首次挂载保留几个 Turn，更早的收进「更早的 N 轮」。
+ * 一次挂载几个 Turn（首屏的窗口大小，也是每次「加载更早」往前补的步长）。
  *
  * **为什么是 2**：一个 Turn 的全部过程事件原样留在 DOM 里（折叠用 hidden，
  * 不是 v-if —— 见下方模板注释），所以"折叠过的长会话"其实一点也没省下渲染。
@@ -180,56 +189,59 @@ watch(
  * 2 而不是 1：留一轮上下文，"上一轮说了什么"是读最新结果时最常回看的东西，
  * 只挂 1 轮会让人每读一次结果都先点一次"展开"。
  *
+ * 同一个 2 也当步长用：挂载窗口与向前分页是**同一条取舍**
+ * （"一次塞进 DOM 的量"），拆成两个数就会出现"首屏省 2 轮、一点补 10 轮"的怪事。
+ *
  * 与"只加载最近 4 个任务"同一个判据：**默认渲染的应该是"多数时候要看的那部分"**，
  * 其余交给一个明确、便宜、可逆的展开动作。
+ *
+ * **不再有"短会话整体挂载"特例**：曾有一个 `mountWindow`（分组数 > 2 或事件数 > 160
+ * 才算窗口），它把"要不要截断"与"窗口多大"混成了一个变量。实测（见 2026-10 的
+ * 一轮回归）它会让 `mountFrom` 出现两种语义，`isMounted` 必须写 `mountFrom < 0`
+ * 的特殊分支，而那正是"一次点击全部挂载"bug 的温床。
+ * 现在截断判据只有一个、无条件：**起点 = 分组数 - MOUNT_WINDOW - 已加载页数**。
+ * 短会话（≤ 2 组）算出来天然是 0，效果与"不截断"完全一样，不需要特例。
  */
 const MOUNT_WINDOW = 2
 
 /**
- * 判断一个 Turn 是否"太大，值得先拦一道"。
+ * 用户的「加载更早」请求：累计要往前多挂几个分组。
  *
- * 这是"要不要做这件事"的核心取舍，不是可选优化：
- * 挂载窗口本身有代价 —— 向后翻历史时多一次点击，且需要重建滚动位置。
- * 代价能换来什么，取决于被省掉的那部分有多重：
- *   - 100 个 Turn 的长会话：省下的是 98 个 Turn 的 DOM（含全部工具卡片 /
- *     Markdown / diff），首次渲染从"几秒的白屏"变成"一次排版" —— 很值。
- *   - 3 个 Turn 的短会话：省下的 DOM 微乎其微，用户却凭空多一次点击 —— 不值。
- * 所以窗口**只对"确实是长会话"的长会话生效**：
- *   - **分组数 > MOUNT_WINDOW**：有东西可省（2 轮以内整体挂载，与改动前无差别）；
- *   - **已加载事件数超过门槛**：轮数少但每轮巨长（几十条工具调用）同样很重，
- *     不过"重不重"要看事件量，不能只看轮数。
- * 两条都不满足 → 返回 null = 不截断。
+ * 为什么不再是"展开全部"的布尔：多轮会话里用户点「加载更早的 N 轮」，
+ * 要的是**往前读一段**，不是"把全部历史一次性塞进 DOM"。
+ * 旧实现 `expandAll = true` ⇒ `mountFrom = 0` ⇒ 12 轮 2120 条事件全部挂载，
+ * 一次点击就把"只挂最近两轮"省下的渲染代价全还回去了 —— 正是本组件开头
+ * 那段"首次渲染代价"要避免的事，只不过从首屏挪到了点击时。
+ * 现在的语义是**逐页向前**：每点一次 `extra += MOUNT_WINDOW`，
+ * 已挂载的那批始终留在 DOM 里（只增不减），用户连点几次也能到最前。
  *
- * ⚠️ 判据是 `groups.length` 而**不是轮数**：前导区（turn 0，首条 user_message
- * 之前的系统事件）也占一个分组。所以"N 轮 ⇒ N 组"只在事件流以 user_message
- * 开头时成立；带前导的会话会多一组。两者都属正常，窗口按分组数走即可。
+ * 换会话要复位 —— 上一任务读到哪一轮不是这一任务的意图（见下方 watch(taskId)）。
  */
-const HEAVY_EVENT_THRESHOLD = 160
-const mountWindow = computed<number | null>(() =>
-  railTurns.value.length > MOUNT_WINDOW || events.value.length > HEAVY_EVENT_THRESHOLD
-    ? MOUNT_WINDOW
-    : null,
-)
+const extraOlder = ref(0)
 
 /**
- * 是否展示全部 Turn。
+ * 首个挂载的 Turn 序号（`groups` 的索引；0 = 一直挂到最前）。
  *
- * 三态而不是布尔，且**默认态必须由 `mountWindow` 决定**（null → 展开）：
- * 一个"用户没表过态、数据也不长"的会话不该被拦，所以它不能是 `ref(false)`。
- * 这里存的是**用户的显式选择**（null = 还没选过）。
- * 换会话要复位 —— 上一任务的"展开全部"不是这一任务的意图。
+ * ⚠️ **这里的 min/max 方向曾经写反过**（`Math.min(尾部起点, 用户请求)`）：
+ * 用户没点过时请求 = 0 ⇒ 取 min 得 0 ⇒ `olderCount` 恒为 0 ⇒「加载更早」
+ * 按钮**永远不出现**，同时 `isMounted` 又把所有轮都挂上。看上去像"窗口化没生效"，
+ * 实际是两个 bug 恰好互相抵消了一半效果。正确语义是：
+ *   默认起点 = **尾部窗口起点**（`length - MOUNT_WINDOW`）；
+ *   用户的请求只能让它**往更早**走 ⇒ `Math.max(尾部起点 - extra, 0)`。
+ * 越界天然收敛到 0，不需要另一个"已全部展开"的标志位。
+ *
+ * `mountWindow === null` 也**不用**单独写"全挂"分支：那种会话的分组数
+ * ≤ MOUNT_WINDOW，尾部起点本来就是 0，公式自然给出 0。
  */
-const expandAll = ref<boolean | null>(null)
-const allMounted = computed(() => (mountWindow.value === null ? true : expandAll.value === true))
-
-/** 首个挂载的 Turn 序号（`groups` 的索引；-1 = 全部挂载） */
-const mountFrom = computed(() => {
-  if (allMounted.value) return -1
-  return Math.max(0, groups.value.length - MOUNT_WINDOW)
-})
+const mountFrom = computed(() =>
+  Math.max(0, groups.value.length - MOUNT_WINDOW - extraOlder.value),
+)
 
 /** 被收起的更早轮数（= 挂载窗口之前的 Turn 组数，含前导区 turn 0） */
-const olderCount = computed(() => (mountFrom.value > 0 ? mountFrom.value : 0))
+const olderCount = computed(() => mountFrom.value)
+
+/** 本步「加载更早」实际会挂几轮（步长与剩余取小）—— 按钮文案与行为共用它 */
+const olderStep = computed(() => Math.min(MOUNT_WINDOW, olderCount.value))
 
 /**
  * 需要"补挂"的 Turn：**用户主动跳到过的那一轮**。
@@ -247,24 +259,40 @@ function pin(turn: number) {
   if (turn > pinnedTurn.value) pinnedTurn.value = turn
 }
 
-/** 是否挂载第 i 个分组（i 是 groups 的下标） */
+/**
+ * 是否挂载第 i 个分组（i 是 groups 的下标）。
+ *
+ * ⚠️ 这是**模板里唯一的窗口判据入口**：`olderCount` / `olderStep` 只决定按钮文案，
+ * 挂载与否一律走这里。曾经只有"前导区(turn 0)不参与轨道 pin"这一条例外，
+ * 现在没有例外：窗口之前的轮**一律不挂**（点「加载更早」逐步前移窗口才是唯一入口）。
+ */
 function isMounted(i: number): boolean {
-  if (mountFrom.value < 0) return true
+  // 前导区（turn 0）：有没有系统事件属于**数据形状**，不是阅读位置 ——
+  // 永远挂载。它不含任何工具卡片/正文，代价可忽略；而"首条提示词之前发生过
+  // 什么"（创建、切 worktree、首条 status）是理解这轮起点的上下文。
+  // 旧实现用它做例外，正是因为一旦让 pinnedTurn 放行整段窗口，前导区就一起被
+  // 放掉；现在窗口与 pin 分开判，这个例外可以只按"是不是 turn 0"来写。
+  if (groups.value[i]?.turn === 0) return true
   if (i >= mountFrom.value) return true
-  return groups.value[i]?.turn !== 0 && groups.value[i].turn <= pinnedTurn.value
+  return groups.value[i] ? groups.value[i].turn <= pinnedTurn.value : false
 }
 
 /**
- * 展开更早的 N 轮。
+ * 展开更早的一页（MOUNT_WINDOW 组）。
  *
- * 先把当前可见的那一轮钉住：**在列表上方插入内容会把内容推下去**，
- * 浏览器为了保持视觉位置会自动补偿 scrollTop —— 但只在内容确实位于
- * 视口上方时成立。钉住当前轮是这一动作对"我正在读第 7 轮"的承诺：
- * 展开历史不该让我丢掉正在读的位置。
+ * ⚠️ **这里不调用 `pin()`**。`pinnedTurn` 的语义是"用户**跳到过**的那一轮"，
+ * `isMounted` 对 `turn <= pinnedTurn` 的轮一律放行；而点这一下时窗口里本来
+ * 就含最后一轮，把 pinnedTurn 设成最后一轮 ⇒ 窗口对**所有**轮失效，
+ * 表现是"点一次全部挂上" —— 正是这次要修的 bug 换条路复发（测试抓到了）。
+ * 在列表上方插入内容时，可视位置由浏览器自己的 scrollTop 补偿维持；
+ * 真要钉，也只能钉**窗口起点**那一轮，不是最后一轮。
+ *
+ * 用"累计要多挂几组"而不是"设一个绝对起点"：起点由 `groups.length` 派生，
+ * 而新的一轮随时可能让它变大（会话还在跑）。记成绝对下标的话，新 Turn 一到
+ * 窗口就缩回去、用户刚加载出来的历史又被卸载；累计增量没有这个问题。
  */
 function showOlder() {
-  pin(railTurns.value.at(-1)?.turn ?? 0)
-  expandAll.value = true
+  extraOlder.value += MOUNT_WINDOW
 }
 
 /** 当前正在读的 Turn 变深时钉住它（翻历史过程中窗口会跟着往下滑时不至于卸载）。
@@ -277,10 +305,16 @@ const { el, onScroll, scrollToEnd } = useTimelineScroll(
   props.consumeForceScroll,
 )
 
-// 切换会话：跳到最新
+// 切换会话：跳到最新，并复位"往前翻到哪"
+// （extraOlder / pinnedTurn 都是**上一个任务**的阅读位置，带过来会让新任务
+//   凭空多挂一段历史、且按钮文案与新窗口对不上）
 watch(
   () => props.taskId,
-  () => scrollToEnd(),
+  () => {
+    extraOlder.value = 0
+    pinnedTurn.value = 0
+    scrollToEnd()
+  },
   { immediate: true },
 )
 
@@ -464,16 +498,19 @@ function jumpToLatest() {
         <ContentColumn>
           <div class="flex flex-col gap-2.5">
           <!-- 需求 2：默认只挂载最近 MOUNT_WINDOW 个 Turn，更早的收进
-               「更早的 N 轮」按需补挂。被收起的轮**真的不在 DOM 里**（v-if），
-               这才是省下首次渲染代价的地方（折叠只藏过程，不省 DOM）。 -->
+               「更早的 N 轮」**逐页向前**补挂。被收起的轮**真的不在 DOM 里**（v-if），
+               这才是省下首次渲染代价的地方（折叠只藏过程，不省 DOM）。
+               文案要如实说明这一步挂多少：「全部加载」会在长会话里
+               一次把几千条事件塞进 DOM，与上面的窗口化自相矛盾。 -->
           <button
             v-if="olderCount"
             type="button"
             class="shrink-0 rounded-lg border border-border/60 bg-surface-subtle py-2 text-xs font-medium text-accent transition-colors hover:bg-surface-muted"
             data-testid="load-older-turns"
+            :data-older-count="olderCount"
             @click="showOlder"
           >
-            更早的 {{ olderCount }} 轮（点击展开）
+            加载更早的 {{ olderStep }} 轮（还有 {{ olderCount }} 轮更早）
           </button>
 
           <!-- 分组渲染（有 user_message 事件即分组） -->
