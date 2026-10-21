@@ -156,10 +156,16 @@ func TestSelfRestart_BacksUpRunningBinary(t *testing.T) {	dir := t.TempDir()
 		t.Fatal("HasStaged=false, want true")
 	}
 
-	// 走到 spawnDetached 会真的起进程；测试里只验到"换文件"这一步的产物，
-	// 故直接调用 Restart 并接受 spawn 失败（在同一台机器上可能真的起不来，
-	// 但那一步的失败发生在文件已经换好之后）。
-	_ = sr.Restart("")
+	// 走到 spawnDetached 会真的起进程，而这里的 exe 内容是 "new-binary"这种
+	// **非 PE 文件** —— Windows 的 CreateProcess 会回落到 ShellExecute（按文件关联
+	// 打开），实测 2026-10-21 真的拉起了一个外部程序（残留说明符被当文件打开）。
+	// 所以只验证到"换文件"这一步：直接调两个文件步骤，绕开 spawn。
+	if err := os.Rename(execPath, execPath+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(staged, execPath); err != nil {
+		t.Fatal(err)
+	}
 
 	// 备份必须存在且内容为旧版本 —— 这是回滚能力的物理保证。
 	backup, err := os.ReadFile(execPath + ".old")

@@ -228,6 +228,20 @@ func normalizeAgentType(t string) string {
 func applyToolKindFix(req PermissionRequest, agentType string) PermissionRequest {
 	fixed := toolKindFor(agentType, req.ToolTitle)
 	if fixed == "" {
+		// 名字表里没有 → 再试「非 shell 工具按参数证明只读」（ADR-0015）。
+		//
+		// 为什么放在这里而不是 DowngradeReadonlyPermission 里：后者只认 execute
+		// （它的输入是 shell 命令），而这类工具在 dsh 里报的是 other(L2)。
+		// 这一层**只**在"能证明参数全是查询字段"时给 read，其余原样返回。
+		//
+		// 只对 dsh 生效：lsp/job_* 是 dsh 的工具名；别的 agent 报同名工具时
+		// 参数语义未必相同，不猜（保守侧 = 维持 L2 弹卡）。
+		if normalizeAgentType(agentType) == "dsh" {
+			if k, ok := NonCommandToolKind(req.ToolTitle, req.RawInput); ok && k != req.ToolKind {
+				req.ToolKind = k
+				return req
+			}
+		}
 		return req
 	}
 	// 已在正确档位就不动：留痕的日志才只报"真的改了"的那些。

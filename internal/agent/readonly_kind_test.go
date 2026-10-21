@@ -66,11 +66,12 @@ func TestDowngradeReadonlyToolKind(t *testing.T) {
 		{"反引号替换", "execute", "echo `whoami`", "execute"},
 		{"换行多命令", "execute", "ls\nrm -rf build", "execute"},
 
+		// ---- 测试/构建类（ADR-0015 起分级，见 shell_runner_test.go 的完整矩阵）----
+		// 只读地跑：`npm run typecheck` / 无内联脚本的 node 仍是保守侧
+		{"node 无内联代码", "execute", "node script.js", "execute"},
 		// ---- 不应降级：白名单之外的命令（可能有构建/网络副作用）----
-		{"npm", "execute", "npm run typecheck", "execute"},
 		{"go test", "execute", "go test ./internal/...", "execute"},
 		{"curl", "execute", "curl -s http://127.0.0.1:3000/ready", "execute"},
-		{"node", "execute", "node -e 'console.log(1)'", "execute"},
 		{"cp 有写副作用", "execute", "cp a.txt b.txt", "execute"},
 		{"mkdir", "execute", "mkdir -p /tmp/x", "execute"},
 		{"rm", "execute", "rm -rf build/", "execute"},
@@ -157,12 +158,23 @@ func TestDowngradeReadonlyPermission(t *testing.T) {
 		t.Errorf("ToolKind = %q, want edit", got.ToolKind)
 	}
 
-	// RawInput 不可解析 / 无 command 字段 → 不降级（不能凭缺失就当作无害）
-	for _, raw := range []string{``, `not json`, `{"cmd":"ls"}`, `{"command":123}`} {
+	// RawInput 不可解析 / 没有任何可执行文本 → 不降级（不能凭缺失就当作无害）。
+	// `{"cmd":"ls"}` 自 ADR-0015 起**会**降级（cmd 是另一种 shell 工具入参形态），
+	// 所以它不在这批里 —— 见下面单独的两条断言。
+	for _, raw := range []string{``, `not json`, `{"file_path":"a.go"}`, `{"command":123}`} {
 		got = DowngradeReadonlyPermission(mk("execute", raw))
 		if got.ToolKind != "execute" {
 			t.Errorf("rawInput %q: ToolKind = %q, want execute", raw, got.ToolKind)
 		}
+	}
+
+	// 其它承载可执行文本的字段名（ADR-0015）：cmd 与 command 同等对待。
+	if got = DowngradeReadonlyPermission(mk("execute", `{"cmd":"ls"}`)); got.ToolKind != "read" {
+		t.Errorf(`{"cmd":"ls"}: ToolKind = %q, want read`, got.ToolKind)
+	}
+	// 有文本但认不出是只读 ⇒ 维持 execute。
+	if got = DowngradeReadonlyPermission(mk("execute", `{"cmd":"rm -rf x"}`)); got.ToolKind != "execute" {
+		t.Errorf(`{"cmd":"rm -rf x"}: ToolKind = %q, want execute`, got.ToolKind)
 	}
 
 	// 原始请求不被就地修改（返回副本，避免调用方共享的 DTO 被悄悄改写）

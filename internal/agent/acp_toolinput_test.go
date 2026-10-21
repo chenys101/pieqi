@@ -126,7 +126,12 @@ func TestPermission_BackfillDrivesReadonlyDowngrade(t *testing.T) {
 		// 非 git：只读白名单
 		{"白名单只读命令降级为 read", "ls -la", "read"},
 		{"白名单命令带写标志则不降级", "find . -delete", "execute"},
-		{"白名单外的命令维持 execute", "npm run build", "execute"},
+		// ADR-0015：package script 按名字分档（test → read，build → edit），
+		// 认不出的脚本名与外部命令仍维持 execute。
+		{"测试脚本降级为 read", "npm run test", "read"},
+		{"构建脚本归 edit(L1)", "npm run build", "edit"},
+		{"认不出的 npm 脚本维持 execute", "npm run something-custom", "execute"},
+		{"外部命令维持 execute", "go build ./...", "execute"},
 		{"复合命令含写操作则不降级", "ls -la; rm -rf build/", "execute"},
 		// git 分档（本步新增）
 		{"git 只读子命令降级为 read", "git status --porcelain", "read"},

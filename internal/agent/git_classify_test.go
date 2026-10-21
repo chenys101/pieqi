@@ -24,7 +24,11 @@ func TestClassifyShellCommand_TakesWorstSegment(t *testing.T) {
 		{"ls -la", "read"},                         // 非 git 只读
 		{"ls -la; git status", "read"},             // 混合都只读
 		{"ls -la; git add -A", "edit"},
-		{"npm test", "execute"}, // 非 git 且非白名单
+		// ADR-0015：测试类 package script 归 read，构建类归 edit（见 shell_runner.go）。
+		{"npm test", "read"},
+		{"npm run build", "edit"},
+		{"npm run some-unknown-script", "execute"}, // 不认识的脚本名：保守
+		{"go build ./...", "execute"},              // 非 git 且非白名单
 		{"cat /etc/hosts; git status", "read"},
 	}
 	for _, tc := range cases {

@@ -147,6 +147,32 @@ func (s *SelfRestart) HasStaged() bool {
 //
 // stagedPath 为空时使用约定落点 stagingPath()；两者都不存在则报错，绝不静默。
 func (s *SelfRestart) Restart(stagedPath string) error {
+	return s.restartWith(stagedPath, true)
+}
+
+// ReloadJustRestart **只重启、不换二进制**（2026-10-21，用户要求）。
+//
+// 与 Restart 共用除"换文件"之外的全部编排：落交接单（摘要取**当前** exe）→
+// 拉起新实例 → 旧实例让出端口 → 等新实例报到 → 退出或回滚重绑。
+//
+// 为什么不是"先 Restart 再删掉换版那一步"的临时拼法：交接受 StagedSHA256 校验，
+// 只重启时那个摘要必须等于**当前** exe 的内容 —— 这样新进程起来后照样能通过
+// 摘要比对，从而把在途会话接回来（否则会被当成"重启未成功"，一批会话判 failed）。
+// 见 stagedOrSelfSHA256：staged 不存在时它本来就退回当前 exe。
+//
+// 冻结纪律：这里**不得**出现任何 os.Rename/copyFile —— 想换版请走 Restart。
+// 有测试（TestReloadJustRestart_DoesNotTouchExecutable）钉住这一条。
+func (s *SelfRestart) ReloadJustRestart() error {
+	return s.restartWith("", false)
+}
+
+// restartWith 是 Restart / ReloadJustRestart 的共同实现。
+//
+// swap=false 时：不读 staged、不改任何文件，只做"落单 → 拉起 → 让位"。
+func (s *SelfRestart) restartWith(stagedPath string, swap bool) error {
+	if !swap {
+		return s.spawnAndHandoff()
+	}
 	if stagedPath == "" {
 		stagedPath = s.stagingPath()
 	}
@@ -200,6 +226,18 @@ func (s *SelfRestart) Restart(stagedPath string) error {
 		s.cleanupStagedIfConsumed(stagedPath)
 	}
 
+	return s.spawnAndHandoff()
+}
+
+// spawnAndHandoff 是"换版"与"只重启"共用的后两步：落交接单 → 拉起新进程。
+//
+// 把这两步抽出来是因为它们的正确性论证与"换不换文件"完全无关，而复制一份
+// 就意味着两个地方要各自维护那条"单子必须先于 spawn"的时序纪律（见下面 ③ 的
+// 事故说明）—— 那正是最容易在改动中丢掉的东西。
+func (s *SelfRestart) spawnAndHandoff() error {
+	if s.execPath == "" {
+		return fmt.Errorf("self-restart: empty executable path")
+	}
 	// ③ 落交接单。**必须在 spawn 之前** —— 这是本文件最反直觉、也最容易写错的一步。
 	//
 	// 曾经的顺序是「spawn → waitForListener → writeHandoff」，它有一个必然发生
@@ -378,10 +416,30 @@ func IsListenerClosed(err error) bool {
 //   - main 侧只需把 RunListener 返回当"正常让位"处理，不必自己编排状态机
 //   - 本函数的行为可被单元测试完整覆盖（否则决策逻辑要跑起整个进程才能触达）
 func (s *SelfRestart) RestartAndExit(addr string, exit func(int)) {
+	s.restartAndExit(addr, exit, true)
+}
+
+// RestartAndExitNoSwap 是 RestartAndExit 的"只重启"版本（2026-10-21）。
+//
+// 与 RestartAndExit 的唯一差别：不换二进制。让位端口、等新实例报到、失败回滚
+// 这条最危险、出过两次事故的时序**完全共用一份代码**（restartAndExit）——
+// 否则"只重启"会变成一条没人维护的影子路径。
+func (s *SelfRestart) RestartAndExitNoSwap(addr string, exit func(int)) {
+	s.restartAndExit(addr, exit, false)
+}
+
+// restartAndExit RestartAndExit / RestartAndExitNoSwap 的共同实现。
+func (s *SelfRestart) restartAndExit(addr string, exit func(int), swap bool) {
 	time.Sleep(500 * time.Millisecond) // 给响应留出 flush 时间
 
-	if err := s.Restart(""); err != nil {
-		s.logf("self-restart failed, staying on current binary", "err", err.Error())
+	var err error
+	if swap {
+		err = s.Restart("")
+	} else {
+		err = s.ReloadJustRestart()
+	}
+	if err != nil {
+		s.logf("self-restart failed, staying on current process", "swap", swap, "err", err.Error())
 		return
 	}
 

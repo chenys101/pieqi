@@ -70,6 +70,9 @@ type Server struct {
 	hasStaged   hasStagedFunc
 	selfRestart restartFunc
 	stagingHint stagingHintFunc
+	// restartOnly 是"只重启、不换二进制"的编排（wired by SetRestartOnly）。
+	// 与 selfRestart 分开接线：它承诺不碰盘上的 exe（见 admin.go 的说明）。
+	restartOnly restartOnlyFunc
 
 	// 可被任务选择的 agent 目录（新任务页选择器）。wired by SetAgents。
 	// 未接线（nil）时降级为「只有 claude 可选」——这正是本字段上线前的实际行为，
@@ -316,12 +319,16 @@ func (s *Server) Register(r gin.IRouter) {
 			corsMiddleware(corsAll, corsOrigins), s.auth.BindOpGateMiddleware())
 		adminGrp.GET("/restart", s.getRestartStatus)
 		adminGrp.POST("/restart", s.postRestart)
+		// 只重启（不换二进制）：给"服务需要重启但手上没有新产物"这条路径一个
+		// 服务端落点，见 postRestartOnly 的说明。
+		adminGrp.POST("/restart-only", s.postRestartOnly)
 		// 补标题：为所有"有 prompt 但没标题"的任务重跑一次标题生成（见 backfillTitles）。
 		// 与 restart 同档（仅内网）：它每条任务起一次 agent 进程，是资源消耗型操作。
 		adminGrp.POST("/backfill-titles", s.backfillTitles)
 	} else {
 		api.GET("/admin/restart", s.getRestartStatus)
 		api.POST("/admin/restart", s.postRestart)
+		api.POST("/admin/restart-only", s.postRestartOnly)
 		api.POST("/admin/backfill-titles", s.backfillTitles)
 	}
 }

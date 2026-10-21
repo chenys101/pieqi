@@ -115,6 +115,53 @@ func initiatorFromRequest(c *gin.Context) string {
 	return strings.TrimSpace(c.GetHeader("X-Pieqi-Task-Id"))
 }
 
+// restartOnlyFunc 由 main 注入：「只重启，不换二进制」的编排。
+//
+// 与 restartFunc 分开接线（而不是加一个 bool 参数）的理由：两者的**最小权限**
+// 不同 —— restartFunc 会替换可执行文件，restartOnlyFunc 承诺不碰盘上的 exe。
+// 分开接线让 main 侧可以显式地把"不换版"这件事实现成一条不会走到 swap 的路径，
+// 而不是靠一个容易传错的布尔。
+//
+// initiator 语义与 restartFunc 相同。
+type restartOnlyFunc func(initiator string)
+
+// SetRestartOnly 接线"仅重启"能力（main 侧注入，见 cmd/pieqi/reload_restart.go）。
+//
+// 未接线时 POST /api/admin/restart-only 返回 501，与其它 nil-safe 注入一致。
+func (s *Server) SetRestartOnly(fn restartOnlyFunc) {
+	s.restartOnly = fn
+}
+
+// postRestartOnly 只重启服务，**不替换二进制**。
+//
+// POST /api/admin/restart-only
+//
+// 为什么需要它（用户 2026-10-21 明确要求）：
+// "有新编译的产物就走替换并启动流程，没有的话就只是重新启动。"
+// 旧的 POST /api/admin/restart 在无暂存产物时回 409 —— 那条语义对"上线新版本"
+// 是对的（防误触），但它把"服务卡住了，重启一下"也一并拒绝了，于是那种时候
+// 只能去点 build/restart.bat，而那个脚本自己也没有"只重启"分支。
+//
+// 这个端点就是那条分支的服务端落点：它**永远**不看 staged、永远不碰 exe。
+// 想"有产物就换、没有就只重启"的调用方按 GET /api/admin/restart 的
+// `staged` 字段二选一即可（build/restart.bat 与面板按钮都这么做）。
+//
+// 安全：与 restart 同档（仅内网，见 router.go 的 adminGrp）—— 它虽然不换二进制，
+// 但仍能让服务在任意时刻中断在途任务，属于特权操作。
+func (s *Server) postRestartOnly(c *gin.Context) {
+	if s.restartOnly == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "restart-only not available"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"ok":         true,
+		"restarting": true,
+		"mode":       "restart-only",
+		"swapped":    false,
+	})
+	go s.restartOnly(initiatorFromRequest(c))
+}
+
 // exeSuffixForAPI 让错误提示里的文件名与平台一致（Windows 是 .exe）。
 func exeSuffixForAPI() string {
 	if os.PathSeparator == '\\' {

@@ -89,9 +89,16 @@ var gitRiskKinds = map[string]string{
 	"revert":      "edit",
 	"am":          "edit",
 
+	// ---- L0 只读：fetch 只更新 .git 里的远端跟踪引用（`origin/main`），
+	// 不改工作区、不改本地分支、不写共享远端。2026-10-21 起从 execute 降为 read
+	// （ADR-0015）：真实会话里"先 fetch 再比 HEAD...@{u}"是推送前的标准动作，
+	// 归 L2 等于每推一次要人工点两次，而其中一次是纯读取。
+	// ⚠️ 仍会更新 .git（可被 worktree 清理脚本视为"未预期写入"），
+	// 若将来出现"fetch 触发了钩子"的问题，把这一行改回 execute 即可。
+	"fetch": "read",
+
 	// ---- L2 影响远端 / 全局：必须人工 ----
 	"push":          "execute",
-	"fetch":         "execute",
 	"pull":          "execute",
 	"clone":         "execute",
 	"init":          "execute",

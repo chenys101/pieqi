@@ -519,6 +519,16 @@ func main() {
 			// 才声明，闭包里读它虽然能编译，但依赖声明顺序会让这段很脆。
 			selfRestart.RestartAndExit(fmt.Sprintf(":%d", cfg.Server.Port), os.Exit)
 		}, selfRestart.StagingHint)
+		// 只重启（不换二进制）：见 internal/api/admin.go 的 postRestartOnly。
+		//
+		// 它与上面的换版路径共用同一套"让出端口 → 等新实例报到 → 退出/回滚"编排，
+		// 区别只在 core.SelfRestart 里少掉"改名备份 + 装上 staged"那一步。
+		// 交接单的摘要取自**当前** exe（SelfRestart.stagedOrSelfSHA256 的兜底），
+		// 因此新进程校验通过 ⇒ 在途会话照常被接回，行为与换版重启一致。
+		apiServer.SetRestartOnly(func(initiator string) {
+			selfRestart.SetInitiator(initiator)
+			selfRestart.RestartAndExitNoSwap(fmt.Sprintf(":%d", cfg.Server.Port), os.Exit)
+		})
 		// 机器人记录增删后重建运行中的实例（删除一台必须真的让它停止收发）。
 		// 钩子是 func()（HTTP 处理流程不宜携带渠道内部错误）；重建失败只记日志，
 		// 不阻塞 bots 接口返回 —— 记录已经落盘，下次重建会再试。

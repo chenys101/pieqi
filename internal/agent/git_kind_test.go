@@ -154,10 +154,12 @@ func TestGitKindFor_BreakingMustNotBeAllowed(t *testing.T) {
 
 // TestGitKindFor_RemoteAffectingIsL2 影响远端的操作维持 L2（弹卡，但不算破坏性）。
 func TestGitKindFor_RemoteAffectingIsL2(t *testing.T) {
+	// 注意 `git fetch` 自 ADR-0015 起归 L0(read)：它只更新 .git 里的远端跟踪引用，
+	// 不改工作区、不改本地分支、不写共享远端。这里刻意**不**把它列进来 ——
+	// 若哪天有人把它改回 execute，TestGitKindFor_FetchIsRead 会失败（双向钉住）。
 	cases := []string{
 		"git push",
 		"git push origin main",
-		"git fetch origin",
 		"git pull",
 		"git pull --rebase",
 		"git clone https://x/y.git",
