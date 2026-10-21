@@ -1326,7 +1326,15 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		}
 		// 状态变更里也常带 RawInput/Title（部分 agent 只在 update 里给，如 dsh 的
 		// pwsh 调用）；同样记下。空值不覆盖已有记录，见 rememberToolInput。
-		a.rememberToolInput(toolCallID, updTitle, rawIn)
+		//
+		// ★ 与 mergeToolUse 配对（2026-10-21 修）：这里返回 true 表示"这份入参/工具名
+		// 是**新**的、而这条调用的事件已经落过盘"。此时必须以 IsNew 形态再通告一次
+		// onToolCall，由事件层 mergeToolUseIntoTask 就地补全那条 tool_use。
+		//
+		// 为什么不能只在本地记录：此前这条链路**只喂审批**（toolInputs 备忘录），
+		// 事件流拿到的仍是开工时那条空壳 —— 于是同一份命令"审批卡上有、时间线上没有"。
+		// 这正是"审批有命令但时间线看不出改了什么"以及"任务文件变更为空"的共同上游。
+		freshInput := a.rememberToolInputFresh(toolCallID, updTitle, rawIn)
 		a.cbMu.RLock()
 		fn := a.onToolCall
 		a.cbMu.RUnlock()
@@ -1348,6 +1356,12 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 			info.RawInput = rawIn
 			info.RawOutput = rawAnyToJSON(u.ToolCallUpdate.RawOutput)
 			fn(info)
+			// 补全通告：IsNew=true 让事件层走"合并进已有那条"，而不是又追加一条。
+			// 只在真有新入参/新工具名时发，避免每次状态变更都多推一份 task_updated。
+			if freshInput && (info.Status == "" || info.Status == "pending" || info.Status == "in_progress") {
+				info.IsNew = true
+				fn(info)
+			}
 		}
 	case u.UsageUpdate != nil:
 		// 上下文用量（UNSTABLE 扩展；dsh-acp 每次 assistant message 后推一条）。
@@ -1406,12 +1420,23 @@ type toolCallMemo struct {
 //
 // 写入后**广播**唤醒可能正在等这个 id 的审批方（见 toolInputWait）。
 func (a *ACPAgent) rememberToolInput(toolCallID, title string, raw json.RawMessage) {
+	a.rememberToolInputFresh(toolCallID, title, raw)
+}
+
+// rememberToolInputFresh 同 rememberToolInput，并报告"这次带来的入参/工具名是不是新的"。
+//
+// 调用方（SessionUpdate 的 ToolCallUpdate 分支）需要它来决定是否向事件层发一次补全通告：
+// 备忘录里本来就有同一份入参时没必要再推一遍 task_updated。
+//
+// 判据是"与已记下的**不同**"，而不是"非空"：agent 会在多个 update 里重复带同一份入参，
+// 每次都算新的话，一次工具调用能触发好几次补全推送。
+func (a *ACPAgent) rememberToolInputFresh(toolCallID, title string, raw json.RawMessage) bool {
 	if toolCallID == "" {
-		return
+		return false
 	}
 	title = strings.TrimSpace(title)
 	if title == "" && len(raw) == 0 {
-		return // 两样都空：没什么可记的，也别无谓地唤醒等待方
+		return false // 两样都空：没什么可记的，也别无谓地唤醒等待方
 	}
 	a.toolInputsMu.Lock()
 	defer a.toolInputsMu.Unlock()
@@ -1419,15 +1444,22 @@ func (a *ACPAgent) rememberToolInput(toolCallID, title string, raw json.RawMessa
 		a.toolInputs = make(map[string]toolCallMemo)
 	}
 	memo := a.toolInputs[toolCallID]
-	if title != "" {
+	fresh := false
+	if title != "" && memo.Title != title {
 		memo.Title = title
+		fresh = true
 	}
-	if len(raw) > 0 {
+	if len(raw) > 0 && string(memo.RawInput) != string(raw) {
 		memo.RawInput = raw
+		fresh = true
+	}
+	if !fresh {
+		return false // 老样子：不覆盖、不广播，也不唤醒等待方
 	}
 	a.toolInputs[toolCallID] = memo
 	a.initToolInputCond()
 	a.toolInputCond.Broadcast()
+	return true
 }
 
 // toolInput 查一个 toolCallId 记录的工具名与入参。第二个返回值为 false 表示"没记过"——

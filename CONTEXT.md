@@ -14,6 +14,7 @@ _Avoid_: 输出面板, 日志
 
 **TaskEvent**:
 Agent Task 执行流中的一条持久化事件（text / user / thinking / tool_use / tool_result / status / rewind / model_switch）。Feedback 的事实源。
+**只补不删**：工具名/入参后到时合并进已有的那条 `tool_use`（不追加空壳），因此同一次工具调用的事件永远只有一条。
 _Avoid_: 日志条目
 
 **Usage（上下文用量）**:
@@ -30,6 +31,7 @@ _Avoid_: step, iteration, agent turn
 
 **FileChange**:
 从 TaskEvent 派生的一条单文件变更（create / modify / delete），记录路径与关联的 tool_use。语义是「Agent 声明改了什么」；用户 Task 开始前的未提交修改不属于 FileChange。
+两个必知前提：(1) 工具名表是**按 agent 分开**的——claude 用首字母大写的 `Edit/Write`，dsh 用全小写的 `edit/write`，查表前不做大小写归一；(2) 一份声明若**每一次调用都失败**（tool_result 的 `is_error`）就不算变更，因为它没写过盘。
 _Avoid_: git change
 
 **Baseline**:
@@ -105,6 +107,45 @@ _Avoid_: 消息轰炸
 **File Rewind**:
 把单个文件恢复到指定 Turn 的状态（Rewind 的文件粒度）。
 _Avoid_: git restore
+
+### 需求闭环（P4）—— 见 ADR-0014
+
+> 现有 Feedback 体系（Turn / Check / Outcome / Evidence）解的是**单个 Task 内**的闭环。
+> 本节补的是**跨多个 Task** 的层级：一条需求拆成若干开发/测试任务，测试发现问题回流成修复任务。
+
+**Requirement（需求）**:
+用户意图的持久化载体，是多个 Agent Task 的容器与验收基准。自身持有一条
+`Events []TaskEvent` 事件流（同构 `Task.Events`），因此**仍受 ADR-0001 约束**——
+它本身也是事实源，而非派生视图。
+_Avoid_: 工单, ticket, 项目（Project 另有所指）
+
+**Task Split（任务拆分）**:
+把 Requirement 的意图展开为一组有依赖关系的子任务（dev / test 两类）。
+产物是**待用户确认的结构化提案**，不是立即执行；且必须经 Go 侧校验
+（每条 AC 至少被一个 test 节点覆盖、DAG 无环），校验不过即拒绝。
+_Avoid_: 计划, plan（与 Plan Mode 冲突）
+
+**Task Graph（任务图）**:
+拆分产出的子任务依赖关系（DAG）。Task 是节点，依赖是边。
+这是"什么可以并行、什么必须等待"的唯一真相。
+_Avoid_: 列表, 队列
+
+**Test Plan（测试计划）**:
+针对 Requirement 的验收标准展开的测试任务集合。与 Check 的区别：
+Check 是**一次验证命令的结果**，Test Plan 是**要验证什么的集合**。
+_Avoid_: 测试用例（范围过窄，且暗示手写）
+
+**Acceptance Item / AC（验收标准）**:
+Requirement 拆分产出的可验收条目（AC-1、AC-2…）。是 Issue 与 Test Plan 的
+共同锚点：test 节点声明 `CoversAC`，Issue 记录 `CoversAC` ——
+由此可回答"这条需求哪条验收标准还没被满足"。
+_Avoid_: 需求点, 功能点
+
+**Issue（问题单）**:
+一条**结构化的、可回流**的缺陷记录。与 `TaskOutcome.Issues`（字符串数组）是升级关系：
+Issue 有 ID / severity / 证据链（SourceTaskID + SourceTurn + CheckID）/ CoversAC / FixTaskID，
+且**可以反向生成修复 Task**（回流）。回流按 severity 分流：blocker 自动，其余人工确认。
+_Avoid_: bug（口语）, 报错
 
 ### 探索（P3）
 

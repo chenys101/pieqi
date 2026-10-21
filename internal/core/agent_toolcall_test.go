@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -206,4 +207,93 @@ func TestWireToolCall_UnwireIdempotent(t *testing.T) {
 	_, _, _, _, _, h := setupToolCallWire(t)
 	h.Unwire()
 	h.Unwire()
+}
+
+// TestWireToolCall_BackfillInputMergesInsteadOfDuplicate 回归（2026-10-21）：
+// 「审批卡上只有工具名、没有命令」的那条链路。
+//
+// dsh 的 tool_call 先来一条**没有任何入参**的（标题也可能缺），入参随后才在
+// tool_call_update 里到。旧实现无条件追加，于是同一调用落了两条 tool_use：
+// 第二条入参为空。用户在时间线/审批卡上看到的就是"有个 pwsh，但看不见命令"。
+//
+// 判据：补全后**仍然只有一条 tool_use**，且它的 Input 含有迟到的命令。
+// 这条一旦回退，反馈面板的文件变更也会跟着空（派生层按 Input 取路径）。
+func TestWireToolCall_BackfillInputMergesInsteadOfDuplicate(t *testing.T) {
+	fa, _, _, store, taskID, h := setupToolCallWire(t)
+	defer h.Unwire()
+
+	// ① 开工：只有 id 与工具名，入参为空（dsh 常见形态）。
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "tc-late", Title: "pwsh", Status: "in_progress", IsNew: true,
+	})
+	// ② 入参后到，同样以 IsNew 形态通告（ACP 适配器在 freshInput 时补发）。
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "tc-late", Title: "pwsh", Status: "in_progress", IsNew: true,
+		RawInput: json.RawMessage(`{"command":"git status --short","description":"查看改动"}`),
+	})
+
+	tt, _ := store.Get(taskID)
+	var toolUses []model.TaskEvent
+	for _, ev := range tt.Events {
+		if ev.Type == model.EventToolUse {
+			toolUses = append(toolUses, ev)
+		}
+	}
+	if len(toolUses) != 1 {
+		t.Fatalf("tool_use 条数=%d，want 1（迟到的入参必须合并进已有那条）: %+v", len(toolUses), toolUses)
+	}
+	if !strings.Contains(string(toolUses[0].Input), "git status --short") {
+		t.Fatalf("tool_use.Input 未补全: %s", string(toolUses[0].Input))
+	}
+	if toolUses[0].ToolName != "pwsh" {
+		t.Errorf("ToolName=%q，want pwsh", toolUses[0].ToolName)
+	}
+}
+
+// TestWireToolCall_StatusUpdateCarriesLateInput 状态更新（IsNew=false）带的入参同样要落进事件。
+//
+// 这一条与上一条是同一缺陷的两条到达路径：ACP 适配器把 update 里的入参既喂审批备忘录、
+// 也以 IsNew 形态补发一次；这里验证事件层在只收到 IsNew=false 时**也不会追加空壳**，
+// 且拿到入参后不丢命令。
+func TestWireToolCall_StatusUpdateCarriesLateInput(t *testing.T) {
+	fa, _, _, store, taskID, h := setupToolCallWire(t)
+	defer h.Unwire()
+
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "tc-st", Title: "edit", Status: "in_progress", IsNew: true,
+	})
+	// 完成态，带 RawInput（某些 agent 只在 completed 里给入参）
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "tc-st", Title: "edit", Status: "completed", IsNew: false,
+		RawInput:  json.RawMessage(`{"file_path":"C:\\repo\\a.go"}`),
+		RawOutput: json.RawMessage(`{"ok":true}`),
+	})
+
+	tt, _ := store.Get(taskID)
+	useCount, resultCount := 0, 0
+	for _, ev := range tt.Events {
+		switch ev.Type {
+		case model.EventToolUse:
+			useCount++
+		case model.EventToolResult:
+			resultCount++
+		}
+	}
+	if useCount != 1 || resultCount != 1 {
+		t.Fatalf("tool_use=%d tool_result=%d，want 1/1: %+v", useCount, resultCount, tt.Events)
+	}
+	// 工具事件必须带上入参：派生层（FileChange / Check）全按 Input 取路径与命令，
+	// 丢了入参就等于"这一轮没改过文件"。事件只补不删，所以这里看的是合并后的那条。
+	var useArgs string
+	for _, ev := range tt.Events {
+		if ev.Type == model.EventToolUse {
+			useArgs = string(ev.Input)
+		}
+	}
+	if !strings.Contains(useArgs, "a.go") {
+		t.Fatalf("tool_use.Input=%q，want 含 a.go（状态更新里的入参必须落到事件上）", useArgs)
+	}
+	// 注：这里**不断言** DeriveFileChanges 能派生出这条路径 —— 派生层对 `edit`
+	// 目前直接返回空（见 feedback.go 的 toolFileOperations），是另一条缺陷，
+	// 由 feedback_test.go 的用例单独守。
 }

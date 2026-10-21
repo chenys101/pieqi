@@ -84,12 +84,49 @@ type FeedbackBundle struct {
 
 // 纳入 FileChange 派生的工具 → 操作类型映射。
 // Bash 等无法可靠解析文件语义的工具不纳入（已知限制，p0-design.md §4.1）。
+//
+// ★ 这张表是**按 agent 分开**的，不能合并成一张大小写通吃的表（2026-10-21 修）。
+//
+// 旧实现只有一张大写表的三个条目（Edit/Write/NotebookEdit），而 dsh 的工具名是
+// **全小写**的 `edit` / `write` —— 查表必落空 ⇒ dsh 任务每一轮派生出的 FileChange
+// 都是空的：反馈面板「本轮变化」恒为 0 文件 +0/-0、`changes` 永远 `[]`，
+// 快照/Rewind 也因此不认这些文件（checkpoint.go 与本表共用）。
+// 实测会话 414b848a：78 次 edit + 2 次 write 全部被跳过，而行内那几个文件的
+// 单文件 diff 接口却返回得好好的 —— 坏的是"认出这是哪一轮改了哪个文件"这一步。
+//
+// 为什么不直接做小写归一：`Write`（整文件覆盖）与 `write`（dsh 的整文件写入）语义相同，
+// 但 qoder 的工具名是 "Read <path>" 这种"名字+参数"形态，归一后再取首词会把
+// `Edit D:\x.vue` 误认成一条 edit —— 顺序与边界都要每家单独定，所以分开写。
 var toolFileOperations = map[string]string{
-	"Edit":        "modify",
-	"Write":       "write", // create/modify 需结合文件历史判定（assembleOperation）
+	// claude（sdk-bridge 原样透传的 SDK 工具名，首字母大写）
+	"Edit":         "modify",
+	"Write":        "write", // create/modify 需结合文件历史判定（assembleOperation）
 	"NotebookEdit": "modify",
-	"Delete":      "delete",
-	"Rename":      "rename",
+	"Delete":       "delete",
+	"Rename":       "rename",
+	// dsh（ACP，工具名全小写，实测 15 个里与文件相关的就这三个写入口）
+	"edit":  "modify",
+	"write": "write",
+}
+
+// dshFileToolNames 是 dsh 的**文件写入口**集合（全小写）。
+//
+// 它的用途只有一个：`write` 在 dsh 里是"整文件覆盖"，与 claude 的 `Write` 同义；
+// 而 dsh 的 `edit` 是**局部替换**（`old_string` → `new_string`）。
+// 两者在"一行没变"时都会失败，所以**不会**产生一份"空改动"的 FileChange ——
+// 见 operationOfTool 的说明。这里显式写出这个名字集合，是为了让
+// "哪个 agent 的名字走哪条判据"在一处可见，而不是散在字面量比较里。
+var dshFileToolNames = map[string]bool{"edit": true, "write": true}
+
+// operationOfTool 按工具名求 FileChange 的操作类型；空串 = 不纳入派生。
+//
+// 判据是**工具名本身**（不是 agent 类型）：事件里没有 agent 字段，而这几个名字
+// 在各自 agent 下语义稳定，不会互相撞上（claude 的大写名与 dsh 的小写名不重叠）。
+func operationOfTool(toolName string) string {
+	if op, ok := toolFileOperations[toolName]; ok {
+		return op
+	}
+	return ""
 }
 
 // toolInputPath 从 tool_use 入参中提取目标文件路径。
@@ -176,8 +213,8 @@ func DeriveFileChanges(events []model.TaskEvent, worktree string, seenBefore fun
 			turn++
 			continue
 		case model.EventToolUse:
-			op, ok := toolFileOperations[ev.ToolName]
-			if !ok {
+			op := operationOfTool(ev.ToolName)
+			if op == "" {
 				continue
 			}
 			path := toolInputPath(ev.Input)
@@ -231,9 +268,25 @@ func DeriveFileChanges(events []model.TaskEvent, worktree string, seenBefore fun
 		}
 		sort.Strings(paths)
 		for _, p := range paths {
-			fc := m[p].fc
+			a := m[p]
+			// 整份「声明了改动、但**每一次**都失败」的不算变更（判据见 effectiveFileOp）。
+			// 放在最后判定：失败也会改写 Status（同 Turn 内后到的失败覆盖先到的成功），
+			// 若在建条目时就跳过，那条失败就再也盖不到前面那条上了。
+			//
+			// 只有"全部失败"才丢；有一次成功就留 —— 那一次真的写过盘。
+			allFailed := len(a.fc.ToolUseIDs) > 0
+			for _, id := range a.fc.ToolUseIDs {
+				if effectiveFileOp(events, a.fc.Operation, id) != "" {
+					allFailed = false
+					break
+				}
+			}
+			if allFailed {
+				continue
+			}
+			fc := a.fc
 			if fc.Operation == "write" {
-				fc.Operation = classifyWrite(p, m[p].firstSeen, events, seenBefore)
+				fc.Operation = classifyWrite(p, a.firstSeen, events, seenBefore)
 			}
 			out = append(out, fc)
 		}
@@ -269,7 +322,7 @@ func classifyWrite(path string, firstSeenIdx int, events []model.TaskEvent, seen
 	// 之前（更早的事件）未出现过该路径 → create
 	for i := 0; i < firstSeenIdx && i < len(events); i++ {
 		if events[i].Type == model.EventToolUse {
-			if op, ok := toolFileOperations[events[i].ToolName]; ok && (op == "modify" || op == "write" || op == "delete") {
+			if op := operationOfTool(events[i].ToolName); op != "" && (op == "modify" || op == "write" || op == "delete") {
 				if toolInputPath(events[i].Input) == path {
 					return "modify"
 				}
@@ -277,6 +330,37 @@ func classifyWrite(path string, firstSeenIdx int, events []model.TaskEvent, seen
 		}
 	}
 	return "create"
+}
+
+// effectiveFileOp 把一次"工具声明"折算成 FileChange 的操作类型；空串 = 不产生变更。
+//
+// 这一步存在的原因只有一条：**声明 ≠ 真的改了**。
+//
+// dsh 的 `edit` 是 `old_string` → `new_string` 的局部替换，一模一样的入参重放会失败；
+// 而 `write` 是整文件覆盖，内容相同就是空操作。这些工具**失败时同样会落一条
+// tool_use**（审批放行后才执行，执行失败并不撤销已记录的调用），于是事件流里躺着
+// 一批"改了 a.go"，而 a.go 从未变过。把它们算进本轮变更，反馈面板就会给出
+// "改了 1 个文件 +0 -0" —— 数字没有错，但它对应用户点开看不到任何 diff。
+//
+// 判据（保守侧，靠得住的那部分）：该 tool_use 的 tool_result 明确是**失败**
+// （is_error）⇒ 不算变更。没有 result / 结果为成功 ⇒ 照算（只要 succeeded 才算，
+// 会把"进行中"的调用整段漏掉，那比多算一条更糟）。
+//
+// 注意字段名不参与判据：这里只看 **is_error**，不看 result 文本 ——
+// 各 agent 的错误文案（"Error:"、"cannot edit file"…）不可枚举，读文案就是在猜。
+func effectiveFileOp(events []model.TaskEvent, op string, toolUseID string) string {
+	if op == "" || toolUseID == "" {
+		return op
+	}
+	for _, ev := range events {
+		if ev.Type == model.EventToolResult && ev.ToolUseID == toolUseID {
+			if ev.IsError {
+				return ""
+			}
+			return op
+		}
+	}
+	return op
 }
 
 // BuildTurnInfos 组装 Feedback 总览的 Turn 列表（含每 Turn 变更与统计）。

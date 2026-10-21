@@ -168,6 +168,68 @@ func TestSummarizeDedupesRepeatedPath(t *testing.T) {
 	}
 }
 
+// TestDeriveFileChanges_DshLowercaseToolNames 回归（2026-10-21）：
+// dsh 的工具名是**全小写** `edit` / `write`，而派生表原先只有大写的 claude 名字。
+//
+// 后果实测（会话 414b848a）：78 次 edit + 2 次 write 全部被跳过 ⇒ 每一轮都是
+// 0 文件 +0/-0、changes 恒为 []，而单文件 diff 接口却是好的。
+// 判据：小写名必须与对应的大写名派生出**同样的** FileChange。
+func TestDeriveFileChanges_DshLowercaseToolNames(t *testing.T) {
+	events := []model.TaskEvent{
+		{Type: model.EventUser, Text: "改个文件", Seq: 1},
+		toolUseEvent("edit", "d1", "web/src/App.vue"),
+		{Type: model.EventToolResult, ToolUseID: "d1", ToolName: "edit"},
+		toolUseEvent("write", "d2", "web/src/new.ts"),
+		{Type: model.EventToolResult, ToolUseID: "d2", ToolName: "write"},
+	}
+	changes := DeriveFileChanges(events, "", nil)
+	if len(changes) != 2 {
+		t.Fatalf("dsh 的小写 edit/write 必须被派生, got %d: %+v", len(changes), changes)
+	}
+	byPath := map[string]FileChange{}
+	for _, c := range changes {
+		byPath[c.Path] = c
+	}
+	if c, ok := byPath["web/src/App.vue"]; !ok || c.Operation != "modify" || c.Status != "success" {
+		t.Fatalf("edit → %+v, want modify/success", c)
+	}
+	// write 走 create/modify 判定：没见过的路径 + seenBefore=nil → create
+	if c, ok := byPath["web/src/new.ts"]; !ok || c.Operation != "create" {
+		t.Fatalf("write → %+v, want create", c)
+	}
+}
+
+// TestDeriveFileChanges_AllFailedEditDropped 全部失败的 edit 不算变更。
+//
+// dsh 的 `edit` 是 old→new 局部替换：old_string 找不到就失败，**什么都没写**。
+// 这类调用同样会落一条 tool_use（审批放行后才执行，失败不撤销记录），
+// 把它们算进本轮变更，面板就会说"改了 1 个文件 +0 -0"而点开没有任何 diff。
+func TestDeriveFileChanges_AllFailedEditDropped(t *testing.T) {
+	events := []model.TaskEvent{
+		{Type: model.EventUser, Text: "改", Seq: 1},
+		toolUseEvent("edit", "f1", "src/App.vue"),
+		{Type: model.EventToolResult, ToolUseID: "f1", ToolName: "edit", IsError: true},
+		toolUseEvent("edit", "f2", "src/Ok.vue"),
+		{Type: model.EventToolResult, ToolUseID: "f2", ToolName: "edit"},
+	}
+	changes := DeriveFileChanges(events, "", nil)
+	if len(changes) != 1 || changes[0].Path != "src/Ok.vue" {
+		t.Fatalf("失败的 edit 不该算变更, got %+v", changes)
+	}
+
+	// 有一次成功就留：同 Turn 同路径"先失败后成功"是真实存在的一轮重试。
+	events2 := []model.TaskEvent{
+		{Type: model.EventUser, Text: "改", Seq: 1},
+		toolUseEvent("edit", "g1", "src/App.vue"),
+		{Type: model.EventToolResult, ToolUseID: "g1", ToolName: "edit", IsError: true},
+		toolUseEvent("edit", "g2", "src/App.vue"),
+		{Type: model.EventToolResult, ToolUseID: "g2", ToolName: "edit"},
+	}
+	if got := DeriveFileChanges(events2, "", nil); len(got) != 1 || got[0].Path != "src/App.vue" {
+		t.Fatalf("先失败后成功应保留一条, got %+v", got)
+	}
+}
+
 func TestUniqueByPath(t *testing.T) {
 	in := []FileChange{
 		{Path: "a.vue", Turn: 1, Additions: 1},
