@@ -190,3 +190,65 @@ func TestUsableStagingDir_RejectsSymlink(t *testing.T) {
 		t.Fatalf("usableStagingDir(symlink)=%q, want \"\"（链接必须被拒绝）", got)
 	}
 }
+
+// --- 2026-10-21 事故：发版流程"已固化"，自重启却静默失效 ---
+//
+// 现场：:3000 上的实例以 cwd=~/.pieqi/bin 运行、PIEQI_CONFIG 落空，cfgPath 因此是
+// 相对值 "config.yaml"。交付目录算成 <cwd>/build（= ~/.pieqi/bin/build，不存在），
+// 自重启被关闭 —— `POST /api/admin/restart` 409 no staged binary、
+// `POST /api/admin/restart-only` 501，而 build/pieqi.new.exe 好端端躺在仓库里。
+// 处置当时只能把产物手动搬进 ~/.pieqi/bin 才让接口复活。所以这里钉两条不变式：
+//   ① 相对 configPath 必须先钉成绝对路径，再参与交付目录推导；
+//   ② 万一谁又把链路接回相对路径，resolveStagingDir 必须报"为空"而不是悄悄指到 cwd/build。
+
+// TestAbsolutizeConfigPath 相对路径钉成绝对，绝对路径原样（含 Windows 反斜杠形态）。
+func TestAbsolutizeConfigPath(t *testing.T) {
+	cwd := func() (string, error) { return `D:\code\go\pieqi`, nil }
+
+	got := absolutizeConfigPath("config.yaml", cwd)
+	if want := filepath.Join(`D:\code\go\pieqi`, "config.yaml"); got != want {
+		t.Fatalf("absolutizeConfigPath(相对)=%q, want %q", got, want)
+	}
+	abs := filepath.Join(`D:\code\go\pieqi`, "config.yaml")
+	if got := absolutizeConfigPath(abs, cwd); got != abs {
+		t.Fatalf("绝对路径不应被改写：%q", got)
+	}
+	if got := absolutizeConfigPath("", cwd); got != "" {
+		t.Fatalf("空路径应原样返回，got %q", got)
+	}
+	// cwd 取不到：原样返回，由 resolveStagingDir 的告警兜底（绝不猜一个目录）。
+	failing := func() (string, error) { return "", os.ErrPermission }
+	if got := absolutizeConfigPath("config.yaml", failing); got != "config.yaml" {
+		t.Fatalf("cwd 失败时应原样返回，got %q", got)
+	}
+}
+
+// TestResolveStagingDir_RelativePathDoesNotLandInCwd 反向断言：修复前的相对路径
+// 场景不能"看起来能用" —— 它推导出的 <cwd>/build 不存在时必须返回空串，
+// 而不是把交付目录指向运行位下面的假目录（那正是让 staged 恒 false 的那条路）。
+func TestResolveStagingDir_RelativePathDoesNotLandInCwd(t *testing.T) {
+	// 造一个"运行位"目录（充当 cwd），里面**没有** build/。
+	runDir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(runDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+
+	if got := resolveStagingDir("config.yaml"); got != "" {
+		t.Fatalf("resolveStagingDir(相对, cwd 无 build/)=%q, want \"\"", got)
+	}
+
+	// 钉成绝对路径后（修复的落点），指向的是真正带 build/ 的仓库，而不是 cwd。
+	_, configPath, wantStage := stagingFixture(t)
+	got := resolveStagingDir(absolutizeConfigPath(configPath, os.Getwd))
+	if got != wantStage {
+		t.Fatalf("resolveStagingDir(绝对)=%q, want %q", got, wantStage)
+	}
+	if got == filepath.Join(runDir, "build") {
+		t.Fatalf("交付目录仍落在运行位 cwd 下：%q", got)
+	}
+}

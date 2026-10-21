@@ -54,6 +54,19 @@ func main() {
 	if p := os.Getenv("PIEQI_CONFIG"); p != "" {
 		cfgPath = p
 	}
+	// 相对路径一律先钉成绝对路径（2026-10-21 事故：自重启被静默关闭）。
+	//
+	// 这不是"顺手规范化"：resolveStagingDir 用 dir(configPath) 推导交付目录，而
+	// **相对的 configPath 让这个推导恒错** —— 服务是以 cwd=~/.pieqi/bin 启动的
+	// （PIEQI_CONFIG 落空时默认值就是 "config.yaml"），于是交付目录算成
+	// ~/.pieqi/bin/build（不存在）⇒ staged 恒 false ⇒ POST /api/admin/restart 409。
+	// 连"有产物就换、没产物就只重启"的 restart-only 也未接线（501）。
+	// 失败方式完全静默：只有一条启动期 ERROR，之后 agent 每次投递都白投。
+	//
+	// 钉成绝对路径对重启没有副作用：SelfRestart 派生的新进程继承环境，得到的是
+	// 同一个路径；而且它让"下次没人记得设 PIEQI_CONFIG"这条路径也随之正确
+	// —— 新进程的 cwd 就是 exe 所在目录，默认的 config.yaml 会解析到运行位自己那份。
+	cfgPath = absolutizeConfigPath(cfgPath, func() (string, error) { return os.Getwd() })
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
@@ -719,6 +732,25 @@ func listenWithRetry(addr string, timeout time.Duration, logger *zap.Logger) (ne
 			delay *= 2
 		}
 	}
+}
+
+// absolutizeConfigPath 把相对路径的 config.yaml 钉成绝对路径；已是绝对路径时原样返回。
+//
+// 存在理由见 main 里调用点的注释：**相对路径会让交付目录推导恒错**（dir("config.yaml")
+// = "." ⇒ 交付目录 = ./build ⇒ 实际是 cwd/build ⇒ 在"运行副本在仓库外"的正确部署下
+// 那个目录压根不存在），而这正是"发版流程已固化、自重启却突然 409"的根因。
+//
+// cwdFn 可注入，纯函数便于单测；cwd 取不到（进程被删除、权限异常）时退回原值并
+// 不报错 —— 那种情况下 resolveStagingDir 本来也会返回空串，由它自己的告警兜底。
+func absolutizeConfigPath(path string, cwdFn func() (string, error)) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	wd, err := cwdFn()
+	if err != nil || wd == "" {
+		return path
+	}
+	return filepath.Join(wd, path)
 }
 
 // resolveStagingDir 解析自重启的**交付目录**（agent 往哪投递 pieqi.new[.exe]）。
