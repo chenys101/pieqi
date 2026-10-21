@@ -92,6 +92,16 @@ type TaskRunner struct {
 
 	mu      sync.Mutex
 	running map[string]*liveProc // taskID -> 活跃进程
+
+	// titleInflight 正在生成标题的任务（见 title.go）。每次进程启动一个实例即可：
+	// 它的全部意义是"同一任务别并发生成两次"，不是一个需要跨重启保持的事实。
+	titleInflight *TitleInFlight
+
+	// 标题兜底后端的命令行（空 = "claude" + 默认参数，见 title.go）。
+	// 只给测试用来把一个必然失败的/可控的进程塞进去 —— 否则"失败必须留痕"这条
+	// 回归**依赖本机 claude 装没装、凭据有没有效**，在 CI 上会时红时绿。
+	titleClaudeBinary string
+	titleClaudeArgs   []string
 }
 
 type liveProc struct {
@@ -170,6 +180,7 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 		running:          make(map[string]*liveProc),
 		wires:            make(map[string]*acpWires),
 		turns:            make(map[string]*turnQueue),
+		titleInflight:    NewTitleInFlight(),
 	}
 	// hook 触发时置 waiting_input（hook 是 waiting_input 的权威信号，见 plan A.6）
 	if hooks != nil {
@@ -630,12 +641,8 @@ func (tr *TaskRunner) LiveTaskIDs() []string {
 	return ids
 }
 
-// GenerateTitleAsync 异步生成任务的一句话标题（大模型摘要）。
-// 不阻塞任务创建流程：spawn 一个轻量 claude -p 摘要 prompt，成功后写入 task.Title 并推送。
-// 失败静默保留前端启发式标题（titleText 智能截断），不影响主流程。
-func (tr *TaskRunner) GenerateTitleAsync(taskID string) {
-	go tr.generateTitle(taskID)
-}
+// 标题生成（GenerateTitleAsync / generateTitle / cleanTitle / BackfillTitles）
+// 见 title.go —— 它有自己的失败语义（绝不静默）与后端优先级（任务自己的 agent 优先）。
 
 // ResumeInterrupted 自动接续一批「被计划内自重启打断」的会话。
 //
@@ -748,70 +755,6 @@ func initiatorResumePrompt(version string) string {
 		"要确认状态，请改用 GET /api/admin/restart 查询（它不会触发重启）。" +
 		"然后继续完成你原本的任务；若你的任务正是验证这次重启，" +
 		"现在重启已经成功，请据实收尾并总结。"
-}
-
-func (tr *TaskRunner) generateTitle(taskID string) {
-	t, ok := tr.store.Get(taskID)
-	if !ok || t == nil || strings.TrimSpace(t.Prompt) == "" {
-		return
-	}
-	dir := t.WorktreePath
-	if dir == "" {
-		dir = t.ProjectPath
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	prompt := "用不超过 20 个字的一句话概括下面这个开发任务，直接输出标题本身，不要引号、不要前缀、不要解释：\n\n" + t.Prompt
-	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--output-format", "text")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		tr.logger.Debug("generate title", zap.String("task", taskID), zap.Error(err))
-		return
-	}
-	title := cleanTitle(string(out))
-	if title == "" {
-		return
-	}
-	updated, err := tr.store.Update(taskID, func(t *model.Task) bool {
-		if t.Title == title {
-			return false
-		}
-		t.Title = title
-		return true
-	})
-	if err != nil {
-		tr.logger.Debug("store title", zap.String("task", taskID), zap.Error(err))
-		return
-	}
-	if updated != nil {
-		tr.bus.Publish(Event{Type: "task_updated", TaskID: taskID, Task: updated})
-	}
-}
-
-// cleanTitle 清洗模型生成的标题：去引号/前后缀/多余空白，压成单行并限长。
-func cleanTitle(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.Trim(s, `"'"“”‘’`)
-	s = strings.TrimPrefix(s, "标题：")
-	s = strings.TrimPrefix(s, "标题:")
-	s = strings.TrimSpace(s)
-	// 折叠空白为单行
-	s = strings.Join(strings.Fields(s), " ")
-	// 拒绝"模型没理解任务"的元回复（如"你的消息里没有附带要概括的开发任务内容"）。
-	// 这类文本不是标题，命中则返回空串，调用方保留前端启发式标题，避免污染任务列表。
-	for _, phrase := range []string{"没有附带", "请把", "请提供", "请说明", "请告诉我", "无法概括", "发给我", "undefined"} {
-		if strings.Contains(s, phrase) {
-			return ""
-		}
-	}
-	runes := []rune(s)
-	const max = 30
-	if len(runes) > max {
-		s = string(runes[:max]) + "…"
-	}
-	return strings.TrimSpace(s)
 }
 
 // run 跑一轮 claude 子进程。resumePrompt 非空表示是续问（用补充文本而非 task.Prompt）。

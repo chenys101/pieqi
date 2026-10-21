@@ -229,6 +229,27 @@ func (s *Server) taskCapabilities(c *gin.Context) {
 	})
 }
 
+// backfillTitles POST /api/admin/backfill-titles：为所有"有 prompt 但没标题"的任务补标题。
+//
+// **仅内网**（与自重启同档，走 BindOpGateMiddleware）：每条任务都会起一次 agent 进程，
+// 外网可触发等于把本机资源变成外部可驱动的东西。
+//
+// 存在的理由：标题只在创建那一刻生成，失败就再也补不回来。2026-10-16 起有 4 天
+// "标题全线为空"，而当时唯一的补救是重新建一次任务。这个入口让用户修好凭据后
+// 一条命令就能把那批补上。
+//
+// body（可选）：{"force": true} —— 连本进程内已尝试过的任务一起重扫
+// （默认跳过：它们刚失败过，重扫只会再起一轮 agent）。
+func (s *Server) backfillTitles(c *gin.Context) {
+	var req struct {
+		Force bool `json:"force"`
+	}
+	// body 可为空：PWA/curl 不带 body 时按默认（不 force）处理。
+	_ = c.ShouldBindJSON(&req)
+	n := s.runner.BackfillTitles(req.Force)
+	c.JSON(http.StatusAccepted, gin.H{"scheduled": n, "force": req.Force})
+}
+
 type interveneReq struct {
 	Kind       string `json:"kind" binding:"required"` // "decision" | "append_prompt"
 	DecisionID string `json:"decision_id"`

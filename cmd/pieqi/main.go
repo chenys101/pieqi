@@ -583,6 +583,14 @@ func main() {
 		go runner.ResumeInterruptedWithInitiator(ids, ver, initiator)
 	}
 
+	// 补齐"有 prompt 但没标题"的任务：标题只在创建那一刻生成，失败就再也不回来
+	// （2026-10-16~20 因 Claude 凭据失效连续 4 天全线为空，见 core/title.go）。
+	//
+	// 与上面的接续一样放 goroutine：补齐会起 agent 进程，绝不能挡端口监听。
+	// 这里刻意在**每次启动**都扫一遍而不是只在"上一次失败"时扫：判据简单
+	// （Title 为空 = 缺），不依赖任何跨重启的失败记忆。
+	go runner.BackfillTitles(false)
+
 	// 先自己 bind（带退避重试），再交给 gin —— 不用 r.Run(addr)。
 	//
 	// 为什么不让 r.Run 自己 bind：它失败即 FATAL，而自重启场景下"失败"只是

@@ -316,9 +316,13 @@ func (s *Server) Register(r gin.IRouter) {
 			corsMiddleware(corsAll, corsOrigins), s.auth.BindOpGateMiddleware())
 		adminGrp.GET("/restart", s.getRestartStatus)
 		adminGrp.POST("/restart", s.postRestart)
+		// 补标题：为所有"有 prompt 但没标题"的任务重跑一次标题生成（见 backfillTitles）。
+		// 与 restart 同档（仅内网）：它每条任务起一次 agent 进程，是资源消耗型操作。
+		adminGrp.POST("/backfill-titles", s.backfillTitles)
 	} else {
 		api.GET("/admin/restart", s.getRestartStatus)
 		api.POST("/admin/restart", s.postRestart)
+		api.POST("/admin/backfill-titles", s.backfillTitles)
 	}
 }
 
