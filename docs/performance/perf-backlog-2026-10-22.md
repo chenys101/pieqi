@@ -111,7 +111,25 @@ Update 次数 / 真正 `persist` 次数 / **锁持有总时长**。
 
 ---
 
-## P0-2 · `TaskSummary` 不再下发 `baseline.dirty_paths`
+## P0-2 · `TaskSummary` 不再下发 `baseline.dirty_paths` ✅ **已完成 2026-10-22**
+
+**完成情况**：`model.NewTaskSummary` 改为**浅拷贝**（`cp := *t`），裁掉 `Events`
+（由遮蔽字段替代）与 `Baseline`，**不原地改传入的指针**（那会改到 store 里的落盘对象）。
+新测试 `TestAPI_ListTasksOmitsBaselineDirtyPaths` 同时守序列化与内存两个层次。
+
+**实测（真实 88 个任务，隔离实例）**：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| `GET /api/tasks` | **5.42 MB** | **2.33 MB**（-57%） |
+| 含 `baseline` 字段的任务数 | 86 / 87 | **0 / 88** |
+| JSON 里 `dirty_paths` 键出现次数 | 86 | **0** |
+
+> 注意：`dirty_paths` 实测省下 2.27MB，但总量降了 3.09MB —— 因为 `Events` 也一并置 nil
+> 了（原先靠遮蔽字段保证不下发，现在多了一层保险）。详情端点 `GET /api/tasks/:id`
+> **不受影响**，`baseline` 原样保留（已实测：`dirty=302` 条仍在）。
+
+---
 
 **为什么是 P0**：一行改动，首页直接减 42%。
 
@@ -230,7 +248,25 @@ watch([groups, () => task.value?.status], () => { ... }, { immediate: true, deep
 
 ---
 
-## P1-3 · HTTP 响应启用 gzip
+## P1-3 · HTTP 响应启用 gzip ✅ **已完成 2026-10-22**
+
+**完成情况**：`internal/api/gzip.go` 自写中间件（标准库 `compress/gzip`，**未引新依赖**），
+在 `Register` 里 `r.Use(GzipMiddleware())` 全局挂载。新测试 `TestGzip_*` 四条。
+
+**实测（隔离实例 `:3203`，真实 88 个任务）**：
+
+| 请求 | `Content-Encoding` | 线缆字节 | 耗时 |
+|---|---|---|---|
+| 无 `Accept-Encoding` | — | 3 368 681 | 152 ms |
+| `gzip, deflate, br` | **gzip** | **1 262 592** | 89 ms |
+| `gzip;q=0`（显式拒绝） | — | 3 368 681 | 12 ms |
+
+**压缩比 2.67×，节省 62%**。
+
+**验证过的边界**：`/api/ws` 握手正常（`state=Open`，首帧 snapshot 完整）；
+`/api/tasks/x/file` 404、`/preview/x/` 503、`/api/ws` 426 —— 均**未被压缩包装**。
+
+---
 
 **为什么是 P1**：手机端收益最大，改动极小。
 

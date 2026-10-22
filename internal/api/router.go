@@ -174,6 +174,11 @@ func (s *Server) Register(r gin.IRouter) {
 		}
 	}
 
+	// 全局 gzip：`GET /api/tasks` 实测 5.42 MB 且原先完全不压缩（见 gzip.go 顶部）。
+	// 挂在这里而不是各子组：/api 与 /preview 是分别 Group 出来的，挂一处才不会有
+	// "某条路径忘了加"；不该压的路径（/api/ws、preview、file）在 shouldGzip 里集中排除。
+	r.Use(GzipMiddleware())
+
 	// 业务 API：wired 了 auth 走 ExternalAuthMiddleware（外网身份+token；内网放行），
 	// 否则回退 legacy Bearer token（旧测试与本地 dev 兼容）。
 	api := r.Group("/api")

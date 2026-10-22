@@ -88,6 +88,61 @@ func TestAPI_CreateAndListTasks(t *testing.T) {
 	_ = store
 }
 
+// TestAPI_ListTasksOmitsBaselineDirtyPaths 回归（2026-10-22 性能修复）：
+// 列表**不得**下发 baseline.dirty_paths。
+//
+// 为什么要守：`Baseline.DirtyPaths` 是任务起始时整个工作区的脏文件清单，实测单个任务
+// 最多 14 212 条，87 个任务的列表响应里它占 2.27 MB / 5.42 MB（42%）。而前端根本不读它
+// —— 唯一读 baseline 的反馈面板走 GET /api/tasks/:id/feedback，直读 task.Baseline。
+//
+// 判据有两个层次，缺一不可：
+//  1. **序列化层面**：响应体里不出现 `dirty_paths`（这是省下那 2.27MB 的直接原因）；
+//  2. **内存层面**：`NewTaskSummary` 返回的是浅拷贝，**不可以**把 store 里那份的
+//     Baseline 原地置 nil（那会改到落盘数据，属于静默损坏）。
+//
+// ⚠️ `store.Create` 出来的 task 没有 Baseline，所以这里必须**显式构造**一个带
+// dirty_paths 的 Task 再塞进 store，否则这条测试测不出任何东西。
+func TestAPI_ListTasksOmitsBaselineDirtyPaths(t *testing.T) {
+	_, store, r := setupAPITest(t)
+
+	dirty := []string{"a.go", "b.go", "untracked-dir/c.go"}
+	task, err := store.Create(&model.Task{
+		ProjectID:   "perf",
+		ProjectPath: `D:\code\demo`,
+		Prompt:      "p",
+		Baseline: &model.TaskBaseline{
+			HeadSHA:    "abc1234",
+			CapturedAt: time.Now(),
+			DirtyPaths: dirty,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/tasks", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status=%d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "dirty_paths") {
+		t.Fatalf("列表响应不应包含 dirty_paths（它是 5.42MB 里占 42%% 的那个字段）: %.300s", body)
+	}
+	if strings.Contains(body, "untracked-dir/c.go") {
+		t.Fatalf("列表响应不应包含任何 dirty path 内容: %.300s", body)
+	}
+
+	// 内存层面：store 里那份必须原样还在（浅拷贝，不是原地裁剪）。
+	if got, ok := store.Get(task.ID); !ok || got.Baseline == nil {
+		t.Fatalf("store 内的 Baseline 被改动了 —— NewTaskSummary 必须是浅拷贝，不能原地置 nil")
+	} else if len(got.Baseline.DirtyPaths) != len(dirty) {
+		t.Fatalf("store 内的 DirtyPaths 条数=%d，want %d（落盘数据不得被下发视图改动）",
+			len(got.Baseline.DirtyPaths), len(dirty))
+	}
+}
+
 func TestAPI_GetTask(t *testing.T) {
 	_, store, r := setupAPITest(t)
 	task, _ := store.Create(&model.Task{ProjectID: "cb", Prompt: "p"})

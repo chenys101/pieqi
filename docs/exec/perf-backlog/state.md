@@ -3,29 +3,30 @@
 > **读法**：新会话从这里开始。读完本文件 + `plan.md` 即可开工，不需要读任何历史对话。
 > **写法**：只写真事实（提交号、数字、结论），不写过程叙述。每段收尾必须更新本文件。
 
-- **更新时间**：2026-10-22（段 A 完成后更新）
+- **更新时间**：2026-10-22（段 A、B 完成后更新）
 - **源清单**：`docs/performance/perf-backlog-2026-10-22.md`
-- **当前阶段**：**段 A 已完成并提交**；段 B 待开工
+- **当前阶段**：**段 A、B 已完成并提交**；段 C 待开工
 
 ## 进度总表
 
 | 段 | 内容 | 分支 / worktree | 状态 |
 |---|---|---|---|
-| A | P0-1 合并重复 Update | ~~`perf/p0-update-merge`~~ → **直接在 `main`** | ✅ **已完成**（见下） |
-| B | P0-2 + P1-3 下发体积 | 直接在 `main` | **待开工** |
+| A | P0-1 合并重复 Update | **直接在 `main`** | ✅ **已完成**（`6d54416`） |
+| B | P0-2 + P1-3 下发体积 | 直接在 `main` | ✅ **已完成**（见下） |
 | C | P1-1 + P1-2 前端渲染 | 直接在 `main` | **待开工** |
 | D | P2-1 / P2-2 / P2-3 | 直接在 `main` | 待定（需重新判断是否仍值得做） |
 | E | P3-1 确认类 | 无代码 | **待开工** |
 
-## ⚠️ worktree 方案已废止（2026-10-22）
+## 段 B 完成记录（2026-10-22）
 
-`pieqi-perf-a` / `pieqi-perf-b` 两个 worktree **已删除**，`perf/*` 分支已删。
-原因：会话进程运行在 **Low 完整性级别**，而 `D:\code\go\pieqi-perf-*` 是无低标签的浅层目录
-⇒ Low 进程写不进去。实测 `workspace-write`（**含显式提权**）均被拒，只有
-`danger-full-access` 可写。而子会话**无法自行提权**（scope 启动时固定）。
-
-**现在的做法**：全部在 `D:\code\go\pieqi`（唯一可写根）**串行执行**，每段独立提交，
-提交前用 `git diff --cached --name-only` 守住不混入别人的文件。
+- **P0-2**：`model.NewTaskSummary` 改浅拷贝，裁掉 `Events` + `Baseline`。
+  实测 `GET /api/tasks` **5.42 MB → 2.33 MB（-57%）**，88 个任务里含 baseline 的从 86 → **0**。
+  详情端点不受影响（baseline 原样保留，实测 dirty=302 条）。
+- **P1-3**：`internal/api/gzip.go` 自写中间件，标准库，无新依赖。
+  实测 **3.37 MB → 1.26 MB（节省 62%）**。
+  `/api/ws` 握手、`/preview/`、`/file` 三条排除路径均已端到端验证未被压缩。
+- **测试**：`TestAPI_ListTasksOmitsBaselineDirtyPaths` + `TestGzip_*` 四条全绿。
+  既有失败 `TestAPI_P1_PreviewAttach`（依赖真实 dev server）与本改动无关。
 
 ## 段 A 完成记录（2026-10-22）
 
@@ -45,6 +46,16 @@
 
 - **两条既有失败**（与本改动无关，已在干净树复现）：
   `TestCheckRunner_RerunLifecycle`、`TestWaitAfterRelease_RollsBackAndKeepsServing`。
+
+## ⚠️ worktree 方案已废止（2026-10-22）
+
+`pieqi-perf-a` / `pieqi-perf-b` 两个 worktree **已删除**，`perf/*` 分支已删。
+原因：会话进程运行在 **Low 完整性级别**，而 `D:\code\go\pieqi-perf-*` 是无低标签的浅层目录
+⇒ Low 进程写不进去。实测 `workspace-write`（**含显式提权**）均被拒，只有
+`danger-full-access` 可写。而子会话**无法自行提权**（scope 启动时固定）。
+
+**现在的做法**：全部在 `D:\code\go\pieqi`（唯一可写根）**串行执行**，每段独立提交，
+提交前用 `git diff --cached --name-only` 守住不混入别人的文件。
 
 ## 已固化的事实（下一个会话直接采信，不要重新验证）
 

@@ -193,11 +193,29 @@ type TaskSummary struct {
 }
 
 // NewTaskSummary 由 Task 构造轻量视图。t 为 nil 时返回 nil。
+//
+// ⚠️ **返回的是浅拷贝**（`*t`），不是原指针。两条原因，都不许改回去：
+//
+//  1. **必须裁掉 Baseline**（2026-10-22 性能修复）。`Baseline.DirtyPaths` 是任务起始时
+//     整个工作区的脏文件清单，实测单个任务最多 **14 212 条**，而 87 个任务的列表响应
+//     里它占 **2.27 MB / 5.42 MB（42%）** —— 而前端**根本不读它**（唯一读 baseline 的
+//     反馈面板走 `GET /api/tasks/:id/feedback`，直读 task.Baseline，不经过本视图）。
+//     落盘的 Task.Baseline 不动：它是 diff 计算的输入（ADR-0002），只是不该下行。
+//
+//  2. **不能原地改 t**：传入的指针就是 store 里的那份对象（`TaskStore.List` 返回的是
+//     快照，但调用方也可能直接传活体）。原地置 nil 会改到落盘数据，属于静默的数据损坏。
+//
+// 用浅拷贝而不是新增遮蔽字段：字段有 25 个，逐个遮蔽必然漂移（见上方 TaskSummary 的说明）；
+// 这里只改一个字段，拷贝后重赋值最不容易漏。
 func NewTaskSummary(t *Task) *TaskSummary {
 	if t == nil {
 		return nil
 	}
-	return &TaskSummary{Task: t, EventCount: len(t.Events)}
+	cp := *t
+	// 事件流由遮蔽字段替代（序列化时不下发）；Baseline 见上。
+	cp.Events = nil
+	cp.Baseline = nil
+	return &TaskSummary{Task: &cp, EventCount: len(t.Events)}
 }
 
 // NewTaskSummaries 批量构造。
