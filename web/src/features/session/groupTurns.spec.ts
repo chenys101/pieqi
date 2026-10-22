@@ -668,4 +668,73 @@ describe('需求 1：一轮完成后自动折叠过程', () => {
     expect(foldedCount(host, 0)).toBe(0)
     expect(host.querySelector('[data-testid="turn-group-0"]')!.textContent).toContain('系统输出')
   })
+
+  // ---- 2026-10-22 性能修复的对抗性验证 ----
+  //
+  // 自动折叠的 watch 从 `deep: true` 改成了「标量摘要」。这是本仓库明确记过的
+  // **静默失败**类型：漏依赖时折叠不生效、不报错、jsdom 也不红。
+  // 下面的用例专门证明"**事件增量到达后**折叠仍能正确触发"——
+  // 一次性把数据全塞进 store 的用例（本文件其余用例）覆盖不到这条路径。
+  it('[性能修复] 流式增量到达 + 任务进终态 → 自动折叠仍会被触发', async () => {
+    const { host, session, taskStore } = mountTimelineCustom({
+      status: 'running',
+      turns: [info(1, 2)],
+      // 目前以工具调用收尾 ⇒ 不该折叠（正文只是过场时不能把它收走）
+      events: [ev(1, 'status'), ev(2, 'user_message', '做A'), ev(3, 'tool_call')],
+    })
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(0)
+
+    // ① 流式正文到达（整体替换数组，与 sessionStore.applyDelta 一致）→ 变成"以正文收尾"，
+    //    但仍是 running，所以还不折。
+    session.eventsBySession[TID] = [...session.eventsBySession[TID], ev(4, 'text_delta', '结果')]
+    await nextTick()
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(0)
+
+    // ② 任务进终态：两个判据同时成立 ⇒ 必须自动折叠。
+    //    这一步正是摘要里 status 那一路在起作用。
+    taskStore.tasks[0].status = 'completed' as never
+    await nextTick()
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(1)
+  })
+
+  it('[性能修复] 事件数组整体替换（追加到末条）也能被摘要察觉', async () => {
+    const { host, session } = mountTimelineCustom({
+      status: 'completed',
+      turns: [info(1, 2)],
+      events: [ev(1, 'status'), ev(2, 'user_message', '做A'), ev(3, 'tool_call')],
+    })
+    await nextTick()
+    // 以 tool_call 收尾 ⇒ 不折
+    expect(foldedCount(host, 1)).toBe(0)
+
+    // 追加一条正文，使本轮变成"以正文收尾"。这是 groupSig 里"末条 id + 文本长度"要覆盖的场景。
+    session.eventsBySession[TID] = [...session.eventsBySession[TID], ev(5, 'text_delta', '结论')]
+    await nextTick()
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(1)
+  })
+
+  it('[性能修复] 只追加进末条（同 id、文本变长）也能被摘要察觉', async () => {
+    const { host, session } = mountTimelineCustom({
+      status: 'completed',
+      turns: [info(1, 2)],
+      events: [ev(1, 'status'), ev(2, 'user_message', '做A'), ev(3, 'text_delta', 'A')],
+    })
+    await nextTick()
+    expect(foldedCount(host, 1)).toBe(0)
+
+    // 模拟 applyDelta 的"合并进末条"：同一个 id、同一个 type，只有 text 变长。
+    const cur = session.eventsBySession[TID]
+    session.eventsBySession[TID] = [
+      ...cur.slice(0, -1),
+      { ...cur[cur.length - 1], payload: { ...cur[cur.length - 1].payload, text: 'A 更长的正文' } },
+    ]
+    await nextTick()
+    await nextTick()
+    // 文本长度进了摘要 ⇒ 重新求值时 hasProduced 仍成立（以正文收尾），不崩、不误折
+    expect(foldedCount(host, 1)).toBe(0)
+  })
 })

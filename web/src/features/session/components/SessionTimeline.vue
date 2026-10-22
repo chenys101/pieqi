@@ -145,8 +145,42 @@ function hasProduced(g: TurnGroup): boolean {
  */
 const autoFolded = ref(new Set<number>())
 
+/**
+ * 自动折叠的**触发信号**（2026-10-22 性能修复）。
+ *
+ * ⚠️ 原先这里是 `watch([groups, status], ..., { deep: true })`。那是本文件里最贵的一处：
+ * `groups` 里每个分组的 `events` 就是 `eventsBySession[taskId]` 的引用，而 `applyDelta`
+ * **每条流式增量都整体替换数组** ⇒ 每帧一次对全部分组、全部事件的深度遍历比较。
+ * 2950 事件的任务上，这就是主线程卡顿的直接来源。
+ *
+ * 现在监听一组**标量摘要**：每个 turn 取 (turn 号, 事件条数, 末条 id, 末条文本长度,
+ * 过程条数) —— `hasProduced` / `endsWithText` / `processCount` 的全部输入都在里面。
+ *
+ * 之所以要"末条 id + 文本长度"而不是只看类型：流式正文是**追加进末条**而非新建，
+ * 类型不变、条数也不变，只有末条的文本在变。
+ *
+ * 判据底线：**宁可多触发一次，不可漏触发** —— 漏触发的表现正是"自动折叠静默失效"，
+ * 而本文件第 138-146 行那条纪律（用户手动展开后不许再被自动折回）完全靠它守。
+ *
+ * ⚠️ 写成 computed 而不是在 watch 里直接求值：本节位于 `groups` 声明之前，
+ * 任何在 setup 期间**立即**求值 `groups` 的代码都会撞上
+ * `Cannot access 'groups' before initialization`（见第 174-181 行的教训）。
+ * computed 的 getter 是惰性的，首次求值发生在 watch 回调里，那时 setup 早已结束。
+ */
+function groupSignature(gs: TurnGroup[]): string {
+  const parts: string[] = []
+  for (const g of gs) {
+    const last = g.events.at(-1)
+    parts.push(
+      `${g.turn}:${g.events.length}:${last?.id ?? ''}:${last?.payload.text?.length ?? 0}:${processCount(g)}`,
+    )
+  }
+  return parts.join('|')
+}
+const groupSig = computed(() => groupSignature(groups.value))
+
 watch(
-  [groups, () => task.value?.status],
+  [groupSig, () => task.value?.status],
   () => {
     const nextFolded = new Set(folded.value)
     const nextAuto = new Set(autoFolded.value)
@@ -166,7 +200,8 @@ watch(
       autoFolded.value = nextAuto
     }
   },
-  { immediate: true, deep: true },
+  // ⚠️ **不要**加回 deep: true —— 见上方 groupSig 的注释。
+  { immediate: true },
 )
 
 // ---- 需求 2：只挂载最近两个 Turn ----
