@@ -9,6 +9,7 @@ package agent
 
 import (
 	"context"
+	"sync"
 
 	"pieqi/internal/config"
 
@@ -23,20 +24,31 @@ type ACPProviderConfig struct {
 	Logger *zap.Logger
 }
 
-var acpProviderCfg = ACPProviderConfig{}
+var (
+	acpProviderMu  sync.RWMutex
+	acpProviderCfg = ACPProviderConfig{}
+)
 
-// ConfigureACPProviders 设置 ACP 系 agent 的 provider 配置（app 启动时调用；可多次覆盖）。
-// Agents 逐个合并（同名覆盖）；Logger 非空时替换。
+// ConfigureACPProviders 设置 ACP 系 agent 的 provider 配置
+// （启动时与运行期设置变更时调用）。
+//
+// Agents **整体替换**而不是逐项合并：settings.agents.enabled 的语义是"以列表为准"，
+// 合并会让被关掉的 agent 继续残留在表里 —— 热应用后表现为"设置里关了，却还能跑"。
+// Logger 非空时替换（避免设置变更只带 Agents 时把 logger 清空）。
 func ConfigureACPProviders(c ACPProviderConfig) {
-	for name, cfg := range c.Agents {
-		if acpProviderCfg.Agents == nil {
-			acpProviderCfg.Agents = make(map[string]config.ACPConfig)
-		}
-		acpProviderCfg.Agents[name] = cfg
-	}
+	acpProviderMu.Lock()
+	defer acpProviderMu.Unlock()
+	acpProviderCfg.Agents = c.Agents
 	if c.Logger != nil {
 		acpProviderCfg.Logger = c.Logger
 	}
+}
+
+// acpLogger 返回当前 provider 的 logger（可能为 nil）。
+func acpLogger() *zap.Logger {
+	acpProviderMu.RLock()
+	defer acpProviderMu.RUnlock()
+	return acpProviderCfg.Logger
 }
 
 // defaultACPAgentType 业务 agent 名 → agent_type。
@@ -59,7 +71,10 @@ var defaultACPAgentType = func() map[string]string {
 // 配置来源已改为「manifest 默认值 + settings 覆盖」（见 AgentRuntimeConfig），
 // agent_type 恒来自代码事实，不再需要"空缺时套兜底"这一步。
 func acpConfigFor(name string) config.ACPConfig {
-	if cfg, ok := acpProviderCfg.Agents[name]; ok {
+	acpProviderMu.RLock()
+	cfg, ok := acpProviderCfg.Agents[name]
+	acpProviderMu.RUnlock()
+	if ok {
 		return cfg
 	}
 	// 未显式注册（例如 settings 里没开、但有人强行选了它）：仍按 manifest 兜底，
@@ -299,7 +314,7 @@ func AvailableAgents(rt AgentRuntimeConfig) []AgentInfo {
 // 注意：NewSession 会懒 spawn agent 进程（如 qodercli --acp / dsh --profile acp），失败返回错误。
 // cfg.AgentType 由 acpConfigFor 保证非空，这里不再猜测具体厂商。
 func openACPSession(ctx context.Context, cfg config.ACPConfig, p OpenParams) (AgentSession, error) {
-	adapter := NewACPAgent(cfg, acpProviderCfg.Logger)
+	adapter := NewACPAgent(cfg, acpLogger())
 	sid, err := adapter.NewSession(ctx, SessionConfig{Cwd: p.Cwd, ResumeFrom: p.ResumeFrom, TaskID: p.TaskID, Model: p.Model})
 	if err != nil {
 		return nil, err

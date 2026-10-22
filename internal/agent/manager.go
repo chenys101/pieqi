@@ -226,7 +226,14 @@ type adapterAttempt struct {
 // 登记 session。primary NewSession 失败时先 Close primary adapter 再回退，防资源泄漏。
 func (m *AgentManager) createAdapterWithFallback(ctx context.Context, cfg SessionConfig) (adapterAttempt, error) {
 	m.logger.Debug("fallback: before primaryFor", zap.String("agent", cfg.Agent), zap.String("task", cfg.TaskID))
-	primaryAdapter, primaryKind, perr := m.primaryFor(cfg.Agent)()
+	primaryFactory, err := m.primaryFor(cfg.Agent)
+	if err != nil {
+		// 显式指定了某个 agent 却未注册（未启用/已关闭）：**绝不回退到默认 agent**。
+		// 那会让 dsh 任务被 claude 接管（甚至拿 dsh 的会话 id 去 claude --resume），
+		// 从事件流上完全看不出跑错了 agent。错误必须直接 surface。
+		return adapterAttempt{primaryErr: err}, err
+	}
+	primaryAdapter, primaryKind, perr := primaryFactory()
 	m.logger.Debug("fallback: after primaryFor", zap.String("agent", cfg.Agent), zap.Bool("factory_ok", perr == nil))
 	if perr == nil {
 		m.logger.Debug("fallback: before NewSession", zap.String("task", cfg.TaskID), zap.String("cwd", cfg.Cwd), zap.String("model", cfg.Model))
@@ -260,31 +267,57 @@ func (m *AgentManager) createAdapterWithFallback(ctx context.Context, cfg Sessio
 // primaryFor 解析本轮该用哪个 agent 的 primary 工厂（多 agent 选择）。
 //
 // 未注册任何 agent 工厂（单 agent 语义）时直接返回 m.primary，行为与改造前完全一致。
-// 注册了（多 agent）时按 cfg 里的 agent 名取；空名取 defaultAgent；未知/未配置的 agent
-// 也落回 defaultAgent —— 选路失败应当降级到默认 agent 干活，而不是让任务创建即失败。
-func (m *AgentManager) primaryFor(agent string) adapterFactory {
+// 注册了（多 agent）时按 cfg 里的 agent 名取；空名取 defaultAgent。
+//
+// 显式指定但未注册的 agent **返回错误**，不落回 defaultAgent：调用方（TaskRunner）
+// 会把它 surface 成"续问失败/agent 未启用"。静默换 agent 是比失败严重得多的错误 ——
+// 用户明确选了 dsh 却跑 claude，从事件流上 indistinguishable，还会拿错会话 id 去 resume。
+func (m *AgentManager) primaryFor(agent string) (adapterFactory, error) {
 	m.mu.Lock()
 	factories, def, primary := m.agentFactories, m.defaultAgent, m.primary
 	m.mu.Unlock()
 
 	if len(factories) == 0 {
-		return primary
+		return primary, nil
 	}
 	if agent == "" {
 		agent = def
 	}
 	if f, ok := factories[agent]; ok {
-		return f
+		return f, nil
 	}
-	if f, ok := factories[def]; ok {
-		return f
+	if agent == def {
+		// 默认 agent 自身缺失（配置异常）：仍走 primary，保持单 agent 语义。
+		return primary, nil
 	}
-	return primary
+	names := make([]string, 0, len(factories))
+	for n := range factories {
+		names = append(names, n)
+	}
+	return nil, fmt.Errorf("agent %q 未启用或未注册（当前可用: %v）；请在设置中启用后再试", agent, names)
+}
+
+// SetAvailableAgents 按运行期设置更新可被任务选择的 agent 目录（热应用）。
+//
+// 与 NewMultiAgentSessionManager 用同一套工厂；settings 变更后调用它，
+// 否则 /api/agents 已经显示新 agent，而分发仍按启动时的旧名单走。
+func (m *AgentManager) SetAvailableAgents(available []string, defaultAgent string) {
+	if len(available) == 0 {
+		return
+	}
+	factories := make(map[string]adapterFactory, len(available))
+	for _, name := range available {
+		n := name // 闭包捕获副本
+		factories[n] = func() (AgentAdapter, AgentKind, error) {
+			return newSessionBackedAdapter(n, nil), AgentKindSession, nil
+		}
+	}
+	m.SetAgentFactories(factories, defaultAgent)
 }
 
 // SetAgentFactories 注册可被任务选择的 agent → session 工厂（多 agent 编排）。
-// defaultAgent 为 cfg.Agent 为空时的落点；同时作为未知名 agent 的兜底。
-// factories 为空时为 no-op（保持构造时的单 agent 语义）。
+// defaultAgent 为 cfg.Agent 为空时的落点。factories 为空时为 no-op
+// （保持构造时的单 agent 语义）。
 func (m *AgentManager) SetAgentFactories(factories map[string]adapterFactory, defaultAgent string) {
 	if len(factories) == 0 {
 		return

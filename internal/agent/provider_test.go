@@ -9,14 +9,33 @@ import (
 	"pieqi/internal/config"
 )
 
-func TestOpenQoderProviderRouting(t *testing.T) {
+// setACPProvidersForTest 替换全局 provider 表并在测试结束恢复（与运行期热应用同一条路径）。
+func setACPProvidersForTest(t *testing.T, c ACPProviderConfig) {
+	t.Helper()
+	acpProviderMu.Lock()
 	prev := acpProviderCfg
-	defer func() { acpProviderCfg = prev }()
+	acpProviderMu.Unlock()
+	ConfigureACPProviders(c)
+	t.Cleanup(func() {
+		acpProviderMu.Lock()
+		acpProviderCfg = prev
+		acpProviderMu.Unlock()
+	})
+}
 
+// registeredACPConfig 读原始登记表（不做 manifest 兜底），用于区分「登记了」与「没登记」。
+func registeredACPConfig(name string) (config.ACPConfig, bool) {
+	acpProviderMu.RLock()
+	defer acpProviderMu.RUnlock()
+	cfg, ok := acpProviderCfg.Agents[name]
+	return cfg, ok
+}
+
+func TestOpenQoderProviderRouting(t *testing.T) {
 	// 用不存在的 spawn 命令：Open("qoder") 应路由到 ACP provider 并报 spawn 错（而非 ErrUnknownAgent）。
-	acpProviderCfg.Agents = map[string]config.ACPConfig{
+	setACPProvidersForTest(t, ACPProviderConfig{Agents: map[string]config.ACPConfig{
 		AgentQoder: {SpawnCommand: []string{"no-such-qodercli-binary-xyz"}},
-	}
+	}})
 
 	_, err := Open(context.Background(), OpenParams{Agent: "qoder", Cwd: t.TempDir()})
 	if err == nil {
@@ -33,12 +52,9 @@ func TestOpenQoderProviderRouting(t *testing.T) {
 // TestOpenDshProviderRouting 同 qoder：注册名必须能路由到 ACP provider，
 // 否则前端选了 dsh 只会拿到 ErrUnknownAgent。
 func TestOpenDshProviderRouting(t *testing.T) {
-	prev := acpProviderCfg
-	defer func() { acpProviderCfg = prev }()
-
-	acpProviderCfg.Agents = map[string]config.ACPConfig{
+	setACPProvidersForTest(t, ACPProviderConfig{Agents: map[string]config.ACPConfig{
 		AgentDsh: {AgentType: "dsh", SpawnCommand: []string{"no-such-dsh-binary-xyz", "--profile", "acp"}},
-	}
+	}})
 
 	_, err := Open(context.Background(), OpenParams{Agent: "dsh", Cwd: t.TempDir()})
 	if err == nil {
@@ -55,12 +71,9 @@ func TestOpenDshProviderRouting(t *testing.T) {
 // TestOpenCodebuddyProviderRouting 同 qoder/dsh：注册名必须能路由到 ACP provider，
 // 否则前端选了 codebuddy 只会拿到 ErrUnknownAgent。
 func TestOpenCodebuddyProviderRouting(t *testing.T) {
-	prev := acpProviderCfg
-	defer func() { acpProviderCfg = prev }()
-
-	acpProviderCfg.Agents = map[string]config.ACPConfig{
+	setACPProvidersForTest(t, ACPProviderConfig{Agents: map[string]config.ACPConfig{
 		AgentCodebuddy: {AgentType: "codebuddy", SpawnCommand: []string{"no-such-codebuddy-binary-xyz", "--acp"}},
-	}
+	}})
 
 	_, err := Open(context.Background(), OpenParams{Agent: "codebuddy", Cwd: t.TempDir()})
 	if err == nil {
@@ -78,10 +91,7 @@ func TestOpenCodebuddyProviderRouting(t *testing.T) {
 // qoder 落到 qodercli、dsh 落到 dsh、codebuddy 落到 codebuddy。曾经共用的一个兜底会让
 // 选了 dsh 的会话静默起 qodercli。
 func TestACPConfigForPerAgentDefault(t *testing.T) {
-	prev := acpProviderCfg
-	defer func() { acpProviderCfg = prev }()
-
-	acpProviderCfg = ACPProviderConfig{}
+	setACPProvidersForTest(t, ACPProviderConfig{})
 	if got := acpConfigFor(AgentQoder).AgentType; got != "qodercli" {
 		t.Fatalf("qoder 兜底 agent_type=%q want qodercli", got)
 	}
@@ -93,20 +103,24 @@ func TestACPConfigForPerAgentDefault(t *testing.T) {
 	}
 
 	// 显式配置优先于兜底。
-	acpProviderCfg.Agents = map[string]config.ACPConfig{AgentDsh: {AgentType: "dsh-acp"}}
+	ConfigureACPProviders(ACPProviderConfig{Agents: map[string]config.ACPConfig{
+		AgentDsh: {AgentType: "dsh-acp"},
+	}})
 	if got := acpConfigFor(AgentDsh).AgentType; got != "dsh-acp" {
 		t.Fatalf("显式 agent_type 被兜底覆盖: %q", got)
 	}
 }
 
 func TestConfigureACPProviders(t *testing.T) {
-	prev := acpProviderCfg
-	defer func() { acpProviderCfg = prev }()
+	setACPProvidersForTest(t, ACPProviderConfig{})
 
 	ConfigureACPProviders(ACPProviderConfig{Agents: map[string]config.ACPConfig{
 		AgentQoder: {AgentType: "codex", SpawnCommand: []string{"codex", "--acp"}},
 	}})
-	cfg := acpProviderCfg.Agents[AgentQoder]
+	cfg, ok := registeredACPConfig(AgentQoder)
+	if !ok {
+		t.Fatal("qoder 未登记")
+	}
 	if cfg.AgentType != "codex" {
 		t.Fatalf("AgentType = %q, want codex", cfg.AgentType)
 	}
@@ -114,15 +128,16 @@ func TestConfigureACPProviders(t *testing.T) {
 		t.Fatalf("SpawnCommand not set: %v", cfg.SpawnCommand)
 	}
 
-	// 逐个合并：配了 dsh 不能把已登记的 qoder 顶掉。
+	// **整体替换**而不是合并：settings.agents.enabled 的语义是"以列表为准"。
+	// 合并会让被关掉的 agent 继续残留在表里 —— 设置里关了，却还能跑。
 	ConfigureACPProviders(ACPProviderConfig{Agents: map[string]config.ACPConfig{
 		AgentDsh: {AgentType: "dsh"},
 	}})
-	if acpProviderCfg.Agents[AgentQoder].AgentType != "codex" {
-		t.Fatalf("合并后 qoder 丢失: %+v", acpProviderCfg.Agents)
+	if _, ok := registeredACPConfig(AgentQoder); ok {
+		t.Fatalf("qoder 已被关闭却仍登记着（合并语义残留）")
 	}
-	if acpProviderCfg.Agents[AgentDsh].AgentType != "dsh" {
-		t.Fatalf("dsh 未登记: %+v", acpProviderCfg.Agents)
+	if cfg, ok := registeredACPConfig(AgentDsh); !ok || cfg.AgentType != "dsh" {
+		t.Fatalf("dsh 未登记: %+v", cfg)
 	}
 }
 

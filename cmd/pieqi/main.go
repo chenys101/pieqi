@@ -343,6 +343,39 @@ func main() {
 		logger.Info("acp agent providers configured", zap.Strings("agents", enabled))
 	}
 
+	// settings 变更热应用：**provider 表与 AgentManager 的 agent 工厂表都要更新**。
+	// 只更新 /api/agents 目录是不够的 —— 会出现"目录里新开了 dsh，但任务仍按启动时的
+	// 旧名单分发"，而 primaryFor 的静默兜底会把 dsh 任务交给 claude。
+	settingsStore.OnChange(func(s core.Settings) {
+		rt := agentRuntimeFromSettings(s)
+		avail := agent.AvailableAgents(rt)
+		names := make([]string, 0, len(avail))
+		for _, a := range avail {
+			names = append(names, a.Name)
+		}
+		def := agent.AgentClaude
+		if len(names) > 0 {
+			def = names[0]
+		}
+		providers := agent.ACPProviderConfigFromRuntime(rt)
+		providers.Logger = logger
+		agent.ConfigureACPProviders(providers)
+		enabledACP := make([]string, 0, len(providers.Agents))
+		for name := range providers.Agents {
+			enabledACP = append(enabledACP, name)
+		}
+		if acpMgr == nil {
+			logger.Warn("agent selection changed but agent manager is not enabled; restart required",
+				zap.Strings("agents", names))
+			return
+		}
+		acpMgr.SetAvailableAgents(names, def)
+		logger.Info("agent selection hot-applied",
+			zap.Strings("agents", names),
+			zap.Strings("acp_providers", enabledACP),
+			zap.String("default_agent", def))
+	})
+
 	// --- Gin ---
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.Default()

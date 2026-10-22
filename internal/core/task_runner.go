@@ -1021,11 +1021,12 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 			return false
 		}
 		// 续问路径 Open 失败多为原会话丢失（ACP load/resume 报错，或 PrintAgent --resume
-		// 报 "No conversation found"）。由协议层 surface：追加 status 事件 + 置 failed 带明确原因，
-		// 不静默失败。
+		// 报 "No conversation found"），也可能是任务记录的 agent 已被关闭/未注册
+		// （AgentManager 拒绝静默换 agent）。两种都由协议层 surface：追加 status 事件 +
+		// 置 failed 带明确原因，不静默失败。
 		if resumeFrom != "" {
 			tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
-				Text: "续问失败：原会话已丢失（" + err.Error() + "），请重新发起任务"})
+				Text: "续问失败：" + err.Error()})
 			// 续问时 task 处终态（completed/failed/cancelled），failTask 经 transition 终态守卫为 no-op；
 			// 用 forceFailTask 强制置 failed，确保状态/Error/通知落库，明确 surface 不静默失败。
 			tr.forceFailTask(task.ID, "agent open: "+err.Error())

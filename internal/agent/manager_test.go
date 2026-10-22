@@ -930,7 +930,6 @@ func TestOpenSelectsAgentByName(t *testing.T) {
 		{"", "s-claude", "未指定 → 默认 agent（Claude Code）"},
 		{AgentClaude, "s-claude", "显式 claude"},
 		{AgentQoder, "s-qoder", "显式 qoder"},
-		{"nonsense", "s-claude", "未知名 → 落回默认，不让任务创建即失败"},
 	}
 	for i, tc := range cases {
 		taskID := "task-" + string(rune('a'+i))
@@ -940,6 +939,61 @@ func TestOpenSelectsAgentByName(t *testing.T) {
 		if got := m.SessionID(taskID); got != tc.want {
 			t.Fatalf("%s: sessionID = %q, want %q", tc.why, got, tc.want)
 		}
+	}
+
+	// 显式指定了未注册的 agent：必须报错，**绝不静默落回默认 agent**。
+	// 静默换 agent 的后果：dsh 任务被 claude 接管（还会拿 dsh 的会话 id 去 --resume），
+	// 从事件流上完全看不出跑错了。
+	claudeAd.mu.Lock()
+	claudeSessionsBefore := claudeAd.newSessionN
+	claudeAd.mu.Unlock()
+	if _, _, err := m.Open(context.Background(), "task-unknown", "proj", SessionConfig{Agent: "nonsense", Cwd: "/tmp"}); err == nil {
+		t.Fatal("未知名 agent: Open 应报错")
+	} else if !strings.Contains(err.Error(), "未启用或未注册") {
+		t.Fatalf("未知名 agent: err = %v, want 含「未启用或未注册」", err)
+	}
+	if got := m.SessionID("task-unknown"); got != "" {
+		t.Fatalf("未知名 agent 不应登记会话，got sessionID=%q", got)
+	}
+	claudeAd.mu.Lock()
+	claudeSessionsAfter := claudeAd.newSessionN
+	claudeAd.mu.Unlock()
+	if claudeSessionsAfter != claudeSessionsBefore {
+		t.Fatalf("未知名 agent 静默回退到了默认 agent：claude NewSession %d → %d 次",
+			claudeSessionsBefore, claudeSessionsAfter)
+	}
+}
+
+// TestSetAvailableAgentsHotApply 设置页改了 agents.enabled 之后，分发必须跟着变。
+//
+// 曾经 SetAvailableAgents 只改 /api/agents（目录现算），而 AgentManager 的工厂表
+// 冻在启动那一刻：界面上能看到 dsh、选了 dsh 却按旧名单走。热应用就是补这个缺口。
+func TestSetAvailableAgentsHotApply(t *testing.T) {
+	m := NewAgentSessionManager(AgentClaude, ManagerConfig{}, nil)
+	m.SetAvailableAgents([]string{AgentClaude, AgentQoder}, AgentClaude)
+
+	if _, err := m.primaryFor(AgentDsh); err == nil {
+		t.Fatal("dsh 未启用时不应解析出工厂")
+	}
+
+	m.SetAvailableAgents([]string{AgentClaude, AgentQoder, AgentDsh}, AgentClaude)
+	f, err := m.primaryFor(AgentDsh)
+	if err != nil {
+		t.Fatalf("热应用后 dsh 仍无工厂: %v", err)
+	}
+	ad, _, ferr := f()
+	if ferr != nil {
+		t.Fatalf("dsh 工厂调用失败: %v", ferr)
+	}
+	sb, ok := ad.(*sessionBackedAdapter)
+	if !ok || sb.name != AgentDsh {
+		t.Fatalf("dsh 工厂产出的 adapter = %#v, want name=dsh", ad)
+	}
+
+	// 关掉 qoder 后必须真的不可分发（不是只在目录里隐藏）。
+	m.SetAvailableAgents([]string{AgentClaude, AgentDsh}, AgentClaude)
+	if _, err := m.primaryFor(AgentQoder); err == nil {
+		t.Fatal("qoder 被关闭后仍能解析出工厂：设置里关掉的 agent 还会继续被分发")
 	}
 }
 

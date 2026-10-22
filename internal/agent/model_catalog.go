@@ -244,7 +244,7 @@ func probeAgentModels(ctx context.Context, agentName string) (ModelCatalog, erro
 	if err := os.MkdirAll(probeDir, 0o755); err != nil {
 		return cat, err
 	}
-	a := NewACPAgent(cfg, acpProviderCfg.Logger)
+	a := NewACPAgent(cfg, acpLogger())
 	defer func() { _ = a.Close(context.Background()) }()
 
 	probeCtx, cancel := context.WithTimeout(ctx, modelCatalogProbe)
