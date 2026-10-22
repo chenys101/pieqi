@@ -79,6 +79,12 @@ type Server struct {
 	// 老测试与最小构造路径不必为此改动。
 	agents       []agent.AgentInfo
 	defaultAgent string
+	// agentSource 按**当前**运行期设置现算目录（wired by SetAgentCatalogSource）。
+	//
+	// 与上面的静态快照并存的原因：agent 启用与否现在存在 settings.json 里、可热改。
+	// 只留启动快照会让"在设置页打开 codebuddy"必须重启才生效，而失败方式很隐蔽
+	// （设置页显示已开启，选择器里却没有）。
+	agentSource func() []agent.AgentInfo
 }
 
 // NewServer 创建 API 服务。

@@ -39,55 +39,117 @@ func ConfigureACPProviders(c ACPProviderConfig) {
 	}
 }
 
-// defaultACPAgentType 业务 agent 名 → 配置里 agent_type 空缺时的兜底。
-// 兜底必须按 agent 区分：共用一个兜底会让「选了 dsh 但没配 agent_type」的会话静默起 qodercli。
-// 这个表同时是 ACP 系 agent 的注册清单：加一个新 ACP agent 就是在这里加一行 +
-// config.AgentsConfig 加一节 + ACPProviderConfigFromAgents 加一个分支。
-var defaultACPAgentType = map[string]string{
-	AgentQoder:     "qodercli",
-	AgentDsh:       "dsh",
-	AgentCodebuddy: "codebuddy",
-}
-
-// acpConfigFor 取某业务名的 ACP 配置，agent_type 空缺时套上面的兜底。
-func acpConfigFor(name string) config.ACPConfig {
-	cfg := acpProviderCfg.Agents[name]
-	if cfg.AgentType == "" {
-		cfg.AgentType = defaultACPAgentType[name]
+// defaultACPAgentType 业务 agent 名 → agent_type。
+//
+// 2026-10-22 起这张表**不再是手写的一份清单**，而是从 agentManifests 派生：
+// 接入一个新 agent 只需在 manifest.go 加一条，这里、AvailableAgents、
+// ACPProviderConfigFromAgents 会一起跟上。保留这个名字是为了兼容既有调用点。
+var defaultACPAgentType = func() map[string]string {
+	m := make(map[string]string, len(agentManifests))
+	for _, spec := range agentManifests {
+		if spec.Kind == TransportACP && spec.ACPType != "" {
+			m[spec.Name] = spec.ACPType
+		}
 	}
-	return cfg
+	return m
+}()
+
+// acpConfigFor 取某业务名的 ACP 配置。
+//
+// 配置来源已改为「manifest 默认值 + settings 覆盖」（见 AgentRuntimeConfig），
+// agent_type 恒来自代码事实，不再需要"空缺时套兜底"这一步。
+func acpConfigFor(name string) config.ACPConfig {
+	if cfg, ok := acpProviderCfg.Agents[name]; ok {
+		return cfg
+	}
+	// 未显式注册（例如 settings 里没开、但有人强行选了它）：仍按 manifest 兜底，
+	// 让错误发生在 spawn 阶段（可读的"找不到可执行文件"）而不是这里返回空配置。
+	if spec, ok := manifestByName(name); ok {
+		return spec.ACPConfig(config.ACPConfig{})
+	}
+	return config.ACPConfig{}
 }
 
-// ACPProviderConfigFromAgents 把 config.AgentsConfig 里各 ACP 系 agent 节转成 provider 配置
-// （main.go 接线用）。只收 transport=="acp" 且 agent_type 非空的节；一个都没有时返回零值。
-func ACPProviderConfigFromAgents(a config.AgentsConfig) ACPProviderConfig {
+// AgentRuntimeConfig 运行期的 agent 选择结果：哪些 agent 被启用，以及各自的覆盖项。
+//
+// 这是 settings.json 里 agents 段的 Go 形态。**它只承载用户意图**：
+// 开不开、装在哪、用哪个模型。凡是 manifest 能表达的（agent_type、默认 spawn、
+// 能力声明）都不出现在这里。
+type AgentRuntimeConfig struct {
+	// Enabled 被启用的业务名集合。为空时只启用 manifest 里非 OptIn 的（即 claude/qoder）。
+	Enabled []string
+	// Overrides 按业务名给出的运行期覆盖（spawn_command、transport 等机器相关知识）。
+	//
+	// Transport 只对 claude 有意义（sdk-bridge / print）：它是"这台机器上桥能不能跑"
+	// 的运行期事实，所以归这里而不是 manifest。ACP 系的 transport 恒为 acp（代码事实）。
+	Overrides map[string]config.ACPConfig
+	// ClaudeTransport claude 的传输选择（"sdk-bridge" 或 "print"）；空 = 用默认 sdk-bridge。
+	ClaudeTransport string
+}
+
+// ClaudeConfigTranspor 返回 claude 实际使用的 transport（空则默认 sdk-bridge）。
+func (rt AgentRuntimeConfig) ClaudeTransportOrDefault() string {
+	if rt.ClaudeTransport == "" {
+		return "sdk-bridge"
+	}
+	return rt.ClaudeTransport
+}
+
+// ACPProviderConfigFromRuntime 由运行期选择结果算出该注册哪些 ACP provider。
+//
+// 取代旧的 ACPProviderConfigFromAgents：后者要求调用方传 config.AgentsConfig，
+// 也就是让"注册什么"取决于配置文件里逐节手写的 transport —— 那是本末倒置
+// （transport 是代码事实，写在配置里只多一个能写错的地方）。
+func ACPProviderConfigFromRuntime(rt AgentRuntimeConfig) ACPProviderConfig {
+	enabled := rt.enabledSet()
 	out := ACPProviderConfig{}
-	put := func(name string, cfg config.ACPConfig) {
-		if cfg.AgentType == "" {
-			return
+	for _, spec := range agentManifests {
+		if spec.Kind != TransportACP || spec.ACPType == "" {
+			continue
+		}
+		if !enabled[spec.Name] {
+			continue
 		}
 		if out.Agents == nil {
 			out.Agents = make(map[string]config.ACPConfig)
 		}
-		out.Agents[name] = cfg
-	}
-	if a.Qoder.Transport == "acp" {
-		put(AgentQoder, a.Qoder.ACPConfig())
-	}
-	if a.Dsh.Transport == "acp" {
-		put(AgentDsh, a.Dsh.ACPConfig())
-	}
-	if a.Codebuddy.Transport == "acp" {
-		put(AgentCodebuddy, a.Codebuddy.ACPConfig())
+		out.Agents[spec.Name] = spec.ACPConfig(rt.Overrides[spec.Name])
 	}
 	return out
 }
 
-// init 按 defaultACPAgentType 注册 ACP 系 agent 的 AgentSession 工厂：
-// agent.Open(Agent:"qoder"/"dsh") 即可。
+// enabledSet 计算最终启用的业务名集合。
+//
+// 规则（约定优于配置）：Enabled 为空 = 用默认值，即所有非 OptIn 的 agent。
+// 显式列出时**以列表为准**（可以只开一个，也可以把默认开的关掉）。
+func (rt AgentRuntimeConfig) enabledSet() map[string]bool {
+	out := make(map[string]bool, len(agentManifests))
+	if len(rt.Enabled) == 0 {
+		for _, spec := range agentManifests {
+			out[spec.Name] = !spec.OptIn
+		}
+		return out
+	}
+	want := make(map[string]bool, len(rt.Enabled))
+	for _, n := range rt.Enabled {
+		want[n] = true
+	}
+	for _, spec := range agentManifests {
+		out[spec.Name] = want[spec.Name]
+	}
+	return out
+}
+
+// init 按 manifest 注册 ACP 系 agent 的 AgentSession 工厂：
+// agent.Open(Agent:"qoder"/"dsh"/"codebuddy") 即可。
+//
+// 遍历 manifest 而不是手写清单：接入新 agent 只改 manifest.go 一处。
 func init() {
-	for name := range defaultACPAgentType {
-		name := name
+	for _, spec := range agentManifests {
+		if spec.Kind != TransportACP {
+			continue
+		}
+		name := spec.Name
 		RegisterSessionProvider(name, func(ctx context.Context, p OpenParams) (AgentSession, error) {
 			return openACPSession(ctx, acpConfigFor(name), p)
 		})
@@ -181,105 +243,54 @@ const (
 
 // AvailableAgents 按配置算出可被任务选择的 agent 列表（顺序即前端展示顺序，claude 在前）。
 //
-// 判据是「配置上跑得起来」，不做进程探活——探活要 spawn 子进程，代价与副作用都不该
+// 判据是「被启用」，不做进程探活——探活要 spawn 子进程，代价与副作用都不该
 // 花在渲染一个下拉框上。真跑不起来时任务会带明确错误失败（ensureACPSession 的 surface 路径）。
-// ACP 系 agent 的可用性判据复用 ACPProviderConfigFromAgents（与 main.go 的接线判据同一个函数，
-// 避免「选择器里有但没注册 provider」这类分叉）。
-//   - claude：永远可用。transport=sdk-bridge 时走桥（失败自动回退 print），print 时直连 claude -p。
-//   - qoder / dsh：transport=acp 且 agent_type 非空。
-func AvailableAgents(a config.AgentsConfig) []AgentInfo {
-	claudeTransport := "SDK Bridge"
-	// claude 的图片通路**只在桥路径存在**：桥能把图转成 SDK 的 content blocks；
-	// 而 print 回退（claude -p 的纯文本 prompt 通道）没有实现图片。
-	// 所以显式配成 transport=print 时，这里必须是 false —— 否则前端会显示加图入口，
-	// 用户选了图却在发送时失败（配置决定能力，不是 agent 名决定能力）。
-	claudeImages := a.Claude.Transport != "print"
-	if a.Claude.Transport == "print" {
-		claudeTransport = "claude -p"
-	}
-	out := []AgentInfo{{
-		Name:         AgentClaude,
-		DisplayName:  "Claude Code",
-		Description:  "Anthropic 官方 Agent，经 SDK 常驻桥驱动（不可用时自动回退 claude -p）",
-		Transport:    claudeTransport,
-		Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
-		ImagePrompt:  claudeImages,
-		// goal 是**斜杠命令**（`/goal <完成条件>`，CLI 本地解析）+ Stop hook 判定；
-		// 没有 create_goal 这类模型可见的工具入口。
-		// 状态可见性在 2026-10-18 之前是 false（桥把 active_goal 丢了），已修。
-		GoalMode:         GoalModeCommand,
-		GoalStateVisible: true,
-		// 「同类免审」只有 ACP 路径有：Resolve 认 approve_session 的前提是
-		// 对端发 RequestPermission；claude 走 PreToolUse hook，选项里没有这一项。
-		SessionAlways:   false,
-		ModelSelectable: false, // 桥不下发模型清单（用 agent 自己的默认）
-		ColdStartCold:   false, // claude SDK 桥秒级起来
-	}}
-	configured := ACPProviderConfigFromAgents(a)
-	if _, ok := configured.Agents[AgentQoder]; ok {
-		out = append(out, AgentInfo{
-			Name:         AgentQoder,
-			DisplayName:  "Qoder CLI",
-			Description:  "Qoder 官方 CLI（ACP 协议），可选用限时免费的 Qwen3.8-Flash 模型",
-			Transport:    "ACP",
-			Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
-			// ACP 具备图片入站通路（ACPAgent 实现 RichPromptSender），
-			// 但是否真收取决于对端握手声明 promptCapabilities.image —— 见 ImagePrompt 的说明。
-			ImagePrompt: true,
-			// qodercli **有**完整的 goal（工具 + /goal 命令 + auto-continuation，见
-			// docs/agents-goal-and-capabilities.md），但 ACP 只开放 4 个斜杠命令
-			// （/init /memory /about /help），goal 不在其中；而且它的 goal 是
-			// SDK control request，不在 ACP 路径上。**两条路都走不通** ⇒ 留空。
-			//
-			// 这里刻意不写 "tool"：实测（字面 /goal 与自然语言各一组，共 62 次 tool_call）
-			// goal 工具调用 **0 次**，模型也不会自己调 —— 谎报能力会让用户盲打 /goal。
-			GoalMode:         "",
-			GoalStateVisible: false,
-			SessionAlways:    true, // ACP：proceed_always / approve_session 都支持
-			ModelSelectable:  true, // qodercli 下发模型清单（Qwen3.8-Flash 等）
-			ColdStartCold:    false,
-		})
-	}
-	if _, ok := configured.Agents[AgentDsh]; ok {
-		out = append(out, AgentInfo{
-			Name:         AgentDsh,
-			DisplayName:  "DeepSeek Harness",
-			Description:  "DeepSeek 官方 agent harness（dsh --profile acp）。模型路由取自 dsh 侧 acp profile 的 pin，出厂 pin 需 DEEPSEEK_API_KEY",
-			Transport:    "ACP",
-			Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
-			ImagePrompt:  true,
-			// dsh 的 goal 是**模型可见的工具**（create_goal/get_goal/update_goal）：
-			// 即便 ACP 没有命令平面，模型也会从工具说明里读出目标意图并自己调用 ——
-			// 已实测收到 tool_call: create_goal → phase=active, activation=armed。
-			GoalMode:         GoalModeTool,
-			GoalStateVisible: true, // 走 tool_call 事件，时间线直接可见
-			SessionAlways:    true,
-			ModelSelectable:  true, // acp profile 的 pin 提供模型清单
-			// dsh 冷启动实测 >90s（init_timeout 因此设为 2m）；
-			// 这条要显示出来，否则用户不知道"点了创建要等一分多钟"。
-			ColdStartCold: true,
-		})
-	}
-	if _, ok := configured.Agents[AgentCodebuddy]; ok {
-		out = append(out, AgentInfo{
-			Name:         AgentCodebuddy,
-			DisplayName:  "CodeBuddy CLI",
-			Description:  "腾讯 CodeBuddy CLI（ACP 协议）。需先在 CLI 内登录（iOA / Google·GitHub / 微信 / 企业域名）或提供 CODEBUDDY_API_KEY",
-			Transport:    "ACP",
-			Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
-			// initialize 实测（v2.159.0）声明 promptCapabilities.image=true，
-			// 故 ACP 这条图片入站通路存在；是否真看得见图仍由对端模型决定。
-			ImagePrompt: true,
-			// goal 没有任何实测证据（CodeBuddy 是闭源 CLI），不谎报：
-			// 报成 tool/command 会让用户盲打 /goal 后没反应。等实测再开。
-			GoalMode:         "",
-			GoalStateVisible: false,
-			SessionAlways:    true, // ACP：proceed_always / approve_session 都支持
-			// session/new 的标准 configOptions 里下发 id="model"（实测 20 个模型），
-			// 与 qoder 同一条通道：清单走 configOptions、设模型走 set_config_option。
-			ModelSelectable: true,
-			ColdStartCold:   false, // Node CLI，initialize/session-new 都在秒级
-		})
+//
+// 2026-10-22 重构：目录不再由 config.AgentsConfig 逐节手写，而是**从 manifest 派生**。
+// 这样"加一个 agent"不再需要在配置里登记（transport/agent_type 这些是代码事实，
+// 写进配置只会多一个写错的地方）。启用与否来自 AgentRuntimeConfig。
+func AvailableAgents(rt AgentRuntimeConfig) []AgentInfo {
+	enabled := rt.enabledSet()
+	configured := ACPProviderConfigFromRuntime(rt)
+
+	out := make([]AgentInfo, 0, len(agentManifests))
+	for _, spec := range agentManifests {
+		if !enabled[spec.Name] {
+			continue
+		}
+		info := AgentInfo{
+			Name:             spec.Name,
+			DisplayName:      spec.DisplayName,
+			Description:      spec.Description,
+			Transport:        spec.Transport,
+			Capabilities:     []string{"流式输出", "工具审批", "续问", "取消"},
+			ImagePrompt:      spec.ImagePrompt,
+			GoalMode:         spec.GoalMode,
+			GoalStateVisible: spec.GoalStateVisible,
+			SessionAlways:    spec.SessionAlways,
+			ModelSelectable:  spec.ModelSelectable,
+			ColdStartCold:    spec.ColdStartCold,
+		}
+		// claude 的图像能力取决于**实际** transport：桥能把图转成 SDK content blocks，
+		// 而 print 回退是纯文本 prompt 通道。配置决定能力，不是 agent 名决定能力 ——
+		// 否则前端会显示加图入口，用户选了图却在发送时失败。
+		//
+		// 判据直接读覆盖项里的 transport，**不 import claude 包**：claude 包已经
+		// import 了本包（见 claude/factory.go），反向依赖会成环。
+		if spec.Kind == TransportClaudeBridge {
+			if rt.ClaudeTransportOrDefault() == "print" {
+				info.Transport = "claude -p"
+				info.ImagePrompt = false
+			}
+		}
+		// ACP 系再做一次一致性兜底：只有真的注册了 provider 才进目录，
+		// 避免"选择器里有但打不开"。
+		if spec.Kind == TransportACP {
+			if _, ok := configured.Agents[spec.Name]; !ok {
+				continue
+			}
+		}
+		out = append(out, info)
 	}
 	return out
 }

@@ -23,8 +23,25 @@ func (s *Server) SetAgents(agents []agent.AgentInfo, defaultAgent string) {
 	s.defaultAgent = defaultAgent
 }
 
+// SetAgentCatalogSource 注入"按当前运行期设置现算目录"的函数（2026-10-22）。
+//
+// 为什么要动态算而不是启动时注入一份固定列表：agent 的启用与否现在存在
+// settings.json 里、可热改。若目录是启动快照，用户在设置页打开 codebuddy 后
+// 必须重启才看得到 —— 那与"运行期可改"的初衷矛盾，且失败方式很隐蔽
+// （设置页显示已开启，选择器里却没有）。
+//
+// 未接线时退回 s.agents（静态快照），保持向后兼容。
+func (s *Server) SetAgentCatalogSource(fn func() []agent.AgentInfo) {
+	s.agentSource = fn
+}
+
 // agentCatalog 返回生效的目录（未接线时给 claude 兜底）。
 func (s *Server) agentCatalog() []agent.AgentInfo {
+	if s.agentSource != nil {
+		if got := s.agentSource(); len(got) > 0 {
+			return got
+		}
+	}
 	if len(s.agents) == 0 {
 		return []agent.AgentInfo{{Name: agent.AgentClaude, DisplayName: "Claude Code"}}
 	}

@@ -2,6 +2,7 @@ package core
 
 import (
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -128,7 +129,9 @@ func TestSettingsStore_PatchAndPersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	if got := s.Get(); got != DefaultSettings() {
+	// Settings 自 2026-10-22 起含 AgentSelection（有切片/map），不再可比较，
+	// 故用 DeepEqual 而不是 ==。
+	if got := s.Get(); !reflect.DeepEqual(got, DefaultSettings()) {
 		t.Fatalf("fresh store should be defaults, got %+v", got)
 	}
 
@@ -153,7 +156,7 @@ func TestSettingsStore_PatchAndPersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if got := reopened.Get(); got != next {
+	if got := reopened.Get(); !reflect.DeepEqual(got, next) {
 		t.Fatalf("persisted %+v, want %+v", got, next)
 	}
 }
@@ -180,7 +183,7 @@ func TestSettingsStore_PatchValidation(t *testing.T) {
 	if _, err := s.Patch(SettingsPatch{DNDEnabled: &on, DNDStart: &same, DNDEnd: &same}); err == nil {
 		t.Error("empty dnd period must be rejected")
 	}
-	if got := s.Get(); got != before {
+	if got := s.Get(); !reflect.DeepEqual(got, before) {
 		t.Fatalf("failed patch must not mutate state: %+v, want %+v", got, before)
 	}
 }

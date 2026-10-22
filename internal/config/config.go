@@ -105,14 +105,24 @@ type ACPConfig struct {
 	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`      // ACP 会话空闲回收阈值：轮间保活，超过该时长无对话则优雅关闭（避免孤儿进程）；<=0 禁用回收
 }
 
-// AgentsConfig 多 Agent 配置（multi-agent.md §9，修订版 §9/§11 P5）。
-// 与 pieqi.acp.* 旧字段并存：新增节、不改旧语义；旧字段迁移（agents.claude/qoder
-// 接管 acp.use_acp 等，含弃用告警）在 P5 单独做。默认 transport 见下方 defaults。
+// AgentsConfig 多 Agent 配置。
+//
+// ⚠️ 2026-10-22 已**大幅瘦身**，这是"约定优于配置"整改的核心一步：
+//
+//   - 各 ACP agent（qoder / dsh / codebuddy / 未来新增的）的节**全部删除**。
+//     transport / agent_type / 默认 spawn / 能力声明 / 超时 都是**代码事实**，
+//     已整体搬进 internal/agent/manifest.go。写进配置的取值永远是同一个常量
+//     （例如 agent_type: codebuddy），用户抄一遍只是多了一个能写错的地方。
+//     要开关某个 agent 或覆盖它的安装位置，改**运行期设置**
+//     （~/.pieqi/settings.json 的 agents 段，见 core.AgentSelection）。
+//
+//   - 只保留 claude 的节，因为它是真正的**机器相关运行期事实**：
+//     桥监听在哪个端口、要不要自动拉起、claude 二进制叫什么、用哪个模型。
+//     这些无法由代码推导，也不该由 manifest 编造。
+//
+// 于是「接入一个新 agent」不再需要碰这个文件 —— 这是本次整改的验收标准。
 type AgentsConfig struct {
-	Claude    AgentClaudeConfig    `mapstructure:"claude"`
-	Qoder     AgentQoderConfig     `mapstructure:"qoder"`
-	Dsh       AgentDshConfig       `mapstructure:"dsh"`
-	Codebuddy AgentCodebuddyConfig `mapstructure:"codebuddy"`
+	Claude AgentClaudeConfig `mapstructure:"claude"`
 }
 
 // AgentClaudeConfig claude agent 配置（multi-agent.md §4.2）。
@@ -137,103 +147,6 @@ type AgentPrintConfig struct {
 	PermissionMode string `mapstructure:"permission_mode"`
 	Model          string `mapstructure:"model"`
 	SysPrompt      string `mapstructure:"sys_prompt"`
-}
-
-// AgentQoderConfig qoder agent 配置（multi-agent.md §11 P4）。
-// transport: "acp"（默认，qodercli --acp）。
-type AgentQoderConfig struct {
-	Transport string         `mapstructure:"transport"`
-	ACP       QoderACPConfig `mapstructure:"acp"`
-}
-
-// QoderACPConfig qoder 的 ACP 配置（与 ACPConfig 字段对应，但 mapstructure 键不带 acp_ 前缀）。
-type QoderACPConfig struct {
-	AgentType string `mapstructure:"agent_type"`
-	// SpawnCommand spawn 命令分词；空 = 按 AgentType 取默认（裸名 "qodercli"）。
-	//
-	// 首元素的解析顺序（见 agent.resolveSpawnName）：显式路径原样使用 →
-	// exec.LookPath（系统 PATH）→ 各 CLI 常见安装落点回退
-	// （qodercli：~/.qoder/bin/qodercli/<name>、$QODER_HOME/bin/...）。
-	//
-	// 之所以要回退：Windows 的 PATH 是**进程启动那一刻的环境快照**，安装器只写
-	// 用户级 PATH，而宿主（IDE/计划任务/常驻服务）常早于安装启动 → 服务进程继承
-	// 不到，裸名直接 `executable file not found in %PATH%`（症状：claude 正常、
-	// 只有 qoder 全挂）。故**裸名即可**，无需在配置里写死机器相关的绝对路径；
-	// 确实要写死时也支持（显式路径不会被改写）。
-	SpawnCommand []string      `mapstructure:"spawn_command"`
-	InitTimeout  time.Duration `mapstructure:"init_timeout"`
-	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`
-}
-
-// ACPConfig 把 qoder 节转成旧 ACPConfig 结构（喂给 agent.ConfigureACPProviders / AgentManager）。
-func (q AgentQoderConfig) ACPConfig() ACPConfig {
-	return ACPConfig{
-		AgentType:    q.ACP.AgentType,
-		SpawnCommand: q.ACP.SpawnCommand,
-		InitTimeout:  q.ACP.InitTimeout,
-		IdleTimeout:  q.ACP.IdleTimeout,
-	}
-}
-
-// AgentDshConfig dsh（DeepSeek Harness）agent 配置。
-// transport: "acp"（dsh --profile acp）。**默认留空 = 不注册**：它要求本机装好 dsh 并在
-// 启动环境提供 DEEPSEEK_API_KEY，缺任一项都只会让任务失败，不如不進选择器。
-type AgentDshConfig struct {
-	Transport string       `mapstructure:"transport"`
-	ACP       DshACPConfig `mapstructure:"acp"`
-}
-
-// DshACPConfig dsh 的 ACP 配置（字段与 QoderACPConfig 对应）。
-// 模型不在这里配：dsh 的模型由 ACP 的 session/set_config_option 在会话内选，
-// CLI 层没有 --model 之类的位置（spawn_command 里塞 `-m` 对它无效）。
-type DshACPConfig struct {
-	AgentType    string   `mapstructure:"agent_type"`
-	SpawnCommand []string `mapstructure:"spawn_command"`
-	// InitTimeout 覆盖 initialize/newSession 超时。dsh 首次启动要组装配方、挂载
-	// 插件（本机 Windows 实测冷启动 >90s，热启动 1s 内回 initialize），30s 默认会
-	// 把第一次会话直接判死，故 defaults 放宽到 2m。
-	InitTimeout time.Duration `mapstructure:"init_timeout"`
-	IdleTimeout time.Duration `mapstructure:"idle_timeout"`
-}
-
-// ACPConfig 把 dsh 节转成旧 ACPConfig 结构（喂给 agent.ConfigureACPProviders）。
-func (d AgentDshConfig) ACPConfig() ACPConfig {
-	return ACPConfig{
-		AgentType:    d.ACP.AgentType,
-		SpawnCommand: d.ACP.SpawnCommand,
-		InitTimeout:  d.ACP.InitTimeout,
-		IdleTimeout:  d.ACP.IdleTimeout,
-	}
-}
-
-// AgentCodebuddyConfig 腾讯 CodeBuddy CLI 配置。
-// transport: "acp"（codebuddy --acp）。**默认留空 = 不注册**：它要求本机装好
-// @tencent-ai/codebuddy-code，且已在 CLI 内登录（iOA / Google·GitHub / 微信 /
-// 企业域名）或提供 CODEBUDDY_API_KEY —— 缺任一项任务只会失败，不如不进选择器。
-type AgentCodebuddyConfig struct {
-	Transport string             `mapstructure:"transport"`
-	ACP       CodebuddyACPConfig `mapstructure:"acp"`
-}
-
-// CodebuddyACPConfig CodeBuddy 的 ACP 配置（字段与 QoderACPConfig 对应）。
-// 模型不在这里配：CLI 的 --model 只影响进程默认，pieqi 走会话级
-// session/set_config_option —— CodeBuddy 在 session/new 的标准 configOptions 里
-// 下发 id="model" 的清单（2026-10-22 实测 v2.159.0，20 个模型），与 qoder 同一条通道。
-type CodebuddyACPConfig struct {
-	AgentType    string        `mapstructure:"agent_type"`
-	SpawnCommand []string      `mapstructure:"spawn_command"`
-	InitTimeout  time.Duration `mapstructure:"init_timeout"`
-	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`
-}
-
-// ACPConfig 把 codebuddy 节转成旧 ACPConfig 结构（喂给 agent.ConfigureACPProviders）。
-func (c AgentCodebuddyConfig) ACPConfig() ACPConfig {
-	return ACPConfig{
-		AgentType:    c.ACP.AgentType,
-		SpawnCommand: c.ACP.SpawnCommand,
-		InitTimeout:  c.ACP.InitTimeout,
-		IdleTimeout:  c.ACP.IdleTimeout,
-	}
 }
 
 // AuthConfig 飞书身份绑定 + Cloudflared 隧道安全系统配置。
@@ -385,17 +298,10 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("agents.claude.bridge.auto_start", true)
 	v.SetDefault("agents.claude.print.command", "claude")
 	v.SetDefault("agents.claude.print.permission_mode", "bypassPermissions")
-	v.SetDefault("agents.qoder.transport", "acp")
-	v.SetDefault("agents.qoder.acp.agent_type", "qodercli")
-	// dsh 刻意不设 transport 默认值：空 transport = 不进 agent 选择器（需要用户显式开启，
-	// 理由是它依赖本机 dsh 安装 + DEEPSEEK_API_KEY，见 AgentDshConfig）。
-	v.SetDefault("agents.dsh.acp.agent_type", "dsh")
-	v.SetDefault("agents.dsh.acp.init_timeout", "2m") // 首启动冷启动远慢于 qodercli，见 DshACPConfig.InitTimeout
-	v.SetDefault("agents.dsh.acp.idle_timeout", "15m")
-	// codebuddy 同样不设 transport 默认值：空 transport = 不进选择器。它要求本机安装
-	// @tencent-ai/codebuddy-code 并已登录（或提供 CODEBUDDY_API_KEY）。
-	v.SetDefault("agents.codebuddy.acp.agent_type", "codebuddy")
-	v.SetDefault("agents.codebuddy.acp.idle_timeout", "15m")
+	// ⚠️ 2026-10-22：qoder / dsh / codebuddy 等 ACP agent 的默认值**已全部移除**。
+	// 它们不再是配置项 —— transport / agent_type / 默认 spawn / 超时都是代码事实，
+	// 归 internal/agent/manifest.go；开不开由运行期设置（settings.json 的 agents 段）
+	// 决定。写在这里只会与 manifest 形成第二份真相。
 	v.SetDefault("auth.debug_skip_all_auth", false)
 	v.SetDefault("auth.feishu_binding_file", filepath.Join(DefaultDataRoot(), "feishu_binding.json"))
 	v.SetDefault("auth.cloudflared.binary_path", "cloudflared")
@@ -498,33 +404,20 @@ func Load(configPath string) (*Config, error) {
 				"编译请用 `go build -o build/pieqi.new.exe ./cmd/pieqi`")
 	}
 
-	// 3) qoder 兼容回填：agents.qoder.acp 未显式配置（新节任一字段都不在配置文件里）
-	//    且旧字段是 qoder 信号（agent_type=qodercli 或 acp_spawn_command 非空）时，
-	//    从 pieqi.acp.* 回填，保证老配置迁到新节不丢 spawn 参数。
-	newQoderACPSet := false
-	for _, k := range []string{
-		"agents.qoder.acp.agent_type",
-		"agents.qoder.acp.spawn_command",
-		"agents.qoder.acp.init_timeout",
-		"agents.qoder.acp.idle_timeout",
-	} {
-		if v.InConfig(k) {
-			newQoderACPSet = true
-			break
-		}
-	}
-	if !newQoderACPSet {
-		legacy := cfg.Pieqi.ACP
-		if legacy.AgentType == "qodercli" || len(legacy.SpawnCommand) > 0 {
-			cfg.Agents.Qoder.ACP = QoderACPConfig{
-				AgentType:    legacy.AgentType,
-				SpawnCommand: legacy.SpawnCommand,
-				InitTimeout:  legacy.InitTimeout,
-				IdleTimeout:  legacy.IdleTimeout,
-			}
-			cfg.Deprecations = append(cfg.Deprecations,
-				"pieqi.acp 的 qoder 配置已自动回填到 agents.qoder.acp（agent_type=qodercli / acp_spawn_command 非空）")
-		}
+	// 3) qoder 的旧字段（pieqi.acp.*）不再是"回填到 agents.qoder.acp"。
+	//
+	//    2026-10-22：agents.qoder 整节已删除 —— spawn 命令等已归 manifest
+	//    （代码事实）。旧配置里的 acp_spawn_command 若真有机器相关差异
+	//    （例如带 -m Qwen3.8-Flash），现在应写进**运行期设置**的
+	//    agents.spawn_overrides.qoder，否则会被静默忽略。
+	//
+	//    这里刻意告警而不静默丢弃：一个还在生效的 spawn 参数突然失效，
+	//    表现是"模型/启动参数莫名其妙变了"，那是最难查的一类问题。
+	if legacy := cfg.Pieqi.ACP; legacy.AgentType == "qodercli" || len(legacy.SpawnCommand) > 0 {
+		cfg.Deprecations = append(cfg.Deprecations,
+			"pieqi.acp.* 的 qoder 配置已不再生效（agents.qoder 节已移除）；"+
+				"如需保留自定义启动参数，请写到运行期设置 ~/.pieqi/settings.json 的 "+
+				"agents.spawn_overrides.qoder")
 	}
 
 	return &cfg, nil

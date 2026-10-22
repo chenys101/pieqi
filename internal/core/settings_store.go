@@ -137,6 +137,43 @@ type Settings struct {
 	// EventRetention 事件保留上限（每个任务）。超出的从**最旧的**开始丢弃。
 	// 0 = 全部保留。默认 5000。
 	EventRetention int `json:"event_retention"`
+
+	// ---------- ⑤ Agent 选择（2026-10-22 新增，运行期） ----------
+
+	// Agents 启用了哪些 agent，以及各 agent 的机器相关覆盖项。
+	//
+	// 为什么放 Settings 而不是 config.yaml：agent 的**代码事实**（怎么 spawn、
+	// agent_type 是什么、有什么能力）已整体搬进 internal/agent/manifest.go；
+	// 剩下的只有"这台机器上开不开、装在哪"——那是用户意图，属于运行期数据，
+	// 应当可热改、不必重启、不随代码走。参见 AGENTS.md「配置迁移注意」。
+	//
+	// 为什么不是"属于某个对象的配置"（Settings 原先的唯一准入标准）：
+	// 它跨任务、跨项目，作用域就是**全局**——恰好是本类型的定义域。它既不描述
+	// 某个任务，也不描述某个渠道，所以放在这里不违反那条纪律。
+	Agents AgentSelection `json:"agents"`
+}
+
+// AgentSelection agent 的运行期选择结果。
+//
+// 字段刻意保持"用户意图"粒度：**不出现** agent_type / 能力声明 / 默认 spawn 这类
+// 代码事实（它们由 manifest 提供）。这样接入一个新 agent 不需要任何人动这个文件。
+type AgentSelection struct {
+	// Enabled 启用的业务名（claude / qoder / dsh / codebuddy ...）。
+	//
+	// nil 或空 = 用 manifest 的默认值（即所有非 OptIn 的 agent）。显式列出时以列表为准 ——
+	// 可以只开一个，也可以把默认开着的关掉。nil 与空切片语义相同是有意的：
+	// 让"从没配过"和"清空"都回到默认，避免用户在设置页删光后得到"一个都没有"。
+	Enabled []string `json:"enabled,omitempty"`
+
+	// SpawnOverrides 按业务名覆盖 spawn 命令（例如把 dsh 指到独立安装位置）。
+	//
+	// 这是**机器相关**知识（"我的 node / dsh 装在哪"），所以归运行期；manifest 里
+	// 只放跨机器不变的裸名。键是业务名，值是命令分词。
+	SpawnOverrides map[string][]string `json:"spawn_overrides,omitempty"`
+
+	// ClaudeTransport claude 的传输选择："sdk-bridge"（默认）| "print"。
+	// 空 = sdk-bridge。它是"这台机器上桥能不能跑"的运行期事实。
+	ClaudeTransport string `json:"claude_transport,omitempty"`
 }
 
 // DefaultSettings 出厂默认值。
@@ -222,6 +259,11 @@ type SettingsPatch struct {
 	DNDStart       *string
 	DNDEnd         *string
 	EventRetention *int
+	// Agents 整体替换 agent 选择（nil = 不修改）。
+	//
+	// 用整体替换而非逐字段补丁：agent 列表本来就是一个集合，"加一个/删一个"
+	// 的补丁语义在并发下容易互相覆盖（两个人同时开关不同 agent 会丢一个改动）。
+	Agents *AgentSelection
 }
 
 // SettingsStore 全局偏好的落盘存储（~/.pieqi/settings.json）。
@@ -316,6 +358,9 @@ func (s *SettingsStore) Patch(p SettingsPatch) (Settings, error) {
 			return prev, fmt.Errorf("event_retention must be >= 0")
 		}
 		next.EventRetention = *p.EventRetention
+	}
+	if p.Agents != nil {
+		next.Agents = *p.Agents
 	}
 
 	// 免打扰开着但起止相同 = 一个永远不生效的时段。它不会报错、只会安安静静

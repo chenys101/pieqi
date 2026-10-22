@@ -126,83 +126,108 @@ func TestConfigureACPProviders(t *testing.T) {
 	}
 }
 
-// TestACPProviderConfigFromAgents 钉住「哪些配置会注册 provider」——与 AvailableAgents 同一判据。
-func TestACPProviderConfigFromAgents(t *testing.T) {
-	got := ACPProviderConfigFromAgents(config.AgentsConfig{
-		Qoder:     config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
-		Dsh:       config.AgentDshConfig{Transport: "acp", ACP: config.DshACPConfig{AgentType: "dsh"}},
-		Codebuddy: config.AgentCodebuddyConfig{Transport: "acp", ACP: config.CodebuddyACPConfig{AgentType: "codebuddy"}},
+// TestACPProviderConfigFromRuntime 钉住「哪些 agent 会注册 provider」——与 AvailableAgents 同一判据。
+//
+// 2026-10-22 重构后判据从「config 里 transport=acp 且 agent_type 非空」改为
+// 「manifest 里有它（Kind=acp）+ 运行期被启用」。因此这组测试也不再需要构造
+// config.AgentsConfig —— 那正是本次要消灭的"用配置表达代码事实"。
+func TestACPProviderConfigFromRuntime(t *testing.T) {
+	// 默认（Enabled 为空）= 只启用非 OptIn 的，即 claude + qoder。
+	got := ACPProviderConfigFromRuntime(AgentRuntimeConfig{})
+	if len(got.Agents) != 1 {
+		t.Fatalf("默认应只注册 qoder，got %+v", got.Agents)
+	}
+	if _, ok := got.Agents[AgentQoder]; !ok {
+		t.Fatalf("默认缺 qoder: %+v", got.Agents)
+	}
+
+	// 显式启用三个 ACP agent。
+	got = ACPProviderConfigFromRuntime(AgentRuntimeConfig{
+		Enabled: []string{AgentClaude, AgentQoder, AgentDsh, AgentCodebuddy},
 	})
 	if len(got.Agents) != 3 {
 		t.Fatalf("agents=%+v, want qoder + dsh + codebuddy", got.Agents)
 	}
-
-	// transport 非 acp / agent_type 空缺都不入表。
-	got = ACPProviderConfigFromAgents(config.AgentsConfig{
-		Qoder: config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
-		Dsh:   config.AgentDshConfig{Transport: "", ACP: config.DshACPConfig{AgentType: "dsh"}},
-	})
-	if _, ok := got.Agents[AgentDsh]; ok {
-		t.Fatalf("dsh transport 空却入了表: %+v", got.Agents)
+	// claude 不是 ACP，绝不能被注册成 ACP provider。
+	if _, ok := got.Agents[AgentClaude]; ok {
+		t.Fatalf("claude 被注册成 ACP provider: %+v", got.Agents)
 	}
+
+	// 显式列出时以列表为准：可以只开一个，也可以把默认开的关掉。
+	got = ACPProviderConfigFromRuntime(AgentRuntimeConfig{Enabled: []string{AgentDsh}})
 	if len(got.Agents) != 1 {
-		t.Fatalf("agents=%+v, want 仅 qoder", got.Agents)
+		t.Fatalf("只开 dsh 时 got %+v", got.Agents)
+	}
+	if _, ok := got.Agents[AgentQoder]; ok {
+		t.Fatalf("qoder 未列入却注册了: %+v", got.Agents)
 	}
 
-	// 两个都没配 → 零值（main.go 据此不注册、也不进 session 驱动路径）。
-	if got := ACPProviderConfigFromAgents(config.AgentsConfig{}); got.Agents != nil {
-		t.Fatalf("未配置时应为零值, got %+v", got.Agents)
+	// 空选择 = 回到默认（非 OptIn 的 qoder），不是"一个都不开"。
+	// 这条语义是有意的：让"从没配过"和"清空"都回到默认，避免用户在设置页
+	// 删光后得到一个空目录。
+	got = ACPProviderConfigFromRuntime(AgentRuntimeConfig{Enabled: []string{}})
+	if _, ok := got.Agents[AgentQoder]; !ok {
+		t.Fatalf("空选择应回到默认（含 qoder），got %+v", got.Agents)
+	}
+	if _, ok := got.Agents[AgentDsh]; ok {
+		t.Fatalf("空选择不应启用 OptIn 的 dsh，got %+v", got.Agents)
+	}
+}
+
+// TestManifestIsTheOnlySource 守「接入一个新 agent 只改 manifest」这条纪律：
+// 每个 manifest 条目都必须自带足够的代码事实，不依赖任何配置。
+func TestManifestIsTheOnlySource(t *testing.T) {
+	for _, m := range AllManifests() {
+		if m.Name == "" || m.DisplayName == "" {
+			t.Fatalf("manifest 条目缺 Name/DisplayName: %+v", m)
+		}
+		if m.Kind == TransportACP {
+			if m.ACPType == "" {
+				t.Fatalf("%s 是 ACP 但没声明 ACPType —— 接入信息不完整", m.Name)
+			}
+			spawn := m.DefaultSpawnCommand()
+			if len(spawn) == 0 {
+				t.Fatalf("%s 算不出默认 spawn 命令", m.Name)
+			}
+			// 裸名纪律：manifest 里绝不写机器相关的绝对路径。
+			if strings.ContainsAny(spawn[0], `/\`) {
+				t.Fatalf("%s 的默认 spawn[0]=%q 含路径分隔符：manifest 必须写裸名", m.Name, spawn[0])
+			}
+		}
+		// OptIn 的 agent 默认不启用 —— 它们需要额外凭据，默认注册只会让用户
+		// 选到一个必然失败的东西。
+		if m.OptIn {
+			rt := AgentRuntimeConfig{}
+			enabled := rt.enabledSet()
+			if enabled[m.Name] {
+				t.Fatalf("%s 标了 OptIn 却在默认选择里被启用", m.Name)
+			}
+		}
 	}
 }
 
 // TestAvailableAgents 目录本身即「新任务页能选什么」的唯一事实源：
 // 顺序（默认 agent = 首位）与可用性判据都必须钉住。
 func TestAvailableAgents(t *testing.T) {
-	t.Run("qoder 未配置时只有 claude", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
-		})
-		if len(got) != 1 || got[0].Name != AgentClaude {
-			t.Fatalf("agents=%+v, want 仅 claude", got)
+	t.Run("默认只有 claude + qoder（OptIn 的不默认启用）", func(t *testing.T) {
+		got := AvailableAgents(AgentRuntimeConfig{})
+		if len(got) != 2 {
+			t.Fatalf("agents=%+v, want claude + qoder", got)
+		}
+		if got[0].Name != AgentClaude || got[1].Name != AgentQoder {
+			t.Fatalf("顺序 = %q,%q，want claude,qoder", got[0].Name, got[1].Name)
 		}
 	})
 
 	t.Run("claude 永远排首位（默认 agent = 首位 = Claude Code）", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
-			Qoder: config.AgentQoderConfig{
-				Transport: "acp",
-				ACP:       config.QoderACPConfig{AgentType: "qodercli"},
-			},
-		})
-		if len(got) != 2 {
-			t.Fatalf("agents=%+v, want 2 个", got)
-		}
-		if got[0].Name != AgentClaude {
-			t.Fatalf("首位 = %q, want %q（默认 agent 取首位）", got[0].Name, AgentClaude)
-		}
-		if got[1].Name != AgentQoder {
-			t.Fatalf("次位 = %q, want %q", got[1].Name, AgentQoder)
-		}
-		if got[0].DisplayName != "Claude Code" {
-			t.Fatalf("claude DisplayName = %q", got[0].DisplayName)
-		}
-	})
-
-	t.Run("qoder transport 非 acp 时不列", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
-			Qoder:  config.AgentQoderConfig{Transport: "off", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
-		})
-		if len(got) != 1 || got[0].Name != AgentClaude {
-			t.Fatalf("agents=%+v, want 仅 claude", got)
+		got := AvailableAgents(AgentRuntimeConfig{})
+		if got[0].Name != AgentClaude || got[0].DisplayName != "Claude Code" {
+			t.Fatalf("首位 = %+v, want Claude Code", got[0])
 		}
 	})
 
 	t.Run("claude print 模式下 transport 描述随之变化", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude: config.AgentClaudeConfig{Transport: "print"},
-		})
+		got := AvailableAgents(AgentRuntimeConfig{ClaudeTransport: "print"})
 		if got[0].Transport != "claude -p" {
 			t.Fatalf("transport=%q, want claude -p", got[0].Transport)
 		}
@@ -215,9 +240,7 @@ func TestAvailableAgents(t *testing.T) {
 	})
 
 	t.Run("claude 走桥时具备图片通路", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
-		})
+		got := AvailableAgents(AgentRuntimeConfig{ClaudeTransport: "sdk-bridge"})
 		if !got[0].ImagePrompt {
 			t.Error("桥路径 ImagePrompt=false：前端永远不显示加图入口，刚打通的图片能力被锁死")
 		}
@@ -225,23 +248,16 @@ func TestAvailableAgents(t *testing.T) {
 
 	t.Run("claude transport 空缺（默认走桥）时也具备图片通路", func(t *testing.T) {
 		// 空 transport 走默认 sdk-bridge（见 openSession）；判据必须与之一致，
-		// 否则"没写 transport"这个最常见的配置会让入口消失。
-		got := AvailableAgents(config.AgentsConfig{})
+		// 否则"没写 transport"这个最常见的状态会让入口消失。
+		got := AvailableAgents(AgentRuntimeConfig{})
 		if !got[0].ImagePrompt {
-			t.Error("默认配置（未写 transport）应走桥并具备图片通路")
+			t.Error("默认（未设 transport）应走桥并具备图片通路")
 		}
 	})
 
-	dshConfig := config.AgentDshConfig{
-		Transport: "acp",
-		ACP:       config.DshACPConfig{AgentType: "dsh"},
-	}
-
-	t.Run("dsh transport=acp 才列，且排在 qoder 之后", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
-			Qoder:  config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
-			Dsh:    dshConfig,
+	t.Run("dsh 需显式启用，且排在 qoder 之后", func(t *testing.T) {
+		got := AvailableAgents(AgentRuntimeConfig{
+			Enabled: []string{AgentClaude, AgentQoder, AgentDsh},
 		})
 		if len(got) != 3 {
 			t.Fatalf("agents=%+v, want 3 个", got)
@@ -258,40 +274,16 @@ func TestAvailableAgents(t *testing.T) {
 		}
 	})
 
-	t.Run("dsh 默认（transport 留空）不注册", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
-			Qoder:  config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
-			Dsh:    config.AgentDshConfig{ACP: config.DshACPConfig{AgentType: "dsh"}},
-		})
-		for _, a := range got {
-			if a.Name == AgentDsh {
-				t.Fatalf("transport 留空却列出了 dsh: %+v", got)
-			}
-		}
-	})
-
-	t.Run("只配 dsh 不配 qoder 也成立（dsh 不需要 qoder 陪跑）", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
-			Dsh:    dshConfig,
-		})
+	t.Run("只开 dsh 不陪跑 qoder 也成立", func(t *testing.T) {
+		got := AvailableAgents(AgentRuntimeConfig{Enabled: []string{AgentClaude, AgentDsh}})
 		if len(got) != 2 || got[1].Name != AgentDsh {
 			t.Fatalf("agents=%+v, want claude + dsh", got)
 		}
 	})
 
-	codebuddyConfig := config.AgentCodebuddyConfig{
-		Transport: "acp",
-		ACP:       config.CodebuddyACPConfig{AgentType: "codebuddy"},
-	}
-
-	t.Run("codebuddy transport=acp 才列，且排在 dsh 之后", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude:    config.AgentClaudeConfig{Transport: "sdk-bridge"},
-			Qoder:     config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
-			Dsh:       dshConfig,
-			Codebuddy: codebuddyConfig,
+	t.Run("codebuddy 需显式启用，且排在 dsh 之后", func(t *testing.T) {
+		got := AvailableAgents(AgentRuntimeConfig{
+			Enabled: []string{AgentClaude, AgentQoder, AgentDsh, AgentCodebuddy},
 		})
 		if len(got) != 4 {
 			t.Fatalf("agents=%+v, want 4 个", got)
@@ -324,15 +316,19 @@ func TestAvailableAgents(t *testing.T) {
 		}
 	})
 
-	t.Run("codebuddy 默认（transport 留空）不注册", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude:    config.AgentClaudeConfig{Transport: "sdk-bridge"},
-			Codebuddy: config.AgentCodebuddyConfig{ACP: config.CodebuddyACPConfig{AgentType: "codebuddy"}},
-		})
-		for _, a := range got {
+	t.Run("codebuddy 默认不启用", func(t *testing.T) {
+		for _, a := range AvailableAgents(AgentRuntimeConfig{}) {
 			if a.Name == AgentCodebuddy {
-				t.Fatalf("transport 留空却列出了 codebuddy: %+v", got)
+				t.Fatalf("OptIn 的 codebuddy 出现在默认目录里")
 			}
+		}
+	})
+
+	// 显式启用一个不存在的名字不应制造幽灵条目。
+	t.Run("未知名字被忽略", func(t *testing.T) {
+		got := AvailableAgents(AgentRuntimeConfig{Enabled: []string{AgentClaude, "no-such-agent"}})
+		if len(got) != 1 || got[0].Name != AgentClaude {
+			t.Fatalf("agents=%+v, want 仅 claude", got)
 		}
 	})
 
@@ -349,21 +345,19 @@ func TestAvailableAgents(t *testing.T) {
 	//   · claude 的 goal 是命令 + Stop hook ⇒ GoalModeCommand、无工具入口
 	//   · dsh 的 goal 是工具 ⇒ GoalModeTool，实测收到 tool_call: create_goal
 	t.Run("三个 agent 的结构化能力必须有差异", func(t *testing.T) {
-		got := AvailableAgents(config.AgentsConfig{
-			Claude: config.AgentClaudeConfig{Transport: "sdk-bridge"},
-			Qoder:  config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
-			Dsh:    dshConfig,
+		got := AvailableAgents(AgentRuntimeConfig{
+			Enabled: []string{AgentClaude, AgentQoder, AgentDsh},
 		})
 		if len(got) != 3 {
 			t.Fatalf("agents=%+v, want 3 个", got)
 		}
-		claude, qoder, dsh := got[0], got[1], got[2]
+		claudeInfo, qoder, dsh := got[0], got[1], got[2]
 
 		// goal 形态：三家必须能区分开（这是用户最容易被误导的一格）
-		if claude.GoalMode != GoalModeCommand {
-			t.Errorf("claude GoalMode=%q, want %q（/goal 是 CLI 本地解析的命令）", claude.GoalMode, GoalModeCommand)
+		if claudeInfo.GoalMode != GoalModeCommand {
+			t.Errorf("claude GoalMode=%q, want %q（/goal 是 CLI 本地解析的命令）", claudeInfo.GoalMode, GoalModeCommand)
 		}
-		if !claude.GoalStateVisible {
+		if !claudeInfo.GoalStateVisible {
 			t.Error("claude GoalStateVisible=false：active_goal 已在 2026-10-18 接通，谎报会让用户以为状态不可见")
 		}
 		if qoder.GoalMode != "" {
@@ -378,7 +372,7 @@ func TestAvailableAgents(t *testing.T) {
 		}
 
 		// 同类免审：只有 ACP 系有（claude 走 PreToolUse hook，没有 approve_session）
-		if claude.SessionAlways {
+		if claudeInfo.SessionAlways {
 			t.Error("claude SessionAlways=true：hook 路径的 Resolve 不认 approve_session")
 		}
 		if !qoder.SessionAlways || !dsh.SessionAlways {
@@ -386,7 +380,7 @@ func TestAvailableAgents(t *testing.T) {
 		}
 
 		// 模型可选：claude 桥不下发清单
-		if claude.ModelSelectable {
+		if claudeInfo.ModelSelectable {
 			t.Error("claude ModelSelectable=true：桥不下发模型清单")
 		}
 		if !qoder.ModelSelectable || !dsh.ModelSelectable {
@@ -394,9 +388,9 @@ func TestAvailableAgents(t *testing.T) {
 		}
 
 		// 冷启动：只有 dsh 明显慢（实测 >90s，init_timeout 因此设 2m）
-		if dsh.ColdStartCold != true || claude.ColdStartCold != false || qoder.ColdStartCold != false {
+		if !dsh.ColdStartCold || claudeInfo.ColdStartCold || qoder.ColdStartCold {
 			t.Errorf("冷启动标记不对：claude=%v qoder=%v dsh=%v（dsh 实测 >90s）",
-				claude.ColdStartCold, qoder.ColdStartCold, dsh.ColdStartCold)
+				claudeInfo.ColdStartCold, qoder.ColdStartCold, dsh.ColdStartCold)
 		}
 	})
 }

@@ -61,15 +61,17 @@ pieqi:
   base_branch: main                  # worktree 基准分支（按你仓库的主分支改：main / master）
   bots_dir: ""                       # IM 机器人绑定记录目录；空 = ~/.pieqi/bots
   # 注：自重启的交付落点**没有配置项、也没有环境变量**。
-  # 落点由**约定推导**：<本 config.yaml 所在目录>/build  （见 cmd/pieqi 的 resolveStagingDir）。
-  # 判据：config.yaml 是启动本来就必需的输入，且与 go.mod 同级（= 仓库根），
-  #       所以"仓库根"可由它推出，不需要新旋钮告诉服务。
-  # 因此编译规范是：go build -o build/pieqi.new.exe ./cmd/pieqi
-  #   build/pieqi.new.exe  编译/交付产物（agent 投递到这里，build/ 里唯一的二进制）
-  #   %USERPROFILE%\.pieqi\bin\pieqi.exe       运行产物（服务真正在跑的那个，必须在仓库外）
-  #   %USERPROFILE%\.pieqi\bin\pieqi.exe.old   回滚备份（与运行产物同目录，由服务自己写）
-  # ⚠️ 不要把运行产物放进仓库：仓库目录带 Low 完整性标签，区内 exe 起的进程写不了
-  #    ~/.pieqi（症状是创建任务 500、日志零增长）。安装请用 build/restart.bat。
+  # 落点由**约定推导**：<dataRoot>/bin，即 %USERPROFILE%\.pieqi\bin\pieqi.new.exe
+  # （见 cmd/pieqi 的 resolveStagingDir）。
+  # 2026-10-22 修订：原依据是"<config.yaml 所在目录>/build"，但那隐含假设
+  #       config.yaml 是仓库文件；它实际上是**运行时产物**，放在 ~/.pieqi/bin 时
+  #       该推导恒错（算出不存在的 ~/.pieqi/bin/build），且失败是静默的。
+  #       改用 dataRoot（= PIEQI_HOME 或 ~/.pieqi）后，与 config.yaml 放哪无关。
+  # 因此日常迭代是三步：编译 → 把产物 copy 到 %USERPROFILE%\.pieqi\bin\pieqi.new.exe
+  #       → POST /api/admin/restart（有产物就换版，没有就只重启）。
+  # ⚠️ 必须 copy 不能 move：仓库里编出的 exe 带 Low 完整性标签，move 会把它一起搬走，
+  #    那样跑起来的进程写不了 ~/.pieqi（症状是创建任务 500、日志零增长）。
+  #    安装运行副本请用 build/restart.bat。
   # 旧的 self_update_dir 若仍写在配置里，会得到一条弃用告警且**不再生效**。
   # ⚠️ 以下 acp 节已弃用（P5 迁移到 agents.*）。显式配置会触发告警。
   #    保留在此仅为从旧配置迁移时对照，**新配置请直接改 agents 节**。
@@ -82,6 +84,28 @@ pieqi:
 
 # ── 多 Agent（multi-agent.md §9）─────────────────────────────────────────────
 agents:
+  # ⚠️ 2026-10-22 起，qoder / dsh / codebuddy 等 ACP agent 的节**已从配置移除**。
+  #
+  # 原因（约定优于配置）：transport / agent_type / 默认 spawn / 能力声明 / 超时
+  # 全都是**代码事实**，已集中在 internal/agent/manifest.go。写在配置里的取值永远
+  # 是同一个常量（例如 agent_type: codebuddy），用户抄一遍只是多一个写错的地方。
+  #
+  # 于是：
+  #   • 接入一个新 agent → 只改 internal/agent/manifest.go，不需要碰任何配置。
+  #   • 开/关某个 agent、或覆盖它的启动命令（例如 qoder 的 -m Qwen3.8-Flash）
+  #     → 改**运行期设置** ~/.pieqi/settings.json 的 agents 段：
+  #         { "agents": {
+  #             "enabled": ["claude", "qoder", "dsh", "codebuddy"],
+  #             "spawn_overrides": { "qoder": ["qodercli","--acp","-m","Qwen3.8-Flash"] },
+  #             "claude_transport": "sdk-bridge"
+  #         } }
+  #       它可热改、不必重启，也不需要改这个文件。
+  #   • 默认启用 claude 与 qoder；dsh / codebuddy 属"需额外凭据"的 agent，
+  #     默认不进选择器（选了也只会失败），要用需在 enabled 里显式列出。
+  #
+  # 为什么 claude 的节**保留**：桥监听端口、鉴权 token、claude 二进制名、
+  # 默认模型 —— 这些是真正的机器相关运行期事实，无法由代码推导。
+  # 可用 agent 列表以后端 /api/agents 为唯一事实源。
   claude:
     transport: sdk-bridge           # sdk-bridge(默认,官方 Agent SDK 常驻桥) | print(直连 claude -p)
     bridge:
@@ -94,58 +118,6 @@ agents:
       permission_mode: bypassPermissions
       model: ""                     # 空 = 用 CLI 默认模型
       sys_prompt: ""
-  qoder:
-    transport: acp                  # acp(默认, qodercli --acp)
-    acp:
-      agent_type: qodercli
-      # 显式带 -m 选用 Qwen3.8-Flash（Qoder 国际版限时免费，0 Credits）。
-      # 不带 -m 时走账号默认模型（付费），Credits 耗尽会报 "credit usage limit"（error_code 118）。
-      # 空数组 = 按 agent_type 取默认。
-      # 裸名即可：spawn 命令解析有安装落点回退
-      # （qodercli → ~/.qoder/bin/qodercli/<name>、$QODER_HOME/bin/...），
-      # 不依赖服务进程的 PATH（PATH 是进程启动快照，宿主早于安装启动时拿不到）。
-      # 确实需要写死时也可填绝对路径，显式路径不会被改写。
-      spawn_command: ["qodercli", "--acp", "-m", "Qwen3.8-Flash"]
-      init_timeout: 30s
-      idle_timeout: 15m             # 会话空闲回收阈值；<=0 禁用
-  dsh:
-    # 默认留空 = 不注册，agent 选择器里看不到它。要启用改成 acp，并满足两个前提：
-    #   1) 装 CLI：npm install -g @deepseek-ai/dsh（0.x；ACP 是它的 profile：dsh --profile acp）
-    #   2) dsh 侧有可用模型路由：ACP 会话的 provider/model 只取自 dsh `acp` profile 里
-    #      `acp` 这条 entry 的 config（出厂 pin 在 deepseek-official，要 DEEPSEEK_API_KEY；
-    #      改 pin 到别的 provider，如本地网关，就不需要这个 key）。缺密钥时任务会失败，
-    #      错误文案直接来自 dsh：no API key for provider route "deepseek-official"。
-    transport: ""                   # ""(默认,不注册) | acp(dsh --profile acp)
-    acp:
-      agent_type: dsh
-      # 裸名即可：Windows 上 npm 全局装的是 .cmd shim，Go spawn 会永久挂死，
-      # 程序会自动在 node_modules 各候选根里找到 @deepseek-ai/dsh 的 lib/bin.js
-      # 并以 `node <入口> --profile acp` 直启（同 claude-code 绕开 npx 的做法）。
-      # 空数组 = 按 agent_type 取默认；要显式写也支持，例如：
-      # spawn_command: ["dsh", "--profile", "acp"]
-      # 模型不要写在这里：CLI 参数里没有 --model 的位置，路由由 dsh 侧 profile 决定。
-      # 会话内可换模型（ACP session/set_config_option），但前提是 profile 已 pin 出
-      # 一个可用路由 —— 没有 pin 时会话压根没有模型可选（dsh 不回落 agent 默认模型）。
-      init_timeout: 2m              # 首次启动要组装配方/挂插件，实测冷启动 >90s（热启动 1s）
-      idle_timeout: 15m
-  codebuddy:
-    # 默认留空 = 不注册，agent 选择器里看不到它。要启用改成 acp，并满足以下任一登录前提：
-    #   1) npm install -g @tencent-ai/codebuddy-code，然后在 CLI 内登录
-    #      （iOA / Google·GitHub / 微信 / 企业域名），或
-    #   2) 在服务启动环境提供 CODEBUDDY_API_KEY。
-    # 未登录时 session/new 会失败，任务直接报错 —— 与 dsh 同理，不默认进选择器。
-    transport: ""                   # ""(默认,不注册) | acp(codebuddy --acp)
-    acp:
-      agent_type: codebuddy
-      # 裸名即可：Windows 上 npm 全局装的是 .cmd shim，Go spawn 会永久挂死，
-      # 程序会自动在 node_modules 各候选根里找到 @tencent-ai/codebuddy-code 的
-      # bin/codebuddy 并以 `node <入口> --acp` 直启。空数组 = 按 agent_type 取默认。
-      # spawn_command: ["codebuddy", "--acp"]
-      # 模型不要写在这里：CodeBuddy 在 session/new 的标准 configOptions 里下发
-      # id="model" 清单，pieqi 用 session/set_config_option 做会话级切换。
-      init_timeout: 30s
-      idle_timeout: 15m
-  # 可用 agent 列表以后端 /api/agents 为唯一事实源；未知名字会被拒（400）。
 
 # ── 鉴权 + Cloudflared 隧道（PRD §8）────────────────────────────────────────
 auth:

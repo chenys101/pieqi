@@ -1,8 +1,10 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 
+	"pieqi/internal/agent"
 	"pieqi/internal/core"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +22,10 @@ type settingsDto struct {
 	DNDStart       string `json:"dnd_start"`
 	DNDEnd         string `json:"dnd_end"`
 	EventRetention int    `json:"event_retention"`
+	// Agents agent 的运行期选择（2026-10-22）。只含**用户意图**：
+	// 开不开、装在哪、claude 走哪条传输。代码事实（agent_type / 默认 spawn /
+	// 能力声明）在 internal/agent/manifest.go，**不在**这里下发 —— 那是只读的。
+	Agents core.AgentSelection `json:"agents"`
 }
 
 func toSettingsDTO(s core.Settings) settingsDto {
@@ -30,7 +36,42 @@ func toSettingsDTO(s core.Settings) settingsDto {
 		DNDStart:       s.DNDStart,
 		DNDEnd:         s.DNDEnd,
 		EventRetention: s.EventRetention,
+		Agents:         s.Agents,
 	}
+}
+
+// validateAgentSelection 校验 agent 选择写进来的名字是否都是已知 agent。
+//
+// 为什么必须校验而不是静默忽略未知名字：写错一个名字（例如 "code-buddy"）会
+// 让对应 agent 悄无声息地不出现，用户只会看到"怎么没生效"。回 400 并列出
+// 已知名字，比让人猜要好。
+//
+// 不复用 agent 包的 manifest 查询是因为 api 已经依赖 agent，用它的导出版本即可；
+// 这里只在 api 层做**入口校验**（名字合法性），不涉及任何代码事实。
+func validateAgentSelection(sel core.AgentSelection) error {
+	if len(sel.Enabled) > 0 {
+		known := make(map[string]bool)
+		for _, m := range agent.AllManifests() {
+			known[m.Name] = true
+		}
+		var unknown []string
+		for _, n := range sel.Enabled {
+			if !known[n] {
+				unknown = append(unknown, n)
+			}
+		}
+		if len(unknown) > 0 {
+			names := make([]string, 0, len(known))
+			for _, m := range agent.AllManifests() {
+				names = append(names, m.Name)
+			}
+			return fmt.Errorf("unknown agent(s) %v; known: %v", unknown, names)
+		}
+	}
+	if sel.ClaudeTransport != "" && sel.ClaudeTransport != "sdk-bridge" && sel.ClaudeTransport != "print" {
+		return fmt.Errorf("claude_transport must be sdk-bridge or print, got %q", sel.ClaudeTransport)
+	}
+	return nil
 }
 
 // getSettings 处理 GET /api/settings。
@@ -65,10 +106,20 @@ func (s *Server) patchSettings(c *gin.Context) {
 		DNDStart       *string `json:"dnd_start"`
 		DNDEnd         *string `json:"dnd_end"`
 		EventRetention *int    `json:"event_retention"`
+		// Agents nil = 不修改；非 nil = **整体替换**。
+		// 用整体替换而不是逐字段补丁：agent 列表本质是一个集合，
+		// "加一个/删一个"的补丁在并发下会互相覆盖（两人同时开关不同 agent 会丢改动）。
+		Agents *core.AgentSelection `json:"agents"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body: " + err.Error()})
 		return
+	}
+	if body.Agents != nil {
+		if err := validateAgentSelection(*body.Agents); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	next, err := s.settings.Patch(core.SettingsPatch{
 		AutoApproveL0:  body.AutoApproveL0,
@@ -77,6 +128,7 @@ func (s *Server) patchSettings(c *gin.Context) {
 		DNDStart:       body.DNDStart,
 		DNDEnd:         body.DNDEnd,
 		EventRetention: body.EventRetention,
+		Agents:         body.Agents,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

@@ -247,8 +247,12 @@ func main() {
 	var acpMgr *agent.AgentManager
 
 	// 可被任务选择的 agent 目录：新任务页选择器的数据源，同时也是 AgentManager 的选路依据。
-	// AvailableAgents 恒含 claude（且排首位），故默认 agent = 列表首位 = Claude Code。
-	availableAgents := agent.AvailableAgents(cfg.Agents)
+	//
+	// 2026-10-22 重构：目录不再来自 config.yaml 的 agents 段，而是「manifest（代码事实）
+	// + Settings.Agents（运行期选择）」合成。于是接入新 agent 只改 manifest.go 一处，
+	// 用户要开/关某个 agent 则改运行期设置（可热应用，不必动配置、不必重启）。
+	agentRT := agentRuntimeFromSettings(settingsStore.Get())
+	availableAgents := agent.AvailableAgents(agentRT)
 	agentNames := make([]string, 0, len(availableAgents))
 	for _, a := range availableAgents {
 		agentNames = append(agentNames, a.Name)
@@ -258,12 +262,10 @@ func main() {
 		defaultAgentName = agentNames[0]
 	}
 
-	// 是否进入 session 驱动路径：沿用改造前的判据（claude 走桥，或有任一 ACP 系 agent 已配置）。
-	// 判据不变是刻意的——本次改动只让「进来之后选哪个 agent」变得可选，不改变
-	// 「哪些配置会进入这条路径」，避免旧配置（use_acp + print）被无声改道。
-	// 表本身也是 provider 的注册依据（见下方「多 Agent」接线），两处共用同一判据。
-	acpProviders := agent.ACPProviderConfigFromAgents(cfg.Agents)
-	if cfg.Agents.Claude.Transport == "sdk-bridge" || len(acpProviders.Agents) > 0 {
+	// 是否进入 session 驱动路径：claude 走桥，或有任一 ACP 系 agent 被启用。
+	acpProviders := agent.ACPProviderConfigFromRuntime(agentRT)
+	claudeTransportRT := agentRT.ClaudeTransportOrDefault()
+	if claudeTransportRT == "sdk-bridge" || len(acpProviders.Agents) > 0 {
 		mgr := agent.NewMultiAgentSessionManager(agentNames, defaultAgentName, agent.ManagerConfig{
 			MaxConcurrent: cfg.Pieqi.MaxConcurrentPerProject,
 			// 会话空闲回收阈值：复用旧 acp.idle_timeout（默认 15m），轮间保活上限
@@ -274,7 +276,7 @@ func main() {
 		logger.Info("agent session manager enabled",
 			zap.Strings("agents", agentNames),
 			zap.String("default_agent", defaultAgentName),
-			zap.String("claude_transport", cfg.Agents.Claude.Transport))
+			zap.String("claude_transport", claudeTransportRT))
 		// 后台空闲回收：会话跨轮保活，超过 idle_timeout 无对话优雅关闭（避免孤儿进程累积）。
 		mgr.StartReaper(cfg.Pieqi.ACP.IdleTimeout / 3)
 	} else if cfg.Pieqi.ACP.UseACP {
@@ -306,6 +308,8 @@ func main() {
 	var claudeProc *claude.Proc
 	{
 		cc := claude.ConfigFromAgents(cfg.Agents)
+		// transport 归运行期设置（"这台机器上桥能不能跑"是运行期事实）。
+		cc.Transport = claudeTransportRT
 		cc.Logger = logger
 		if cc.Transport == "sdk-bridge" && cfg.Agents.Claude.Bridge.AutoStart {
 			proc := claude.NewProc(claude.ProcConfig{
@@ -325,8 +329,8 @@ func main() {
 		}
 		claude.Configure(cc)
 	}
-	// ACP 系 agent（qoder / dsh）工厂：配置里 transport=acp 的才进表，业务 agent.Open("<名字>") 即用。
-	// 名字与 AvailableAgents 的 Name 同一个串，两处共用 ACPProviderConfigFromAgents 的判据。
+	// ACP 系 agent（qoder / dsh / codebuddy）工厂：被启用的才进表，业务 agent.Open("<名字>") 即用。
+	// 名字与 AvailableAgents 的 Name 同一个串，两处共用 ACPProviderConfigFromRuntime 的判据。
 	if len(acpProviders.Agents) > 0 {
 		acpProviders.Logger = logger
 		agent.ConfigureACPProviders(acpProviders)
@@ -479,6 +483,11 @@ func main() {
 		// 新任务页 agent 选择器的目录（与 runner 用的是同一份 availableAgents，
 		// 单一事实源：能选的 agent 就是 AgentManager 真能分发的 agent）。
 		apiServer.SetAgents(availableAgents, defaultAgentName)
+		// 目录按**当前**设置现算：agent 开关存在 settings.json 里、可热改，
+		// 只留启动快照会让"设置页打开了 codebuddy"必须重启才生效。
+		apiServer.SetAgentCatalogSource(func() []agent.AgentInfo {
+			return agent.AvailableAgents(agentRuntimeFromSettings(settingsStore.Get()))
+		})
 		apiServer.SetAuth(authSvc, tunnelMgr)
 		apiServer.SetFeedback(feedbackStore, previewMgr)
 		apiServer.SetCheckRunner(checkRunner)
@@ -499,26 +508,26 @@ func main() {
 		// 就是仓库子树），pieqi 负责把它搬到位（仓库外的运行位）并接管端口。
 		//
 		// 编排在后台 goroutine 里跑（先回 202 再退出），见 core.SelfRestart.RestartAndExit。
-		// 交付目录由约定推导：<config.yaml 所在目录>/build（= 仓库根的 build\）。
-		// 不需要任何配置或环境变量 —— 见 resolveStagingDir 的说明。
-		stageDir := resolveStagingDir(cfgPath)
+		// 交付目录由约定推导：<dataRoot>/bin（默认 ~/.pieqi/bin）。
+		// 与 config.yaml 放在哪里**无关** —— 见 resolveStagingDir 的说明。
+		stageDir := resolveStagingDir(dataRoot)
 		selfRestart = core.NewSelfRestart(execPath, dataRoot, stageDir, func(msg string, kv ...any) {
 			logger.Info(msg, zap.Any("detail", kv))
 		})
 		if stageDir == "" {
-			// 算不出来（configPath 为空，或 <repo>/build 不存在/不可用）：
+			// 算不出来（dataRoot 为空，或 <dataRoot>/bin 不存在/不可用）：
 			// **显式报错**，绝不静默退回 dir(execPath) 那个在"运行位在仓库外"的
 			// 正确部署下必然错误的路径。这条告警是刻意的 —— 静默退化的表现是
 			// staged 恒 false，没人能看出是环境问题还是功能坏了。
 			logger.Error("self-restart disabled: could not resolve the delivery (staging) directory",
-				zap.String("config_path", cfgPath),
-				zap.String("expected", filepath.Join(filepath.Dir(cfgPath), "build")),
-				zap.String("hint", "约定：交付目录 = <config.yaml 所在目录>/build。"+
-					"请确认 config.yaml 与 go.mod 同级（仓库根），且 build/ 已存在（构建一次即可）"))
+				zap.String("data_root", dataRoot),
+				zap.String("expected", filepath.Join(dataRoot, "bin")),
+				zap.String("hint", "约定：交付目录 = <dataRoot>/bin（默认 ~/.pieqi/bin）。"+
+					"请确认该目录存在（构建/部署一次即可）"))
 		}
 		logger.Info("self-restart staging dir resolved",
 			zap.String("dir", stageDir),
-			zap.String("source", stagingDirSource(cfgPath)))
+			zap.String("source", stagingDirSource(dataRoot)))
 		// 交接单要记的"被打断的会话"由 runner 提供：只有它知道哪些任务真的
 		// 挂在本进程上（running / 等 approval）。running 中的 ACP 会话与
 		// claude 子进程都随本进程 exit 一起死，所以这就是受影响的全集。
@@ -734,6 +743,28 @@ func listenWithRetry(addr string, timeout time.Duration, logger *zap.Logger) (ne
 	}
 }
 
+// agentRuntimeFromSettings 把运行期设置里的 agent 选择转成 agent 包的运行时配置。
+//
+// 为什么放在 main 而不是 agent 或 core 包：agent 包不能 import core（core 用 agent），
+// core 也不该知道 agent 的 manifest 形态。main 是**唯一**同时依赖两者的地方，
+// 转换逻辑放这里既不断开依赖方向，也不制造第三份真相。
+func agentRuntimeFromSettings(s core.Settings) agent.AgentRuntimeConfig {
+	rt := agent.AgentRuntimeConfig{
+		Enabled:         s.Agents.Enabled,
+		ClaudeTransport: s.Agents.ClaudeTransport,
+	}
+	if len(s.Agents.SpawnOverrides) > 0 {
+		rt.Overrides = make(map[string]config.ACPConfig, len(s.Agents.SpawnOverrides))
+		for name, cmd := range s.Agents.SpawnOverrides {
+			if len(cmd) == 0 {
+				continue // 空数组 = 不覆盖，用 manifest 默认（与"显式清空"同义）
+			}
+			rt.Overrides[name] = config.ACPConfig{SpawnCommand: cmd}
+		}
+	}
+	return rt
+}
+
 // absolutizeConfigPath 把相对路径的 config.yaml 钉成绝对路径；已是绝对路径时原样返回。
 //
 // 存在理由见 main 里调用点的注释：**相对路径会让交付目录推导恒错**（dir("config.yaml")
@@ -797,38 +828,49 @@ func absolutizeConfigPath(path string, cwdFn func() (string, error)) string {
 // 关闭自重启，**绝不静默退回 dir(execPath)** 那个必然错误的路径。判据见
 // usableStagingDir（存在、是目录、非符号链接）。
 //
-// 注意区分两种"算不出来"：
-//   - configPath 为空 → 调用方拿不到仓库根，返回空串（调用方报错）
-//   - <repo>/build 尚不存在 → 也返回空串。**不代为创建**：build\ 是编译落点，
-//     由构建/交付流程建立；服务替它建目录只会掩盖"仓库根本没构建过"这件事。
+// # 为什么 2026-10-22 改为由 <dataRoot>/bin 推导（原来的 dir(config.yaml)/build 不再使用）
 //
-// ⚠️ 编译规范与此**强耦合**，改一边必须改另一边（见 AGENTS.md）：
+// 原方案把"config.yaml 所在目录"当作仓库根，隐含假设 **config.yaml 与 go.mod 同级**。
+// 但 config.yaml 实际上是**运行时产物**：它含飞书凭据路径、隧道 token 路径、端口、
+// 个人域名，这些东西根本不该随代码走，实践中它也确实被放进了运行位
+// （~/.pieqi/bin/config.yaml）。一旦如此，假设当场失效：
 //
-//	go build -o build/pieqi.new.exe ./cmd/pieqi   ← 只写 .new，**绝不**直接写 pieqi.exe
+//	dir(~/.pieqi/bin/config.yaml) = ~/.pieqi/bin  ⇒  交付目录 ~/.pieqi/bin/build（不存在）
 //
-// 运行产物 pieqi.exe 的**唯一写者**是 core.SelfRestart（改名备份 → 落新文件 →
-// 失败回滚）。若构建直接覆盖 pieqi.exe，会让"回滚备份"保存的是刚编出来的那份，
-// 而不是"上次跑成功的那份"。
-func resolveStagingDir(configPath string) string {
-	if strings.TrimSpace(configPath) == "" {
+// 症状是**静默的**：stagingDir="" ⇒ POST /api/admin/restart 退化为 restart-only，
+// 看起来"重启成功了"，其实新版本从未被装上。
+//
+// 新判据只依赖 dataRoot（= PIEQI_HOME 或 ~/.pieqi）——它本来就必须存在（任务、
+// 日志、worktree 全在下面），且与 config.yaml 放在哪里完全无关：
+//
+//	交付目录 = <dataRoot>/bin    ⇒  默认 ~/.pieqi/bin/pieqi.new.exe
+//
+// 代价与取舍（刻意接受的）：
+//   - 交付位从"仓库内"移到"运行位旁边"。这**不违反**"运行产物必须在仓库外"那条纪律
+//     —— 那条纪律是为了避免 Low 完整性标签，而 <dataRoot> 在仓库外，天然是 Medium。
+//   - 但交付物必须用 copy 投放（不能 move/rename）：move 会把源文件的 Low 标签一起
+//     搬过来。deploy-dev.sh 已按此实现。
+//   - agent 若在受限沙箱里跑，可能写不到 ~/.pieqi。此时仍可把产物放到仓库 build/
+//     再手工 copy —— 但那属于部署动作，不再由服务端推导。
+//
+// 仍然保留的校验：目录必须存在、是真目录、非链接（见 usableStagingDir）。
+// 与旧实现一致，**不代为创建** —— 那会掩盖"根本没部署过"。
+func resolveStagingDir(dataRoot string) string {
+	if strings.TrimSpace(dataRoot) == "" {
 		return ""
 	}
-	abs, err := filepath.Abs(configPath)
-	if err != nil {
-		return ""
-	}
-	return usableStagingDir(filepath.Join(filepath.Dir(abs), "build"))
+	return usableStagingDir(filepath.Join(dataRoot, "bin"))
 }
 
 // stagingDirSource 说明交付目录是怎么算出来的，仅供日志取证。
 //
 // 存在的理由：排查"agent 投递了但服务说 staged:false"时，第一件要问的事就是
 // "服务到底在看哪个目录、依据是什么"。把推导依据打进启动日志，这个问题无需再猜。
-func stagingDirSource(configPath string) string {
-	if strings.TrimSpace(configPath) == "" {
-		return "unresolved:empty config path"
+func stagingDirSource(dataRoot string) string {
+	if strings.TrimSpace(dataRoot) == "" {
+		return "unresolved:empty data root"
 	}
-	return "convention:dir(config.yaml)/build"
+	return "convention:dataRoot/bin"
 }
 
 // usableStagingDir 校验推导出的交付目录是否可用；不可用返回空串（调用方据此明确报错）。

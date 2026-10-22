@@ -25,9 +25,11 @@
 
   * `qoder` 等 → 原生 ACP（`qodercli --acp`，`coder/acp-go-sdk`）。
 
-  * `dsh` → 同为 ACP，但入口是一个 profile（`dsh --profile acp`，DeepSeek Harness）。默认**不注册**：需要本机装 `@deepseek-ai/dsh`，且其 `acp` profile 里 pin 了可用模型路由（出厂路由需 `DEEPSEEK_API_KEY`，也可改 pin 到本地网关等免 key 的 provider）；模型由 dsh 侧决定，不在本项目配置里。
+  * `dsh` → 同为 ACP，但入口是一个 profile（`dsh --profile acp`，DeepSeek Harness）。默认**不启用**（需显式列进运行期设置的 `agents.enabled`）：需要本机装 `@deepseek-ai/dsh`，且其 `acp` profile 里 pin 了可用模型路由（出厂路由需 `DEEPSEEK_API_KEY`，也可改 pin 到本地网关等免 key 的 provider）；模型由 dsh 侧决定，不在本项目配置里。
 
-  * `codebuddy` → ACP（`codebuddy --acp`，腾讯 CodeBuddy CLI）。默认**不注册**：需要本机装 `@tencent-ai/codebuddy-code` 并已登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`；模型清单由 `session/new` 的标准 `configOptions` 下发，支持会话内切换。
+  * `codebuddy` → ACP（`codebuddy --acp`，腾讯 CodeBuddy CLI）。默认**不启用**：需要本机装 `@tencent-ai/codebuddy-code` 并已登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`；模型清单由 `session/new` 的标准 `configOptions` 下发，支持会话内切换。
+
+  * 接入一个新 agent 只需改 `internal/agent/manifest.go` 一处（**不需要动任何配置**）；开/关它则改运行期设置 `agents.enabled`，可热改。
 
   * 可选 agent 列表以 `GET /api/agents` 为唯一事实源，前端选择器由它驱动。
 
@@ -249,12 +251,14 @@ agents:
     bridge:
       base_url: "http://127.0.0.1:18790"
       auto_start: true     # 探活失败自动 spawn 桥服务
-  qoder:
-    transport: acp         # qodercli --acp
-  dsh:
-    transport: ""          # 留空 = 不注册；改成 acp 即接 dsh --profile acp（模型路由在 dsh 侧 profile 里 pin）
-  codebuddy:
-    transport: ""          # 留空 = 不注册；改成 acp 即接 codebuddy --acp（需先在 CLI 登录或设 CODEBUDDY_API_KEY）
+  # qoder / dsh / codebuddy 等 ACP agent **不再在这里配置**：
+  # 它们的 transport / agent_type / 默认 spawn / 能力声明都是代码事实，
+  # 统一在 internal/agent/manifest.go 里声明。
+  # 开/关某个 agent、或覆盖它的启动命令，改运行期设置（可热改，不必重启）：
+  #   ~/.pieqi/settings.json
+  #   { "agents": { "enabled": ["claude","qoder","dsh","codebuddy"],
+  #                 "spawn_overrides": { "qoder": ["qodercli","--acp","-m","Qwen3.8-Flash"] } } }
+  # 也可以直接调 PATCH /api/settings 的 agents 段。默认只启用 claude + qoder。
 
 pieqi:
   max_concurrent_per_project: 4
@@ -389,7 +393,7 @@ GOOS=windows GOARCH=amd64 go build -o build/release/pieqi-windows-amd64.exe ./cm
 
 * **dsh（DeepSeek Harness）** 需 `npm install -g @deepseek-ai/dsh`（ACP 入口是它的 profile：`dsh --profile acp`），并在其 `acp` profile 里 pin 好模型路由。默认不注册；握手实测冷启动 >90s，故其 `init_timeout` 默认 2m。清空 pin 不会回落默认模型，会话会彻底没模型。
 
-* **codebuddy（腾讯 CodeBuddy CLI）** 需 `npm install -g @tencent-ai/codebuddy-code` 并在 CLI 内登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`。默认不注册；模型清单走标准 ACP `configOptions`（实测 v2.159.0 下发 20 个模型），可在会话内切换。
+* **codebuddy（腾讯 CodeBuddy CLI）** 需 `npm install -g @tencent-ai/codebuddy-code` 并在 CLI 内登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`。默认不启用（需在运行期设置的 `agents.enabled` 里显式列出）；模型清单走标准 ACP `configOptions`（实测 v2.159.0 下发 20 个模型），可在会话内切换。
 
 * **dsh 的 goal 不在 ACP 路径上**（走 SDK control request），pieqi 侧取不到；已在 Qoder/dsh 侧记录，结论见 [`docs/agents-goal-and-capabilities.md`](docs/agents-goal-and-capabilities.md)。
 

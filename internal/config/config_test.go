@@ -169,18 +169,62 @@ func TestConfig_AgentsDefaults(t *testing.T) {
 	if cfg.Agents.Claude.Print.Command != "claude" {
 		t.Fatalf("agents.claude.print.command default = %q, want claude", cfg.Agents.Claude.Print.Command)
 	}
-	if cfg.Agents.Qoder.Transport != "acp" {
-		t.Fatalf("agents.qoder.transport default = %q, want acp", cfg.Agents.Qoder.Transport)
+	// 2026-10-22：qoder / dsh / codebuddy 的节已从配置移除（归 manifest + 运行期设置），
+	// 故这里不再断言它们的默认值 —— 那些断言的存在本身就是在为"代码事实被写进配置"背书。
+	// 新语义由 TestConfig_ACPAgentSectionsRemoved 与 agent 包的 TestManifestIsTheOnlySource 守。
+}
+
+// TestConfig_ACPAgentSectionsRemoved 守卫「ACP agent 不再由配置声明」这条整改。
+//
+// 判据（2026-10-22 用户要求：约定优于配置）：
+//   - 接入一个新 agent 只需改 internal/agent/manifest.go，**不需要碰任何配置**。
+//   - 因此旧写法（agents.qoder.acp.spawn_command 等）写进配置必须**不生效**，
+//     且给出一条可操作告警 —— 不能静默忽略。老用户可能真的以为那些参数还在起作用，
+//     而"启动参数莫名其妙变了"是最难查的一类问题。
+func TestConfig_ACPAgentSectionsRemoved(t *testing.T) {
+	// 1) 旧写法仍能加载（不能因为多了未知键就起不来 —— 那会让升级变成事故）。
+	p := writeTestConfig(t, `
+server:
+  port: 3000
+agents:
+  qoder:
+    transport: acp
+    acp:
+      agent_type: qodercli
+      spawn_command: ["qodercli", "--acp", "-m", "Qwen3.8-Flash"]
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("旧配置应仍可加载，got %v", err)
 	}
-	if cfg.Agents.Qoder.ACP.AgentType != "qodercli" {
-		t.Fatalf("agents.qoder.acp.agent_type default = %q, want qodercli", cfg.Agents.Qoder.ACP.AgentType)
+	// 2) 关键判据：配置里写这些**不会**改变运行期行为（它们已不属于 Config）。
+	//    这里用一个可观察的结果来钉住：Claude 节不受影响，且没有 ACP agent 的残留字段可读。
+	if cfg.Agents.Claude.Transport != "sdk-bridge" {
+		t.Fatalf("claude 默认被未知键影响: %q", cfg.Agents.Claude.Transport)
 	}
-	// codebuddy 同 dsh：agent_type 有默认值，但 transport 留空 = 不注册。
-	if cfg.Agents.Codebuddy.Transport != "" {
-		t.Fatalf("agents.codebuddy.transport default = %q, want 空（需显式开启）", cfg.Agents.Codebuddy.Transport)
+
+	// 3) 传 legacy ACP 信号（qodercli）时必须有告警，告知落点已变到运行期设置。
+	pl := writeTestConfig(t, `
+server:
+  port: 3000
+pieqi:
+  acp:
+    agent_type: qodercli
+    acp_spawn_command: ["qodercli", "--acp", "-m", "Qwen3.8-Flash"]
+`)
+	cfgL, err := Load(pl)
+	if err != nil {
+		t.Fatalf("load legacy: %v", err)
 	}
-	if cfg.Agents.Codebuddy.ACP.AgentType != "codebuddy" {
-		t.Fatalf("agents.codebuddy.acp.agent_type default = %q, want codebuddy", cfg.Agents.Codebuddy.ACP.AgentType)
+	found := false
+	for _, d := range cfgL.Deprecations {
+		if strings.Contains(d, "spawn_overrides") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("旧 qoder spawn 配置未告警：用户会以为 -m 仍生效。deprecations=%v", cfgL.Deprecations)
 	}
 }
 
@@ -263,13 +307,8 @@ agents:
 	if cfg.Agents.Claude.Print.PermissionMode != "default" {
 		t.Fatalf("print permission_mode override wrong: %q", cfg.Agents.Claude.Print.PermissionMode)
 	}
-	acp := cfg.Agents.Qoder.ACPConfig()
-	if acp.AgentType != "qodercli" || len(acp.SpawnCommand) != 2 || acp.SpawnCommand[0] != "qodercli" {
-		t.Fatalf("qoder ACPConfig() wrong: %+v", acp)
-	}
-	if acp.InitTimeout != 10*time.Second || acp.IdleTimeout != 5*time.Minute {
-		t.Fatalf("qoder timeouts wrong: init=%v idle=%v", acp.InitTimeout, acp.IdleTimeout)
-	}
+	// 2026-10-22：agents.qoder 节已移除（归 manifest + 运行期设置），故这里不再断言
+	// 它被解析出来。旧写法不生效这一点由 TestConfig_ACPAgentSectionsRemoved 覆盖。
 }
 
 func TestConfig_DeprecationWarnings(t *testing.T) {
@@ -310,61 +349,6 @@ func TestConfig_NoDeprecationWithoutLegacy(t *testing.T) {
 	}
 }
 
-func TestConfig_QoderLegacyBackfill(t *testing.T) {
-	// 老配置（agent_type: qodercli + spawn_command）未配 agents.qoder → 自动回填新节
-	p := writeTestConfig(t, `
-pieqi:
-  acp:
-    agent_type: qodercli
-    acp_spawn_command: ["qodercli", "--acp", "--port", "1234"]
-`)
-	cfg, err := Load(p)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.Agents.Qoder.Transport != "acp" {
-		t.Fatalf("qoder transport backfill = %q, want acp", cfg.Agents.Qoder.Transport)
-	}
-	q := cfg.Agents.Qoder.ACP
-	if q.AgentType != "qodercli" || len(q.SpawnCommand) != 4 || q.SpawnCommand[0] != "qodercli" {
-		t.Fatalf("qoder acp backfill wrong: %+v", q)
-	}
-	if cfg.Agents.Qoder.ACPConfig().AgentType != "qodercli" {
-		t.Fatalf("ACPConfig() after backfill wrong")
-	}
-	found := false
-	for _, d := range cfg.Deprecations {
-		if strings.Contains(d, "自动回填") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected qoder backfill deprecation note, got: %+v", cfg.Deprecations)
-	}
-}
-
-func TestConfig_QoderNoBackfillWhenNewSectionSet(t *testing.T) {
-	// agents.qoder 已显式配置 → 不回填旧字段
-	p := writeTestConfig(t, `
-pieqi:
-  acp:
-    agent_type: qodercli
-    acp_spawn_command: ["qodercli", "--acp"]
-agents:
-  qoder:
-    transport: acp
-    acp:
-      agent_type: qodercli
-      spawn_command: ["qodercli", "--acp", "--port", "9999"]
-`)
-	cfg, err := Load(p)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if got := cfg.Agents.Qoder.ACP.SpawnCommand; len(got) != 4 || got[3] != "9999" {
-		t.Fatalf("qoder acp should keep explicit config (not backfill), got: %v", got)
-	}
-}
 
 // TestConfig_TunnelModeAndTokenFileDefaults verifies the named-tunnel knobs:
 // mode defaults to quick (临时域名), the token file defaults to a path OUTSIDE
@@ -512,75 +496,6 @@ func TestConfig_ExampleContainsNoCredentials(t *testing.T) {
 	}
 }
 
-// TestConfig_ExampleQoderSpawnIsBareName 守卫：模板里的 qoder spawn 命令必须写裸名。
-// 裸名由 agent.resolveSpawnName 补「安装落点回退」（见 internal/agent/acp.go），
-// 跨机器可复制；一旦有人往模板里写死某台机器的绝对路径（如 C:\Users\<名字>\...），
-// 这份模板对别人就失效了 —— 正是本用例要拦住的回归。
-func TestConfig_ExampleQoderSpawnIsBareName(t *testing.T) {
-	cfg, err := Load(exampleConfigPath)
-	if err != nil {
-		t.Fatalf("load example: %v", err)
-	}
-	cmd := cfg.Agents.Qoder.ACP.SpawnCommand
-	if len(cmd) == 0 {
-		t.Fatal("example agents.qoder.acp.spawn_command 不应为空（应显式带 -m Qwen3.8-Flash）")
-	}
-	if strings.ContainsAny(cmd[0], `/\`) {
-		t.Fatalf("模板 spawn_command[0] = %q 含路径分隔符：请写裸名（解析器会补安装落点），不要写死机器路径", cmd[0])
-	}
-	if cmd[0] != "qodercli" {
-		t.Fatalf("模板 spawn_command[0] = %q, want qodercli", cmd[0])
-	}
-	if joined := strings.Join(cmd, " "); !strings.Contains(joined, "Qwen3.8-Flash") {
-		t.Fatalf("模板应显式 -m Qwen3.8-Flash（否则走付费默认模型），实际 %v", cmd)
-	}
-}
-
-// TestConfig_ExampleDshIsOptIn 守卫：dsh 在模板里必须保持「不注册」。
-// 它依赖本机装了 @deepseek-ai/dsh 且其 acp profile pin 了可用模型路由，两者都不由 pieqi 保证；
-// 默认就把一个会失败、且模型不由本项目控制的 agent 放进每个人的选择器是不可接受的。
-// 真要默认开启时，改这条用例的理由得写清楚。
-func TestConfig_ExampleDshIsOptIn(t *testing.T) {
-	cfg, err := Load(exampleConfigPath)
-	if err != nil {
-		t.Fatalf("load example: %v", err)
-	}
-	if cfg.Agents.Dsh.Transport != "" {
-		t.Fatalf("example agents.dsh.transport = %q，want 空（dsh 需显式开启）", cfg.Agents.Dsh.Transport)
-	}
-	if cfg.Agents.Dsh.ACP.AgentType != "dsh" {
-		t.Fatalf("example agents.dsh.acp.agent_type = %q, want dsh", cfg.Agents.Dsh.ACP.AgentType)
-	}
-	// 模板若哪天给出 spawn_command，首元素同样必须是裸名（理由同 qoder 那条守卫）。
-	if cmd := cfg.Agents.Dsh.ACP.SpawnCommand; len(cmd) > 0 && strings.ContainsAny(cmd[0], `/\`) {
-		t.Fatalf("模板 dsh spawn_command[0] = %q 含路径分隔符：请写裸名（解析器会补 node 入口），不要写死机器路径", cmd[0])
-	}
-	// 冷启动实测 >90s，模板不能沿用 30s 默认握手超时。
-	if cfg.Agents.Dsh.ACP.InitTimeout < time.Minute {
-		t.Fatalf("example agents.dsh.acp.init_timeout = %v，dsh 首启动冷启动远慢于此，至少要 1m", cfg.Agents.Dsh.ACP.InitTimeout)
-	}
-}
-
-// TestConfig_ExampleCodebuddyIsOptIn 守卫：codebuddy 在模板里必须保持「不注册」。
-// 它依赖本机安装了 @tencent-ai/codebuddy-code 且已登录（或提供 CODEBUDDY_API_KEY），
-// 两者都不由 pieqi 保证；默认把一个会失败的 agent 放进每个人的选择器是不可接受的。
-// 真要默认开启时，改这条用例的理由得写清楚。
-func TestConfig_ExampleCodebuddyIsOptIn(t *testing.T) {
-	cfg, err := Load(exampleConfigPath)
-	if err != nil {
-		t.Fatalf("load example: %v", err)
-	}
-	if cfg.Agents.Codebuddy.Transport != "" {
-		t.Fatalf("example agents.codebuddy.transport = %q，want 空（codebuddy 需显式开启）", cfg.Agents.Codebuddy.Transport)
-	}
-	if cfg.Agents.Codebuddy.ACP.AgentType != "codebuddy" {
-		t.Fatalf("example agents.codebuddy.acp.agent_type = %q, want codebuddy", cfg.Agents.Codebuddy.ACP.AgentType)
-	}
-	// 模板若给出 spawn_command，首元素同样必须是裸名（理由同 qoder 那条守卫）。
-	if cmd := cfg.Agents.Codebuddy.ACP.SpawnCommand; len(cmd) > 0 && strings.ContainsAny(cmd[0], `/\`) {
-		t.Fatalf("模板 codebuddy spawn_command[0] = %q 含路径分隔符：请写裸名（解析器会补 node 入口），不要写死机器路径", cmd[0])
-	}
-}
 
 // TestConfig_AccessDefaults 守卫 Cloudflare Access 的默认值：
 // 必须**默认关闭**且**保留 token 兜底** —— 否则升级后老部署会突然全站 401
