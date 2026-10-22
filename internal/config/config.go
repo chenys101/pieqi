@@ -105,6 +105,23 @@ type ACPConfig struct {
 	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`      // ACP 会话空闲回收阈值：轮间保活，超过该时长无对话则优雅关闭（避免孤儿进程）；<=0 禁用回收
 }
 
+// SameProbeIdentity 报告两份配置是否"探测同一个东西"：类型与 spawn 命令一致。
+//
+// 用途：模型清单缓存（agent.ListAgentModels）是**用这份配置起进程问出来的**。
+// 只在 spawn 相关字段变了时才作废缓存；桥端口、超时这类不影响清单的字段变化
+// 不该让它重新探测 5~7s（探测要起一个真会话）。
+func (c ACPConfig) SameProbeIdentity(o ACPConfig) bool {
+	if c.AgentType != o.AgentType || len(c.SpawnCommand) != len(o.SpawnCommand) {
+		return false
+	}
+	for i := range c.SpawnCommand {
+		if c.SpawnCommand[i] != o.SpawnCommand[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // AgentsConfig 多 Agent 配置。
 //
 // ⚠️ 2026-10-22 已**大幅瘦身**，这是"约定优于配置"整改的核心一步：

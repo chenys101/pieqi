@@ -161,11 +161,14 @@ func normalizeProjectKey(p string) string {
 }
 
 func (s *Server) listTasks(c *gin.Context) {
-	tasks := s.store.List()
+	// 只要事件的**条数**，不要内容：ListSummaryEvents 不克隆那 3.9 万条事件
+	// （实测全库任务 33.9MB，事件占单任务 JSON 的 83%），而本接口下发的只有 3.3MB
+	// 轻量视图。见 core.TaskStore.ListSummaryEvents 的判据。
+	tasks, counts := s.store.ListSummaryEvents()
 	// 按 project_path 分组（REQ-01）
 	groups := map[string]*taskGroup{}
 	order := []string{}
-	for _, t := range tasks {
+	for i, t := range tasks {
 		key := normalizeProjectKey(t.ProjectPath)
 		g, ok := groups[key]
 		if !ok {
@@ -177,7 +180,11 @@ func (s *Server) listTasks(c *gin.Context) {
 			order = append(order, key)
 		}
 		// 列表只给轻量视图：事件流是详情页的重载荷（见 model.TaskSummary）
-		g.Tasks = append(g.Tasks, model.NewTaskSummary(t))
+		n := 0
+		if i < len(counts) {
+			n = counts[i]
+		}
+		g.Tasks = append(g.Tasks, model.NewTaskSummary(t, n))
 		g.count(t.Status)
 	}
 	out := make([]*taskGroup, 0, len(order))

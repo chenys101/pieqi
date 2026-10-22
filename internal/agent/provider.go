@@ -22,6 +22,11 @@ import (
 type ACPProviderConfig struct {
 	Agents map[string]config.ACPConfig
 	Logger *zap.Logger
+
+	// initialised 标记"这份 provider 表是否已经装配过"。
+	// 用来区分**启动**与**运行期变更**：只有后者才该作废模型清单缓存
+	// （启动时作废会把上一进程留下的磁盘缓存删掉，磁盘缓存就失去全部意义）。
+	initialised bool
 }
 
 var (
@@ -37,10 +42,33 @@ var (
 // Logger 非空时替换（避免设置变更只带 Agents 时把 logger 清空）。
 func ConfigureACPProviders(c ACPProviderConfig) {
 	acpProviderMu.Lock()
-	defer acpProviderMu.Unlock()
+	old := acpProviderCfg.Agents
+	initialised := acpProviderCfg.initialised
 	acpProviderCfg.Agents = c.Agents
+	acpProviderCfg.initialised = true
 	if c.Logger != nil {
 		acpProviderCfg.Logger = c.Logger
+	}
+	acpProviderMu.Unlock()
+
+	// 探测身份变了的 agent 要丢掉模型清单缓存：清单是"用这份 spawn 配置起进程问出来的"，
+	// spawn/agent_type 改了，旧答案就不再代表现状。不清掉的话，用户在设置页改完路径，
+	// 界面还会拿旧清单显示一整天（内存档 24h / 磁盘档 7 天）。
+	//
+	// ⚠️ **首次调用是启动，不是变更**：那时 old 为空，若照"没有旧值就作废"处理，
+	// 每次启动都会把上一进程存下的磁盘缓存删掉 —— 磁盘缓存唯一的用途（跨重启）当场作废，
+	// 实测表现为"重启后首个请求仍要等 7s"（2026-10-22 踩过）。
+	// 首次以本次配置把"初始状态"记入 old，后续调用才比较。
+	// 必须在 acpProviderMu **之外**调：探测路径会在持自己的锁时反向调 acpConfigFor（RLock），
+	// 同序持锁会锁序反转。
+	if !initialised {
+		return
+	}
+	for name, cfg := range c.Agents {
+		if prev, ok := old[name]; ok && prev.SameProbeIdentity(cfg) {
+			continue
+		}
+		InvalidateAgentModels(name)
 	}
 }
 

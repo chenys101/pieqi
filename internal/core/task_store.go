@@ -136,7 +136,46 @@ func (s *TaskStore) Get(id string) (*model.Task, bool) {
 	return cp, true
 }
 
-// List 返回全部任务副本，按 CreatedAt 升序。
+// ListSummaryEvents 返回全部任务副本 + 各自的事件总数（同序），按 CreatedAt 升序。
+//
+// 给列表/快照视图用：那里**不需要**事件内容，只需要条数（TaskSummary.EventCount）。
+// 与 List 的唯一区别是**不克隆 Events 切片**（见下方 2026-10-22 的性能判据）。
+//
+// 为什么值得单开一个方法，而不是让调用方自己 len(t.Events)：
+// 事件总数必须在**持锁时**读取才有意义 —— 异步合并会原地改写最后一个元素、
+// 释放锁后还可能追加，锁外读会读到别的时刻的条数。这里在锁内数完，一次锁穿越。
+//
+// 判据（实测 2026-10-22）：89 个任务共 **3.9 万条事件 / 磁盘 33.9MB**，单个任务
+// 事件占其 JSON 的 **83%**（2120 条里 834 条 thinking、881 条 tool_use）。而
+// `GET /api/tasks` 与 WS 首帧只下发 3.3MB 的轻量视图 —— 为得出一个 `int` 把 33.9MB
+// 的 TaskEvent 结构体全拷一遍，纯属白付，且每个流式 delta 都会再付一次
+// （TaskRunner 每轮在持写锁时 persist，列表/快照线程等这把锁）。
+func (s *TaskStore) ListSummaryEvents() ([]*model.Task, []int) {
+	s.mu.RLock()
+	// 任务与计数**成对**收集后一次性排序：分别排两个切片会让 Counts 与 Tasks 错位
+	// （Create 时两个切片同序，但排序比较键不同就会出现"计数跟着别的任务走"）。
+	pairs := make([]summaryPair, 0, len(s.tasks))
+	for _, t := range s.tasks {
+		cp := *t // 不克隆 Events：本函数的契约是"调用方不读事件内容"
+		cp.Events = nil
+		pairs = append(pairs, summaryPair{task: &cp, count: len(t.Events)})
+	}
+	s.mu.RUnlock()
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].task.CreatedAt.Before(pairs[j].task.CreatedAt) })
+	out := make([]*model.Task, len(pairs))
+	counts := make([]int, len(pairs))
+	for i, p := range pairs {
+		out[i], counts[i] = p.task, p.count
+	}
+	return out, counts
+}
+
+type summaryPair struct {
+	task  *model.Task
+	count int
+}
+
+// List 返回全部任务副本（含事件）**浅拷贝**，按 CreatedAt 升序。
 func (s *TaskStore) List() []*model.Task {
 	s.mu.RLock()
 	out := make([]*model.Task, 0, len(s.tasks))

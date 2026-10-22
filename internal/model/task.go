@@ -193,6 +193,7 @@ type TaskSummary struct {
 }
 
 // NewTaskSummary 由 Task 构造轻量视图。t 为 nil 时返回 nil。
+// eventCount 是事件总数（调用方量好的；-1 表示"就地数"，见 NewTaskSummaries）。
 //
 // ⚠️ **返回的是浅拷贝**（`*t`），不是原指针。两条原因，都不许改回去：
 //
@@ -205,24 +206,42 @@ type TaskSummary struct {
 //  2. **不能原地改 t**：传入的指针就是 store 里的那份对象（`TaskStore.List` 返回的是
 //     快照，但调用方也可能直接传活体）。原地置 nil 会改到落盘数据，属于静默的数据损坏。
 //
+//  3. **必须裁掉 Output**（2026-10-22，同批性能修复）。Output 是最近一次流式输出的
+//     **累积全文**，实测 89 个任务里它占列表响应的 **1.70 MB / 2.36 MB（72%）**，
+//     单条任务 4.3KB 里它独占 3.8KB。而列表**从不渲染它**：唯一的读取点是会话页
+//     （useSession / SessionTimeline 在"没有事件"时把它当兜底文本），那条路径的数据
+//     来自 GET /api/tasks/:id，不经过本视图。落盘的 Task.Output 不动（详情页要用）。
+//
 // 用浅拷贝而不是新增遮蔽字段：字段有 25 个，逐个遮蔽必然漂移（见上方 TaskSummary 的说明）；
-// 这里只改一个字段，拷贝后重赋值最不容易漏。
-func NewTaskSummary(t *Task) *TaskSummary {
+// 这里只改字段，拷贝后重赋值最不容易漏。
+func NewTaskSummary(t *Task, eventCount int) *TaskSummary {
 	if t == nil {
 		return nil
 	}
+	if eventCount < 0 {
+		eventCount = len(t.Events)
+	}
 	cp := *t
-	// 事件流由遮蔽字段替代（序列化时不下发）；Baseline 见上。
+	// 事件流由遮蔽字段替代（序列化时不下发）；Baseline / Output 见上。
 	cp.Events = nil
 	cp.Baseline = nil
-	return &TaskSummary{Task: &cp, EventCount: len(t.Events)}
+	cp.Output = ""
+	return &TaskSummary{Task: &cp, EventCount: eventCount}
 }
 
-// NewTaskSummaries 批量构造。
-func NewTaskSummaries(ts []*Task) []*TaskSummary {
+// NewTaskSummaries 批量构造。事件总数用调用方量的值（同序一一对应）；
+// counts 为 nil 时退回就地数 len(t.Events)。
+//
+// 为什么要外部传入计数：快照构造函数拿不到"被裁掉的事件有多少条"，
+// 而为了数它去深拷贝整个事件流，正是列表接口变慢的根因（见 core.TaskStore.ListSummaryEvents）。
+func NewTaskSummaries(ts []*Task, counts []int) []*TaskSummary {
 	out := make([]*TaskSummary, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, NewTaskSummary(t))
+	for i, t := range ts {
+		n := -1
+		if i < len(counts) {
+			n = counts[i]
+		}
+		out = append(out, NewTaskSummary(t, n))
 	}
 	return out
 }

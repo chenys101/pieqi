@@ -107,6 +107,7 @@ func main() {
 		filepath.Join(dataRoot, "tasks"),
 		filepath.Join(dataRoot, "worktrees"),
 		filepath.Join(dataRoot, "checkpoints"), // Feedback P0：Turn 快照/baseline 落盘
+		filepath.Join(dataRoot, "cache"),       // 模型清单等可重建的跨重启缓存（见 SetModelCatalogDir）
 	} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			logger.Fatal("mkdir data dir", zap.String("dir", dir), zap.Error(err))
@@ -329,6 +330,13 @@ func main() {
 		}
 		claude.Configure(cc)
 	}
+	// 模型清单的磁盘缓存落点：<dataRoot>/cache。
+	//
+	// 为什么要落盘：清单只能靠"起一个真会话问 agent"拿到，实测冷探测 5.7~7.0s，而在这里
+	// 重启是常态（发版 / 自重启 / 崩溃恢复）。只放内存的话每次重启后第一个打开会话页的
+	// 用户都要吃这 7s。清空缓存只需删掉 <dataRoot>/cache/agent-models-*.json，无需配置项。
+	agent.SetModelCatalogDir(filepath.Join(dataRoot, "cache"))
+
 	// ACP 系 agent（qoder / dsh / codebuddy）工厂：被启用的才进表，业务 agent.Open("<名字>") 即用。
 	// 名字与 AvailableAgents 的 Name 同一个串，两处共用 ACPProviderConfigFromRuntime 的判据。
 	if len(acpProviders.Agents) > 0 {

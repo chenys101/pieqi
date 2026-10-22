@@ -118,7 +118,10 @@ func (s *Server) writeSnapshot(ctx context.Context, conn *websocket.Conn) error 
 	// 这里持有 EventBus 读锁只是为了冻结"事件序号"这一读数，
 	// 与列表内容构成一个一致的采样点（发布者无法在两者之间插入新事件）。
 	s.bus.WithSeqHeld(func(cur uint64) {
-		tasks = model.NewTaskSummaries(s.store.List())
+		// 不克隆事件流：快照只带轻量视图，但每次重同步都会重跑一次，
+		// 克隆那 3.9 万条事件纯属白付。见 core.TaskStore.ListSummaryEvents。
+		ts, counts := s.store.ListSummaryEvents()
+		tasks = model.NewTaskSummaries(ts, counts)
 		seq = cur
 	})
 	snapshot := gin.H{

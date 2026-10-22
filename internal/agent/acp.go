@@ -691,6 +691,15 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 	// 顺手记下供探测接口读 —— 读到哪条通道也决定了后面往哪条写。
 	a.rememberCatalog(resp.ConfigOptions, resp.Meta)
 	if err := a.applyModel(sessCtx, string(resp.SessionId), cfg.Model); err != nil {
+		// 失败即摘缓存：最常见的原因是"清单里那一项已被上游下架"，而清单是跨天缓存的
+		// （见 model_catalog.go 的 modelCatalogTTL）。不清掉的话，用户会一直看到一个
+		// 已失效的选项、并且每次选它都失败，直到缓存自然过期 —— 表现为"怎么选都不行"。
+		// 用 catalog.Agent（探测路径写入的业务名）而非"本进程里的 agent"：
+		// 任务会话的 ACPAgent 不知道自己对应的业务名，只有探测探针知道。
+		a.catalogMu.Lock()
+		agentName := a.modelCatalog.Agent
+		a.catalogMu.Unlock()
+		InvalidateAgentModels(agentName)
 		return "", err
 	}
 	return string(resp.SessionId), nil
@@ -819,6 +828,9 @@ func (a *ACPAgent) rememberCatalog(opts []acp.SessionConfigOption, meta map[stri
 		return
 	}
 	a.catalogMu.Lock()
+	// 业务 agent 名只由探测路径（probeAgentModels）写入；这里协商得到的清单本身不带名字，
+	// 必须保留已有的，否则"建会话失败时按名字摘缓存"会拿到空名而失效。
+	cat.Agent = a.modelCatalog.Agent
 	a.modelCatalog = cat
 	a.catalogSrc = src
 	a.catalogMu.Unlock()
