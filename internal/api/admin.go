@@ -68,33 +68,56 @@ func (s *Server) getRestartStatus(c *gin.Context) {
 // 安全：**仅内网**。它等价于本机任意代码执行（能把任意二进制装上并以服务身份
 // 常驻），因此与 /api/auth/bind 同档：外部请求一律拒绝，即使 token 和身份都有效。
 // 这条 gate 在 router 注册时挂上，见 Register 里的 adminGrp。
+// 语义（2026-10-22 合并，与 build/restart.bat 的 mode 判定逐字对齐）：
+//
+//	有新产物 → swap-and-restart：备份当前 exe、装新产物、启动
+//	无新产物 → restart-only     ：一个文件都不动，启动同一份 exe
+//
+// 也就是说"有没有新产物"决定走哪条路，**调用方不必自己分支**。
+// 原来的 409 `no staged binary` 把"服务卡住了，重启一下"也一并拒绝了，调用方只好
+// 先 GET 拿 staged 再二选一 —— 那套约定分散在调用方，新增一个调用方就得重抄一遍。
 func (s *Server) postRestart(c *gin.Context) {
 	if s.selfRestart == nil || s.hasStaged == nil {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "self-restart not available"})
 		return
 	}
+
+	initiator := initiatorFromRequest(c)
+
 	if !s.hasStaged() {
-		// 明确区分"没东西可切"和"切失败"：前者是调用方的使用问题
-		// （忘了先把新二进制放到约定落点），应当给出可操作的指引 ——
-		// 带上确切路径，调用方无需去读源码猜。
-		hint := ""
-		if s.stagingHint != nil {
-			hint = s.stagingHint()
+		// 没有产物 ⇒ 只重启。这里**不能**退回 409：那正是本次要修掉的行为。
+		//
+		// 仍要区分"没接线"与"没产物"：只重启编排未接线时，退回 409 并给出
+		// 可操作提示比静默"已受理但什么也没发生"诚实得多。
+		if s.restartOnly == nil {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "no staged binary",
+				"hint":  "没有待切换的产物，且 restart-only 编排未接线；请先编译并投放新二进制",
+				"mode":  "restart-only",
+			})
+			return
 		}
-		c.JSON(http.StatusConflict, gin.H{
-			"error": "no staged binary",
-			"hint":  "先编译新二进制并放到 " + hint + "，再调用本接口；服务会用它替换自身并重新启动",
-			"path":  hint,
+		c.JSON(http.StatusAccepted, gin.H{
+			"ok":         true,
+			"restarting": true,
+			"mode":       "restart-only",
+			"swapped":    false,
 		})
+		go s.restartOnly(initiator)
 		return
 	}
 
 	// 先回响应再退出（由注入的 restart 编排负责时序）。这里同步返回 202：
 	// 调用方据此知道"重启已受理"，而不是"连接断了"。
-	c.JSON(http.StatusAccepted, gin.H{"ok": true, "restarting": true})
+	c.JSON(http.StatusAccepted, gin.H{
+		"ok":         true,
+		"restarting": true,
+		"mode":       "swap-and-restart",
+		"swapped":    true,
+	})
 	// 发起者身份必须在**此处**（请求还活着的时候）解析并交给编排 ——
 	// 等到进程退出前再取已经晚了，那时发起者那一轮早已随子进程消失。
-	go s.selfRestart(initiatorFromRequest(c))
+	go s.selfRestart(initiator)
 }
 
 // initiatorFromRequest 解析"是哪个会话在请求重启我"。

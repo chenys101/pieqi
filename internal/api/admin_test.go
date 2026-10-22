@@ -19,28 +19,92 @@ func newAdminTestServer(t *testing.T, staged bool, calls *int) *Server {
 }
 
 // newAdminTestServerWithInitiator 同上，但把发起者 id 记录下来供断言。
+// restart-only 编排同样接线（swap 与 no-swap 两个计数器分开，便于断言走了哪条）。
 func newAdminTestServerWithInitiator(t *testing.T, staged bool, calls *int, initiators *[]string) *Server {
+	t.Helper()
+	return newAdminTestServerFull(t, staged, calls, initiators, nil)
+}
+
+// newAdminTestServerFull 额外收集 restart-only 的调用次数（nil = 仍接线但不计数）。
+func newAdminTestServerFull(t *testing.T, staged bool, swapCalls *int, initiators *[]string, onlyCalls *int) *Server {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	s := &Server{}
 	s.SetSelfRestart(
 		func() bool { return staged },
 		func(initiator string) {
-			*calls++
+			*swapCalls++
 			if initiators != nil {
 				*initiators = append(*initiators, initiator)
 			}
 		},
 		func() string { return "/tmp/work/selfupdate/pieqi.new" },
 	)
+	s.SetRestartOnly(func(initiator string) {
+		if onlyCalls != nil {
+			*onlyCalls++
+		}
+		if initiators != nil {
+			*initiators = append(*initiators, initiator)
+		}
+	})
 	return s
 }
 
-// TestAdminRestart_NoStagedBinary409 没有待切换的新二进制时，必须明确拒绝而不是
-// 空跑一次重启 —— 否则调用方会以为"重启成功了"，其实什么也没发生。
-func TestAdminRestart_NoStagedBinary409(t *testing.T) {
+// TestAdminRestart_NoStagedFallsBackToRestartOnly 没有新产物时必须**照常重启**，
+// 而不是像旧行为那样回 409。
+//
+// 这条语义 2026-10-22 由用户明确：POST /api/admin/restart 要同时覆盖
+//   - 编译+重启：~/.pieqi/bin 有 pieqi.new.exe  → swap-and-restart
+//   - 单重启：   ~/.pieqi/bin 无新产物          → restart-only（不动任何文件）
+// 判据与 build/restart.bat 的 mode 判定逐字对齐，"有没有产物"决定走哪条路，
+// **调用方不必自己分支**。旧的 409 把"服务卡住了，重启一下"也一并拒绝了。
+func TestAdminRestart_NoStagedFallsBackToRestartOnly(t *testing.T) {
+	swapCalls, onlyCalls := 0, 0
+	s := newAdminTestServerFull(t, false, &swapCalls, nil, &onlyCalls)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/admin/restart", nil)
+	s.postRestart(c)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status=%d, want 202（无产物应退化为只重启）body=%s", w.Code, w.Body.String())
+	}
+	// 编排在 goroutine 里跑，给它一点时间落地再断言。
+	deadline := time.Now().Add(2 * time.Second)
+	for onlyCalls == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if onlyCalls != 1 {
+		t.Fatalf("restart-only calls=%d, want 1", onlyCalls)
+	}
+	if swapCalls != 0 {
+		t.Fatalf("swap calls=%d, want 0（无产物绝不能走换版）", swapCalls)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["mode"] != "restart-only" {
+		t.Fatalf("mode=%v, want restart-only", body["mode"])
+	}
+	if body["swapped"] != false {
+		t.Fatalf("swapped=%v, want false", body["swapped"])
+	}
+}
+
+// TestAdminRestart_NoStagedAndRestartOnlyNotWired409 只重启编排未接线时仍要明确拒绝：
+// 静默"已受理但什么也没发生"比 409 更糟 —— 调用方会以为服务重启过了。
+func TestAdminRestart_NoStagedAndRestartOnlyNotWired409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 	calls := 0
-	s := newAdminTestServer(t, false, &calls)
+	s := &Server{}
+	s.SetSelfRestart(
+		func() bool { return false },
+		func(string) { calls++ },
+		func() string { return "/tmp/work/selfupdate/pieqi.new" },
+	) // 刻意不接 SetRestartOnly
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -48,10 +112,43 @@ func TestAdminRestart_NoStagedBinary409(t *testing.T) {
 	s.postRestart(c)
 
 	if w.Code != http.StatusConflict {
-		t.Fatalf("status=%d, want 409（无暂存二进制应拒绝）body=%s", w.Code, w.Body.String())
+		t.Fatalf("status=%d, want 409 body=%s", w.Code, w.Body.String())
 	}
 	if calls != 0 {
 		t.Fatalf("restart called %d times, want 0（不该空跑重启）", calls)
+	}
+}
+
+// TestAdminRestart_StagedTakesPrecedenceOverRestartOnly 有产物时必须走换版，
+// 不能因为 restart-only 也接了就退化成"只重启"（那会把新版本静默丢掉）。
+func TestAdminRestart_StagedTakesPrecedenceOverRestartOnly(t *testing.T) {
+	swapCalls, onlyCalls := 0, 0
+	s := newAdminTestServerFull(t, true, &swapCalls, nil, &onlyCalls)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/api/admin/restart", nil)
+	s.postRestart(c)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status=%d, want 202 body=%s", w.Code, w.Body.String())
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for swapCalls == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if swapCalls != 1 {
+		t.Fatalf("swap calls=%d, want 1", swapCalls)
+	}
+	if onlyCalls != 0 {
+		t.Fatalf("restart-only calls=%d, want 0（有产物必须走换版）", onlyCalls)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["mode"] != "swap-and-restart" {
+		t.Fatalf("mode=%v, want swap-and-restart", body["mode"])
 	}
 }
 
