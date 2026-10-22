@@ -27,6 +27,15 @@ export const useSessionStore = defineStore('session', {
     deltaCounters: {} as Record<string, number>,
     /** 去重集合（方案 §14）：网络重连 / 重复推送 / 页面重进 */
     dedupers: {} as Record<string, EventDeduper>,
+    /**
+     * taskId → 事件流里是否已出现过正文（text_delta）。
+     *
+     * 纯性能缓存，不是业务状态：`mergeDeltaIntoEvents` 判定 `firstText` 需要扫全量事件，
+     * 而该真值**单调**（一旦有正文就永远为 false）。逐字流式时每条增量都扫一遍是
+     * O(N×n) —— 2950 事件的任务上这就是主线程吃紧的来源。
+     * 这里记住结果，把扫描降到每任务一次。缺省 false = 未知 ⇒ 回退扫描（与改动前一致）。
+     */
+    hasText: {} as Record<string, boolean>,
   }),
 
   getters: {
@@ -96,6 +105,8 @@ export const useSessionStore = defineStore('session', {
         const events = normalizeEvents(dto.id, dto.events)
         this.eventsBySession[dto.id] = events
         this.deduper(dto.id).addAll(events)
+        // 重算性能缓存：全量替换后，之前的判断可能不再成立。
+        this.hasText[dto.id] = events.some((e) => e.type === 'text_delta')
       }
 
       // 终态 / 需决策：清除思考占位（此时是请求决策而非思考）
@@ -113,8 +124,17 @@ export const useSessionStore = defineStore('session', {
       const current = this.eventsBySession[delta.taskId] ?? []
       const counter = (this.deltaCounters[delta.taskId] ?? 0) + 1
       this.deltaCounters[delta.taskId] = counter
-      const { events, firstText } = mergeDeltaIntoEvents(current, delta, () => `${delta.taskId}:delta-${counter}`)
+      // 传第四个参数把「是否已有正文」这个已知真值喂给合并函数，省掉一次全量扫描
+      // （见 state.hasText 与 mergeDeltaIntoEvents 的 hasText 说明）。
+      const { events, firstText } = mergeDeltaIntoEvents(
+        current,
+        delta,
+        () => `${delta.taskId}:delta-${counter}`,
+        this.hasText[delta.taskId] === true,
+      )
       this.eventsBySession[delta.taskId] = events
+      // 缓存单调推进：只要出现过正文就永远为 true，不需要每帧重扫。
+      if (!delta.isThought && firstText) this.hasText[delta.taskId] = true
       if (firstText) this.thinking[delta.taskId] = false
     },
 
@@ -149,6 +169,7 @@ export const useSessionStore = defineStore('session', {
       delete this.thinking[taskId]
       delete this.deltaCounters[taskId]
       delete this.dedupers[taskId]
+      delete this.hasText[taskId]
     },
   },
 })

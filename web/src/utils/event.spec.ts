@@ -1,6 +1,6 @@
 // 事件工具单测（方案 §14/§39）：去重 / 流式增量合并
 import { describe, expect, it } from 'vitest'
-import { EventDeduper, mergeDeltaIntoEvents, persistentEventId } from './event'
+import { EventDeduper, hasTextDelta, mergeDeltaIntoEvents, persistentEventId } from './event'
 import type { AgentEvent } from '@/types/event'
 
 function ev(id: string, type: AgentEvent['type'], text?: string): AgentEvent {
@@ -65,6 +65,44 @@ describe('mergeDeltaIntoEvents', () => {
     expect(a.firstText).toBe(false)
     const b = mergeDeltaIntoEvents([ev('t1:1', 'thinking_delta', '想')], { taskId: 't1', text: 'C', isThought: false }, () => 'x')
     expect(b.firstText).toBe(true)
+  })
+
+  // 2026-10-22 性能修复：hasText 是**可选**的快速路径，结果必须与扫描完全一致。
+  describe('hasText 快速路径（性能）', () => {
+    it('hasText=true 且此前确有正文：跳过扫描，firstText=false', () => {
+      const stream = [ev('t1:1', 'text_delta', 'A'), ev('t1:2', 'tool_call')]
+      const out = mergeDeltaIntoEvents(stream, { taskId: 't1', text: 'B', isThought: false }, () => 'x', true)
+      expect(out.firstText).toBe(false)
+    })
+
+    it('hasText=true 时**不再读 events**：用一个会抛错的代理证明真的跳过了扫描', () => {
+      // 把数组换成"一访问 some 就炸"的对象，能跑通即证明没有走 .some()。
+      const trap = new Proxy([ev('t1:1', 'tool_call')] as AgentEvent[], {
+        get(target, prop, recv) {
+          if (prop === 'some') throw new Error('不应扫描：hasText=true 时必须跳过 .some()')
+          return Reflect.get(target, prop, recv)
+        },
+      })
+      const out = mergeDeltaIntoEvents(trap, { taskId: 't1', text: 'B', isThought: false }, () => 'x', true)
+      expect(out.firstText).toBe(false)
+      expect(out.events).toHaveLength(2) // 类型不同 → 新建
+    })
+
+    it('不传 hasText：行为与改动前完全一致（回退扫描）', () => {
+      const noText = mergeDeltaIntoEvents([ev('t1:1', 'tool_call')], { taskId: 't1', text: 'A', isThought: false }, () => 'x')
+      expect(noText.firstText).toBe(true)
+      const withText = mergeDeltaIntoEvents([ev('t1:1', 'text_delta', 'A')], { taskId: 't1', text: 'B', isThought: false }, () => 'x')
+      expect(withText.firstText).toBe(false)
+    })
+
+    it('thinking 增量即使 hasText=true 也不算正文', () => {
+      const out = mergeDeltaIntoEvents([], { taskId: 't1', text: '想', isThought: true }, () => 'x', true)
+      expect(out.firstText).toBe(false)
+    })
+  })
+  it('hasTextDelta 判定与 mergeDeltaIntoEvents 的回退路径一致', () => {
+    expect(hasTextDelta([ev('a', 'tool_call')])).toBe(false)
+    expect(hasTextDelta([ev('a', 'thinking_delta'), ev('b', 'text_delta')])).toBe(true)
   })
 })
 
