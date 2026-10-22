@@ -44,8 +44,9 @@ func ConfigureACPProviders(c ACPProviderConfig) {
 // 这个表同时是 ACP 系 agent 的注册清单：加一个新 ACP agent 就是在这里加一行 +
 // config.AgentsConfig 加一节 + ACPProviderConfigFromAgents 加一个分支。
 var defaultACPAgentType = map[string]string{
-	AgentQoder: "qodercli",
-	AgentDsh:   "dsh",
+	AgentQoder:     "qodercli",
+	AgentDsh:       "dsh",
+	AgentCodebuddy: "codebuddy",
 }
 
 // acpConfigFor 取某业务名的 ACP 配置，agent_type 空缺时套上面的兜底。
@@ -75,6 +76,9 @@ func ACPProviderConfigFromAgents(a config.AgentsConfig) ACPProviderConfig {
 	}
 	if a.Dsh.Transport == "acp" {
 		put(AgentDsh, a.Dsh.ACPConfig())
+	}
+	if a.Codebuddy.Transport == "acp" {
+		put(AgentCodebuddy, a.Codebuddy.ACPConfig())
 	}
 	return out
 }
@@ -167,11 +171,12 @@ const (
 	GoalModeCommand = "command"
 )
 
-// AgentClaude / AgentQoder / AgentDsh 可用 agent 的常量名（避免散落的裸串拼错）。
+// AgentClaude / AgentQoder / AgentDsh / AgentCodebuddy 可用 agent 的常量名（避免散落的裸串拼错）。
 const (
-	AgentClaude = "claude"
-	AgentQoder  = "qoder"
-	AgentDsh    = "dsh"
+	AgentClaude    = "claude"
+	AgentQoder     = "qoder"
+	AgentDsh       = "dsh"
+	AgentCodebuddy = "codebuddy"
 )
 
 // AvailableAgents 按配置算出可被任务选择的 agent 列表（顺序即前端展示顺序，claude 在前）。
@@ -253,6 +258,27 @@ func AvailableAgents(a config.AgentsConfig) []AgentInfo {
 			// dsh 冷启动实测 >90s（init_timeout 因此设为 2m）；
 			// 这条要显示出来，否则用户不知道"点了创建要等一分多钟"。
 			ColdStartCold: true,
+		})
+	}
+	if _, ok := configured.Agents[AgentCodebuddy]; ok {
+		out = append(out, AgentInfo{
+			Name:         AgentCodebuddy,
+			DisplayName:  "CodeBuddy CLI",
+			Description:  "腾讯 CodeBuddy CLI（ACP 协议）。需先在 CLI 内登录（iOA / Google·GitHub / 微信 / 企业域名）或提供 CODEBUDDY_API_KEY",
+			Transport:    "ACP",
+			Capabilities: []string{"流式输出", "工具审批", "续问", "取消"},
+			// initialize 实测（v2.159.0）声明 promptCapabilities.image=true，
+			// 故 ACP 这条图片入站通路存在；是否真看得见图仍由对端模型决定。
+			ImagePrompt: true,
+			// goal 没有任何实测证据（CodeBuddy 是闭源 CLI），不谎报：
+			// 报成 tool/command 会让用户盲打 /goal 后没反应。等实测再开。
+			GoalMode:         "",
+			GoalStateVisible: false,
+			SessionAlways:    true, // ACP：proceed_always / approve_session 都支持
+			// session/new 的标准 configOptions 里下发 id="model"（实测 20 个模型），
+			// 与 qoder 同一条通道：清单走 configOptions、设模型走 set_config_option。
+			ModelSelectable: true,
+			ColdStartCold:   false, // Node CLI，initialize/session-new 都在秒级
 		})
 	}
 	return out

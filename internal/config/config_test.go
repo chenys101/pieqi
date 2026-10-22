@@ -175,6 +175,13 @@ func TestConfig_AgentsDefaults(t *testing.T) {
 	if cfg.Agents.Qoder.ACP.AgentType != "qodercli" {
 		t.Fatalf("agents.qoder.acp.agent_type default = %q, want qodercli", cfg.Agents.Qoder.ACP.AgentType)
 	}
+	// codebuddy 同 dsh：agent_type 有默认值，但 transport 留空 = 不注册。
+	if cfg.Agents.Codebuddy.Transport != "" {
+		t.Fatalf("agents.codebuddy.transport default = %q, want 空（需显式开启）", cfg.Agents.Codebuddy.Transport)
+	}
+	if cfg.Agents.Codebuddy.ACP.AgentType != "codebuddy" {
+		t.Fatalf("agents.codebuddy.acp.agent_type default = %q, want codebuddy", cfg.Agents.Codebuddy.ACP.AgentType)
+	}
 }
 
 // TestConfig_AutoApproveToolsRemoved pieqi.auto_approve_tools 已移除：显式配置必须
@@ -551,6 +558,27 @@ func TestConfig_ExampleDshIsOptIn(t *testing.T) {
 	// 冷启动实测 >90s，模板不能沿用 30s 默认握手超时。
 	if cfg.Agents.Dsh.ACP.InitTimeout < time.Minute {
 		t.Fatalf("example agents.dsh.acp.init_timeout = %v，dsh 首启动冷启动远慢于此，至少要 1m", cfg.Agents.Dsh.ACP.InitTimeout)
+	}
+}
+
+// TestConfig_ExampleCodebuddyIsOptIn 守卫：codebuddy 在模板里必须保持「不注册」。
+// 它依赖本机安装了 @tencent-ai/codebuddy-code 且已登录（或提供 CODEBUDDY_API_KEY），
+// 两者都不由 pieqi 保证；默认把一个会失败的 agent 放进每个人的选择器是不可接受的。
+// 真要默认开启时，改这条用例的理由得写清楚。
+func TestConfig_ExampleCodebuddyIsOptIn(t *testing.T) {
+	cfg, err := Load(exampleConfigPath)
+	if err != nil {
+		t.Fatalf("load example: %v", err)
+	}
+	if cfg.Agents.Codebuddy.Transport != "" {
+		t.Fatalf("example agents.codebuddy.transport = %q，want 空（codebuddy 需显式开启）", cfg.Agents.Codebuddy.Transport)
+	}
+	if cfg.Agents.Codebuddy.ACP.AgentType != "codebuddy" {
+		t.Fatalf("example agents.codebuddy.acp.agent_type = %q, want codebuddy", cfg.Agents.Codebuddy.ACP.AgentType)
+	}
+	// 模板若给出 spawn_command，首元素同样必须是裸名（理由同 qoder 那条守卫）。
+	if cmd := cfg.Agents.Codebuddy.ACP.SpawnCommand; len(cmd) > 0 && strings.ContainsAny(cmd[0], `/\`) {
+		t.Fatalf("模板 codebuddy spawn_command[0] = %q 含路径分隔符：请写裸名（解析器会补 node 入口），不要写死机器路径", cmd[0])
 	}
 }
 

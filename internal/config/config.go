@@ -91,7 +91,7 @@ type PieqiConfig struct {
 	MaxConcurrentPerProject int           `mapstructure:"max_concurrent_per_project"` // 每项目并发上限，默认 4
 	BaseBranch              string        `mapstructure:"base_branch"`                // worktree 基准分支，默认 "main"
 	BotsDir                 string        `mapstructure:"bots_dir"`                   // IM 机器人绑定记录目录；空 = ~/.pieqi/bots
-	ACP                     ACPConfig `mapstructure:"acp"` // ACP 协议配置（Phase 2 引入；use_acp=false 时走 Phase 1 PrintAgent 路径）
+	ACP                     ACPConfig     `mapstructure:"acp"`                        // ACP 协议配置（Phase 2 引入；use_acp=false 时走 Phase 1 PrintAgent 路径）
 }
 
 // ACPConfig ACP 协议（Agent Client Protocol）相关配置。
@@ -109,9 +109,10 @@ type ACPConfig struct {
 // 与 pieqi.acp.* 旧字段并存：新增节、不改旧语义；旧字段迁移（agents.claude/qoder
 // 接管 acp.use_acp 等，含弃用告警）在 P5 单独做。默认 transport 见下方 defaults。
 type AgentsConfig struct {
-	Claude AgentClaudeConfig `mapstructure:"claude"`
-	Qoder  AgentQoderConfig  `mapstructure:"qoder"`
-	Dsh    AgentDshConfig    `mapstructure:"dsh"`
+	Claude    AgentClaudeConfig    `mapstructure:"claude"`
+	Qoder     AgentQoderConfig     `mapstructure:"qoder"`
+	Dsh       AgentDshConfig       `mapstructure:"dsh"`
+	Codebuddy AgentCodebuddyConfig `mapstructure:"codebuddy"`
 }
 
 // AgentClaudeConfig claude agent 配置（multi-agent.md §4.2）。
@@ -202,6 +203,36 @@ func (d AgentDshConfig) ACPConfig() ACPConfig {
 		SpawnCommand: d.ACP.SpawnCommand,
 		InitTimeout:  d.ACP.InitTimeout,
 		IdleTimeout:  d.ACP.IdleTimeout,
+	}
+}
+
+// AgentCodebuddyConfig 腾讯 CodeBuddy CLI 配置。
+// transport: "acp"（codebuddy --acp）。**默认留空 = 不注册**：它要求本机装好
+// @tencent-ai/codebuddy-code，且已在 CLI 内登录（iOA / Google·GitHub / 微信 /
+// 企业域名）或提供 CODEBUDDY_API_KEY —— 缺任一项任务只会失败，不如不进选择器。
+type AgentCodebuddyConfig struct {
+	Transport string             `mapstructure:"transport"`
+	ACP       CodebuddyACPConfig `mapstructure:"acp"`
+}
+
+// CodebuddyACPConfig CodeBuddy 的 ACP 配置（字段与 QoderACPConfig 对应）。
+// 模型不在这里配：CLI 的 --model 只影响进程默认，pieqi 走会话级
+// session/set_config_option —— CodeBuddy 在 session/new 的标准 configOptions 里
+// 下发 id="model" 的清单（2026-10-22 实测 v2.159.0，20 个模型），与 qoder 同一条通道。
+type CodebuddyACPConfig struct {
+	AgentType    string        `mapstructure:"agent_type"`
+	SpawnCommand []string      `mapstructure:"spawn_command"`
+	InitTimeout  time.Duration `mapstructure:"init_timeout"`
+	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`
+}
+
+// ACPConfig 把 codebuddy 节转成旧 ACPConfig 结构（喂给 agent.ConfigureACPProviders）。
+func (c AgentCodebuddyConfig) ACPConfig() ACPConfig {
+	return ACPConfig{
+		AgentType:    c.ACP.AgentType,
+		SpawnCommand: c.ACP.SpawnCommand,
+		InitTimeout:  c.ACP.InitTimeout,
+		IdleTimeout:  c.ACP.IdleTimeout,
 	}
 }
 
@@ -361,6 +392,10 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("agents.dsh.acp.agent_type", "dsh")
 	v.SetDefault("agents.dsh.acp.init_timeout", "2m") // 首启动冷启动远慢于 qodercli，见 DshACPConfig.InitTimeout
 	v.SetDefault("agents.dsh.acp.idle_timeout", "15m")
+	// codebuddy 同样不设 transport 默认值：空 transport = 不进选择器。它要求本机安装
+	// @tencent-ai/codebuddy-code 并已登录（或提供 CODEBUDDY_API_KEY）。
+	v.SetDefault("agents.codebuddy.acp.agent_type", "codebuddy")
+	v.SetDefault("agents.codebuddy.acp.idle_timeout", "15m")
 	v.SetDefault("auth.debug_skip_all_auth", false)
 	v.SetDefault("auth.feishu_binding_file", filepath.Join(DefaultDataRoot(), "feishu_binding.json"))
 	v.SetDefault("auth.cloudflared.binary_path", "cloudflared")

@@ -1,6 +1,6 @@
 # Pieqi
 
-把 **Claude Code / qoder / dsh 等 coding agent** 接入 IM（飞书 / 企微 / 微信）与移动端 PWA 的桥接服务：在手机上发消息即可创建任务、续问、审批工具调用，实时看到逐字流式输出，并在改完后**看见改了什么、验证对不对、必要时回退、带证据继续**。
+把 **Claude Code / qoder / dsh / CodeBuddy 等 coding agent** 接入 IM（飞书 / 企微 / 微信）与移动端 PWA 的桥接服务：在手机上发消息即可创建任务、续问、审批工具调用，实时看到逐字流式输出，并在改完后**看见改了什么、验证对不对、必要时回退、带证据继续**。
 
 ```
 飞书(长连接/webhook) ─┐
@@ -26,6 +26,8 @@
   * `qoder` 等 → 原生 ACP（`qodercli --acp`，`coder/acp-go-sdk`）。
 
   * `dsh` → 同为 ACP，但入口是一个 profile（`dsh --profile acp`，DeepSeek Harness）。默认**不注册**：需要本机装 `@deepseek-ai/dsh`，且其 `acp` profile 里 pin 了可用模型路由（出厂路由需 `DEEPSEEK_API_KEY`，也可改 pin 到本地网关等免 key 的 provider）；模型由 dsh 侧决定，不在本项目配置里。
+
+  * `codebuddy` → ACP（`codebuddy --acp`，腾讯 CodeBuddy CLI）。默认**不注册**：需要本机装 `@tencent-ai/codebuddy-code` 并已登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`；模型清单由 `session/new` 的标准 `configOptions` 下发，支持会话内切换。
 
   * 可选 agent 列表以 `GET /api/agents` 为唯一事实源，前端选择器由它驱动。
 
@@ -134,7 +136,7 @@ pieqi/
 │   └── reload_restart.go      # 自重启端点的接线
 ├── internal/
 │   ├── agent/                 # AgentSession/Manager 抽象 + 各传输
-│   │   ├── acp.go             # ACP 传输（qoder / dsh / codex）
+│   │   ├── acp.go             # ACP 传输（qoder / dsh / codebuddy / codex）
 │   │   ├── print*.go          # print 回退传输
 │   │   ├── readonly_kind.go   # 只读命令降级（ADR-0008）
 │   │   ├── shell_runner.go    # 测试/构建命令族分档（ADR-0015）
@@ -251,6 +253,8 @@ agents:
     transport: acp         # qodercli --acp
   dsh:
     transport: ""          # 留空 = 不注册；改成 acp 即接 dsh --profile acp（模型路由在 dsh 侧 profile 里 pin）
+  codebuddy:
+    transport: ""          # 留空 = 不注册；改成 acp 即接 codebuddy --acp（需先在 CLI 登录或设 CODEBUDDY_API_KEY）
 
 pieqi:
   max_concurrent_per_project: 4
@@ -384,6 +388,8 @@ GOOS=windows GOARCH=amd64 go build -o build/release/pieqi-windows-amd64.exe ./cm
 * **qoder 等 ACP agent** 需本机安装对应 CLI（`qodercli` / `codex` 等）并支持 `--acp`；qoder 默认模型是付费档，Credits 耗尽会报 `error_code 118`（模板里已显式带 `-m Qwen3.8-Flash`）。
 
 * **dsh（DeepSeek Harness）** 需 `npm install -g @deepseek-ai/dsh`（ACP 入口是它的 profile：`dsh --profile acp`），并在其 `acp` profile 里 pin 好模型路由。默认不注册；握手实测冷启动 >90s，故其 `init_timeout` 默认 2m。清空 pin 不会回落默认模型，会话会彻底没模型。
+
+* **codebuddy（腾讯 CodeBuddy CLI）** 需 `npm install -g @tencent-ai/codebuddy-code` 并在 CLI 内登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`。默认不注册；模型清单走标准 ACP `configOptions`（实测 v2.159.0 下发 20 个模型），可在会话内切换。
 
 * **dsh 的 goal 不在 ACP 路径上**（走 SDK control request），pieqi 侧取不到；已在 Qoder/dsh 侧记录，结论见 [`docs/agents-goal-and-capabilities.md`](docs/agents-goal-and-capabilities.md)。
 

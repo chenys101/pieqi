@@ -52,8 +52,31 @@ func TestOpenDshProviderRouting(t *testing.T) {
 	}
 }
 
+// TestOpenCodebuddyProviderRouting 同 qoder/dsh：注册名必须能路由到 ACP provider，
+// 否则前端选了 codebuddy 只会拿到 ErrUnknownAgent。
+func TestOpenCodebuddyProviderRouting(t *testing.T) {
+	prev := acpProviderCfg
+	defer func() { acpProviderCfg = prev }()
+
+	acpProviderCfg.Agents = map[string]config.ACPConfig{
+		AgentCodebuddy: {AgentType: "codebuddy", SpawnCommand: []string{"no-such-codebuddy-binary-xyz", "--acp"}},
+	}
+
+	_, err := Open(context.Background(), OpenParams{Agent: "codebuddy", Cwd: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected spawn error from codebuddy provider")
+	}
+	if errors.Is(err, ErrUnknownAgent) {
+		t.Fatal("Open(codebuddy) should route to ACP provider, got ErrUnknownAgent")
+	}
+	if !strings.Contains(err.Error(), "no-such-codebuddy-binary-xyz") {
+		t.Fatalf("error should mention spawn command, got: %v", err)
+	}
+}
+
 // TestACPConfigForPerAgentDefault 钉住「兜底按 agent 区分」：provider 表里没有这个名字时，
-// qoder 落到 qodercli、dsh 落到 dsh。曾经共用的一个兜底会让选了 dsh 的会话静默起 qodercli。
+// qoder 落到 qodercli、dsh 落到 dsh、codebuddy 落到 codebuddy。曾经共用的一个兜底会让
+// 选了 dsh 的会话静默起 qodercli。
 func TestACPConfigForPerAgentDefault(t *testing.T) {
 	prev := acpProviderCfg
 	defer func() { acpProviderCfg = prev }()
@@ -64,6 +87,9 @@ func TestACPConfigForPerAgentDefault(t *testing.T) {
 	}
 	if got := acpConfigFor(AgentDsh).AgentType; got != "dsh" {
 		t.Fatalf("dsh 兜底 agent_type=%q want dsh（不能串到 qodercli）", got)
+	}
+	if got := acpConfigFor(AgentCodebuddy).AgentType; got != "codebuddy" {
+		t.Fatalf("codebuddy 兜底 agent_type=%q want codebuddy", got)
 	}
 
 	// 显式配置优先于兜底。
@@ -103,11 +129,12 @@ func TestConfigureACPProviders(t *testing.T) {
 // TestACPProviderConfigFromAgents 钉住「哪些配置会注册 provider」——与 AvailableAgents 同一判据。
 func TestACPProviderConfigFromAgents(t *testing.T) {
 	got := ACPProviderConfigFromAgents(config.AgentsConfig{
-		Qoder: config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
-		Dsh:   config.AgentDshConfig{Transport: "acp", ACP: config.DshACPConfig{AgentType: "dsh"}},
+		Qoder:     config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
+		Dsh:       config.AgentDshConfig{Transport: "acp", ACP: config.DshACPConfig{AgentType: "dsh"}},
+		Codebuddy: config.AgentCodebuddyConfig{Transport: "acp", ACP: config.CodebuddyACPConfig{AgentType: "codebuddy"}},
 	})
-	if len(got.Agents) != 2 {
-		t.Fatalf("agents=%+v, want qoder + dsh", got.Agents)
+	if len(got.Agents) != 3 {
+		t.Fatalf("agents=%+v, want qoder + dsh + codebuddy", got.Agents)
 	}
 
 	// transport 非 acp / agent_type 空缺都不入表。
@@ -251,6 +278,61 @@ func TestAvailableAgents(t *testing.T) {
 		})
 		if len(got) != 2 || got[1].Name != AgentDsh {
 			t.Fatalf("agents=%+v, want claude + dsh", got)
+		}
+	})
+
+	codebuddyConfig := config.AgentCodebuddyConfig{
+		Transport: "acp",
+		ACP:       config.CodebuddyACPConfig{AgentType: "codebuddy"},
+	}
+
+	t.Run("codebuddy transport=acp 才列，且排在 dsh 之后", func(t *testing.T) {
+		got := AvailableAgents(config.AgentsConfig{
+			Claude:    config.AgentClaudeConfig{Transport: "sdk-bridge"},
+			Qoder:     config.AgentQoderConfig{Transport: "acp", ACP: config.QoderACPConfig{AgentType: "qodercli"}},
+			Dsh:       dshConfig,
+			Codebuddy: codebuddyConfig,
+		})
+		if len(got) != 4 {
+			t.Fatalf("agents=%+v, want 4 个", got)
+		}
+		cb := got[3]
+		if cb.Name != AgentCodebuddy || cb.DisplayName != "CodeBuddy CLI" {
+			t.Fatalf("末位 = %+v, want codebuddy / CodeBuddy CLI", cb)
+		}
+		if cb.Transport != "ACP" {
+			t.Fatalf("codebuddy transport = %q, want ACP", cb.Transport)
+		}
+		// initialize 实测声明 promptCapabilities.image=true → 具备图片入站通路。
+		if !cb.ImagePrompt {
+			t.Error("codebuddy ImagePrompt=false：ACP 握手已声明图片能力，应在目录里体现")
+		}
+		// 与 qoder/dsh 同为 ACP RequestPermission 路径。
+		if !cb.SessionAlways {
+			t.Error("codebuddy SessionAlways=false：ACP 的 approve_session 可用")
+		}
+		// session/new 的标准 configOptions 下发 id="model"（实测 20 个模型）。
+		if !cb.ModelSelectable {
+			t.Error("codebuddy ModelSelectable=false：实测下发标准 configOptions 模型清单")
+		}
+		// 没有 goal 能力的实测证据 → 必须留空，不能谎报。
+		if cb.GoalMode != "" || cb.GoalStateVisible {
+			t.Errorf("codebuddy goal=(%q,%v)，无实测证据时应留空/false", cb.GoalMode, cb.GoalStateVisible)
+		}
+		if cb.ColdStartCold {
+			t.Error("codebuddy ColdStartCold=true：Node CLI 的 initialize/session-new 在秒级")
+		}
+	})
+
+	t.Run("codebuddy 默认（transport 留空）不注册", func(t *testing.T) {
+		got := AvailableAgents(config.AgentsConfig{
+			Claude:    config.AgentClaudeConfig{Transport: "sdk-bridge"},
+			Codebuddy: config.AgentCodebuddyConfig{ACP: config.CodebuddyACPConfig{AgentType: "codebuddy"}},
+		})
+		for _, a := range got {
+			if a.Name == AgentCodebuddy {
+				t.Fatalf("transport 留空却列出了 codebuddy: %+v", got)
+			}
 		}
 	})
 

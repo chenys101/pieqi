@@ -128,6 +128,23 @@ agents:
       # 一个可用路由 —— 没有 pin 时会话压根没有模型可选（dsh 不回落 agent 默认模型）。
       init_timeout: 2m              # 首次启动要组装配方/挂插件，实测冷启动 >90s（热启动 1s）
       idle_timeout: 15m
+  codebuddy:
+    # 默认留空 = 不注册，agent 选择器里看不到它。要启用改成 acp，并满足以下任一登录前提：
+    #   1) npm install -g @tencent-ai/codebuddy-code，然后在 CLI 内登录
+    #      （iOA / Google·GitHub / 微信 / 企业域名），或
+    #   2) 在服务启动环境提供 CODEBUDDY_API_KEY。
+    # 未登录时 session/new 会失败，任务直接报错 —— 与 dsh 同理，不默认进选择器。
+    transport: ""                   # ""(默认,不注册) | acp(codebuddy --acp)
+    acp:
+      agent_type: codebuddy
+      # 裸名即可：Windows 上 npm 全局装的是 .cmd shim，Go spawn 会永久挂死，
+      # 程序会自动在 node_modules 各候选根里找到 @tencent-ai/codebuddy-code 的
+      # bin/codebuddy 并以 `node <入口> --acp` 直启。空数组 = 按 agent_type 取默认。
+      # spawn_command: ["codebuddy", "--acp"]
+      # 模型不要写在这里：CodeBuddy 在 session/new 的标准 configOptions 里下发
+      # id="model" 清单，pieqi 用 session/set_config_option 做会话级切换。
+      init_timeout: 30s
+      idle_timeout: 15m
   # 可用 agent 列表以后端 /api/agents 为唯一事实源；未知名字会被拒（400）。
 
 # ── 鉴权 + Cloudflared 隧道（PRD §8）────────────────────────────────────────

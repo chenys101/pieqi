@@ -277,14 +277,16 @@ func buildSpawnCommand(cfg config.ACPConfig) (string, []string) {
 }
 
 // nodeCLIAgent 判断「这个 spawn 命令名其实是 npm 发的 shim，应该换成 node 直启入口」。
-// keepArgs=true 时原参数要保留（dsh 的 --profile acp 是真参数）；false 时整段丢弃
-// （claude-code 的 `-y @scope/pkg@latest` 是 npx 的包选择器，对 node 直启无意义）。
+// keepArgs=true 时原参数要保留（dsh 的 --profile acp、codebuddy 的 --acp 都是真参数）；
+// false 时整段丢弃（claude-code 的 `-y @scope/pkg@latest` 是 npx 的包选择器，对 node 直启无意义）。
 func nodeCLIAgent(agentType, name string) (entryRel string, keepArgs bool, ok bool) {
 	switch {
 	case agentType == "claude-code" && name == "npx":
 		return filepath.Join("@agentclientprotocol", "claude-agent-acp", "dist", "index.js"), false, true
 	case name == "dsh":
 		return filepath.Join("@deepseek-ai", "dsh", "lib", "bin.js"), true, true
+	case agentType == "codebuddy" && name == "codebuddy":
+		return filepath.Join("@tencent-ai", "codebuddy-code", "bin", "codebuddy"), true, true
 	}
 	return "", false, false
 }
