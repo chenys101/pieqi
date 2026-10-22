@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,8 @@ func TestWireToolCall_NewAppendsToolUse(t *testing.T) {
 		IsNew:      true,
 		RawInput:   json.RawMessage(`{"command":"ls -la"}`),
 	})
+	// 落盘走 200ms 合并窗口（见 FlushToolCallWindow），测试里显式 Flush 以免依赖真实计时。
+	h.Flush()
 
 	evs := drainEvents(sub, 80*time.Millisecond)
 	sawUpdate := false
@@ -103,6 +106,7 @@ func TestWireToolCall_UpdateCompleted(t *testing.T) {
 		ToolCallID: "tc-2", Status: "completed", IsNew: false, // 无 Title，应回查补全 "Read"
 		RawOutput: json.RawMessage(`{"content":"hello"}`),
 	})
+	h.Flush() // 合并窗口（见 FlushToolCallWindow）
 
 	tt, _ := store.Get(taskID)
 	if len(tt.Events) != 2 {
@@ -143,6 +147,7 @@ func TestWireToolCall_UpdateFailed(t *testing.T) {
 		ToolCallID: "tc-3", Title: "Write", Status: "failed", IsNew: false,
 		RawOutput: json.RawMessage(`{"error":"denied"}`),
 	})
+	h.Flush() // 合并窗口（见 FlushToolCallWindow）
 
 	ev := lastEvent(t, store, taskID)
 	if ev.Type != model.EventToolResult {
@@ -172,6 +177,7 @@ func TestWireToolCall_IntermediateStatusIgnored(t *testing.T) {
 	fa.emitToolCall(agent.ToolCallUpdateInfo{
 		ToolCallID: "tc-4", Status: "in_progress", IsNew: false,
 	})
+	h.Flush() // 合并窗口（见 FlushToolCallWindow）
 
 	tt, _ := store.Get(taskID)
 	if len(tt.Events) != 1 {
@@ -191,6 +197,9 @@ func TestWireToolCall_UnwireStopsCallback(t *testing.T) {
 	})
 	_ = drainEvents(sub, 60*time.Millisecond)
 
+	// ⚠️ 这里**不显式 Flush**：tc-5 还在 200ms 合并窗口内，Unwire 必须自己先落盘
+	// （见 ToolCallHandle.Unwire 的"先 Flush 再拆"纪律）。若顺序写反，下面断言会拿到
+	// 0 条事件 —— 这正是"最后一段工具事件真丢了"的形态。
 	h.Unwire()
 	fa.emitToolCall(agent.ToolCallUpdateInfo{
 		ToolCallID: "tc-6", Title: "Write", Status: "pending", IsNew: true,
@@ -231,6 +240,7 @@ func TestWireToolCall_BackfillInputMergesInsteadOfDuplicate(t *testing.T) {
 		ToolCallID: "tc-late", Title: "pwsh", Status: "in_progress", IsNew: true,
 		RawInput: json.RawMessage(`{"command":"git status --short","description":"查看改动"}`),
 	})
+	h.Flush() // 合并窗口（见 FlushToolCallWindow）
 
 	tt, _ := store.Get(taskID)
 	var toolUses []model.TaskEvent
@@ -268,6 +278,7 @@ func TestWireToolCall_StatusUpdateCarriesLateInput(t *testing.T) {
 		RawInput:  json.RawMessage(`{"file_path":"C:\\repo\\a.go"}`),
 		RawOutput: json.RawMessage(`{"ok":true}`),
 	})
+	h.Flush() // 合并窗口（见 FlushToolCallWindow）
 
 	tt, _ := store.Get(taskID)
 	useCount, resultCount := 0, 0
@@ -296,4 +307,85 @@ func TestWireToolCall_StatusUpdateCarriesLateInput(t *testing.T) {
 	// 注：这里**不断言** DeriveFileChanges 能派生出这条路径 —— 派生层对 `edit`
 	// 目前直接返回空（见 feedback.go 的 toolFileOperations），是另一条缺陷，
 	// 由 feedback_test.go 的用例单独守。
+}
+
+// TestWireToolCall_BatchesIntoOnePersist 回归（2026-10-22 性能修复）：
+// **一批工具调用只落盘一次**。
+//
+// 背景：`TaskStore.Update` 的写锁贯穿到 fsync+rename，且 persist 每次 marshal
+// 整个 task —— 代价 O(事件总数)。实测 2950 事件的任务单次 20.6ms，而真实任务有
+// 2886 条工具事件，逐条落盘 ⇒ 每任务 2 分钟以上的全库阻塞，审批/流式/快照全部排队
+// （表现就是「网页卡着不动，刷新之后才有审核弹出」）。
+//
+// 判据：N 条工具调用更新 → 只发生 **1 次** persist，且事件一条不少、顺序正确。
+// 只看最终内容正确，合并完全失效（退化成逐条落盘）也能通过 —— 所以必须数落盘次数。
+func TestWireToolCall_BatchesIntoOnePersist(t *testing.T) {
+	fa, _, sub, store, taskID, h := setupToolCallWire(t)
+	defer h.Unwire()
+
+	// 窗口调短，避免测试等待 200ms；不影响"批次数"的判定。
+	// 直接改 wire 的窗口需要重新排定时器，这里用显式 Flush 保持确定性。
+	const N = 20
+	for i := 0; i < N; i++ {
+		id := fmt.Sprintf("tc-batch-%d", i)
+		fa.emitToolCall(agent.ToolCallUpdateInfo{
+			ToolCallID: id, Title: "Bash", Status: "pending", IsNew: true,
+			RawInput: json.RawMessage(`{"command":"echo hi"}`),
+		})
+		fa.emitToolCall(agent.ToolCallUpdateInfo{
+			ToolCallID: id, Title: "Bash", Status: "completed", IsNew: false,
+			RawOutput: json.RawMessage(`ok`),
+		})
+	}
+	// 此刻还没有落盘（窗口内）。
+	if got := len(drainEvents(sub, 50*time.Millisecond)); got != 0 {
+		t.Fatalf("窗口内不应已推送，收到 %d 条事件", got)
+	}
+	if tt, _ := store.Get(taskID); len(tt.Events) != 0 {
+		t.Fatalf("窗口内不应已落盘，事件数=%d", len(tt.Events))
+	}
+
+	h.Flush()
+
+	tt, _ := store.Get(taskID)
+	if len(tt.Events) != N*2 {
+		t.Fatalf("events=%d，want %d（每条工具调用 tool_use+tool_result 各一条，一条都不能丢）",
+			len(tt.Events), N*2)
+	}
+	// 顺序必须保持：tool_use 先于对应的 tool_result（lookupToolName 依赖这个顺序）。
+	for i := 0; i < N; i++ {
+		use, res := tt.Events[i*2], tt.Events[i*2+1]
+		wantID := fmt.Sprintf("tc-batch-%d", i)
+		if use.Type != model.EventToolUse || use.ToolUseID != wantID {
+			t.Fatalf("events[%d]=%s/%s，want tool_use/%s", i*2, use.Type, use.ToolUseID, wantID)
+		}
+		if res.Type != model.EventToolResult || res.ToolUseID != wantID {
+			t.Fatalf("events[%d]=%s/%s，want tool_result/%s", i*2+1, res.Type, res.ToolUseID, wantID)
+		}
+		// 批处理不能破坏"回查补全工具名"这条既有行为。
+		if res.ToolName != "Bash" {
+			t.Errorf("events[%d].ToolName=%q，want Bash", i*2+1, res.ToolName)
+		}
+	}
+	// Seq 必须连续单调（前端按 Seq 增量渲染）。
+	for i, ev := range tt.Events {
+		if ev.Seq != i+1 {
+			t.Fatalf("events[%d].Seq=%d，want %d", i, ev.Seq, i+1)
+		}
+	}
+	// 一批只推一次 task_updated（中途的中间态对前端没有意义）。
+	evs := drainEvents(sub, 80*time.Millisecond)
+	updates := 0
+	for _, ev := range evs {
+		if ev.Type == "task_updated" {
+			updates++
+		}
+	}
+	if updates != 1 {
+		t.Fatalf("task_updated 推送了 %d 次，want 1（整批一次）", updates)
+	}
+	// 落盘次数：只算真正调用 store.Update 的次数。
+	if got := h.wire.flushCount(); got != 1 {
+		t.Fatalf("flushCount=%d，want 1（%d 条更新必须合并成 1 次落盘）", got, N*2)
+	}
 }

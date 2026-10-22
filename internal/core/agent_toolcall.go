@@ -22,6 +22,8 @@ package core
 import (
 	"encoding/json"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"pieqi/internal/agent"
@@ -31,30 +33,55 @@ import (
 // ToolCallHandle WireToolCall 返回的句柄，Unwire 可拆卸回调。幂等。
 type ToolCallHandle struct {
 	adapter agent.AgentAdapter
+	// wire 供 Unwire 前落盘残留缓冲（见 Unwire 的"先 Flush 再拆"说明）。
+	wire *toolCallWire
 }
 
 // Unwire 注销回调（置空），断开 adapter 到事件流的工具调用推送。幂等。
 // 任务结束/取消时调用，避免后续误触发的工具事件再写入已终态 task。
+//
+// ⚠️ 与 DeltaHandle.Unwire 同一纪律：**先 Flush 再拆回调**。合并窗口内的待落盘事件
+// 还没进 store，直接拆会丢掉最后一段工具事件（表现：时间线末尾少一条工具卡片，
+// 而磁盘上也确实没有 —— 不是渲染问题，是真丢了）。
 func (h *ToolCallHandle) Unwire() {
-	if h == nil || h.adapter == nil {
+	if h == nil {
+		return
+	}
+	if h.wire != nil {
+		h.wire.Flush()
+		h.wire = nil
+	}
+	if h.adapter == nil {
 		return
 	}
 	h.adapter.OnToolCallUpdate(nil)
 	h.adapter = nil
 }
 
+// Flush 立刻把合并窗口内待落盘的工具事件写进 store（幂等；无待落盘内容时是空操作）。
+//
+// 与 DeltaHandle.Flush 同一用途：Unwire 内部会先调它，调用方一般不需要手动调；
+// 暴露出来主要是给测试与"想在某个边界立刻可见"的场景。
+func (h *ToolCallHandle) Flush() {
+	if h == nil || h.wire == nil {
+		return
+	}
+	h.wire.Flush()
+}
+
 // WireToolCall 把一个 AgentAdapter 的 OnToolCallUpdate 回调接到任务事件流。
 //
 // 注册后，adapter 每产出一个工具调用更新（ACP ToolCall/ToolCallUpdate），回调内：
-//  1. 映射为 EventToolUse（IsNew）或 EventToolResult（completed/failed）；
-//  2. store.Update 追加事件（Seq 自增）；
-//  3. Publish task_updated（全量，前端按 Seq 渲染，行为与 Phase 1 一致）。
+//  1. 更新先进**合并缓冲**（不立刻落盘，见 FlushToolCallWindow 的代价说明）；
+//  2. 窗口到期或 Flush 时，**一次** store.Update 依次施加整批更新
+//     （映射为 EventToolUse/EventToolResult，Seq 自增），再 Publish 一次 task_updated
+//     （全量，前端按 Seq 渲染，行为与 Phase 1 一致）。
 //
-// 返回 *ToolCallHandle，调用方在任务结束/取消时 Unwire 拆卸。
+// 返回 *ToolCallHandle，调用方在任务结束/取消时 Unwire 拆卸（会先 Flush）。
 func WireToolCall(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore, taskID string) *ToolCallHandle {
-	w := &toolCallWire{bus: bus, store: store, taskID: taskID}
+	w := &toolCallWire{bus: bus, store: store, taskID: taskID, flushWindow: FlushToolCallWindow}
 	adapter.OnToolCallUpdate(w.onUpdate)
-	return &ToolCallHandle{adapter: adapter}
+	return &ToolCallHandle{adapter: adapter, wire: w}
 }
 
 // toolCallWire 持有 OnToolCallUpdate 回调所需的依赖。taskID 固定（一个 wire 对应一个 task）。
@@ -62,49 +89,154 @@ type toolCallWire struct {
 	bus    *EventBus
 	store  *TaskStore
 	taskID string
+
+	// flushWindow 落盘合并窗口（见 FlushToolCallWindow）。<=0 时不排定时器，
+	// 由调用方显式 Flush（仅测试/特殊场景用，生产恒为 FlushToolCallWindow）。
+	flushWindow time.Duration
+
+	// mu 保护下面的待落盘队列。onUpdate 由 agent 适配器的 goroutine 调用，
+	// Flush 可能由任务结束路径（另一个 goroutine）调用，两者会并发。
+	//
+	// ⚠️ 锁顺序：**mu 先于 store.mu**。持 mu 期间会调用 store.Update（拿 store.mu），
+	// 所以任何需要同时拿两把锁的路径都必须按这个顺序，否则与关闭路径（onAgentSessionClosed）
+	// 互等死锁。
+	mu sync.Mutex
+	// pending 待落盘的工具调用更新，按到达顺序保存。
+	//
+	// 为什么能合并：这些更新各自独立的 mutator 体只是"补全已有那条 / 追加一条"，
+	// 而它们都作用于同一个 task 的事件流。合并后一次 Update 依次施加，结果与逐条
+	// 落盘完全一致 —— 只有写盘次数变了。**顺序不能乱**：tool_use 必须先于对应
+	// tool_result 落下，否则 lookupToolName 回查不到工具名。
+	pending []agent.ToolCallUpdateInfo
+	// flushTimer 合并窗口的定时器；非 nil 表示已排定一次落盘。
+	flushTimer *time.Timer
+
+	// flushN 累计**实际落盘次数**（测试与诊断用）。
+	//
+	// 与 contentDeltaWire.flushN 同一理由：只看最终内容正确，合并完全失效
+	// （退化成每个更新落盘一次）的回归也能通过测试 —— 而写放大正是本次要修的东西。
+	flushN atomic.Int64
 }
 
-// onUpdate OnToolCallUpdate 回调实现：映射为 tool_use/tool_result 事件并追加 + 推送。
-func (w *toolCallWire) onUpdate(info agent.ToolCallUpdateInfo) {
-	// ① 入参/工具名**后到**：补全已落盘的那条 tool_use 而不是再追加一条。
-	//
-	// 这一步是 2026-10-21 修的那个"又坏了"的根因所在，见 mergeToolUseIntoTask 的注释。
-	if backfillExistingToolUse(w.store, w.taskID, info) {
-		if updated, ok := w.store.Get(w.taskID); ok && updated != nil {
-			w.bus.Publish(Event{Type: "task_updated", TaskID: w.taskID, Task: updated})
-		}
-	}
+// flushCount 返回累计落盘次数（测试与诊断用）。
+func (w *toolCallWire) flushCount() int64 { return w.flushN.Load() }
 
-	ev, ok := mapToolCallEvent(info)
-	if !ok {
-		return // 非完成态的 ToolCallUpdate 忽略
+// FlushToolCallWindow 是工具调用事件的**落盘**合并窗口。
+//
+// 为什么需要（2026-10-22 性能诊断）：`TaskStore.Update` 的写锁**贯穿到 fsync+rename**，
+// 且 `persist` 每次 marshal 整个 task 含全部 events —— 代价是 **O(事件总数) 每次**。
+// 实测 2950 事件 / 2.03MB 的任务单次 Update = **20.6ms**。而一条 agent 工具通知原先
+// 最多触发 2 次 Update（backfill + 主 Update），真实任务有 2886 条工具事件 ⇒
+// 每任务累计 2 分钟以上的**全库串行阻塞**：审批、流式 delta、WS 快照全部排队，
+// 表现就是「网页卡着不动，刷新之后才有审核弹出」。
+//
+// 与 FlushDeltaWindow 取同一个值（200ms）的理由也一样：它只影响**落盘**，不影响推送语义
+// 的实时性——只是把"每条工具事件一次全量序列化"压成"每 200ms 一次批量"。
+// 真正影响观感的是"工具卡片什么时候出现"，而 200ms 在人的感知阈值以下。
+//
+// 正确性由 Flush 保证：任务结束/取消时必定落盘，不依赖窗口到期。
+const FlushToolCallWindow = 200 * time.Millisecond
+
+// onUpdate OnToolCallUpdate 回调实现：把更新攒进合并缓冲，窗口到期后批量落盘 + 推送。
+//
+// ⚠️ **这里不再直接 store.Update**（2026-10-22 性能修复）。原因见 FlushToolCallWindow：
+// 单次 Update 是 20.6ms 且持全局写锁，逐条落盘会让审批/流式/快照全部排队。
+//
+// 顺序语义不变：pending 按到达顺序保存，Flush 时**一次 Update 依次施加**，
+// 与逐条落盘的结果逐字节一致（只少了几千次 fsync）。
+func (w *toolCallWire) onUpdate(info agent.ToolCallUpdateInfo) {
+	w.mu.Lock()
+	w.pending = append(w.pending, info)
+	if w.flushTimer == nil {
+		w.flushTimer = time.AfterFunc(w.flushWindow, w.Flush)
 	}
-	ev.At = time.Now()
+	w.mu.Unlock()
+}
+
+// Flush 把缓冲里的工具调用更新批量落盘并推送。幂等；无待落盘内容时是空操作。
+//
+// 由三条路径调用：窗口定时器到期、ToolCallHandle.Unwire（任务结束）、测试直接调用。
+//
+// ⚠️ **锁顺序**（违反即静默死锁）：
+//  1. 持 w.mu 调 store.Update（即 w.mu → store.mu，与关闭路径同向）；
+//  2. **Publish 必须在放掉 store 写锁之后**。理由不是洁癖：ws.go 的 writeSnapshot
+//     在持有 bus.mu.RLock 的同时调 store.List()（要 store.mu）；若在持 store.mu 时
+//     Publish（要 bus.mu），两边互等，表现为流式彻底停住而日志全干净。
+func (w *toolCallWire) Flush() {
+	w.mu.Lock()
+	if w.flushTimer != nil {
+		w.flushTimer.Stop()
+		w.flushTimer = nil
+	}
+	infos := w.pending
+	w.pending = nil
+	if len(infos) == 0 {
+		w.mu.Unlock()
+		return
+	}
+	w.flushN.Add(1)
+
+	// 锁内只写内存；store.Update 返回的快照带出锁外再 Publish。
 	updated, err := w.store.Update(w.taskID, func(t *model.Task) bool {
-		// ToolCallUpdate 缺 Title 时，回查同 ToolUseID 的最后一个 tool_use 补全工具名。
-		if ev.Type == model.EventToolResult && ev.ToolName == "" {
-			if name := lookupToolName(t.Events, info.ToolCallID); name != "" {
-				ev.ToolName = name
+		changed := false
+		for _, info := range infos {
+			if applyToolCallUpdate(w.store, t, info) {
+				changed = true
 			}
 		}
-		// ② 同一个 id 已经有 tool_use、但这次更新把标题/入参补齐了：合并进那一条，
-		// **不再追加**第二条只有工具名的空卡（那正是"审批卡上没命令"的样子）。
-		if ev.Type == model.EventToolUse {
-			if mergeToolUseIntoTask(t, info) {
-				return true
-			}
-			// 已有那条完整时若这次带了说明文字，只补说明（见 attachToolDescription）。
-			// 它不影响 tool_use 的内容，只让摘要能说"这条命令是要干什么"。
-			attachToolDescription(t, info)
-		}
-		w.store.AppendEvent(t, ev)
-		return true
+		return changed
 	})
+	w.mu.Unlock()
+
 	if err != nil || updated == nil {
 		return
 	}
 	// 工具事件是离散的，全量重绘合适（前端按 Seq 增量渲染），不用 delta。
+	// 一次批量只推一次 —— 中途的中间态对前端没有意义（它按 Seq 渲染最终集合）。
 	w.bus.Publish(Event{Type: "task_updated", TaskID: w.taskID, Task: updated})
+}
+
+// applyToolCallUpdate 把**一条** ToolCallUpdateInfo 施加到 t 上，返回是否改动了 t。
+//
+// 这是原先 onUpdate 里两段 Update 的合并体（2026-10-22）。合并是**纯等价变换**：
+// 原先 `backfillExistingToolUse` 的 mutator 体与随后主 Update 的 mutator 体各自调用
+// 同一批 helper，作用于同一个 Task —— 拆成两次写只是让同一批数据多落一次盘。
+//
+// 顺序不能调换，两步是"先补全已有的那条，再决定要不要追加新的"：
+//  1. 入参/工具名**后到**：补全已落盘的那条 tool_use，而不是再追加一条空壳
+//     （2026-10-21 修复的"审批卡上只有工具名、没有命令"，见 mergeToolUseIntoTask）；
+//  2. 映射为事件并追加；若这次是 IsNew 但已有同 id 的 tool_use，同样只合并不追加。
+func applyToolCallUpdate(store *TaskStore, t *model.Task, info agent.ToolCallUpdateInfo) bool {
+	changed := false
+
+	// ① 补全已有那条：mergeToolUseIntoTask 改 Input/ToolName，attachToolDescription 补说明。
+	// 两者都只对"已有同 id 的 tool_use"生效；都不命中时 changed 保持 false。
+	if mergeToolUseIntoTask(t, info) {
+		changed = true
+	}
+	if attachToolDescription(t, info) {
+		changed = true
+	}
+
+	// ② 映射为事件。非完成态的中间状态更新不产生事件。
+	ev, ok := mapToolCallEvent(info)
+	if !ok {
+		return changed
+	}
+	ev.At = time.Now()
+	// ToolCallUpdate 缺 Title 时，回查同 ToolUseID 的最后一个 tool_use 补全工具名。
+	if ev.Type == model.EventToolResult && ev.ToolName == "" {
+		if name := lookupToolName(t.Events, info.ToolCallID); name != "" {
+			ev.ToolName = name
+		}
+	}
+	// 同一个 id 已经有 tool_use、但这次更新把标题/入参补齐了：合并进那一条，
+	// **不再追加**第二条只有工具名的空卡。
+	if ev.Type == model.EventToolUse && mergeToolUseIntoTask(t, info) {
+		return true
+	}
+	store.AppendEvent(t, ev)
+	return true
 }
 
 // mergeToolUseIntoTask 把一次"新工具调用"更新合并进已有的同名工具事件；返回 true 表示已处理。
@@ -191,25 +323,6 @@ func attachToolDescription(t *model.Task, info agent.ToolCallUpdateInfo) bool {
 		return true
 	}
 	return false
-}
-
-// backfillExistingToolUse 用一条 status 更新里携带的入参/工具名，补全已有的 tool_use 事件。
-// 返回 true 表示确实改了内容（调用方据此推送 task_updated）。
-func backfillExistingToolUse(store *TaskStore, taskID string, info agent.ToolCallUpdateInfo) bool {
-	if info.ToolCallID == "" || (len(info.RawInput) == 0 && info.Title == "") {
-		return false
-	}
-	touched := false
-	_, err := store.Update(taskID, func(t *model.Task) bool {
-		touched = mergeToolUseIntoTask(t, info)
-		// 已有那条完整、只是少了说明文字：同样要补（它不改变 tool_use 的内容）。
-		// attachToolDescription 返回它是否真的写入了。
-		if attachToolDescription(t, info) {
-			touched = true
-		}
-		return touched
-	})
-	return touched && err == nil
 }
 
 // mapToolCallEvent 把 ToolCallUpdateInfo 映射为 TaskEvent。

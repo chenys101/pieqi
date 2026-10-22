@@ -17,6 +17,7 @@
 | [`frontend-v2/`](frontend-v2) | 前端 V2 重构的契约基准（`baseline.md`）、迁移完成报告、**设计原文归档**（`Pieqi Frontend V2 架构升级技术方案.md`） | 已完成（设计原文仅存档） |
 | [`requirements/`](requirements/overview.md) | 2.2 版本需求流水线 S0–S5（规划 / PRD / 技术方案 / 排期 / 实施记录） | 已放行 |
 | [`v2.1/`](v2.1) | 下一阶段综合功能迭代规划 v1.0 与功能点清单 | 规划 |
+| [`performance/`](performance/perf-backlog-2026-10-22.md) | 性能瓶颈修复任务队列（P0–P3，2026-10-22 诊断产出：写锁饥饿 / 5.4MB 首页 payload） | **待执行** |
 | [`superpowers/plans/`](superpowers/plans) | 飞书 IM 绑定 + cloudflared 隧道、飞书长连接 + Device Flow 的实施计划 | 历史存档 |
 | [`spikes/`](spikes/claude-sdk-bridge/README.md) | P0 spike 存档（claude-sdk-bridge 验证脚本，非产品代码） | 历史存档 |
 | [`multi-agent.md`](multi-agent.md) | 多 Agent 技术方案（`agents.*` 配置、桥 / print / ACP、P0–P5 演进） | 现行 |
