@@ -961,6 +961,83 @@ var imageMimeWhitelist = map[string]bool{
 // 那取决于原始字节数。
 const maxImageBytes = 5 << 20
 
+// ───────────────────── 工具结果里的图片（出站，面向人）─────────────────────
+
+// acpImageToolNames 结果里的图片**可以展示给人看**的工具名（小写比较）。
+//
+// ⚠️ 这是白名单而不是"Content 里有图就收"，理由是两类图片的**去向完全不同**：
+//   - ACP 的 ToolCall/ToolCallUpdate.Content 是**给人看的**（客户端渲染成卡片内容），
+//     改文件类工具在这里带的是 diff，dsh 的读图工具在这里带的是图片块；
+//   - 而"模型看到的工具结果"是另一条通道（ToolCall.RawOutput），pieqi 只能拿到文本部分。
+// 若不做工具名过滤，任何 Bash 的输出里都能塞 image 块，图片就会绕过"这条调用是什么"
+// 的语义直接进到界面 —— 那等于给 agent 开了一个不经审批对外的展示通道。
+var acpImageToolNames = map[string]bool{
+	"read_image": true, // dsh / 官方读图工具
+	"readimage":  true, // 驼峰变体（不同 agent 的命名习惯）
+}
+
+// toolCallImages 从一条 ACP 工具调用的 Content 里取出可展示的图片。
+//
+// 判据（全部满足才收）：
+//  1. 工具名在 acpImageToolNames 白名单里（见上面的理由）；
+//  2. Content 项是 standard content block、且里面的块是 image；
+//  3. base64 能解、mime 在白名单里（与出站图片同一套校验，见 validateImage）。
+//
+// 单张图失败**不影响其它图**：dsh 一次 read_image 只返回一张，这里按张独立判，
+// 是为了让"其中一张损坏"不至于把整次调用变成静默无图。
+//
+// 张数上限沿用 maxPromptImages：展示侧没有单独配置的理由，一张工具结果里出现
+// 十几张图本身就是异常，截断比放宽更安全。
+func toolCallImages(toolName string, content []acp.ToolCallContent) []ImageInput {
+	if len(content) == 0 || !acpImageToolNames[strings.ToLower(strings.TrimSpace(toolName))] {
+		return nil
+	}
+	out := make([]ImageInput, 0, 1)
+	for _, item := range content {
+		if item.Content == nil || item.Content.Content.Image == nil {
+			continue
+		}
+		img := item.Content.Content.Image
+		candidate := ImageInput{Data: img.Data, MimeType: img.MimeType}
+		if validateImageRules(candidate) != nil {
+			continue
+		}
+		out = append(out, candidate)
+		if len(out) >= maxPromptImages {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// describeToolContent 把一条 Content 的**形状**压成一行诊断串（如 `content/text,content/image`）。
+//
+// 只报形状不报内容：图片 base64 动辄几百 KB，打进日志既没用又会把日志撑爆。
+// 但"有没有 image 块、是不是标准的 content 包装"恰恰是排查唯一需要的两位信息。
+func describeToolContent(content []acp.ToolCallContent) string {
+	parts := make([]string, 0, len(content))
+	for _, item := range content {
+		switch {
+		case item.Diff != nil:
+			parts = append(parts, "diff")
+		case item.Terminal != nil:
+			parts = append(parts, "terminal")
+		case item.Content == nil:
+			parts = append(parts, "content/<nil>")
+		case item.Content.Content.Image != nil:
+			parts = append(parts, "content/image")
+		case item.Content.Content.Text != nil:
+			parts = append(parts, "content/text")
+		default:
+			parts = append(parts, "content/other")
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
 // validateImage 校验一张待发图片：mime 白名单、base64 形状、解码后大小。
 //
 // 这里**不解码出图**（那会为校验白拷一份内存），只做长度推算 + 字符集检查：
@@ -1328,6 +1405,8 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 				// 工具入参/输出（RawOutput 在开始事件里通常为空，留 nil 即可）。
 				RawInput:  rawIn,
 				RawOutput: rawAnyToJSON(u.ToolCall.RawOutput),
+				// 结果里的图片（read_image 才有）；见 toolCallImages 的判据。
+				Images: toolCallImages(u.ToolCall.Title, u.ToolCall.Content),
 			})
 		}
 	case u.ToolCallUpdate != nil:
@@ -1369,6 +1448,30 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 			// 工具入参/输出（RawOutput 在 completed/failed 时承载结果，→ EventToolResult.Result）。
 			info.RawInput = rawIn
 			info.RawOutput = rawAnyToJSON(u.ToolCallUpdate.RawOutput)
+			// 结果里的图片（read_image 才有）。
+			//
+			// ⚠️ 工具名要**自己取**：dsh 的 ToolCallUpdate 常常只带 Status/Content、
+			// 不再重复 Title。此时 updTitle 是空串，若拿它判白名单，图片会被静默丢掉
+			// （表现：时间线上 tool_result 只有一行文字信封，永远没有图）。
+			// 补全规则与"tool_result 缺工具名"一致：回查同 ToolCallID 的开工记录。
+			imgName := updTitle
+			if imgName == "" {
+				if memo, ok := a.toolInput(toolCallID); ok {
+					imgName = memo.Title
+				}
+			}
+			info.Images = toolCallImages(imgName, u.ToolCallUpdate.Content)
+			// 诊断：只有"这条更新到底有没有带内容"这一件事能从这行看出来。
+			// 没有它，图片链路的失败表现是**完全静默**的（工具结果照常有、只是没图），
+			// 2026-10-23 就因为无法区分"agent 没发 Content"与"我们没解析"而多绕了一圈。
+			if len(u.ToolCallUpdate.Content) > 0 {
+				a.logger.Debug("acp tool content",
+					zap.String("tool_call_id", toolCallID),
+					zap.String("tool", imgName),
+					zap.Int("items", len(u.ToolCallUpdate.Content)),
+					zap.Int("images", len(info.Images)),
+					zap.String("shapes", describeToolContent(u.ToolCallUpdate.Content)))
+			}
 			fn(info)
 			// 补全通告：IsNew=true 让事件层走"合并进已有那条"，而不是又追加一条。
 			// 只在真有新入参/新工具名时发，避免每次状态变更都多推一份 task_updated。

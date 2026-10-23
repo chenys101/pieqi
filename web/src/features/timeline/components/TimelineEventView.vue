@@ -9,6 +9,7 @@ import TextBubble from './TextBubble.vue'
 import ThinkingBlock from './ThinkingBlock.vue'
 import ToolCard from './ToolCard.vue'
 import ToolResultCard from './ToolResultCard.vue'
+import EventImages from './EventImages.vue'
 import RewindCard from '@/features/feedback/components/RewindCard.vue'
 import ModelSwitchNote from './ModelSwitchNote.vue'
 
@@ -72,12 +73,23 @@ const clock = computed(() => formatClock(props.event.timestamp))
     :tool-name="event.payload.toolName ?? 'tool'"
     :input="event.payload.input"
   />
-  <ToolResultCard
-    v-else-if="event.type === 'tool_result'"
-    :tool-name="event.payload.toolName ?? '结果'"
-    :result="event.payload.result"
-    :is-error="event.payload.isError"
-  />
+  <!-- tool_result：有图时**图在上、文字卡在其下**。
+       为什么不是把图塞进 ToolResultCard 内部：那张卡默认折叠，图片若跟着折叠，
+       用户得先点开才知道"这里有图"—— 而图本身就是要看的东西，不是附注。
+       文字（`<type>image</type><content>image/png 489x561…</content>` 那段信封）
+       仍然保留且可展开：它是"这张图从哪来、多大"的可核对事实。 -->
+  <div v-else-if="event.type === 'tool_result'" class="flex flex-col gap-1.5">
+    <EventImages
+      v-if="event.payload.images?.length"
+      :task-id="event.taskId"
+      :images="event.payload.images"
+    />
+    <ToolResultCard
+      :tool-name="event.payload.toolName ?? '结果'"
+      :result="event.payload.result"
+      :is-error="event.payload.isError"
+    />
+  </div>
   <div v-else-if="event.type === 'status'" class="event-enter px-1 text-xs text-muted">
     {{ event.payload.text }}
   </div>

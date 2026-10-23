@@ -134,7 +134,11 @@ type TaskEvent struct {
 	Input     json.RawMessage `json:"input,omitempty"`    // tool_use 的参数(原样 JSON)
 	Result    string          `json:"result,omitempty"`   // tool_result 文本化内容
 	IsError   bool            `json:"is_error,omitempty"` // tool_result 是否失败
-	// Images 该事件随附的图片（当前只有 user 事件会有）。
+	// Images 该事件随附的图片。
+	//
+	// 两类来源，**前端按 Stored 决定画不画**：
+	//   - user 事件：用户随消息发出的图（旧数据只有元数据，Stored=false）；
+	//   - tool_result 事件：读图类工具（read_image）结果里的图，已落盘（Stored=true）。
 	//
 	// ⚠️ **只存元数据，绝不存 base64**：一张图动辄几百 KB~几 MB，而 Task.Events
 	// 是要整体序列化进任务 JSON、并在 WS task_updated 里全量下发的。把 base64
@@ -157,6 +161,18 @@ type TaskImage struct {
 	Bytes int `json:"bytes"`
 	// Hash 图片内容的 SHA-256（hex）。空 = 未计算（旧数据/降级路径）。
 	Hash string `json:"hash,omitempty"`
+
+	// Name 图片的文件名（工具结果里的图才有，如 `A.png`；用户上传的通常为空）。
+	// 只用于标题/无障碍文案，不参与寻址。
+	Name string `json:"name,omitempty"`
+
+	// Stored 图片**本体**是否已落盘、可按 Hash 取回。
+	//
+	// ⚠️ 它解决的是一个会**静默说谎**的界面问题：旧版用户上传的图只记了 Hash/Bytes
+	// 却没存字节（见 ResumeRich 的说明），前端若按"有 Image 就画 <img>"去做，
+	// 那些历史事件会渲染成一堆永远加载不出来的破图 —— 看起来是"图丢了"，
+	// 实际是"从来没过存过"。**只有 Stored=true 才允许渲染缩略图。**
+	Stored bool `json:"stored,omitempty"`
 }
 
 // DiffStat 任务在**进入终态那一刻**对累计代码改动的快照。

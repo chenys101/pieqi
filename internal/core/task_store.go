@@ -14,6 +14,7 @@ import (
 	"pieqi/internal/model"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 // TaskStore 任务的内存索引 + 文件持久化。
@@ -40,6 +41,30 @@ type TaskStore struct {
 	// 记下来而不是就地吞掉：坏文件是**数据丢失的现场**，必须能在日志与诊断导出里
 	// 看到"丢了几个、坏在哪、证据留在哪"。原先裸 continue 让这一切无声无息。
 	badFiles []BadTaskFile
+
+	// attachments 工具结果图片的落盘存储（见 attachments.go）。
+	//
+	// nil = 未接线：此时工具结果里的图**不落盘**，事件上只留空的 Images。
+	// 这与"未接线时别的反馈能力降级"同一口径（api.Server 的 nil-safe 注入），
+	// 让只用到事件流的测试不必为此建目录。
+	attachments *AttachmentStore
+	// logger 只用于附件落盘失败这类**本来会被静默吞掉**的诊断（见 saveToolImages）。
+	logger *zap.Logger
+}
+
+// SetAttachments 注入图片附件存储（main 启动时接线；未接线时工具图片不落盘）。
+func (s *TaskStore) SetAttachments(a *AttachmentStore, logger *zap.Logger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attachments = a
+	s.logger = logger
+}
+
+// Attachments 返回已注入的附件存储（未接线时 nil）。
+func (s *TaskStore) Attachments() *AttachmentStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.attachments
 }
 
 // NewTaskStore 创建并从磁盘恢复任务索引。

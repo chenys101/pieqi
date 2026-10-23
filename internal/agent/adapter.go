@@ -262,6 +262,17 @@ type ToolCallUpdateInfo struct {
 	// RawOutput 工具输出（取自 ACP RawOutput）。
 	// 映射到 EventToolResult.Result（转 string）；为空时 nil。
 	RawOutput json.RawMessage
+
+	// Images 这次更新里**可以给人看**的图片（取自 ACP ToolCall/ToolCallUpdate 的
+	// Content 里的 image 块）。
+	//
+	// ⚠️ 与 RawOutput 是两条**完全不同的**通道，别合并：
+	//   - RawOutput 是"模型看到的工具结果"，ACP 在**所有改文件的工具**上都会带 diff；
+	//   - Images 是"人看到的图片"，本轮只用于 read_image —— 模型只能通过工具结果里的
+	//     原生图像块看它，而那部分根本走不到 pieqi。
+	// 只有工具名是读图类（见 acpImageToolNames）时才填充，其余工具即便 Content 里有图
+	// 也**不收**：任意 Bash 都能在输出里塞图片块，白名单是唯一的判据。
+	Images []ImageInput
 }
 
 // ContentDeltaFunc 内容增量回调（M2 落地：WS 逐字）。

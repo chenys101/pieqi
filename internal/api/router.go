@@ -220,6 +220,8 @@ func (s *Server) Register(r gin.IRouter) {
 		api.POST("/tasks/:id/push", s.postPush)
 		// 文件预览（markdown/pdf 原始内容，file_preview.go）
 		api.GET("/tasks/:id/file", s.getTaskFile)
+		// 工具结果里的图片字节（read_image；按内容寻址的 hash 取，见 attachments.go）
+		api.GET("/tasks/:id/attachments/:hash", s.getTaskAttachment)
 		// preview 控制端点与代理共用一条 wildcard 路由（见 previewRoute 分发说明）
 		api.Any("/tasks/:id/preview/*path", s.previewRoute)
 		api.GET("/skills", s.listSkills) // Phase 6 实现，先占位

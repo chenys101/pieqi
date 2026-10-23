@@ -28,6 +28,8 @@ import (
 
 	"pieqi/internal/agent"
 	"pieqi/internal/model"
+
+	"go.uber.org/zap"
 )
 
 // ToolCallHandle WireToolCall 返回的句柄，Unwire 可拆卸回调。幂等。
@@ -235,8 +237,54 @@ func applyToolCallUpdate(store *TaskStore, t *model.Task, info agent.ToolCallUpd
 	if ev.Type == model.EventToolUse && mergeToolUseIntoTask(t, info) {
 		return true
 	}
+	// 结果里的图片：落在 tool_result 事件上（见 attachToolImages 的说明）。
+	//
+	// 放在 append 之前算，是因为要把它一并写进**这一条**事件的 Images；
+	// 落盘失败不阻断事件本身（工具确实跑完了，结果文本才是主体），
+	// 只是这条事件不带图 —— 与"图太大被拒"同一处理口径，不制造假事实。
+	if len(info.Images) > 0 && ev.Type == model.EventToolResult {
+		ev.Images = store.saveToolImages(info.Images)
+	}
 	store.AppendEvent(t, ev)
 	return true
+}
+
+// saveToolImages 把工具结果里的图片落盘，返回可进事件的元数据。
+//
+// 单张失败**不影响其它张**（理由同 agent.toolCallImages：一张坏图不该让整次调用变无图）。
+// 全部失败时返回 nil —— 事件照常追加，只是不带图。
+func (s *TaskStore) saveToolImages(images []agent.ImageInput) []model.TaskImage {
+	// 取一次引用，避免循环里逐张读 store 字段（SetAttachments 与写事件是两条路径）。
+	s.mu.RLock()
+	att, log := s.attachments, s.logger
+	s.mu.RUnlock()
+	if att == nil {
+		return nil
+	}
+	out := make([]model.TaskImage, 0, len(images))
+	for _, img := range images {
+		// 文件名不在 ImageInput 里（那是"发出去"的结构，没有名字的概念）；
+		// 展示用的名字与大小由附件层按字节算，不信任上游自报。
+		hash, bytes, err := att.Save(img.Data, img.MimeType, "")
+		if err != nil {
+			// 静默失败是这里最危险的事：界面只会看起来"没有图"。
+			// 日志是唯一的线索，所以一定要打。
+			if log != nil {
+				log.Warn("attachment save failed", zap.String("mime", img.MimeType), zap.Error(err))
+			}
+			continue
+		}
+		out = append(out, model.TaskImage{
+			MimeType: img.MimeType,
+			Bytes:    bytes,
+			Hash:     hash,
+			Stored:   true,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // mergeToolUseIntoTask 把一次"新工具调用"更新合并进已有的同名工具事件；返回 true 表示已处理。

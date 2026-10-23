@@ -36,16 +36,30 @@ export interface TaskEventDto {
   input?: unknown
   result?: string
   is_error?: boolean
-  /** 该事件随附的图片**元数据**（当前只有 user 事件有）。**不含图片本体** —— 见 model.TaskImage。 */
+  /**
+   * 该事件随附的图片**元数据**。**不含图片本体** —— 见后端 model.TaskImage。
+   *
+   * 两类来源：user 事件（用户发的图，旧数据 stored 缺省）与
+   * tool_result 事件（read_image 结果里的图，stored=true）。
+   */
   images?: TaskImageDto[]
   at: string
 }
 
-/** 随消息发出的图片元数据（后端 model.TaskImage；不含 base64） */
+/** 随事件发出的图片元数据（后端 model.TaskImage；不含 base64） */
 export interface TaskImageDto {
   mime_type: string
   bytes: number
   hash?: string
+  /** 文件名（工具结果里的图才有，如 `A.png`） */
+  name?: string
+  /**
+   * 图片**本体**是否已落盘、可按 hash 取回。
+   *
+   * ⚠️ 只有 true 才允许渲染缩略图：旧版用户上传的图只记了 hash/bytes 却没存字节，
+   * 照着画 <img> 会得到一堆永远加载不出来的破图（看起来像"图丢了"）。
+   */
+  stored?: boolean
 }
 
 export interface DecisionDto {

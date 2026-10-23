@@ -148,6 +148,12 @@ func main() {
 	if err != nil {
 		logger.Fatal("init task store", zap.Error(err))
 	}
+	// 工具结果图片（read_image）的落盘存储：<dataRoot>/attachments/<sha256>.<ext>。
+	//
+	// 为什么由 main 接线而不是 TaskStore 自己推导 PIEQI_HOME：数据根是**运行期事实**，
+	// 与 checkpoints / previews 同一口径，统一在启动路径上算一次（见 dataRoot 的来源）。
+	// 未接线时工具图片只是不落盘，不影响任何其它路径。
+	store.SetAttachments(core.NewAttachmentStore(filepath.Join(dataRoot, "attachments")), logger)
 	// 启动时读不出来的任务文件必须**显式报出来**（原先是被静默跳过的）。
 	//
 	// 为什么值得单独一段日志：这类失败的表现是"任务凭空消失"，而此前日志里

@@ -54,6 +54,20 @@ export function taskFileURL(taskId: string, path: string): string {
   return `/api/tasks/${encodeURIComponent(taskId)}/file?${qs}`
 }
 
+/**
+ * GET /api/tasks/:id/attachments/:hash 的图片 URL（工具结果里的图，如 read_image）。
+ *
+ * 用 `<img src>` 直接拉而不是先 fetch 成 blob：同源、带 cookie/token 的 GET 就能鉴权，
+ * 由浏览器负责缓存与解码（后端对该路径发了 immutable 的 Cache-Control —— 内容寻址
+ * 意味着同一 hash 的字节永不变化）。
+ *
+ * 路径与 fileURL 保持同一风格（裸 `/api/...` 而非 BASE_URL）：两者都由浏览器直接请求，
+ * 走的是同源，而 VITE_API_BASE_URL 只服务于 request() 的代码内请求。
+ */
+export function taskAttachmentURL(taskId: string, hash: string): string {
+  return `/api/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(hash)}`
+}
+
 /** GET /api/tasks/:id/file 的原始文本（markdown 渲染前拉取）。 */
 export async function getTaskFileText(taskId: string, path: string): Promise<string> {
   const qs = new URLSearchParams({ path })

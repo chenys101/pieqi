@@ -37,6 +37,21 @@ export interface ModelSwitchPayload {
   to: string
 }
 
+/**
+ * 可直接渲染的图片引用（后端 model.TaskImage 的 `stored=true` 子集）。
+ *
+ * 刻意**不带** base64 或 URL：URL 由组件按 taskId + hash 拼（见 services/api/attachments），
+ * 这样同一张图在两个事件里引用时天然是同一个地址，浏览器缓存能命中。
+ */
+export interface AgentEventImage {
+  mimeType: string
+  bytes: number
+  /** sha256 hex：拼取图 URL 用 */
+  hash: string
+  /** 文件名（工具结果里的图才有），用作标题与无障碍文案 */
+  name?: string
+}
+
 export interface AgentEventPayload {
   text?: string
   toolName?: string
@@ -44,6 +59,13 @@ export interface AgentEventPayload {
   input?: unknown
   result?: string
   isError?: boolean
+  /**
+   * 随事件附带的图片（已落盘、可渲染的那些）。
+   *
+   * 只有 `stored=true` 的条目会进来 —— "有元数据但没存字节"的旧图在这里被
+   * 在归一化阶段就滤掉，避免组件里再判一次（两处判据必然漂移）。
+   */
+  images?: AgentEventImage[]
   /** 仅 rewind 事件填充 */
   rewind?: RewindPayload
   /** 仅 model_switch 事件填充 */

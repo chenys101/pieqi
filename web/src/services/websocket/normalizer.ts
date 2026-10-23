@@ -6,9 +6,17 @@ import type {
   TaskDto,
   TaskSummaryDto,
   TaskEventDto,
+  TaskImageDto,
   UsagePayloadDto,
 } from '@/types/api'
-import type { AgentEvent, AgentEventType, AgentDelta, RewindPayload, ModelSwitchPayload } from '@/types/event'
+import type {
+  AgentEvent,
+  AgentEventType,
+  AgentDelta,
+  AgentEventImage,
+  RewindPayload,
+  ModelSwitchPayload,
+} from '@/types/event'
 import type { Task, TaskUsage } from '@/types/task'
 import { adaptTask } from '@/services/api/client'
 import { persistentEventId } from '@/utils/event'
@@ -144,6 +152,33 @@ function adaptModelSwitchInput(raw: unknown): ModelSwitchPayload | undefined {
 }
 
 /**
+ * 图片元数据 → 可渲染的引用；只收**已落盘**的（stored=true 且有 hash）。
+ *
+ * 为什么在这里滤而不是在组件里：这是"这张图能不能画"的唯一判据。放在归一化层之后，
+ * 组件拿到 images 就直接画，不会再出现"组件判一次、别处再判一次"的漂移；
+ * 而历史数据里 stored 缺省（旧版只记了元数据没存字节），在这里被统一挡掉 ——
+ * 表现是"这条事件没有图"，而不是一排永远加载不出来的破图。
+ *
+ * 为什么不让后端直接不返回那些条目：事件是事实源，元数据本身是真实发生过的
+ *（用户确实发过这张图，只是字节没留住）。过滤属于**展示适配**，归前端。
+ */
+function adaptEventImages(list: TaskImageDto[] | undefined): AgentEventImage[] | undefined {
+  if (!Array.isArray(list) || list.length === 0) return undefined
+  const out: AgentEventImage[] = []
+  for (const img of list) {
+    if (!img || img.stored !== true) continue
+    if (typeof img.hash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(img.hash)) continue
+    out.push({
+      mimeType: typeof img.mime_type === 'string' ? img.mime_type : 'image/png',
+      bytes: typeof img.bytes === 'number' ? img.bytes : 0,
+      hash: img.hash.toLowerCase(),
+      name: typeof img.name === 'string' && img.name ? img.name : undefined,
+    })
+  }
+  return out.length ? out : undefined
+}
+
+/**
  * 后端 events[] → 前端 AgentEvent[]（id = taskId:seq，用于去重）。
  * 兼容旧数据：「↻ 续问: 」前缀的 text 事件归一为 user_message。
  */
@@ -168,6 +203,7 @@ export function normalizeEvents(taskId: string, events: TaskEventDto[] | undefin
         input: ev.input,
         result: ev.result,
         isError: ev.is_error,
+        images: adaptEventImages(ev.images),
         // rewind 事件：结构化载荷（to_turn / restored / preview_stopped）
         rewind: ev.type === 'rewind' ? adaptRewindInput(ev.input) : undefined,
         // model_switch 事件：结构化载荷（from / to 均为不透明选择值）
