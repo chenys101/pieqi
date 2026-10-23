@@ -142,10 +142,23 @@ export default defineConfig({
         ws: true, // WebSocket 代理（/api/ws）
       },
       '/internal': apiTarget,
-      // e2e 交互用例要读夹具后端的写请求流水账（GET /__writes；DELETE /__writes 清空）。
-      // 只在 e2e 模式（E2E_MOCK_PORT 存在）下挂 —— 生产与日常 dev 都没有这条路径，
-      // 它属于"测试专有观测口"，不该出现在真实服务上。
-      ...(E2E_MOCK_PORT ? { '/__writes': { target: apiTarget, changeOrigin: true } } : {}),
+      //
+      // 测试专有的观测口/开关，只在 e2e 模式（E2E_MOCK_PORT 存在）下挂：
+      //   · /__writes  交互用例读写请求流水账（GET /__writes；DELETE 清空）
+      //   · /__faults  夹具的时序/故障开关（见 e2e/mock-api.mjs 的 parseFaultQuery）。
+      //                用例用 `page.request.post('/__faults?_delay=/api/settings:800')`
+      //                造出"设置晚到"这类真实竞态 —— 浏览器直接 fetch 会被 CORS 拦住，
+      //                走 vite 代理就等于同源。
+      // 生产与日常 dev 都没有这两条路径，它们不该出现在真实服务上。
+      ...(E2E_MOCK_PORT
+        ? {
+            '/__writes': { target: apiTarget, changeOrigin: true },
+            '/__faults': { target: apiTarget, changeOrigin: true },
+            // 路由落点：夹具页用 `?to=` 让浏览器**真的导航**到某条夹具路由
+            // （例如 `/tasks/new?project=…`），而不用在夹具里重造一份路由表。
+            '/__fixture': { target: apiTarget, changeOrigin: true },
+          }
+        : {}),
     },
   },
   build: {

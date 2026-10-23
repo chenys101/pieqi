@@ -23,6 +23,7 @@ import DashboardPage from '@/pages/DashboardPage.vue'
 import AgentsPage from '@/pages/AgentsPage.vue'
 import SettingsPage from '@/pages/SettingsPage.vue'
 import NewTaskPage from '@/pages/NewTaskPage.vue'
+import SessionPage from '@/pages/SessionPage.vue'
 import { useAgentStore } from '@/stores/agent'
 import { getSettings } from '@/services/api/settings'
 import { useSessionStore } from '@/stores/session'
@@ -39,17 +40,23 @@ import { tasks, LONG_TASK_ID } from '../fixtures/api-payloads.mjs'
 const FIXTURE_TASKS = tasks as TaskDto[]
 const LONG_ = FIXTURE_TASKS.find((t) => t.id === LONG_TASK_ID) as TaskDto
 
-/** 夹具 DTO → 生产领域模型（与 taskStore.loadTasks 走同一条适配） */
-function seed(): void {
+/**
+ * 夹具 DTO → 生产领域模型（与 taskStore.loadTasks 走同一条适配）
+ *
+ * `opts.tasksDeferred`：**先不灌任务清单**，只把 `loaded` 置真后再由调用方在
+ * 一个延迟后 `seedTasks()`。用它复现"设置先到、项目清单后到"的真实时序
+ * （见 mock-api 的 `_delay` 与 vite.config 的 e2e 代理）。
+ */
+function seed(opts: { tasksDeferred?: boolean } = {}): void {
   const pinia = createPinia()
   setActivePinia(pinia)
 
   const taskStore = useTaskStore()
-  taskStore.tasks = FIXTURE_TASKS.map(adaptTask)
   // `loaded` 必须显式置 true：新建任务页的判空逻辑等它（区分"还没到"与"确实没有"，
   // 见 NewTaskPage 的 watch）。夹具是**同步**灌数据的，不像生产那样有网络往返，
   // 不设的话页面会一直停在"项目还没到"的观感上。
   taskStore.loaded = true
+  if (!opts.tasksDeferred) taskStore.tasks = FIXTURE_TASKS.map(adaptTask)
   useSessionStore().syncFromTask(LONG_)
 
   // 顶部横幅（"尚未绑定飞书管理员账号…"）是全局状态，生产里由 auth/status 拉取后设置。
@@ -57,6 +64,11 @@ function seed(): void {
   // 12~36px —— 基线里带着它，任何"改 banner 文案"都会变成全线视觉 diff；
   // 反过来，夹具跑在等接口的状态下又会时有时无（实测出现过两次基线不一致）。
   useAppStore().banner = null
+}
+
+/** 延迟灌任务清单（配合 seed({ tasksDeferred: true })） */
+function seedTasks(): void {
+  useTaskStore().tasks = FIXTURE_TASKS.map(adaptTask)
 }
 
 function toApproval(t: TaskDto): ApprovalRequest {
@@ -73,16 +85,70 @@ function toApproval(t: TaskDto): ApprovalRequest {
   }
 }
 
+/**
+ * 夹具里 `?project=` 的取值（**只用于夹具自己拼 URL 的场景**）。
+ *
+ * 生产侧的约定只有一条：链接是 `{ project: 路径 }`、由 vue-router 编一次码，
+ * 页面从 `route.query.project` 拿回**原样路径**（见 `src/app/router.ts` 的
+ * newTaskProjectOf）。夹具的 Shell 不经过路由 props，只能自己从 `location.search`
+ * 取 —— 所以这里**显式解一次**，把"浏览器编码"这一层还原掉。
+ *
+ * ⚠️ 必须用 `location.search` 原样切、**不能**用 `URLSearchParams.get()`：
+ * 后者会先解码一次，再交给 `decodeURIComponent` 就变成解两次
+ * （`D%253A` → `D%3A` → `D:` —— 看上去对，但任何真含 `%` 的路径都会坏）。
+ * 2026-10-24 实测踩过这一轮。
+ */
+function rawProjectParam(): string {
+  const raw = location.search
+  const i = raw.indexOf('project=')
+  if (i < 0) return ''
+  return raw.slice(i + 'project='.length).split('&')[0]
+}
+
+function projectParam(): string {
+  const raw = rawProjectParam()
+  if (!raw) return ''
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
+}
+
 const Shell = defineComponent({
   setup() {
-    const raw = new URLSearchParams(location.search).get('mode')
-    const mode: 'session' | 'approval' | 'dashboard' | 'agents' | 'settings' | 'newtask' =
-      raw === 'approval' ? 'approval'
-      : raw === 'dashboard' ? 'dashboard'
-      : raw === 'agents' ? 'agents'
-      : raw === 'settings' ? 'settings'
-      : raw === 'newtask' ? 'newtask'
-      : 'session'
+    /**
+     * 当前是夹具的哪一屏。
+     *
+     * ⚠️ **必须在渲染函数里读**（不是 setup 里算一次）：点击详情页那枚入口会**就地**把
+     * 路径换成生产形态的 `/tasks/new?project=…`，而 SPA 复用同一个 Shell 实例 ——
+     * 在 setup 里读一次就会永远停在 session 那支：URL 已经是新建页、界面却还是详情页，
+     * 而且因为 session 分支要 `route.params.id`，页面只剩一句「加载中…」。
+     * 2026-10-24 实测踩过（点了"新建任务"看起来没反应）。
+     */
+    const currentMode = (): 'session' | 'approval' | 'dashboard' | 'agents' | 'settings' | 'newtask' | 'sessionpage' => {
+      const raw = new URLSearchParams(location.search).get('mode')
+      // 整页会话详情走独立路径 `/__e2e/detail/<id>/sessionpage`：路径本身就是模式判据
+      if (location.pathname.endsWith('/sessionpage')) return 'sessionpage'
+      // ⚠️ `/tasks/new` 这条必须排在 `/__e2e/detail` 的**查询参数判据之前**：
+      // 点击详情页的入口后 SPA 复用同一个 Shell 实例，`?project=…` 旁边**没有** `mode=`
+      // （生产链接就是这样的）。若先判 `mode`，`raw === null` 会一路掉到默认的 'session'，
+      // 于是 URL 已是新建页、界面还停在会话壳（并立刻按"最近项目"重置了预选）。
+      // 2026-10-24 实测踩过：点了入口，项目变成了 pieqi/web 而不是 pieqi。
+      if (location.pathname === '/tasks/new') return 'newtask'
+      // ⚠️ `raw` 可能是 **null**（直接打开 `/__e2e/detail`）。`null === 'session'` 不成立，
+      // 于是默认分支必须显式兜住 —— 早先写的是 `mode == null || mode === 'session'`，
+      // 改成"查询参数里的字符串"之后，不带参数的入口就掉进了"既不是 session 也不是别的"
+      // 的空壳（375 宽实测：页面只剩底栏，一行错都没有）。
+      if (raw === 'session') return 'session'
+      if (raw === 'approval') return 'approval'
+      if (raw === 'dashboard') return 'dashboard'
+      if (raw === 'agents') return 'agents'
+      if (raw === 'settings') return 'settings'
+      if (raw === 'newtask') return 'newtask'
+      if (raw === 'sessionpage') return 'sessionpage'
+      return 'session'
+    }
     const decisions = FIXTURE_TASKS.filter((t) => t.current_decision)
 
     /**
@@ -93,19 +159,24 @@ const Shell = defineComponent({
      * 状态一变就跟着变，不会拍到"清单还没到"的中间态。
      */
     const agentStore = useAgentStore()
-    const modelAgent = (): string => (mode === 'newtask' ? agentStore.defaultAgent : LONG_.agent ?? agentStore.defaultAgent)
-    const modelsOfAgent = () => agentStore.modelsOf(modelAgent())
-    const modelsLoadedForAgent = () => !!agentStore.modelsLoaded[modelAgent()]
+    const modelsLoadedForAgent = (a: string) => !!agentStore.modelsLoaded[a]
 
-    return () =>
-      // ⚠️ `h-dvh` 会与 AppLayout 里真实存在的移动端底栏（BottomNav）抢底部 49px：
-      // 夹具页自己占满整屏，底栏被挤到视口之外且不参与滚动 ⇒ 输入区被它挡住。
-      // 根元素用 `h-full`（由 AppLayout 的滚动容器给高度），真实页面就是这么排的。
-      h('div', { class: 'flex h-full w-full min-w-0 overflow-hidden bg-canvas', 'data-e2e': 'shell' }, [
+    return () => {
+      // ⚠️ 根元素 `h-full` 而**不是** `h-dvh`：高度由 AppLayout（App.vue 里那层）的滚动容器给。
+      // 自己占满整屏会把底栏挤到视口之外（底栏不参与滚动 ⇒ 输入区被它挡住），
+      // 真实页面就是这么排的。
+      //
+      // ⚠️ 夹具**不再**自己包 AppLayout：App.vue 已经给每一个页面套了一层，
+      // 再包一层就是两条底栏、主区被压两次（375 宽实测直接溢出）。
+      // 早先夹具自搭壳时没有底栏，"最新消息会不会被底栏挡住"根本量不到 ——
+      // 现在壳就是生产那个，底栏/侧栏的尺寸一并是真的。
+      const m = currentMode()
+      const agentOf = () => (m === 'newtask' ? agentStore.defaultAgent : LONG_.agent ?? agentStore.defaultAgent)
+      return h('div', { class: 'flex h-full w-full min-w-0 overflow-hidden bg-canvas', 'data-e2e': 'shell' }, [
         h(
           'main',
           { class: 'flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto', 'data-e2e': 'main' },
-          mode === 'newtask'
+          m === 'newtask'
             ? [
                 // 新建任务页：项目选择器 + 执行 Agent + 输入条。
                 //
@@ -113,9 +184,31 @@ const Shell = defineComponent({
                 // **有路由的环境**里挂 —— 夹具页的独立路由表正好提供这一点。
                 // 依赖：taskStore.loaded（判空）、agentStore.defaultAgent（默认 agent）。
                 // 前者在 seed() 里显式置 true，后者由 beforeEnter 拉目录后填充。
-                h('div', { 'data-e2e': 'newtask' }, [h(NewTaskPage)]),
+                //
+                // `project` 查询参数 = 上游带来的预选项目（生产里由 SessionPage 的
+                // 「在「x」新建任务」入口经 `/tasks/new?project=…` 给到，路由以 props 传入）。
+                // 夹具必须**同名同义**地喂进去，否则"从详情页新建默认落当前项目"这条
+                // 根本不会被验证到。
+                h('div', { 'data-e2e': 'newtask' }, [
+                  // 取值口径与生产一致（见 app/router.ts 的 newTaskProjectOf）：
+                  // 页面最终拿到的是**原样路径**，这里只解掉"浏览器编码"那一层
+                  //（夹具 Shell 不经过路由 props，只能自己从 location 取，见 projectParam）。
+                  h(NewTaskPage, { initialProjectPath: projectParam() }),
+                ]),
               ]
-            : mode === 'settings'
+            : m === 'sessionpage'
+            ? [
+                // 任务 ID 用 LONG_：它已在 seed() 里经 syncFromTask 进过 store，
+                // SessionPage 的"本地是否已有权威事件流"判据因此成立（不再拉一次详情）。
+                //
+                // **直接挂**（不经过 RouterView）：SessionPage 只需要 `route.params.id`，
+                // 而夹具路由没有 `:id`。早先试过在 Shell 内部再套一层 RouterView 并把 id 当 prop 传，
+                // 那会渲染**另一个**页面实例（SessionTimeline 又出现一次），页面结构就不是生产那份了。
+                // 改用**路由这一层**提供 id：同一条 `/__e2e/detail` 再注册一条带 `:id` 的变体，
+                // 由 beforeEach 把 `?mode=sessionpage` 改写成 `<路径>/<LONG_.id>/sessionpage`（见下面）。
+                h('div', { class: 'h-full', 'data-e2e': 'sessionpage' }, [h(SessionPage)]),
+              ]
+            : m === 'settings'
             ? [
                 // 设置页：四组全局偏好。它依赖 getSettings() —— 那个请求回来之前
                 // 所有开关都是 disabled（代码里刻意的：不给"点了没反应"的控件）。
@@ -123,7 +216,7 @@ const Shell = defineComponent({
                 // 拍到一个"全部灰掉"的页面，看起来正常、实际一行设置都没验证到。
                 h('div', { 'data-e2e': 'settings' }, [h(SettingsPage)]),
               ]
-            : mode === 'agents'
+            : m === 'agents'
             ? [
                 // Agents 页：能力矩阵的落点。
                 //
@@ -132,7 +225,7 @@ const Shell = defineComponent({
                 // 的空态 —— 那种截图看起来"页面正常"，实际什么都没验证。
                 h('div', { 'data-e2e': 'agents' }, [h(AgentsPage)]),
               ]
-            : mode === 'dashboard'
+            : m === 'dashboard'
             ? [
                 // Dashboard 是首页，也是全产品唯一的"行动面"（SPEC §6.2）。
                 // 挂真实页面而不是重搭一份：它的两个区块（待审批 / 本周概览）的选择性渲染
@@ -142,7 +235,7 @@ const Shell = defineComponent({
                 // tasks 算出 —— 所以这里不需要额外喂 store。
                 h('div', { 'data-e2e': 'dashboard' }, [h(DashboardPage)]),
               ]
-            : mode === 'session'
+            : m === 'session'
             ? [
                 // 必填 props 必须给真值：缺失只会是一条 Vue warning，
                 // 但"警告被当成噪声忽略"恰恰会让夹具与生产行为悄悄分叉
@@ -166,8 +259,8 @@ const Shell = defineComponent({
                   //
                   // ⚠️ modelsOf 是 Pinia 的 getter（`modelsOf(state)` 返回取值函数），
                   // 必须在 setup 作用域里取一次缓存，**不能塞进模板字符串当响应式源**。
-                  models: modelsOfAgent(),
-                  modelsLoaded: modelsLoadedForAgent(),
+                  models: agentStore.modelsOf(agentOf()),
+                  modelsLoaded: modelsLoadedForAgent(agentOf()),
                   currentModel: '',
                   /**
                    * ★ 必须接 `onSend`，否则"点发送"在夹具里**静默无效**。
@@ -202,9 +295,70 @@ const Shell = defineComponent({
           h(FeedbackPanel, { taskId: LONG_.id, mode: 'dock', canRewind: true }),
         ]),
       ])
+    }
   },
 })
 
+/**
+ * 夹具路由表里共用的**数据就绪**逻辑（`/__e2e/detail` 与 `/tasks/new` 都用）。
+ *
+ * 为什么必须在挂载前跑：store 里先有数据，首次渲染就是"有数据"的状态，
+ * 不会先闪一帧空态（那会让视觉基线随机多/少一个 0 状态断言）。
+ */
+async function primeStores(to: { query: Record<string, unknown> }): Promise<void> {
+  const mode = to.query.mode as string | undefined
+  // "设置先到、项目清单后到"这条时序（`?tasksDelay=<ms>`）：任务清单推迟灌，
+  // 而 agent 目录 / 设置照常先落地 —— 用它复现生产里两请求乱序的那一侧。
+  // 夹具是同步的（seed() 直接写 store），所以延迟只能用 setTimeout 表达；
+  // 用例侧则用 mock 的 `_delay=/api/settings:<ms>` 造出"设置晚到"。
+  const tasksDelay = Number(to.query.tasksDelay || 0)
+  seed({ tasksDeferred: tasksDelay > 0 })
+  if (tasksDelay > 0) setTimeout(seedTasks, tasksDelay)
+
+  // agents 场景：目录是异步拉的（GET /api/agents），**必须在挂载前拉完**。
+  // 否则会截到"暂无可用 Agent"的空态 —— 那种图看起来页面正常，
+  // 实际一个能力矩阵都没验证到（典型的静默假绿）。
+  // agents 场景要目录；newtask / sessionpage 也要（默认执行 Agent、以及会话的模型清单）。
+  // ⚠️ 会话/审批场景**不能**用 loadCatalog(true)：那是 force 语义，会把 store 换一份新对象；
+  // 这里只需要"有目录"，走默认的幂等分支。
+  if (mode === 'agents' || mode === 'newtask') {
+    await useAgentStore().loadCatalog(true)
+  }
+  // 会话场景：生产里是 **SessionPage** 在任务到达后 `loadModels(task.agent)`，
+  // 再经 InterveneInput 把清单交给模型选择器。夹具页直接挂的是 InterveneInput，
+  // 没有这步 ⇒ `models=[]` + `modelsLoaded=true`，触发器只剩 105px 的
+  // 「Agent 默认」、框下还会多一行「该 Agent 不提供可选模型」的说明。
+  // 那不是用户的形态：真实用户一旦选过模型，触发器是「◈ DeepSeek-V4.1-Flash」
+  // （约 158px），而**宽度**恰恰是这一行最容易出事的地方。这里按生产同序补齐。
+  if (mode == null || mode === 'session' || mode === 'approval' || mode === 'sessionpage') {
+    const agentStore = useAgentStore()
+    try {
+      await agentStore.loadCatalog()
+      await agentStore.loadModels(LONG_.agent || agentStore.defaultAgent)
+    } catch {
+      // 拉不到就保持空清单：组件会走它自己的降级分支（那是真实行为）
+    }
+  }
+  // settings 场景同理：getSettings() 没回来之前开关全是 disabled。
+  // 这里先把它预热进 HTTP 缓存不可行（要的是组件状态），所以改成"等它成功一次"：
+  // 组件挂载时还会再发一次，但那时网络已经在途/已缓存，且我们的 ready 选择器
+  // 等的是"开关可交互"而不是"页面出现"。
+  if (mode === 'settings') {
+    try {
+      await getSettings()
+    } catch {
+      // 失败就让页面自己走它的降级路径（开关 disabled）——
+      // 那是真实行为，用例会在断言里红，而不是被夹具吞掉
+    }
+  }
+  // newtask / sessionpage：**不能**预先拉设置。
+  //
+  // 新建任务页读 `GET /api/settings` 的默认工作目录，会话页（预选项目那条路）不读。
+  // 若在 beforeEnter 就替页面拉一次，mock 的 `_delay=/api/settings:<ms>` 会被
+  // 白白消耗在"没人用的那次请求"上，页面自己那次反而瞬间返回 ——
+  // 「设置晚到」的用例于是就测不到了（而且看起来还是绿的）。
+  // 这两条时序由页面自己发请求，夹具不抢跑。
+}
 /**
  * 夹具页的**独立路由表**。
  *
@@ -215,60 +369,106 @@ const Shell = defineComponent({
  *   · 独立路由表 = 只认 `/__e2e/detail`，没有兜底可掉。掉不进去就渲染不出东西、
  *     ready 元素等不到、用例立刻红 —— **失败是响亮的**。
  *
- * 形态就取 `app/router.ts` 的同构写法；组件仍然是那些生产组件。
  */
 export const fixtureRouter = createRouter({
   history: createWebHistory(),
+  /**
+   * `?project=<绝对路径>` 归一化为 `<path>?project=<encodeURIComponent(路径)>`
+   * —— 与生产 `src/app/router.ts` 的 `/tasks/new` 完全一致（那边也是路由用
+   * `encodeURIComponent` 生成链接、再用 `route.query.project` 原样传给组件）。
+   *
+   * 为什么夹具要自己归一化：夹具 Shell 的 div 包在 RouterView 外面，路由级 props
+   * 传不到它；于是 `initialProjectPath` 由 Shell 从 `location` 读 `project` 查询参数
+   * （见 newtask 分支）。若不归一化，直接手动打开
+   * `/tasks/new?project=D:\code\go\pieqi` 时浏览器只会把 `\` 当字符，
+   * Shell 读到的值与页面的 `route.query` 形态就分叉了 —— 夹具于是不再 equals 生产。
+   */
+  beforeEach: (to) => {
+    const raw = location.search
+    // `/__fixture?to=<路径>` 服务端 302 到 `<路径>`（见 mock-api 的同名分支）。
+    // 为什么要有它：夹具路由表**故意没有** `/tasks/new` 这样的"真实页面路径"
+    // （见上面的说明），可"从详情页点入口 → 落到新建页"这条链必须**真的导航**才测得出来。
+    // mock 的 `to=` 查询参数会被浏览器 url 编码成一个值，起点是 `/` —— 在这里还原成
+    // 夹具页要的 `mode=` 查询参数。`to` 里可能带 `&`，所以整段取出、不再按 & 拆。
+    if (location.pathname === '/__fixture') {
+      const i = raw.indexOf('to=')
+      if (i >= 0) return `/__e2e/detail${raw.slice(i + 2)}`
+      return '/__e2e/detail'
+    }
+    // 直接打开（或 e2e 入口的兜底）根路径：落到夹具页
+    if (location.pathname === '/') return `/__e2e/detail${raw}`
+    // `?mode=sessionpage` → 带 id 的独立路由（见路由表里那条的说明），
+    // 这样 SessionPage 的 `route.params.id` 才是真值。
+    // ⚠️ 正在去那条路由的路上（pathname 已经是 `/__e2e/detail/<id>/sessionpage`）时**不要**再改写，
+    // 否则每一轮都重定向一次、永远到不了（实测：页面停在"任务不存在"，请求打到了
+    // 一个不存在的 id）。
+    const onSessionPage = /^\/__e2e\/detail\/[^/]+\/sessionpage$/.test(location.pathname)
+    if (!onSessionPage && location.pathname === '/__e2e/detail' && /(^|&)mode=sessionpage(&|$)/.test(raw.slice(1))) {
+      // 去掉 mode=sessionpage 这个 URLSearchParams（保留其余参数，如 project）
+      const rest = new URLSearchParams(raw)
+      rest.delete('mode')
+      const qs = rest.toString()
+      return `/__e2e/detail/${LONG_.id}/sessionpage${qs ? `?${qs}` : ''}`
+    }
+    const i = raw.indexOf('project=')
+    if (i < 0) return true
+    const v = decodeURIComponent(raw.slice(i + 'project='.length).split('&')[0])
+    const canonical = `${to.path}?project=${encodeURIComponent(v)}`
+    // 已经是规范形态（raw 就是规范化后的查询串）→ 放行，避免无限重定向
+    if (raw === `?${canonical.slice(canonical.indexOf('?') + 1)}`) return true
+    return canonical
+  },
   routes: [
+    /**
+     * **整页会话详情**的专用入口：`/__e2e/detail/<id>/sessionpage`。
+     *
+     * 必须是**独立的路由记录**而不是"在 Shell 里再套一层 RouterView"：
+     * 后者会渲染出第二个 Shell（时间线、头、输入条都出现两遍），量出来的结构已经不是生产那份。
+     * `?mode=sessionpage` 由 beforeEach 改写成这条路径（见上）。
+     * id 走路由参数 ⇒ SessionPage 的 `route.params.id` 拿到真值，与生产 /sessions/:id 同构。
+     */
+    {
+      path: '/__e2e/detail/:id/sessionpage',
+      component: Shell,
+      beforeEnter: async (to) => {
+        await primeStores(to)
+        return true
+      },
+    },
     {
       path: '/__e2e/detail',
       component: Shell,
       // beforeEnter 在组件挂载前跑：store 里先有数据，首次渲染就是"有数据"的状态，
       // 不会先闪一帧空态（那会让视觉基线随机多/少一个 0 状态断言）
       beforeEnter: async (to) => {
-        seed()
-        // agents 场景：目录是异步拉的（GET /api/agents），**必须在挂载前拉完**。
-        // 否则会截到"暂无可用 Agent"的空态 —— 那种图看起来页面正常，
-        // 实际一个能力矩阵都没验证到（典型的静默假绿）。
-        // agents 场景要目录；newtask 也要（默认执行 Agent 来自目录的 default）。
-        // 两者都在挂载前拉完，避免截到"还没加载"的状态。
-        // newtask 里 NewTaskPage 自己也会 loadCatalog（幂等），这里先拉是为了
-        // "首帧就有默认 agent"，免得视觉基线拍到目录落地前的那一帧。
-        // 会话/审批场景**不能**用 loadCatalog(true)：那是 force 语义，会把 store 换一份新对象；
-        // 这里只需要"有目录"，走默认的幂等分支。
-        if (to.query.mode === 'agents' || to.query.mode === 'newtask') {
-          await useAgentStore().loadCatalog(true)
-        }
-        // 会话场景：生产里是 **SessionPage** 在任务到达后 `loadModels(task.agent)`，
-        // 再经 InterveneInput 把清单交给模型选择器。夹具页直接挂的是 InterveneInput，
-        // 没有这步 ⇒ `models=[]` + `modelsLoaded=true`，触发器只剩 105px 的
-        // 「Agent 默认」、框下还会多一行「该 Agent 不提供可选模型」的说明。
-        // 那不是用户的形态：真实用户一旦选过模型，触发器是「◈ DeepSeek-V4.1-Flash」
-        // （约 158px），而**宽度**恰恰是这一行最容易出事的地方。这里按生产同序补齐。
-        if (to.query.mode == null || to.query.mode === 'session' || to.query.mode === 'approval') {
-          const agentStore = useAgentStore()
-          try {
-            await agentStore.loadCatalog()
-            await agentStore.loadModels(LONG_.agent || agentStore.defaultAgent)
-          } catch {
-            // 拉不到就保持空清单：组件会走它自己的降级分支（那是真实行为）
-          }
-        }
-        // settings 场景同理：getSettings() 没回来之前开关全是 disabled。
-        // 这里先把它预热进 HTTP 缓存不可行（要的是组件状态），所以改成"等它成功一次"：
-        // 组件挂载时还会再发一次，但那时网络已经在途/已缓存，且我们的 ready 选择器
-        // 等的是"开关可交互"而不是"页面出现"。
-        if (to.query.mode === 'settings') {
-          try {
-            await getSettings()
-          } catch {
-            // 失败就让页面自己走它的降级路径（开关 disabled）——
-            // 那是真实行为，用例会在断言里红，而不是被夹具吞掉
-          }
-        }
+        await primeStores(to)
         return true
       },
     },
+    /**
+     * 「新建任务」的落地页：与 `src/app/router.ts` 的 `/tasks/new` **同一形状**
+     * （同组件、同 `project` 查询参数 → `initialProjectPath`）。
+     *
+     * 为什么夹具不能省掉这一条：Task 1 的判据是"**点详情页那枚入口，新建页的项目
+     * 已经是当前任务的**"。入口是 `<RouterLink :to="/tasks/new?project=…">`，
+     * 没有这条路由，点击会停在原地（夹具路由表**没有兜底**，这正是它的设计），
+     * 表现是"点了没反应"—— 与生产里路由漏注册的故障长得一模一样，会把人带偏。
+     * 有了它，"点 → 导航 → 新页面的项目预选"这条链才在夹具里是真的。
+     */
+    {
+      path: '/tasks/new',
+      component: Shell,
+      beforeEnter: async (to) => {
+        // 换页**不重新 seed**：任务/agent 都已在首个路由里就绪，再 seed 一次会把
+        // "从详情页带过来的上下文"冲掉（也会让测「设置晚到」的那条用例多一次请求）。
+        // 但**首次直接打开**它（用例直达 `/tasks/new?project=…`，不经详情页）时必须
+        // 先把 store 备好 —— 判据是"还没初始化过"，而不是"从哪一页来"。
+        if (!useTaskStore().loaded) await primeStores(to)
+        return true
+      },
+    },
+    // 详情页的"删除后回仪表盘"靠它落到一个能渲染的页面
+    { path: '/dashboard', component: Shell, beforeEnter: () => true },
   ],
 })
 

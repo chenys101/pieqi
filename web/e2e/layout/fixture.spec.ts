@@ -237,6 +237,18 @@ for (const sc of SCENES) {
          * 不输入就无法暴露的问题，只能靠"真的填进去"来测。
          */
         const box = page.getByLabel('补充指令')
+        /**
+         * 只有时间线 + 输入条的子组件夹具里**不该**出现页面级的「新建任务」入口
+         * （它是 SessionPage 的 UI，见 SessionPage 里 new-task-bar 的注释）：
+         * 一旦有人把页面级块塞进子组件，下面所有"输入条贴着视口底部"的几何前提
+         * 也会跟着失效。入口本身的正向几何归 interaction 层
+         * （new-task-entry.spec.ts，那里挂的是整页 SessionPage）。
+         */
+        await expect(
+          page.locator('[data-testid="session-new-task"]'),
+          '子组件夹具里出现了「新建任务」入口',
+        ).toHaveCount(0)
+
         await box.fill(Array.from({ length: 10 }, (_, i) => `第 ${i + 1} 行内容`).join('\n'))
         // 等文本框按内容定高（autoResize 是异步的：先 resize 再布局）
         await page.waitForTimeout(200)
@@ -390,7 +402,19 @@ for (const sc of SCENES) {
           const taR = ta.getBoundingClientRect()
           const acR = actions.getBoundingClientRect()
           const trR = trigger?.getBoundingClientRect() ?? null
+          /**
+           * 选择器与**主按钮**（发送 ⇄ 中止，见 InterveneInput 的 composer-send）之间的水平净空。
+           *
+           * 为什么必须量它（2026-10-24）：模型选择器原先 `max-w-[10rem]` 且**不肯压缩**，
+           * 373/375 宽下加图按钮 + 长模型名 + 发送按钮同处一行时，选择器右沿会压到发送按钮
+           * 左侧 7px —— 两个按钮的命中区（after:-inset-1 外扩 4px）直接重叠，点选择器会点到发送。
+           * 这类问题上下界断言全绿，只有"两个控件之间的净空"能抓住。
+           */
+          const main = document.querySelector('[data-testid="composer-send"]') as HTMLElement | null
+          const mR = main?.getBoundingClientRect() ?? null
           return {
+            triggerMainGap: trR && mR ? Math.round(mR.left - trR.right) : null,
+            triggerMainSameRow: trR && mR ? (trR.top + trR.bottom) / 2 >= mR.top - 1 && (trR.top + trR.bottom) / 2 <= mR.bottom + 1 : null,
             sameParent: actions.parentElement === ta.parentElement,
             actionsIsAbs: getComputedStyle(actions).position === 'absolute',
             taPadBottom: parseFloat(cs.paddingBottom),
@@ -414,6 +438,17 @@ for (const sc of SCENES) {
         expect(geometry.triggerInActions, '模型选择器触发器不在动作行里（被挤出去了？）').toBe(true)
         // 夹具给 dsh 喂了真实长度的模型清单 ⇒ 触发器不是 105px 的「Agent 默认」形态
         expect(geometry.triggerW, `${vp.name} 下模型选择器只有 ${geometry.triggerW}px：夹具没喂到模型清单`).toBeGreaterThan(100)
+        // 触发器宽度有**上限**：它必须让出位置给右侧按钮（详见 Geometry 里 triggerMainGap 的注释）
+        expect(geometry.triggerW, `模型选择器宽 ${geometry.triggerW}px：上限是 140px（max-w-[8.75rem]）`).toBeLessThanOrEqual(141)
+        /**
+         * ★ 选择器与主按钮**不得重叠、也不得换行**（2026-10-24）。
+         *
+         * 判据取净空 > 4：主按钮的命中区靠 `after:-inset-1` 向左外扩 4px，
+         * 净空 ≤4 就已经是"点选择器点到发送/中止"了；0 以下则是视觉上直接压住。
+         * 这条在 375 宽、有加图按钮、长模型名时最紧（实测改造前是 -7）。
+         */
+        expect(geometry.triggerMainGap, `${vp.name} 下模型选择器与主按钮重叠 ${-(geometry.triggerMainGap ?? 0)}px`).toBeGreaterThan(4)
+        expect(geometry.triggerMainSameRow, `${vp.name} 下模型选择器与主按钮被挤到了两行（输入条白白变高）`).toBe(true)
         // ⚠️ 这里**不**断言"触发器的高度 ≤ 动作行"：加了图片入口（缩略图条 + 提示行）
         // 之后动作行自身会被撑高到 48px+，而触发器仍是 `items-center` 里的 32px ——
         // 这条断言曾经看着像"行内错位"的守卫，其实量的是插槽内容高度，与遮挡无关。
@@ -429,7 +464,7 @@ for (const sc of SCENES) {
          *   ② 盒子上有 `overflow-hidden` ⇒ 弹层被整块裁掉，用户点"模型"什么也看不到。
          * 这两条都不会报错、也不会让任何"元素存在"的断言变红，只能用几何钉住。
          */
-        const picker = page.locator('[data-testid="model-picker"]')
+        const picker = page.locator('[data-testid="model-picker-trigger"]')
         await picker.click()
         const popup = page.locator('[data-testid="model-picker-popup"]')
         await expect(popup, '点开模型选择器后没有弹层').toBeVisible()

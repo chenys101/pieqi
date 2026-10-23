@@ -87,7 +87,17 @@ function route(url) {
     if (!t) return { status: 404, body: { error: `task ${id} not found` } }
     if (rest === '') return { body: t }
     if (rest === '/feedback') return { body: feedbackResponse(id) }
-    if (rest === '/capabilities') return { body: { images: true } }
+    // 会话能力（图片入站通路）。字段名与后端一致：`image_prompt`（见 types/api.ts 的
+    // TaskCapabilitiesDto 与 SessionPage 的 canAttachImages）。
+    //
+    // ⚠️ 早先这里回的是 `{ images: true }` —— 字段名拼错，前端读 `image_prompt` 拿到
+    // undefined ⇒ 加图入口在所有 e2e 场景里**永远不渲染**，而"入口没出现"看起来
+    // 与"这个 agent 不收图"一模一样，于是这个功能零覆盖（2026-10-24 发现并改正）。
+    // 夹具模型的配置是 ImagePrompt: true（internal/agent/manifest.go），所以这里给 true。
+    if (rest === '/capabilities') return { body: { image_prompt: true } }
+    // 截断标题生成后会补发一条"标题变了"的事件（生产里由 runner 经 WS 推送）。
+    // 新建任务页也订阅它，所以夹具必须回一个**形状正确**的响应，否则控制台会冒 404。
+    if (rest === '/history') return { body: { events: [] } }
     if (rest === '/checks') return { body: { checks: [] } }
     if (rest === '/evidence') return { body: { scope: 'task', at: t.updated_at } }
     if (rest === '/outcome')
@@ -108,6 +118,32 @@ function route(url) {
 
 /** 写请求的流水账（只记不放行；读回与清空见 /__writes）。 */
 const recordedWrites = []
+
+/**
+ * 夹具**时序/故障**开关 —— 专为"异步竞态"这类用例。
+ *
+ * 为什么需要（2026-10-24，新建任务页的预选项目）：`GET /api/settings`（默认工作目录）
+ * 与 `GET /api/tasks`（历史项目清单）是两个请求，谁先到不确定。真实缺陷恰恰只在一侧
+ * 先到的那一瞬间暴露（"配了默认目录却不生效"只在列表比设置先到时出现），而本地跑
+ * 一百次也复现不了 —— 除非能**指定**先后。于是给夹具一个开关，用例把某一侧摁住。
+ *
+ *   · `_delay=<path>:<ms>`  该路径的响应延后 ms 再发（可重复，按出现顺序生效）
+ *   · `_fail=<path>`        该路径回 500（模拟"这条数据拉不到"）
+ *
+ * 两者都**只影响读**，且每个用例自己设、自己擦（`DELETE /__faults` 或下次设置覆盖），
+ * 不改变任何夹具数据本身。
+ */
+let faults = { delay: {}, fail: new Set() }
+
+function parseFaultQuery(url) {
+  const delays = {}
+  for (const v of url.searchParams.getAll('_delay')) {
+    const i = v.lastIndexOf(':')
+    if (i > 0) delays[v.slice(0, i)] = Number(v.slice(i + 1)) || 0
+  }
+  const fail = new Set(url.searchParams.getAll('_fail'))
+  faults = { delay: delays, fail }
+}
 
 const server = createServer((req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`)
@@ -150,6 +186,26 @@ const server = createServer((req, res) => {
     return json(res, { ok: true, cleared: true })
   }
 
+  // ⚠️ 夹具路由表的**快照**：让 `vite --mode e2e` 的 `router.push('/tasks/new?project=…')`
+  // 这类**不在夹具里的路径**也能落到夹具页（否则夹具路由表没有该路径 ⇒
+  // vue-router 报"No match"、页面停在原地，看起来像"点了没反应"）。
+  // 只做服务端重定向，不改变任何夹具数据；用于复现"从详情页带项目进新建页"的落点。
+  if (url.pathname === '/__fixture' && req.method === 'GET') {
+    const target = url.searchParams.get('to') || '/'
+    res.writeHead(302, { Location: target, 'Cache-Control': 'no-store' })
+    return res.end()
+  }
+
+  // 夹具故障/时序开关：设置见 parseFaultQuery，清空走 DELETE /__faults
+  if (url.pathname === '/__faults' && req.method === 'DELETE') {
+    faults = { delay: {}, fail: new Set() }
+    return json(res, { ok: true, cleared: true })
+  }
+  if (url.pathname === '/__faults') {
+    parseFaultQuery(url)
+    return json(res, { ok: true, delay: faults.delay, fail: [...faults.fail] })
+  }
+
   if (req.method !== 'GET' && req.method !== 'DELETE') {
     const chunks = []
     req.on('data', (c) => chunks.push(c))
@@ -172,8 +228,16 @@ const server = createServer((req, res) => {
   // 健康检查：Playwright 的 webServer 以此判断"起来了"
   if (url.pathname === '/__health') return json(res, { ok: true, tasks: tasks.length })
 
-  const { status, body } = route(url)
-  json(res, body, status)
+  // 故障/时序开关（见 faults 的注释）：只对**读**生效，且不改数据
+  const failFor = faults.fail.has(url.pathname)
+  const delayMs = faults.delay[url.pathname] || 0
+  const send = () => {
+    if (failFor) return json(res, { error: 'e2e mock: fault injected' }, 500)
+    const { status, body } = route(url)
+    json(res, body, status)
+  }
+  if (delayMs > 0) setTimeout(send, delayMs)
+  else send()
 })
 
 // WebSocket 升级：显式拒绝。前端 WebSocketClient 会走重连退避，页面照常渲染。
