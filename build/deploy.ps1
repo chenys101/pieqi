@@ -48,7 +48,7 @@ if ($env:PIEQI_TASK_ID) { $headers['X-Pieqi-Task-Id'] = $env:PIEQI_TASK_ID }
 # 重启编排在后台跑：这个请求返回 202 之后进程随时可能退场，所以**不能**重试/长等。
 try {
     $resp = Invoke-RestMethod -Method Post -Uri "$base/api/admin/restart" -Headers $headers `
-        -NoProxy -TimeoutSec 60
+        -TimeoutSec 60
 } catch {
     Write-Error "POST 失败（服务没在 $base 上监听？）: $($_.Exception.Message)"
     exit 1
@@ -79,7 +79,7 @@ while ((Get-Date) -lt $goneDeadline) {
     $listening = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue).Count -gt 0
     if (-not $listening) { $sawDown = $true; break }
     try {
-        Invoke-RestMethod -Method Get -Uri "$base/api/admin/restart" -NoProxy -TimeoutSec 1 | Out-Null
+        Invoke-RestMethod -Method Get -Uri "$base/api/admin/restart" -TimeoutSec 1 | Out-Null
     } catch {
         $sawDown = $true
         break
@@ -97,7 +97,7 @@ $deadline = (Get-Date).AddSeconds($ReadyTimeoutSec)
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
     try {
-        $st = Invoke-RestMethod -Method Get -Uri "$base/api/admin/restart" -NoProxy -TimeoutSec 3
+        $st = Invoke-RestMethod -Method Get -Uri "$base/api/admin/restart" -TimeoutSec 3
         Write-Host '==> 新实例就绪'
         $st | ConvertTo-Json -Compress | Write-Host
         # staged 必须回到 false：服务换完二进制会比对摘要并清理已消费的产物。
