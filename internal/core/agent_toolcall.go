@@ -223,6 +223,11 @@ func applyToolCallUpdate(store *TaskStore, t *model.Task, info agent.ToolCallUpd
 	// ② 映射为事件。非完成态的中间状态更新不产生事件。
 	ev, ok := mapToolCallEvent(info)
 	if !ok {
+		// 中间态（pending / in_progress）不落事件是**设计**，但如果它带着图，
+		// 图片就再也回不来了（同一调用后面不会重发 Content）。必须可见。
+		if len(info.Images) > 0 {
+			store.warnImagesDropped(t.ID, info, "update status produced no event: "+info.Status)
+		}
 		return changed
 	}
 	ev.At = time.Now()
@@ -235,6 +240,12 @@ func applyToolCallUpdate(store *TaskStore, t *model.Task, info agent.ToolCallUpd
 	// 同一个 id 已经有 tool_use、但这次更新把标题/入参补齐了：合并进那一条，
 	// **不再追加**第二条只有工具名的空卡。
 	if ev.Type == model.EventToolUse && mergeToolUseIntoTask(t, info) {
+		// 合并分支会提前 return —— 若这次还带着图，它会**悄悄丢掉**。
+		// 理论开工通知不带图（图在结果里），但"理论"不是判据：打一条告警，
+		// 让"图片在哪个分支消失"这件事下次一眼可见，而不是再反推一晚。
+		if len(info.Images) > 0 {
+			store.warnImagesDropped(t.ID, info, "merged into existing tool_use")
+		}
 		return true
 	}
 	// 结果里的图片：落在 tool_result 事件上（见 attachToolImages 的说明）。
@@ -249,6 +260,26 @@ func applyToolCallUpdate(store *TaskStore, t *model.Task, info agent.ToolCallUpd
 	return true
 }
 
+// warnImagesDropped 记录"解析到了图，却没进事件"这一事实。
+//
+// 为什么值得单独一个函数：这条链路的失败**天生是静默的**（工具结果照常有、
+// 只是没有图），而三种失败方式（未接线、合入已有 tool_use、中间态不落事件）
+// 各在一处、表现完全相同。统一打一条带原因的 WARN，线上只需一条 grep 就能定位。
+func (s *TaskStore) warnImagesDropped(taskID string, info agent.ToolCallUpdateInfo, reason string) {
+	s.mu.RLock()
+	log := s.logger
+	s.mu.RUnlock()
+	if log == nil {
+		return
+	}
+	log.Warn("attachment images dropped",
+		zap.String("task", taskID),
+		zap.String("tool_call_id", info.ToolCallID),
+		zap.String("tool", info.Title),
+		zap.Int("images", len(info.Images)),
+		zap.String("reason", reason))
+}
+
 // saveToolImages 把工具结果里的图片落盘，返回可进事件的元数据。
 //
 // 单张失败**不影响其它张**（理由同 agent.toolCallImages：一张坏图不该让整次调用变无图）。
@@ -259,6 +290,13 @@ func (s *TaskStore) saveToolImages(images []agent.ImageInput) []model.TaskImage 
 	att, log := s.attachments, s.logger
 	s.mu.RUnlock()
 	if att == nil {
+		// 未接线：这不是"正常降级"，而是**部署配置缺失**。原先这里静默返回 nil，
+		// 表现是"图片解析成功、事件里却没有图、日志一句没有" —— 2026-10-24 线上
+		// 排查绕了整晚的直接原因就是它。
+		if log != nil {
+			log.Warn("attachment store not wired; tool images dropped",
+				zap.Int("images", len(images)))
+		}
 		return nil
 	}
 	out := make([]model.TaskImage, 0, len(images))
@@ -270,7 +308,8 @@ func (s *TaskStore) saveToolImages(images []agent.ImageInput) []model.TaskImage 
 			// 静默失败是这里最危险的事：界面只会看起来"没有图"。
 			// 日志是唯一的线索，所以一定要打。
 			if log != nil {
-				log.Warn("attachment save failed", zap.String("mime", img.MimeType), zap.Error(err))
+				log.Warn("attachment save failed",
+					zap.String("mime", img.MimeType), zap.Int("b64_len", len(img.Data)), zap.Error(err))
 			}
 			continue
 		}
@@ -283,6 +322,9 @@ func (s *TaskStore) saveToolImages(images []agent.ImageInput) []model.TaskImage 
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	if log != nil {
+		log.Debug("attachment saved", zap.Int("count", len(out)), zap.String("hash", out[0].Hash), zap.Int("bytes", out[0].Bytes))
 	}
 	return out
 }

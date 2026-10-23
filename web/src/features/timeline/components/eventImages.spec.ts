@@ -101,4 +101,27 @@ describe('TimelineEventView：tool_result 的图片渲染', () => {
     expect(host.querySelector('[data-testid="event-images"]')).toBeNull()
     app.unmount()
   })
+
+  /**
+   * 回归：**不得让浏览器放大位图**（2026-10-23 "图糊了"的直接成因）。
+   *
+   * 判据有两条，缺一不可：
+   *   ① `<img>` 上没有 width/height 属性 —— 那组值会参与**渲染尺寸**，把位图拉到 160px，
+   *      位图只有几十像素宽时就糊；
+   *   ② class 是 `w-auto`（只缩小不放大）—— 换成 `w-full` 就是"小图拉满容器"，同样糊。
+   */
+  it('图片只缩小不放大：无 width/height 属性、用 w-auto', async () => {
+    const { host, app } = mount(TimelineEventView, {
+      event: eventWith([{ mimeType: 'image/png', bytes: 1024, hash: HASH_A, name: 'tiny.png' }]),
+    })
+    await nextTick()
+    const img = host.querySelector('img')!
+    expect(img.hasAttribute('width'), 'img 带 width 属性会把小位图放大').toBe(false)
+    expect(img.hasAttribute('height'), 'img 带 height 属性会改变渲染尺寸').toBe(false)
+    // 按**词**判断：`max-w-full` 里也含 "w-full" 字样，用子串判会把合法写法误判成回退。
+    const classes = img.className.split(/\s+/)
+    expect(classes).toContain('w-auto')
+    expect(classes).not.toContain('w-full')
+    app.unmount()
+  })
 })

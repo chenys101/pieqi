@@ -319,11 +319,15 @@ func (a *sessionBackedAdapter) onEvent(ev Event) {
 		a.emitTool(ToolCallUpdateInfo{
 			SessionID: a.sid, ToolCallID: ev.ToolCallID, Title: ev.ToolTitle,
 			Status: "in_progress", IsNew: true, RawInput: ev.RawInput,
+			// Images 也要透传（见 Event.Images 的说明）：这是**第二**个中转层，
+			// 与 session.go 的 OnToolCallUpdate 一样，漏一个字段就静默丢图。
+			Images: ev.Images,
 		})
 	case EventToolEnd:
 		a.emitTool(ToolCallUpdateInfo{
 			SessionID: a.sid, ToolCallID: ev.ToolCallID, Title: ev.ToolTitle,
 			Status: ev.ToolStatus, IsNew: false, RawOutput: ev.RawOutput,
+			Images: ev.Images,
 		})
 	case EventPermissionNeeded:
 		p := ev.Permission

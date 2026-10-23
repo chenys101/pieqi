@@ -88,8 +88,15 @@ type Event struct {
 	ToolTitle  string
 	ToolStatus string // tool_start: pending/in_progress；tool_end: completed/failed
 	ToolKind   string
-	RawInput   json.RawMessage
-	RawOutput  json.RawMessage
+	RawInput  json.RawMessage
+	RawOutput json.RawMessage
+	// Images 工具结果里可展示给人的图片（当前只有读图类工具会带，见 ToolCallUpdateInfo.Images）。
+	//
+	// ⚠️ 这一层是**中转层**，默认不透传任何字段。加这个字段之前，图片在
+	// ToolCallUpdateInfo 里存在、在 Event 里被静默丢掉（2026-10-23 线上：
+	// 解析日志 images=1，任务 JSON 里却没有图）。凡是从适配器回调往事件层搬的数据，
+	// 都要在这里显式列一遍 —— 漏一个字段不会有任何报错。
+	Images     []ImageInput
 	Permission PermissionRequest // PermissionNeeded 载荷
 	Turn       *TurnInfo         // TurnEnd 载荷
 	Err        error             // Error 事件
@@ -297,7 +304,9 @@ func (s *sessionAdapter) OnEvent(fn func(Event)) {
 		}
 		s.fire(Event{Kind: k, SessionID: u.SessionID, ToolCallID: u.ToolCallID,
 			ToolTitle: u.Title, ToolStatus: u.Status, ToolKind: u.Kind,
-			RawInput: u.RawInput, RawOutput: u.RawOutput})
+			RawInput: u.RawInput, RawOutput: u.RawOutput,
+			// Images 必须显式透传：漏掉它，图片就在这一层无声消失（见 Event.Images 说明）。
+			Images: u.Images})
 	})
 	s.adapter.OnPermissionRequest(func(req PermissionRequest) {
 		s.fire(Event{Kind: EventPermissionNeeded, SessionID: req.SessionID, Permission: req})

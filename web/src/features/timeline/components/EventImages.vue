@@ -52,22 +52,27 @@ function toggle(hash: string) {
       class="min-w-0 max-w-[44%] overflow-hidden rounded-[var(--radius-sm)] border border-border bg-surface-subtle"
       data-testid="event-image"
     >
+      <!-- 按钮宽 `w-fit`：跟着图片自身的显示宽度走，而不是拉满 figure。
+           拉满时点击区会落在图片右边那片空白上，看着像"点了没反应"。 -->
       <button
         type="button"
-        class="block w-full cursor-zoom-in focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40"
+        class="block w-fit cursor-zoom-in focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40"
         :title="zoomed === img.hash ? '收起图片' : `点击放大 ${img.label}`"
         :aria-label="zoomed === img.hash ? `收起 ${img.label}` : `放大 ${img.label}`"
         :aria-expanded="zoomed === img.hash"
         @click="toggle(img.hash)"
       >
-        <!-- width/height 写死成 120：加载完成前后占位一致，时间线不会因为图到了而跳一下 -->
+        <!-- ★ 绝不让浏览器**放大**位图：解码后的像素是固定的，放大只会糊
+             （2026-10-23 用户反馈"图糊了/看着像被拉过"就是这个原因：位图只有几十~一两百像素宽，
+             却被 w-full 拉到容器宽度再显示）。
+             所以这里是 `w-auto max-w-full` + `max-h-*`：**只缩小、不放大** ——
+             小图按自身像素显示（可能很小，但清晰），大图等比缩进容器。
+             不用 width/height 属性占位：那组值同时参与渲染尺寸，见上。 -->
         <img
           :src="img.url"
           :alt="img.label"
-          class="block w-full object-contain transition-[max-height] duration-200"
-          :class="zoomed === img.hash ? 'max-h-[70vh] cursor-zoom-out' : 'max-h-[7.5rem] cursor-zoom-in'"
-          width="160"
-          height="120"
+          class="block w-auto max-w-full object-contain transition-[max-height] duration-200"
+          :class="zoomed === img.hash ? 'max-h-[80vh] cursor-zoom-out' : 'max-h-[10rem] cursor-zoom-in'"
           loading="lazy"
           decoding="async"
         />

@@ -18,6 +18,7 @@ import (
 	"pieqi/internal/model"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // attachPNG 1x1 PNG（与 agent 包测试同一张图，便于人工核对）。
@@ -132,15 +133,33 @@ func TestTaskStore_SaveToolImagesPersistsMetadataOnly(t *testing.T) {
 	}
 }
 
-// TestTaskStore_SaveToolImagesWithoutStoreIsNil 未接线时返回 nil（不影响事件追加）。
+// TestTaskStore_SaveToolImagesWithoutStoreIsNil 未接线时返回 nil，且**必须留下 WARN**。
+//
+// 返回 nil 是对的（事件照常追加，不制造假事实），但"静默"是错的 ——
+// 2026-10-23 线上排查绕圈的根因之一就是这里一声不响：
+// 解析日志 images=1、任务 JSON 里没有图、日志里一句都没有。
 func TestTaskStore_SaveToolImagesWithoutStoreIsNil(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewTaskStore(filepath.Join(dir, "tasks"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// observer.New(zap.WarnLevel)：本用例只关心告警，DEBUG 进不来更干净。
+	core, observed := observer.New(zap.WarnLevel)
+	store.SetAttachments(nil, zap.New(core))
+
 	if got := store.saveToolImages([]agent.ImageInput{{Data: attachPNG, MimeType: "image/png"}}); got != nil {
-		t.Errorf("got %v, want nil（未接线应静默降级）", got)
+		t.Errorf("got %v, want nil（未接线时不该凭空造出元数据）", got)
+	}
+
+	found := false
+	for _, e := range observed.All() {
+		if strings.Contains(e.Message, "attachment store not wired") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("未接线时没有打 WARN：线上表现就是'图凭空消失'且没有任何线索")
 	}
 }
 
