@@ -12,11 +12,20 @@
 // usage_update 实时变（每轮多条），放在时间线里会刷屏，放在反馈面板里又看不见。
 // 移动端用 dense 形态（只有条 + 百分比）挤进头部那一行；没有上报的 agent 整块不渲染。
 //
+// **agent 名是第三个例外**（用户 2026-10-23 要求：详情页要能看出这个任务跑在哪个 agent 上）：
+// 它是这个会话最重要的上下文之一 —— 同一句话交给 claude 和 qoder，行为与审批路径都不同
+// （claude 走 PreToolUse hook、没有"同类免审"）。此前详情页只有新建页能选 agent、
+// 进去之后就再也看不到，只能靠"印象"回忆。桌面放在元信息行（与项目名同级），
+// 移动端放不进那一行（横向已被标题/状态/用量占满），改由标题下一行承载，
+// 且**只在执行运行时出现** —— 它回答的是"现在是谁在干活"。
+//
 // **「中止」不在这里**（详情页 UI 优化 · 需求 2）：它与输入框内右下角那枚 ■ 是同一个
 // 动作（都 emit cancel → taskStore.cancelTask），顶部再挂一个就是同一件事给两个入口，
 // 且顶部那个在手机上还紧挨着「返回」，误触成本高。中止的唯一入口 = 输入框内那枚按钮
 // （InterveneInput 的 canCancel 双态按钮），它就在拇指区、且与发送同位。
+import { computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { useAgentStore } from '@/stores/agent'
 import StatusBadge from '@/components/task/StatusBadge.vue'
 import Button from '@/components/ui/Button.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
@@ -25,7 +34,7 @@ import type { Task } from '@/types/task'
 import { timeAgo } from '@/utils/date'
 import { shortId } from '@/utils/format'
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     task: Task
     /**
@@ -52,6 +61,31 @@ withDefaults(
  */
 const emit = defineEmits<{ cancel: []; remove: []; feedback: [] }>()
 const router = useRouter()
+
+const agentStore = useAgentStore()
+
+/**
+ * 本任务的 agent：**展示名**（Claude Code / Qoder CLI）而非业务名（claude / qoder）。
+ *
+ * 目录未加载 / 该 agent 已被关掉时（旧任务、或用户收窄了 agents.enabled），
+ * byId 返回 undefined —— 此时原样显示业务名，"不知道它是什么"也好过显示空白。
+ * 旧任务没有 agent 字段，适配层已兜底成默认 agent（见 api/client.ts 的 adaptTask）。
+ */
+const agentLabel = computed(() => {
+  const id = props.task.agent
+  if (!id) return ''
+  return agentStore.byId(id)?.name || id
+})
+/** 悬停说明：业务名 + 传输层，用来区分"显示名相同但通道不同"的情形 */
+const agentTitle = computed(() => {
+  const id = props.task.agent
+  if (!id) return ''
+  const info = agentStore.byId(id)
+  return info ? `${info.name}（${id} · ${info.transport}）` : id
+})
+
+/** 正在执行中：此时 agent 决定"此刻是谁在动这个仓库" */
+const isActive = computed(() => props.task.status === 'running' || props.task.status === 'pending')
 
 /**
  * ← 是"回上一页"，不是"回首页"：手机上多数是从 /tasks 列表或仪表盘待审批组点进来的，
@@ -123,10 +157,35 @@ function goBack() {
         <Button v-if="!compact" variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
       </div>
 
+      <!-- 移动端：agent 名单独一行（在标题下方、与标题左对齐）。
+           为什么不塞进上面那一行：横向已被标题/状态/用量占满，再挤会截标题；
+           而 agent 是"谁在干活"这种一等上下文，值得占一行**短行**。
+           只在执行中出现：终态任务的 agent 已在元信息事实里，不必额外占常驻版面。 -->
+      <div
+        v-if="compact && agentLabel && isActive"
+        class="mt-1 flex items-center gap-1.5 pl-8 text-xs text-muted"
+        data-testid="session-agent-compact"
+      >
+        <span class="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[11px] text-text" :title="agentTitle">
+          {{ agentLabel }}
+        </span>
+        <span class="text-text-tertiary">执行中</span>
+      </div>
+
       <!-- 元信息行：移动端只在有 error 时出现（#id 没有可操作性，项目名与时间在手机上不值得再占一行） -->
       <div v-if="!compact || task.error" class="mt-1 flex items-center gap-2 pl-8 text-xs text-muted">
         <template v-if="!compact">
           <span class="font-mono">#{{ shortId(task.id) }}</span>
+          <!-- agent：本任务跑在哪个 agent 上（与项目名同级、同一行）。
+               放在项目名**之前**：换了 agent 往往比换了项目更能解释"行为为什么不一样"。 -->
+          <span
+            v-if="agentLabel"
+            class="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[11px] font-medium text-text"
+            :title="agentTitle"
+            data-testid="session-agent"
+          >
+            {{ agentLabel }}
+          </span>
           <span class="truncate" :title="task.projectPath">{{ task.project }}</span>
           <span>{{ timeAgo(task.updatedAt || task.createdAt) }}前</span>
         </template>

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 // 新建任务页：复用 Session 详情页骨架（Header + 底部输入条），
-// 与详情页唯一的差别是顶部需要先选项目 + 执行 Agent（详情页这两项都由任务决定）。
+// 与详情页唯一的差别是顶部要先定项目 + 执行 Agent（详情页这两项都由任务决定）。
+//
+// **项目不是必选项**（用户 2026-10-23 要求）：默认落在设置里的「默认工作目录」
+// （出厂缺省是服务端的 `<数据根>/workspace`），用户不碰项目那一步也能直接发任务。
+// 想换目录时才展开选择器 —— 于是"每次都要选一遍那个永远一样的目录"这条负担消失了。
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import Button from '@/components/ui/Button.vue'
@@ -17,6 +21,7 @@ import { useSessionStore } from '@/stores/session'
 import { useAgentStore } from '@/stores/agent'
 import { useNotificationStore } from '@/stores/notification'
 import { groupKey } from '@/utils/format'
+import { getSettings } from '@/services/api/settings'
 
 const router = useRouter()
 const taskStore = useTaskStore()
@@ -28,10 +33,48 @@ const prompt = ref('')
 /** 已选图片（v-model 给 ImagePicker）。发送后清空 —— 图片是**按轮**载荷。 */
 const images = ref<PendingImage[]>([])
 const imagePicker = ref<{ open: (data: DataTransfer) => void } | null>(null)
+/** 'select' = 从历史项目里挑；'path' = 手填绝对路径 */
 const mode = ref<'select' | 'path'>('select')
 const selectedPath = ref('')
 const customPath = ref('')
 const creating = ref(false)
+
+/**
+ * 服务端设置里的默认工作目录（空串 = 服务端也没配）。
+ *
+ * 为什么前端必须读它而不是硬编码一个默认值：路径必须是**服务端上真实存在**的目录，
+ * 前端凭空造一个（'~'、'./workspace'）只会在提交时换来一句 400。真正的兜底判断
+ * 也在后端（见 api.resolveTaskPath），这里读到的值只用来**显示与预选**。
+ */
+const defaultProjectPath = ref('')
+/** 设置是否已读回（用来区分"还没读到"与"确实没配"） */
+const settingsLoaded = ref(false)
+/** 用户是否主动改过目录：改过之后就不再被默认值覆盖 */
+const pathTouched = ref(false)
+/**
+ * 是否展开路径选择器。
+ *
+ * 默认**收起**：默认目录就是绝大多数时候的答案，选择器摊在首屏等于每次都要
+ * 从一堆无关的东西里穿过它才能打字。没有默认目录（且没有历史项目）时才展开，
+ * 因为那时它是必填项。
+ */
+const showProjectPicker = ref(false)
+
+/** 当前生效的项目路径（空 = 交给后端的默认目录） */
+const effectiveProjectPath = computed(() => {
+  if (mode.value === 'path') return customPath.value.trim()
+  return selectedPath.value || ''
+})
+
+/** 是否会落到默认目录：只有用户完全没指定路径时才是 */
+const usingDefaultPath = computed(() => !effectiveProjectPath.value && !!defaultProjectPath.value)
+
+/** 项目卡片头部的摘要文案：一眼看出这次任务会在哪跑 */
+const projectSummary = computed(() => {
+  if (effectiveProjectPath.value) return effectiveProjectPath.value
+  if (defaultProjectPath.value) return defaultProjectPath.value
+  return '未配置默认目录'
+})
 
 // 执行 Agent：取值是 agent 业务名（claude / qoder）。**默认 Claude Code**——
 // 初始值来自服务端目录的 default（后端保证是 claude），目录拉不到时由 store 兜底。
@@ -81,16 +124,42 @@ onMounted(async () => {
   if (!agent.value) agent.value = agentStore.defaultAgent
 })
 
-// 项目默认值：有历史项目就选中第一个，确认「一条都没有」才切自定义路径。
+// 读默认工作目录。失败**不弹错**：读不到就退化成"没有默认值"，用户自己选一个即可，
+// 那仍然是完整可用的路径 —— 一个可选的便利不该在半路拦住"新建任务"这条主流程。
+onMounted(async () => {
+  try {
+    defaultProjectPath.value = (await getSettings()).default_project_path || ''
+  } catch {
+    defaultProjectPath.value = ''
+  } finally {
+    settingsLoaded.value = true
+  }
+})
+
+// 项目默认值（已不是必选项）：
+//   ① 有默认工作目录 → 什么都不选，直接用它（不再自动选中"最近项目"：
+//      选一个用户没要的目录，比让默认目录生效更容易让人意外地在错的仓库里干活）；
+//   ② 没有默认目录但有历史项目 → 选中最近的一个（与从前一致）；
+//   ③ 两者都没有 → 切到手动填路径（此时路径是必需项，不填就发不出去）。
 // 判空必须等 taskStore.loaded —— 冷启动时（移动端首屏尤其明显）此刻 tasks 往往
 // 还没到，在 onMounted 里判空会把"还没到"当成"没有"（PC 上因列表先到才没暴露）。
-// 落到 path 模式后不再自动切回：用户可能正在往路径框里打字。
+// 用户手动改过路径（pathTouched）之后，这些自动填充一律不再生效。
+// ⚠️ **必须等设置读回再决定**（settingsLoaded 先于一切判断）：两个请求哪个先到不确定，
+// 若在设置还没到时就按 ② 选中了最近项目，默认目录到达后就被"已有选择"挡在外面 ——
+// 表现是"配了默认目录却不生效"，而且只在列表比设置先到的那台/那次出现。
+// 设置读回之前的等待很短（同一批首屏请求），代价远低于这类时序性错误。
 watch(
-  [projects, () => taskStore.loaded],
+  [projects, () => taskStore.loaded, defaultProjectPath, settingsLoaded],
   ([list, loaded]) => {
-    if (mode.value !== 'select' || selectedPath.value) return
-    if (list.length) selectedPath.value = list[0].projectPath
-    else if (loaded) mode.value = 'path'
+    if (!settingsLoaded.value) return
+    if (pathTouched.value || effectiveProjectPath.value) return
+    if (defaultProjectPath.value) return // ①：交给默认目录，不动选择器
+    if (list.length) {
+      selectedPath.value = list[0].projectPath // ②
+    } else if (loaded) {
+      mode.value = 'path' // ③
+      showProjectPicker.value = true // 此时路径是必填项，选择器必须露出来
+    }
   },
   { immediate: true },
 )
@@ -112,9 +181,17 @@ watch(
  */
 const canSubmitContent = computed(() => !!prompt.value.trim() || images.value.length > 0)
 
+/**
+ * 可提交：有内容 **且** 有一个真正能用的目录。
+ *
+ * 三条来源任有一条即可：手填路径 / 选中的历史项目 / 服务端默认目录。
+ * 一条都没有时禁用提交 —— 此时点下去只会换来后端一句"未指定项目路径"，
+ * 让按钮自己说得清楚（见模板里的提示行）比事后报错好。
+ */
 const canSubmit = computed(() => {
   if (creating.value || !canSubmitContent.value) return false
-  return mode.value === 'path' ? !!customPath.value.trim() : !!selectedPath.value
+  if (mode.value === 'path') return !!customPath.value.trim()
+  return !!selectedPath.value || !!defaultProjectPath.value
 })
 
 /**
@@ -144,19 +221,19 @@ function onPaste(data: DataTransfer | null) {
   if (data) imagePicker.value?.open(data)
 }
 
-/** 当前生效的项目路径 */
-function effectivePath(): string | null {  if (mode.value === 'path') return customPath.value.trim() || null
-  return selectedPath.value || null
-}
-
 async function submit() {
   if (!canSubmit.value) return
-  const path = effectivePath()
-  if (!path) {
+  // 空串是**合法输入**：表示"用服务端的默认工作目录"（见 services/api/tasks.createTask）。
+  // 只有"既没选也没默认目录"才是错误 —— 那种情况 canSubmit 已经挡掉了。
+  const path = effectiveProjectPath.value
+  if (!path && !defaultProjectPath.value) {
     notify.error('请选择或输入项目路径')
     mode.value = 'path'
     return
   }
+  // 走到这里说明用户显式给了路径（否则是默认目录），切回"用户已决定"，
+  // 免得后台的默认值 watcher 在提交途中把选择器清掉。
+  if (path) pathTouched.value = true
   // 兜底：正常情况下 agent 切换时会清空图片，这里防的是"入口被绕过"（例如目录后到、
   // agent 由空变成 claude 而图片已在框里）。宁可前置报一句人话，也不让后端那句
   // 「当前 agent 传输不支持图片（*claude.session）」直接糊到用户脸上。
@@ -211,26 +288,62 @@ async function submit() {
       <div class="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-4">
         <ContentColumn pad="" data-testid="page-content-wrap">
           <div class="flex flex-col gap-2" data-testid="page-content">
-            <div class="rounded-lg border border-border bg-surface p-3">
-              <div class="mb-1.5 text-xs font-medium text-muted">项目</div>
-              <div class="flex gap-2">
-                <template v-if="mode === 'select'">
-                  <Select v-model="selectedPath" class="min-w-0 flex-1">
-                    <option v-for="p in projects" :key="groupKey(p.projectPath)" :value="p.projectPath">
-                      {{ p.projectId || p.projectPath }}
-                    </option>
-                    <option v-if="!projects.length" value="" disabled>暂无历史项目 — 请自定义路径</option>
-                  </Select>
-                  <Button size="sm" @click="mode = 'path'">自定义路径</Button>
-                </template>
-                <template v-else>
-                  <Input
-                    v-model="customPath"
-                    class="min-w-0 flex-1"
-                    placeholder="输入绝对路径，如 G:\workspace\erp"
-                  />
-                  <Button v-if="projects.length" size="sm" @click="mode = 'select'">选项目</Button>
-                </template>
+            <!-- 项目（可选）：默认用设置里的「默认工作目录」，一动不碰也能直接发任务。
+                 折叠态只显示一行"将在哪跑"，展开才出现选择器 —— 因为**大多数时候
+                 用户要的就是那个固定目录**，把选择器一直摊在首屏是在为少数情况付费。 -->
+            <div class="rounded-lg border border-border bg-surface p-3" data-testid="project-card">
+              <div class="flex items-center gap-2">
+                <div class="min-w-0 flex-1">
+                  <div class="mb-1.5 flex items-baseline gap-1.5 text-xs font-medium text-muted">
+                    <span>项目</span>
+                    <span class="font-normal text-text-tertiary">可选</span>
+                  </div>
+                  <!-- 一行摘要：本次任务的工作目录。长路径截断，全文在 title 里 -->
+                  <div
+                    class="flex min-w-0 items-center gap-1.5 text-xs"
+                    :title="projectSummary"
+                    data-testid="project-summary"
+                  >
+                    <span class="min-w-0 truncate font-mono" :class="usingDefaultPath ? 'text-text-tertiary' : 'text-text'">
+                      {{ projectSummary }}
+                    </span>
+                    <span v-if="usingDefaultPath" class="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[11px] text-text-tertiary">
+                      默认目录
+                    </span>
+                  </div>
+                </div>
+                <Button size="sm" variant="ghost" data-testid="project-toggle" @click="showProjectPicker = !showProjectPicker">
+                  {{ showProjectPicker ? '收起' : '更改' }}
+                </Button>
+              </div>
+
+              <div v-if="showProjectPicker" class="mt-2 flex flex-col gap-2 border-t border-border-subtle pt-2">
+                <div class="flex gap-2">
+                  <template v-if="mode === 'select'">
+                    <Select v-model="selectedPath" class="min-w-0 flex-1" aria-label="历史项目" @change="pathTouched = true">
+                      <!-- 空值项 = 用默认目录。显式列出它，用户才能在"选了历史项目"之后**退回**默认 -->
+                      <option v-if="defaultProjectPath" value="">使用默认目录（{{ defaultProjectPath }}）</option>
+                      <option v-for="p in projects" :key="groupKey(p.projectPath)" :value="p.projectPath">
+                        {{ p.projectId || p.projectPath }}
+                      </option>
+                      <option v-if="!projects.length" value="" disabled>暂无历史项目 — 请自定义路径</option>
+                    </Select>
+                    <Button size="sm" @click="mode = 'path'">自定义路径</Button>
+                  </template>
+                  <template v-else>
+                    <Input
+                      v-model="customPath"
+                      class="min-w-0 flex-1"
+                      placeholder="输入绝对路径，如 G:\workspace\erp"
+                      @input="pathTouched = true"
+                    />
+                    <Button v-if="projects.length || defaultProjectPath" size="sm" @click="mode = 'select'">选项目</Button>
+                  </template>
+                </div>
+                <!-- 兜底提示：既没默认目录也没选任何东西时，必须把"为什么发不出去"说出来 -->
+                <p v-if="!canSubmit && canSubmitContent" class="text-[11px] text-warning" data-testid="project-missing">
+                  还没有工作目录：请选择一个项目或填写路径（也可以到设置里配置默认目录）。
+                </p>
               </div>
             </div>
             <div class="rounded-lg border border-border bg-surface p-3">
@@ -248,7 +361,9 @@ async function submit() {
                  「项目 / Agent」是**这个任务的属性**，而模型是**发这条消息时的选择**，
                  两者不在同一个决策时刻，摆在一起反而让人以为改模型等于改任务。
                  该 Agent 不下发清单时，弹层里有一句说明（ModelPicker 的空清单分支）。 -->
-            <p class="px-1 text-xs text-muted">选择项目与 Agent 后，在下方描述要做什么，创建后进入会话。</p>
+            <p class="px-1 text-xs text-muted">
+              {{ defaultProjectPath ? '默认在「默认工作目录」里执行（可在上面更改）。' : '选择项目并指定 Agent 后，' }}在下方描述要做什么，创建后进入会话。
+            </p>
           </div>
         </ContentColumn>
       </div>

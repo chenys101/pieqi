@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,8 +17,12 @@ import (
 )
 
 type createTaskReq struct {
-	// ProjectPath 任意本地路径（绝对路径优先），用于直接在原路径运行，不建 worktree
-	ProjectPath string `json:"project_path" binding:"required"`
+	// ProjectPath 任意本地路径（绝对路径优先），用于直接在原路径运行，不建 worktree。
+	//
+	// **可省略**（项目不再是必选项）：空则用设置里的 default_project_path
+	// （设置页「默认工作目录」，出厂缺省 <dataRoot>/workspace）。
+	// 两者都没有时返回 400 并指向设置页 —— 不猜目录，理由见 resolveTaskPath。
+	ProjectPath string `json:"project_path"`
 	Prompt      string `json:"prompt" binding:"required"`
 	// Agent 可选的 agent 名（见 GET /api/agents）。空 = 服务端默认（Claude Code）。
 	// 取值为 agent 业务名（claude / qoder），不是前端展示名。
@@ -94,13 +99,9 @@ func (s *Server) createTask(c *gin.Context) {
 	}
 
 	// 项目不再预注册：一律用 project_path（绝对路径），deriveProjectID 派生稳定 id。
-	abs, err := filepath.Abs(req.ProjectPath)
+	abs, err := s.resolveTaskPath(req.ProjectPath)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid path: " + err.Error()})
-		return
-	}
-	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path not found or not a directory: " + abs})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	projectID := deriveProjectID(abs)
@@ -138,6 +139,45 @@ func (s *Server) createTask(c *gin.Context) {
 	// 异步生成一句话标题（大模型摘要）：不阻塞创建，生成后经 WS 推送替换前端截断标题
 	s.runner.GenerateTitleAsync(task.ID)
 	c.JSON(http.StatusCreated, task)
+}
+
+// ErrNoDefaultProjectPath 既没传 project_path、设置里也没有默认目录时的错误文案。
+//
+// 为什么**不**在这里临时造一个目录（例如自动建 <dataRoot>/workspace 再落进去）：
+// 建任务的地方没有任何"用户看着某个目录"的语境，静默选一个目录意味着 agent 会在
+// 用户没预期的位置改代码；而正确解法就在设置页，一句指路的报错比一次惊奇的正确便宜。
+const ErrNoDefaultProjectPath = "未指定项目路径，且设置里没有「默认工作目录」；请先到设置页配置，或在新建任务时选择路径"
+
+// resolveTaskPath 求本次任务的工作目录：显式路径优先，空则回落设置里的默认目录。
+//
+// 返回绝对后的路径，且**保证它是已存在的目录** —— 两种来源走同一段校验，
+// 因为"设置里写错了"与"请求里写错了"对用户是同一件事，报错文案也该同构。
+func (s *Server) resolveTaskPath(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
+	fromSettings := false
+	if p == "" {
+		if s.settings == nil {
+			return "", fmt.Errorf("%s", ErrNoDefaultProjectPath)
+		}
+		p = strings.TrimSpace(s.settings.Get().DefaultProjectPath)
+		if p == "" {
+			return "", fmt.Errorf("%s", ErrNoDefaultProjectPath)
+		}
+		fromSettings = true
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
+		if fromSettings {
+			// 明确点出"这是来自设置的值"：否则用户会以为前端选了错目录，
+			// 而实际改的地方在设置页（默认目录被删掉/挪走了）。
+			return "", fmt.Errorf("默认工作目录不存在或不是目录：%s（来自设置，请到设置页修改）", abs)
+		}
+		return "", fmt.Errorf("path not found or not a directory: %s", abs)
+	}
+	return abs, nil
 }
 
 // deriveProjectID 从绝对路径派生一个稳定的 project ID（用于分组与并发限流）。

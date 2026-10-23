@@ -175,8 +175,6 @@ func main() {
 	skills := core.NewSkillScanner(logger, cfg.Pieqi.SkillsDirs)
 	commands := core.NewCommandScanner(logger, nil)
 
-	// pieqi 可执行文件绝对路径已在上面取过（PreToolUse hook 子进程回连 + 自重启判定共用）。
-
 	hookTimeoutSec := int(cfg.Pieqi.HookTimeout / time.Second)
 
 	// 全局偏好（跨任务 / 跨项目 / 跨 agent）：审批自动放行 / 免打扰 / 事件保留上限。
@@ -189,6 +187,26 @@ func main() {
 	settingsStore, err := core.NewSettingsStore(filepath.Join(dataRoot, "settings.json"))
 	if err != nil {
 		logger.Fatal("init settings store", zap.Error(err))
+	}
+
+	// 新建任务的**出厂缺省工作目录**：<dataRoot>/workspace。
+	//
+	// 项目不再是必选项（用户要求），但"没有项目"不等于"没有工作目录" —— agent 必须
+	// 在一个真实目录里干活。选 <dataRoot>/workspace 而不是猜用户的某个代码目录：
+	// 它由 pieqi 自己创建并保证可写，在别人的机器上也不会"因为目录不存在而建任务失败"。
+	//
+	// 只作为**缺省**注入（SetFallbackProjectPath）：用户显式配过就没它的事了，
+	// 显式清空也不会被填回来 —— 见 SettingsStore.fallbackProjectPath 的说明。
+	// 必须在 NewSettingsStore **之后**（它要读落盘文件才能判断"用户配没配过"）。
+	defaultProjectDir := filepath.Join(dataRoot, core.DefaultWorkspaceDirName)
+	if err := os.MkdirAll(defaultProjectDir, 0755); err != nil {
+		// 建不出来就降级为"没有缺省目录"（用户仍可在设置页指定别处），不阻塞启动。
+		logger.Warn("could not create default workspace dir; default project path stays unset",
+			zap.String("dir", defaultProjectDir), zap.Error(err))
+	} else {
+		settingsStore.SetFallbackProjectPath(defaultProjectDir)
+		logger.Info("default project path resolved",
+			zap.String("default_project_path", settingsStore.Get().DefaultProjectPath))
 	}
 
 	runner := core.NewTaskRunner(

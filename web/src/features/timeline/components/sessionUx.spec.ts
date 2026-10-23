@@ -209,6 +209,36 @@ describe('需求 2：中止入口唯一', () => {
     expect(host.textContent).not.toContain('删除')
   })
 
+  it('详情页头部展示本任务的 agent（需求：详情页要能看出跑在哪个 agent 上）', () => {
+    // agent 业务名 → 展示名（目录未加载时由 store 的兜底目录给出 Claude Code）
+    const header = mount(SessionHeader, {
+      task: { ...baseTask, agent: 'claude' } as unknown as Task,
+      canCancel: true,
+    })
+    const badge = header.host.querySelector('[data-testid="session-agent"]')
+    expect(badge).not.toBeNull()
+    expect(badge!.textContent).toContain('Claude Code')
+    // 悬停说明带业务名：同名/改名的情形下这是唯一能对上的标识
+    expect(badge!.getAttribute('title')).toContain('claude')
+  })
+
+  it('移动端：agent 只在执行中单独占一行（终态不额外占常驻版面）', () => {
+    const running = mount(SessionHeader, {
+      task: { ...baseTask, agent: 'claude', status: 'running' } as unknown as Task,
+      canCancel: true,
+      compact: true,
+    })
+    expect(running.host.querySelector('[data-testid="session-agent-compact"]')).not.toBeNull()
+
+    document.body.innerHTML = ''
+    const done = mount(SessionHeader, {
+      task: { ...baseTask, agent: 'claude', status: 'completed' } as unknown as Task,
+      canCancel: false,
+      compact: true,
+    })
+    expect(done.host.querySelector('[data-testid="session-agent-compact"]')).toBeNull()
+  })
+
   it('运行中的中止入口只剩输入框那一枚（emit cancel 一次）', () => {
     // 头部：**不点击**返回/删除（它们各自要 router / emit，与本用例无关），
     // 只收集"能触发中止"的按钮 —— 判据是 title 文案里有没有「中止」。

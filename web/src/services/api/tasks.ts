@@ -52,6 +52,10 @@ export async function getTaskDto(id: string): Promise<TaskDto> {
 /**
  * POST /api/tasks：创建成功返回完整 DTO（含预置 user 事件）。
  *
+ * projectPath **可为空串**（项目不再是必选项）：空 = 用服务端设置里的默认工作目录
+ * （设置页「默认工作目录」，出厂缺省 `<数据根>/workspace`）。两边都没有时后端返回 400
+ * 并指路设置页 —— 这里不做任何本地兜底，理由同 AppSettings.default_project_path。
+ *
  * agent 为 agent 业务名（claude / qoder，见 GET /api/agents）；空串 = 后端默认（Claude Code）。
  * 后端会校验：未在可选目录里的 agent 直接 400，不会静默换成别的 agent。
  *
@@ -69,7 +73,9 @@ export async function createTask(
   return request<TaskDto>('/tasks', {
     method: 'POST',
     body: {
-      project_path: projectPath,
+      // 空串时**不发**该字段（而不是发 ""）：后端据此走"用默认目录"的分支，
+      // 发送空串虽然后端也按缺省处理，但 omit 更准确地表达了"用户没有指定项目"。
+      project_path: projectPath || undefined,
       prompt,
       agent: agent || undefined,
       model: model || undefined,

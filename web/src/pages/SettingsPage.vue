@@ -15,7 +15,7 @@
 //
 // 组③ 只落**主题**与**减弱动效**两项。原型同组还有「语言」「时区」，本页不放：
 // 产品没有 i18n、时区也是服务端本地时区 —— 放上去就是两个点不动的控件。
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useSessionStore } from '@/stores/session'
 import { useAppStore } from '@/stores/app'
@@ -87,6 +87,59 @@ async function apply(patch: Partial<AppSettings>) {
     settings.value = prev
     notify.error(e instanceof Error ? e.message : '保存失败')
   }
+}
+
+// ---------- 默认工作目录（新建任务的缺省值） ----------
+
+/**
+ * 输入框草稿：**不在每次输入时提交**。
+ *
+ * 逐字 PATCH 的代价不是多几个请求，而是中间态必然大部分是"路径不存在"——
+ * 后端会逐个 400，用户看到的是打字过程中不断弹出的红字。失焦/回车提交时，
+ * 磁盘上那条路径要么已经敲完、要么就是真的写错了。
+ */
+const defaultPathDraft = ref('')
+const savingDefaultPath = ref(false)
+
+/** 草稿与服务端不一致（用来提示"还没保存"，而不是一直挂着一句提示） */
+const defaultPathDirty = computed(
+  () => !!settings.value && defaultPathDraft.value.trim() !== (settings.value.default_project_path || ''),
+)
+
+watch(
+  () => settings.value?.default_project_path,
+  (v) => {
+    // 只在**服务端值变化**时同步草稿（保存成功 / 首次加载）；
+    // 不监听草稿，否则用户打字会被自己触发的同步覆盖。
+    if (!defaultPathDirty.value || savingDefaultPath.value) defaultPathDraft.value = v || ''
+  },
+  { immediate: true },
+)
+
+/**
+ * 保存默认工作目录。失败时**保留草稿**并报错 ——
+ * 清空输入框等于把用户刚敲的路径扔掉，而他恰恰要根据报错去修它。
+ */
+async function saveDefaultPath() {
+  if (!settings.value || savingDefaultPath.value) return
+  const v = defaultPathDraft.value.trim()
+  if (v === (settings.value.default_project_path || '')) return
+  savingDefaultPath.value = true
+  try {
+    settings.value = await patchSettings({ default_project_path: v })
+    defaultPathDraft.value = settings.value.default_project_path || ''
+    notify.success(v ? '默认工作目录已保存' : '已清除默认工作目录')
+  } catch (e) {
+    notify.error(e instanceof Error ? e.message : '保存失败')
+  } finally {
+    savingDefaultPath.value = false
+  }
+}
+
+/** 清空默认工作目录（此后新建任务必须自己选路径） */
+async function clearDefaultPath() {
+  defaultPathDraft.value = ''
+  await saveDefaultPath()
 }
 
 const retentionOptions = [
@@ -280,6 +333,42 @@ const appVersion = __APP_VERSION__
         <div class="px-[14px] pb-3">
           <TunnelPanel />
         </div>
+
+        <!-- 默认工作目录：新建任务不再强制选项目，缺省就落在这里。
+             它是"新建任务"那条主流程的缺省值，属于**跨项目的全局偏好**，放这里合规。
+             输入框用**失焦/回车才提交**（不是逐字 PATCH）：每敲一个字符发一次请求，
+             中间态几乎必然全是"路径不存在"，会在半路刷出一串错误提示。 -->
+        <SettingRow
+          label="默认工作目录"
+          desc="新建任务时不选项目，就在这里执行（需要是服务端上已存在的绝对路径）。留空则每次新建都要自己选路径。"
+          stack
+        >
+          <div class="flex items-center gap-1.5" data-testid="default-project-path">
+            <Input
+              :model-value="defaultPathDraft"
+              size="sm"
+              class="min-w-0 flex-1 font-mono"
+              placeholder="如 D:\workspace\my-project"
+              :disabled="!settings"
+              aria-label="默认工作目录"
+              data-testid="default-project-path-input"
+              @update:model-value="(v: string) => (defaultPathDraft = v)"
+              @blur="saveDefaultPath"
+              @keydown.enter="saveDefaultPath"
+            />
+            <Button
+              v-if="settings?.default_project_path"
+              size="sm"
+              variant="ghost"
+              :disabled="savingDefaultPath"
+              @click="clearDefaultPath"
+            >
+              清空
+            </Button>
+          </div>
+          <!-- 提示只在"草稿与服务端不一致"时出现：一直显示一句"未保存"会变成噪音 -->
+          <p v-if="defaultPathDirty" class="text-[11px] text-warning">未保存 —— 回车或点别处生效。</p>
+        </SettingRow>
 
         <SettingRow label="工作区" desc="任务与 worktree 的落盘位置。">
           <span class="font-mono text-xs text-text-tertiary">~/.pieqi</span>

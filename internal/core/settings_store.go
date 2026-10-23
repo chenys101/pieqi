@@ -138,6 +138,25 @@ type Settings struct {
 	// 0 = 全部保留。默认 5000。
 	EventRetention int `json:"event_retention"`
 
+	// ---------- ⑥ 新建任务缺省值 ----------
+
+	// DefaultProjectPath 新建任务的**缺省工作目录**（绝对路径）。
+	//
+	// 为什么需要它：项目不再是必选项。此前每次新建任务都必须先点一个项目或手打一条
+	// 绝对路径，而绝大多数人的用法是"在一个固定目录里让 agent 干活" —— 那个目录
+	// 每次都一样，却每次都要求人再选一遍。
+	//
+	// 空串 = 未配置：此时 POST /api/tasks 不带 project_path 会被**明确拒绝**
+	// （400，提示先到设置页配置），而不是拿某个猜测目录兜底。猜一个目录的后果是
+	// agent 在用户没预期的仓库里改代码，比一句报错严重得多。
+	// 取值由 main.go 用 <dataRoot>/workspace 作为出厂缺省注入（见 SetFallbackProjectPath）。
+	//
+	// ⚠️ **不能加 omitempty**：空串是"用户显式清空"的合法取值，加 omitempty 会让这个键
+	// 在清空时从 JSON 里消失 ⇒ 重启后与"从没配过"不可区分 ⇒ 出厂缺省被填回来
+	// （设置页表现为"清空了又自己回来"）。回归测试见
+	// TestSettings_DefaultProjectPath_ExplicitClearSticks。
+	DefaultProjectPath string `json:"default_project_path"`
+
 	// ---------- ⑤ Agent 选择（2026-10-22 新增，运行期） ----------
 
 	// Agents 启用了哪些 agent，以及各 agent 的机器相关覆盖项。
@@ -259,6 +278,11 @@ type SettingsPatch struct {
 	DNDStart       *string
 	DNDEnd         *string
 	EventRetention *int
+	// DefaultProjectPath 新建任务的缺省工作目录（nil = 不修改）。
+	//
+	// 补丁语义而不是"整体替换"：它是一台机器上一个固定目录，本身就是单值，
+	// 不存在 Agents 那种"集合并发改丢一项"的问题。
+	DefaultProjectPath *string
 	// Agents 整体替换 agent 选择（nil = 不修改）。
 	//
 	// 用整体替换而非逐字段补丁：agent 列表本来就是一个集合，"加一个/删一个"
@@ -275,6 +299,20 @@ type SettingsStore struct {
 	path     string
 	cur      Settings
 	onChange []func(Settings)
+
+	// fallbackProjectPath 出厂缺省工作目录（main.go 注入 <dataRoot>/workspace）。
+	//
+	// 为什么需要这一层，而不是把默认值直接写进 DefaultSettings()：
+	//   - 它依赖 PIEQI_HOME（运行期事实），core 包里算不出来；
+	//   - 更要紧的是**必须能区分「从没配过」与「用户显式清空」**。两者若同样表现为
+	//     空串，用户就永远关不掉这个缺省（清空后又被默认值填回来），设置页上
+	//     表现为"删了又回来了"。
+	//
+	// 判据取自落盘文件：见 NewSettingsStore 的 applyFallbackLocked 调用点。
+	fallbackProjectPath string
+	// projectPathSet 用户是否**显式**配置过 default_project_path（落盘 JSON 里有这个键）。
+	// 只由加载/落盘路径维护，不参与对外语义。
+	projectPathSet bool
 }
 
 // NewSettingsStore 打开（或首次创建）设置文件。path 为空时退化为纯内存存储
@@ -302,7 +340,34 @@ func NewSettingsStore(path string) (*SettingsStore, error) {
 		return nil, fmt.Errorf("parse settings %s: %w", path, err)
 	}
 	s.cur = loaded
+	// 「显式配过」的判据只有一个：落盘 JSON 里**有没有这个键**。
+	// 用"值是否为空串"来判断是错的 —— 空串正是用户清空后的正常取值。
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err == nil {
+		_, s.projectPathSet = probe["default_project_path"]
+	}
+	s.applyFallbackLocked()
 	return s, nil
+}
+
+// SetFallbackProjectPath 注入出厂缺省工作目录（main.go 在创建 store 后立即调用）。
+//
+// 必须在 NewSettingsStore **之后**调用：加载时还无从知道这个值，applyFallbackLocked
+// 走的是"没有缺省"的分支；这里补上后再重新应用一次。
+// 已显式配置过（含显式清空）的用户**不受影响** —— 那是本方法的核心约束。
+func (s *SettingsStore) SetFallbackProjectPath(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fallbackProjectPath = strings.TrimSpace(dir)
+	s.applyFallbackLocked()
+}
+
+// applyFallbackLocked 在用户没显式配置时用出厂缺省填上。调用方需持锁。
+func (s *SettingsStore) applyFallbackLocked() {
+	if s.projectPathSet {
+		return
+	}
+	s.cur.DefaultProjectPath = s.fallbackProjectPath
 }
 
 // Get 返回当前设置的副本。
@@ -328,6 +393,7 @@ func (s *SettingsStore) Patch(p SettingsPatch) (Settings, error) {
 	s.mu.Lock()
 	prev := s.cur
 	next := prev
+	explicitProjectPath := false
 
 	if p.AutoApproveL0 != nil {
 		next.AutoApproveL0 = *p.AutoApproveL0
@@ -359,6 +425,18 @@ func (s *SettingsStore) Patch(p SettingsPatch) (Settings, error) {
 		}
 		next.EventRetention = *p.EventRetention
 	}
+	if p.DefaultProjectPath != nil {
+		v, err := normalizeDefaultProjectPath(*p.DefaultProjectPath)
+		if err != nil {
+			s.mu.Unlock()
+			return prev, err
+		}
+		next.DefaultProjectPath = v
+		// 显式写一次（哪怕写的是空串）就永久转入"用户自己决定"的分支，
+		// 出厂缺省不再回填 —— 否则用户清空后重启，默认目录又回来了。
+		// 只在**落盘成功之后**置位，避免写到一半失败时内存态与磁盘态分叉。
+		explicitProjectPath = true
+	}
 	if p.Agents != nil {
 		next.Agents = *p.Agents
 	}
@@ -371,8 +449,13 @@ func (s *SettingsStore) Patch(p SettingsPatch) (Settings, error) {
 	}
 
 	s.cur = next
+	prevSet := s.projectPathSet
+	if explicitProjectPath {
+		s.projectPathSet = true
+	}
 	if err := s.persistLocked(); err != nil {
 		s.cur = prev
+		s.projectPathSet = prevSet
 		s.mu.Unlock()
 		return prev, err
 	}
@@ -386,6 +469,53 @@ func (s *SettingsStore) Patch(p SettingsPatch) (Settings, error) {
 		fn(next)
 	}
 	return next, nil
+}
+
+// DefaultWorkspaceDirName 缺省工作目录在数据根下的目录名（即 <dataRoot>/workspace）。
+//
+// 为什么是"数据根下的子目录"而不是用户的某个项目目录：它必须**存在且可写**
+// （agent 要在里面改文件），而 ~/.pieqi 是 pieqi 自己创建并保证可写的地方；
+// 反过来挑一个"看起来像项目"的目录（如 ~/code）在别人的机器上可能根本不存在，
+// 于是默认值在别人的机器上表现为"建任务 400" —— 一个只在别人那里坏掉的默认值。
+const DefaultWorkspaceDirName = "workspace"
+
+// normalizeDefaultProjectPath 归一并校验缺省工作目录。
+//
+// 三条判据：
+//  1. 空串 = **清空配置**（合法），此时新建任务必须显式带路径；
+//  2. 相对路径一律拒绝 —— 它的含义取决于进程 cwd（服务跑在 ~/.pieqi/bin），
+//     而用户在设置页写的是"他心里的那个目录"，两者不是一回事；
+//  3. 必须存在且是目录 —— 否则第一次建任务才失败，而成因（设置写错了）
+//     离现象（建任务报错）很远。
+//
+// 返回的是 filepath.Clean 过的原样路径（不 EvalSymlinks）：用户看到的就是他写的那条，
+// 换成真实路径会让设置页里显示的东西与他输入的不一致。
+func normalizeDefaultProjectPath(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(v) {
+		return "", fmt.Errorf("default_project_path must be an absolute path, got %q", v)
+	}
+	abs := filepath.Clean(v)
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("default_project_path not accessible: %s: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("default_project_path is not a directory: %s", abs)
+	}
+	return abs, nil
+}
+
+// NormalizeDefaultProjectPath 是 normalizeDefaultProjectPath 的导出版本。
+//
+// 为什么要导出：新建任务时可以**不带** project_path（项目已不是必选项），
+// api 层需要与设置页**同一套判据**来解析它 —— 两处各写一份必然漂移
+// （典型症状：设置页存得进、建任务时却 400）。
+func NormalizeDefaultProjectPath(v string) (string, error) {
+	return normalizeDefaultProjectPath(v)
 }
 
 func (s *SettingsStore) persistLocked() error {

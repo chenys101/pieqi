@@ -20,6 +20,15 @@ export interface AppSettings {
   dnd_end: string
   /** 事件保留上限；0 = 全部保留 */
   event_retention: number
+  /**
+   * 新建任务的缺省工作目录（绝对路径）。
+   *
+   * 空串 = 未配置：此时新建任务必须显式选/填一个路径。
+   * 出厂缺省是服务端的 `<数据根>/workspace`（main.go 注入），所以它通常不会为空 ——
+   * 只有用户显式清空过后才是空串。前端**不自己造默认值**：路径必须是服务端上真实
+   * 存在的目录，前端猜一个（例如 '~'）只会在提交时换来一句 400。
+   */
+  default_project_path: string
 }
 
 export async function getSettings(): Promise<AppSettings> {
