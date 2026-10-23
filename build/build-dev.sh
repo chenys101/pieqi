@@ -20,17 +20,24 @@ echo "==> [2/2] 后端编译 -> build/pieqi.new.exe"
 # 落点必须是 .new：若直接写 pieqi.exe 会覆盖交付位，
 # Restart() 里那份"回滚备份"保存的就是刚编出来的，回滚即失去意义。
 #
-# GOTMPDIR 兜底（2026-10-22 实测）：go 的 work dir 落在 os.TempDir()，而在受限
-# 沙箱/服务下跑时，C:\...\Temp 本身可能不可写，报
-#   go: creating work dir: mkdir C:\Users\...\Temp\go-buildNNN: Access is denied.
-# 属偶发（重试常能过），但失败时不打印成功标记、产物时间戳不推进 —— 容易把
-# "没编出来"当成"已编出"。这里只在**未显式设置**时指向 build/.gotmp（工作区内、
-# 天然可写），且用完即清；不覆盖调用方已有的 GOTMPDIR。
-if [ -z "${GOTMPDIR:-}" ]; then
-  export GOTMPDIR="$REPO/build/.gotmp"
-  mkdir -p "$GOTMPDIR"
-  echo "    (GOTMPDIR 未设置，暂用 $GOTMPDIR)"
-fi
+# GOTMPDIR **必须**指向工作区内（2026-10-23 复核，判据见 docs/adr/0016）。
+#
+# go build 需要在 os.TempDir() 下创建 work dir（go-buildNNN）。在 agent 会话里，
+# 「进程能否在工作区外建目录」是被限制的，于是：
+#   - 不设置            → mkdir C:\...\Temp\go-buildNNN: Access is denied
+#   - 指向 %TEMP% 下任意目录（哪怕目录已存在、DACL 全开）→ 同样被拒
+#   - 指向 **工作区内** 的 build/.gotmp → 成功
+# 实测对照（产物是否真的生成，不看退出码）：
+#   GOTMPDIR=build/.gotmp → built=True
+#   GOTMPDIR=%TEMP%/...   → built=False
+#   未设置                 → built=False
+# 所以这里**无条件**用 build/.gotmp，不再沿用调用方已有的 GOTMPDIR ——
+# 一个"外部显然正确"的 GOTMPDIR（比如会话 Temp）恰恰是失败的原因。
+# 同时注意 `-o` 的输出也必须在工作区内：写到 %TEMP% 会以
+# `copying ...: open C:\...\Temp\xxx.exe: Access is denied` 失败。
+export GOTMPDIR="$REPO/build/.gotmp"
+mkdir -p "$GOTMPDIR"
+echo "    (GOTMPDIR=$GOTMPDIR)"
 go build -o build/pieqi.new.exe ./cmd/pieqi
 
 # 零字节产物是构建中断的残骸；restart.bat 与自重启都把"零字节"当"没有产物"，
