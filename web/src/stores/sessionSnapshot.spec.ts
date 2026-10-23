@@ -19,7 +19,7 @@ import { useTaskStore } from './task'
 import { dispatch } from '@/services/websocket/dispatcher'
 import { normalizeWsMessage } from '@/services/websocket/normalizer'
 import { adaptTask } from '@/services/api/client'
-import type { TaskSummaryDto } from '@/types/api'
+import type { TaskDto, TaskSummaryDto } from '@/types/api'
 import type { Task } from '@/types/task'
 
 /** 后端的列表/快照载荷（model.NewTaskSummary）：**events 被置 nil**，序列化后是 `"events": null`。 */
@@ -36,7 +36,7 @@ function snapshotTask(id: string, status: Task['status'] = 'failed'): TaskSummar
     // ★ 关键：Go 的 `Events []TaskEvent json:"events,omitempty"` 对 nil 切片不发字段，
     // 但 TaskSummary 把 Events 遮蔽成非 omitempty 的 `[]TaskEvent`，nil 会原样发出 null。
     // 无论线上是 null 还是缺字段，前端都**不能**把它当成"我说了什么"。
-    events: null as unknown as TaskSummaryDto['events'],
+    events: null as unknown as TaskDto['events'],
     event_count: 322,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:01:00Z',

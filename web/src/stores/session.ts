@@ -216,7 +216,7 @@ export const useSessionStore = defineStore('session', {
  * 放宽成 `'events' in dto` 会让 Wire 上的 `null` 走进"说了没有事件"那一档，
  * 而它真正想说的是"我没给你"。这条函数就是那个分界线，不要在每个调用点各写一遍。
  */
-export function shouldReplaceEvents(dto: TaskDto | TaskSummaryDto): boolean {
+export function shouldReplaceEvents(dto: TaskDto | TaskSummaryDto): dto is TaskDto {
   return 'events' in dto && Array.isArray((dto as TaskDto).events)
 }
 
