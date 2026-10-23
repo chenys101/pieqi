@@ -1,58 +1,67 @@
-# ADR-0016：本机会话内 `go build` 必然失败——根因是「会话令牌禁止建临时目录」，与 go 版本/项目/权限无关
+# ADR-0016：`go build` 的 work dir 必须落在工作区内（前一条"会话禁止建目录"的结论已推翻）
 
-- 状态：已确认（2026-10-23 实测）
-- 影响面：所有在 dsh 会话内跑 `go build` / `go vet` / `go test` 的操作，以及据此得出的"是不是沙箱提权没生效"的判断
+- 状态：**已更正**（2026-10-23；初版结论错误，当日推翻）
+- 影响面：在 dsh 会话内编译本机 Go 二进制的所有操作
 
-## 现象
+## 结论（一句话）
 
-```text
-go: creating work dir: mkdir C:\Users\13631\AppData\Local\Temp\go-buildNNNNNNNNNN: Access is denied.
+```powershell
+$env:GOTMPDIR = "$PWD\build\.gotmp"     # 必须在工作区内
+go build -o build/pieqi.new.exe ./cmd/pieqi   # -o 也必须在工作区内
 ```
 
-任何 `go build`、`go vet`、`go test` 都失败，**换包、换工程、换输出路径、换 TMP/TEMP/GOTMPDIR 都没用**。
-但 `go list`、`go run`（缓存命中时）成功 —— 因为它们不创建 work dir。
+**必须同时满足两条**：`GOTMPDIR` 指向工作区内、输出也写在工作区内。满足则构建成功，
+不满足则报 `creating work dir: mkdir C:\Users\...\Temp\go-buildNNN: Access is denied.`。
 
-## 根因（逐条实测，不是推断）
+## 实测对照（判据是"产物真的生成"，不是退出码）
 
-1. **不是 go 版本、不是项目**：一个全新的 `go.mod` 最小工程同样失败；
-   `go env`、`go list ./internal/model` 正常。
-2. **不是目录权限**：`C:\Users\13631\AppData\Local\Temp` 的 DACL 是
-   `SYSTEM/Administrators/13631:(F)`，PowerShell 与 `cmd` 都能在其中建目录，
-   包括 `go-build` 前缀的随机名目录。
-3. **不是名字前缀**：用 Win32 `CreateDirectoryW` 在 Temp 下建任何名字都返回 `err=5`
-   （ERROR_ACCESS_DENIED），而我编译出来的 exe **存放在 `D:\code\go\pieqi` 下时**
-   正是这样；同一个 exe 从 `%TEMP%` 拷贝出来跑则一切正常。
-4. **决定性实验**：同一个 `go build` 交给 **Windows 计划任务**执行（脱离 dsh 会话的
-   令牌，工作目录同样是仓库），**依然失败**。
-5. **对照**：从仓库外的 CWD 起新进程再 `cd` 进仓库执行，同样失败。
+| `GOTMPDIR` | 产物 |
+|---|---|
+| `<repo>\build\.gotmp` | ✅ 生成（38 402 048 字节） |
+| `%TEMP%\任意目录`（目录已存在、DACL 全开也是） | ❌ 不生成 |
+| 未设置（落到系统 Temp） | ❌ 不生成 |
 
-⇒ 结论：**被 dsh 会话施加的限制落在"进程能创建什么"上，而不是"文件路径的 ACL"上**。
-它拦的是 `CreateDirectoryW` 本身（至少在用户 Temp 下），任何在该会话里跑的 `go build`
-都会撞上，**无论是否提权**（`danger-full-access` 也不改变这一点；提权只放开"写哪些文件"）。
+另有一条独立的坑：`-o` 写到 `%TEMP%` 会以
+`copying ...: open C:\...\Temp\x.exe: Access is denied` 失败 —— 输出同样必须在工作区内。
 
-## 这推翻了 AGENTS.md 里的旧结论
+## ★ 初版结论错在哪里（留档，避免重犯）
 
-AGENTS.md 曾写"`go build` 偶发失败，重试即过 / 把 `GOTMPDIR` 指向会话私有目录就好"。
-实测那是**误判**：失败是 100% 确定性的，`GOTMPDIR` 改到任何位置都失败；
-之前"重试就过"的记忆多半来自另一台机器或另一版本的环境。
+初版写的是「会话令牌禁止 `CreateDirectoryW`，任何 `go build` 都必然失败，提权也不解」。
+**那是错的**，错在实验设计：我试过的每一个 `GOTMPDIR` 目录（会话私有 Temp、上级 Temp、
+专门新建的空目录、`build-dev.sh` 早期建议的位置）**全部位于工作区外**，于是观察到的
+现象被归纳成了"会话禁止建目录"。真正被禁止的是**在工作区外建目录**。
 
-同时：`go run` 能跑通，是因为它把产物写进了 `GOCACHE`（`%LOCALAPPDATA%\go-build`），
-**不需要 work dir**。`GOCACHE` 仍可写，所以"依赖包能解析、能 list"但"编不出 exe"。
+这组实验里还有两处方法错误值得记住：
 
-## 在会话内要拿到可运行的二进制
+1. **读错退出码**：管道里跑 `go build ... | Select-Object` 时 `$LASTEXITCODE` 会串到
+   别的命令上，我因此一度"看到"一次成功并据此下了相反结论。**判据必须是产物是否存在
+   且非零字节**，不是退出码。
+2. **"脱离会话令牌就失败"的解释只差一步**：用计划任务跑确实也失败，但那只是因为
+   它同样把 work dir 放进了系统 Temp —— 两种情况的原因同一个，不需要引入"令牌"假设。
 
-1. **正常路径仍是 `go build`** —— 交给**用户**在资源管理器/终端里跑，或让一个不在
-   本会话树内的宿主（svchost / 计划任务之外的登录会话）执行。本会话内不要为此绕路。
-2. 紧急情况下可以从**并行会话**的构建产物取（本次 `build/pieqi.new.exe` 就是另一个
-   并行会话在同一份源码上编出来的），但要**核对源码一致性**：`main.go` 前缀是
-   `pieqi/cmd/pieqi` 的源码嵌入，可据此确认是同一个包。
-3. **不要**为此改构建命令形态（例如手工重放 `go build -n` 的 compile/link 计划）——
-   实测那条路也走不通（`compile.exe` 报 `open .25`），而且会掩盖"命令本身能不能跑"这个
-   真实问题。
+## 为什么 `go list` / `go run` 不失败
 
-## 与"启动纪律"的关系
+它们不需要 work dir（`go run` 缓存命中时产物直接进 `GOCACHE`）。所以"能 list 不能 build"
+这个组合本身就是一个提示：问题在 work dir，不在工具链可用性。
 
-仓库目录（`D:\code\go\pieqi`）本身带 `Mandatory Label\Low Mandatory Level`，
-区内产物会继承 Low 标签，这是**另一条**已记录的纪律（见 AGENTS.md「启动纪律」）。
-本次附带证实了它的后果：把它自己编出的测试 exe 从 `build/` 里直接跑，
-连在用户 Temp 下建目录都会被拒 —— 所以"运行副本必须在仓库外"这条继续有效。
+## 落地
+
+`build/` 下三个脚本已按这条结论写好，**会话内可一键发布、无需人类介入**：
+
+| 脚本 | 作用 |
+|---|---|
+| `build\release.ps1` | 前端 build → `go build`（自动设 `GOTMPDIR`）→ 投递 → 自重启；`-NoDeploy` 只构建 |
+| `build\release.bat` | 同上，纯 ASCII（cmd 在中文 Windows 按 GBK 读 .bat） |
+| `build\deploy.ps1` | Windows 版 `deploy-dev.sh`：投放 `<dataRoot>\bin\pieqi.new.exe` → POST `/api/admin/restart` |
+
+`build/build-dev.sh` 也已改为**无条件**使用 `build/.gotmp`（原来只在调用方未设
+`GOTMPDIR` 时才设，而外部的 `GOTMPDIR` 恰恰是失败来源）。
+
+## 发布链上的两条纪律（实测踩到，写进脚本注释）
+
+1. **POST `/api/admin/restart` 不会返回**：旧进程正是随它退场的，调用它的 agent 会话
+   会一起被切断。判断成功与否**一律用 GET `/api/admin/restart`**，`staged` 回到 `false`
+   才说明产物被消费、换版生效。
+2. **"等新实例就绪"不能从当前时刻开始轮询**：旧实例要等新实例 bind 成功才放手，所以
+   第一次 GET 会打到正在退场的旧实例并立刻成功 —— 脚本会误报"就绪"，随后进程消失。
+   必须先等它答不上话（或端口真空），再等它答得上。
