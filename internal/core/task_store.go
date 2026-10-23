@@ -232,7 +232,10 @@ func (s *TaskStore) List() []*model.Task {
 //     少于成功 Update 次数）。锁内 marshal 同时保证了快照的一致性（见 snapshot）。
 //
 // mutator 只允许改内存字段，**不得**回调 store 的任何取锁方法（Update/Get/List/
-// Delete）—— 那会在持写锁时自锁。
+// Delete，以及Attachments/EventRetention/BadFiles/InterruptedByRestart/imageSink
+// 等一切会取 s.mu 的访问器）—— 那会在持写锁时自锁。注意 RWMutex **不可重入**：
+// 持写锁时再取读锁（RLock）同样永久死锁，2026-10-24 线上事故正是
+// saveToolImages 在 mutator 里 RLock 引爆的（见 agent_toolcall.go 的 imageSink）。
 func (s *TaskStore) Update(id string, mutator func(*model.Task) bool) (*model.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

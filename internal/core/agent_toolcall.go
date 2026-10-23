@@ -179,10 +179,16 @@ func (w *toolCallWire) Flush() {
 	w.flushN.Add(1)
 
 	// 锁内只写内存；store.Update 返回的快照带出锁外再 Publish。
+	//
+	// ⚠️ imageSink 必须在 Update **之前**取（在写锁外拿一次 RLock 快照出附件依赖）：
+	// mutator 运行在 store 写锁内，若在 mutator 里再取读锁就是同一把 RWMutex
+	// 上的自死锁 —— 2026-10-24 线上事故：第一张真实工具图到达时 /api/tasks
+	// 全库冻结（详见 imageSink 与 agent_toolcall_deadlock_test.go 的注释）。
+	sink := w.store.imageSink()
 	updated, err := w.store.Update(w.taskID, func(t *model.Task) bool {
 		changed := false
 		for _, info := range infos {
-			if applyToolCallUpdate(w.store, t, info) {
+			if applyToolCallUpdate(w.store, sink, t, info) {
 				changed = true
 			}
 		}
@@ -208,7 +214,7 @@ func (w *toolCallWire) Flush() {
 //  1. 入参/工具名**后到**：补全已落盘的那条 tool_use，而不是再追加一条空壳
 //     （2026-10-21 修复的"审批卡上只有工具名、没有命令"，见 mergeToolUseIntoTask）；
 //  2. 映射为事件并追加；若这次是 IsNew 但已有同 id 的 tool_use，同样只合并不追加。
-func applyToolCallUpdate(store *TaskStore, t *model.Task, info agent.ToolCallUpdateInfo) bool {
+func applyToolCallUpdate(store *TaskStore, sink imageSink, t *model.Task, info agent.ToolCallUpdateInfo) bool {
 	changed := false
 
 	// ① 补全已有那条：mergeToolUseIntoTask 改 Input/ToolName，attachToolDescription 补说明。
@@ -225,9 +231,9 @@ func applyToolCallUpdate(store *TaskStore, t *model.Task, info agent.ToolCallUpd
 	if !ok {
 		// 中间态（pending / in_progress）不落事件是**设计**，但如果它带着图，
 		// 图片就再也回不来了（同一调用后面不会重发 Content）。必须可见。
-		if len(info.Images) > 0 {
-			store.warnImagesDropped(t.ID, info, "update status produced no event: "+info.Status)
-		}
+			if len(info.Images) > 0 {
+				sink.warnDropped(t.ID, info, "update status produced no event: "+info.Status)
+			}
 		return changed
 	}
 	ev.At = time.Now()
@@ -244,7 +250,7 @@ func applyToolCallUpdate(store *TaskStore, t *model.Task, info agent.ToolCallUpd
 		// 理论开工通知不带图（图在结果里），但"理论"不是判据：打一条告警，
 		// 让"图片在哪个分支消失"这件事下次一眼可见，而不是再反推一晚。
 		if len(info.Images) > 0 {
-			store.warnImagesDropped(t.ID, info, "merged into existing tool_use")
+			sink.warnDropped(t.ID, info, "merged into existing tool_use")
 		}
 		return true
 	}
@@ -254,25 +260,45 @@ func applyToolCallUpdate(store *TaskStore, t *model.Task, info agent.ToolCallUpd
 	// 落盘失败不阻断事件本身（工具确实跑完了，结果文本才是主体），
 	// 只是这条事件不带图 —— 与"图太大被拒"同一处理口径，不制造假事实。
 	if len(info.Images) > 0 && ev.Type == model.EventToolResult {
-		ev.Images = store.saveToolImages(info.Images)
+		ev.Images = sink.saveImages(info.Images)
 	}
 	store.AppendEvent(t, ev)
 	return true
 }
 
-// warnImagesDropped 记录"解析到了图，却没进事件"这一事实。
+// imageSink 是"把工具图落盘/告警"所需依赖的**锁外快照**（附件存储 + logger）。
+//
+// 为什么要有这个类型：这两件事都发生在 store.Update 的 mutator 里，也就是
+// **持有 store 写锁**的代码段内。而取依赖本身（读 s.attachments / s.logger 字段）
+// 按惯例要拿 s.mu.RLock —— 同一把 RWMutex 上持写锁再取读锁，Go 的 RWMutex
+// 不可重入，必然永久自锁。2026-10-24 线上事故：中转层修好后第一张真实工具图
+// 到达，saveToolImages 在 mutator 里 RLock，/api/tasks 与 WS 快照全库冻结。
+//
+// 纪律：imageSink() 只能在**不持 store 写锁**的语境调用（典型：Flush 在
+// Update 之前取一次），sink 本身是不可变值，可安全带进 mutator。
+// 回归测试：agent_toolcall_deadlock_test.go（修复前在该处 3s 看门狗必红）。
+type imageSink struct {
+	att *AttachmentStore
+	log *zap.Logger
+}
+
+// imageSink 在锁外语境下快照附件依赖（未接线时 att 为 nil，saveImages 会打 WARN）。
+func (s *TaskStore) imageSink() imageSink {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return imageSink{att: s.attachments, log: s.logger}
+}
+
+// warnDropped 记录"解析到了图，却没进事件"这一事实。
 //
 // 为什么值得单独一个函数：这条链路的失败**天生是静默的**（工具结果照常有、
 // 只是没有图），而三种失败方式（未接线、合入已有 tool_use、中间态不落事件）
 // 各在一处、表现完全相同。统一打一条带原因的 WARN，线上只需一条 grep 就能定位。
-func (s *TaskStore) warnImagesDropped(taskID string, info agent.ToolCallUpdateInfo, reason string) {
-	s.mu.RLock()
-	log := s.logger
-	s.mu.RUnlock()
-	if log == nil {
+func (sink imageSink) warnDropped(taskID string, info agent.ToolCallUpdateInfo, reason string) {
+	if sink.log == nil {
 		return
 	}
-	log.Warn("attachment images dropped",
+	sink.log.Warn("attachment images dropped",
 		zap.String("task", taskID),
 		zap.String("tool_call_id", info.ToolCallID),
 		zap.String("tool", info.Title),
@@ -280,15 +306,13 @@ func (s *TaskStore) warnImagesDropped(taskID string, info agent.ToolCallUpdateIn
 		zap.String("reason", reason))
 }
 
-// saveToolImages 把工具结果里的图片落盘，返回可进事件的元数据。
+// saveImages 把工具结果里的图片落盘，返回可进事件的元数据。
 //
 // 单张失败**不影响其它张**（理由同 agent.toolCallImages：一张坏图不该让整次调用变无图）。
 // 全部失败时返回 nil —— 事件照常追加，只是不带图。
-func (s *TaskStore) saveToolImages(images []agent.ImageInput) []model.TaskImage {
-	// 取一次引用，避免循环里逐张读 store 字段（SetAttachments 与写事件是两条路径）。
-	s.mu.RLock()
-	att, log := s.attachments, s.logger
-	s.mu.RUnlock()
+func (sink imageSink) saveImages(images []agent.ImageInput) []model.TaskImage {
+	// 依赖已在 imageSink() 里锁外快照（见该类型注释：mutator 锁内禁取 s.mu）。
+	att, log := sink.att, sink.log
 	if att == nil {
 		// 未接线：这不是"正常降级"，而是**部署配置缺失**。原先这里静默返回 nil，
 		// 表现是"图片解析成功、事件里却没有图、日志一句没有" —— 2026-10-24 线上

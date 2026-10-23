@@ -113,7 +113,7 @@ func TestTaskStore_SaveToolImagesPersistsMetadataOnly(t *testing.T) {
 	}
 	store.SetAttachments(att, zap.NewNop())
 
-	imgs := store.saveToolImages([]agent.ImageInput{{Data: attachPNG, MimeType: "image/png"}})
+	imgs := store.imageSink().saveImages([]agent.ImageInput{{Data: attachPNG, MimeType: "image/png"}})
 	if len(imgs) != 1 {
 		t.Fatalf("got %d images, want 1", len(imgs))
 	}
@@ -148,7 +148,7 @@ func TestTaskStore_SaveToolImagesWithoutStoreIsNil(t *testing.T) {
 	core, observed := observer.New(zap.WarnLevel)
 	store.SetAttachments(nil, zap.New(core))
 
-	if got := store.saveToolImages([]agent.ImageInput{{Data: attachPNG, MimeType: "image/png"}}); got != nil {
+	if got := store.imageSink().saveImages([]agent.ImageInput{{Data: attachPNG, MimeType: "image/png"}}); got != nil {
 		t.Errorf("got %v, want nil（未接线时不该凭空造出元数据）", got)
 	}
 
@@ -176,10 +176,10 @@ func TestApplyToolCallUpdate_AttachesImagesToToolResult(t *testing.T) {
 	store.SetAttachments(NewAttachmentStore(filepath.Join(dir, "attachments")), zap.NewNop())
 
 	task := &model.Task{ID: "t1"}
-	_ = applyToolCallUpdate(store, task, agent.ToolCallUpdateInfo{
+	_ = applyToolCallUpdate(store, store.imageSink(), task, agent.ToolCallUpdateInfo{
 		ToolCallID: "tc-1", Title: "read_image", IsNew: true,
 	})
-	_ = applyToolCallUpdate(store, task, agent.ToolCallUpdateInfo{
+	_ = applyToolCallUpdate(store, store.imageSink(), task, agent.ToolCallUpdateInfo{
 		ToolCallID: "tc-1", Status: "completed",
 		Images: []agent.ImageInput{{Data: attachPNG, MimeType: "image/png"}},
 	})
