@@ -166,7 +166,11 @@ export interface TaskSummaryDto extends Omit<TaskDto, 'events'> {
 export interface InterveneRequestDto {
   kind: 'decision' | 'append_prompt'
   decision_id?: string
-  choice?: 'approve' | 'approve_session' | 'deny'
+  /**
+   * approve_same 是**补偿动作**（不进 UI 按钮）：审批请求已有结论时，前端改投它，
+   * 后端据此把该工具类别记成本会话免审。见 types/approval.ts 与 stores/approval.ts。
+   */
+  choice?: 'approve' | 'approve_session' | 'approve_same' | 'deny'
   text?: string
   /**
    * 本轮要用的模型（**不透明选择值**，见 GET /api/agents/{agent}/models）。

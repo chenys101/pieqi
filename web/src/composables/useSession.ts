@@ -78,6 +78,13 @@ export function useSession(taskId: Ref<string>) {
     }
   }
 
+  /**
+   * 三个决策动作的失败**一律要说出来**（notify.error）。
+   *
+   * 2026-10-23 f74bcb09 会话里，"点了没反应"之所以完全查不出来：卡片 loading 被 finally
+   * 释放了，界面回到原样，而失败只体现在服务端日志的一行 no pending 里。
+   * 现在后端会把"已经处理过"与"id 不存在"分开回报，两种都必须浮到用户面前。
+   */
   async function approve() {
     try {
       await approvalStore.approve(taskId.value)

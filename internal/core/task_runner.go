@@ -524,6 +524,10 @@ func (tr *TaskRunner) ResumeRich(taskID, text, turnModel string, images []agent.
 	if t.Status != model.TaskRunning {
 		tr.captureTurnEnd(taskID)
 	}
+	// 新一轮开始前，旧卡若已无人应答就先清掉（判据见 clearStaleDecision）：
+	// 新一轮会把它覆盖成 running / 新的 CurrentDecision，但前端那张旧卡是拿 id 回投的，
+	// 留着它只会让用户再点一次 no pending。
+	tr.clearStaleDecision(taskID)
 	// 追加一条 user 事件，标记续问起点（前端渲染为右对齐气泡，与首次 prompt 一致）。
 	// 带图时同时记下图片元数据（see model.TaskEvent.Images）。
 	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text, Images: ImageMeta(images)})
@@ -1164,6 +1168,11 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 		}
 	}
 
+	// 轮结束时可能残留一张"没人应答"的审批卡：本轮已结束 = 那张卡的 owner
+	// （挂在 RequestPermission 上的那次调用）随轮结束消失，pending 表里也已没有它。
+	// 不清掉它，卡片会一直挂在界面上，用户点下去只能拿到 no pending。
+	tr.clearStaleDecision(task.ID)
+
 	// PrintAgent 一次性：轮末关会话并 unwire；ACP 保活：不关（由回收/取消/删任务/关停关）。
 	if !keepAlive && tr.agentMgr.Adapter(task.ID) != nil {
 		_ = tr.agentMgr.Close(task.ID)
@@ -1201,6 +1210,75 @@ func (tr *TaskRunner) runAgentTurn(ctx context.Context, taskID, prompt, turnMode
 		case <-time.After(busyRetryDelay):
 		}
 	}
+}
+
+// decisionStaleGrace 判定"这张审批卡已经过期"的宽限。
+//
+// 为什么不能"没有 pending 就是过期"：onPermissionRequest 是**先登记 pending、再展示卡片**
+// （Pending 在 pw.mu 里先写入），反过来 show() 也会先写 CurrentDecision 再由 adapter 侧的
+// 回调返回。两个方向都有窗口，用"此刻查不到"去清卡会误清一张正在展示的卡 ——
+// 那比留一张陈旧卡更糟（用户正在看的那张会凭空消失）。
+// 5s 远大于任一窗口（都在微秒级），又远小于人的反应时间，不会误伤。
+const decisionStaleGrace = 5 * time.Second
+
+// clearStaleDecision 清掉"卡片还在、但已经不可能被应答"的 CurrentDecision。
+//
+// 场景（2026-10-23 f74bcb09 会话后期 no pending 刷屏的**服务端根因**）：
+//   - ACP 同一轮里，前一条 RequestPermission 被批准后，agent 可能**紧接着**再发一条
+//     请求，于是 CurrentDecision 从 req-N 换成 req-N+1；旧卡（req-N）仍留在前端的
+//     列表/内存里，点它必然 pending 查无此物；
+//   - 轮次结束（completeTask/failTask 之外的路径，例如 agent 自己 end_turn 后再
+//     被重放）后 CurrentDecision 没有随轮清理。
+//
+// 这里只做一件事：任务**不在** waiting_input，或决策 id 与当前展示的 pending 不一致，
+// 且已超过宽限期 ⇒ 把 CurrentDecision 清掉并推一次 task_updated，让界面上那张
+// 死按钮消失。**不动任务状态**（下一条审批/下一次 setRunning 会各自设置它）。
+func (tr *TaskRunner) clearStaleDecision(taskID string) {
+	t, ok := tr.store.Get(taskID)
+	if !ok || t == nil || t.CurrentDecision == nil {
+		return
+	}
+	// 只处理审批类：choice 卡（路径 B）是**合法持久态**，它的"答案"是普通文本，
+	// 不依赖 pending 表，隔天仍可继续选 —— 绝不能因为 pending 里没有就清掉。
+	if t.CurrentDecision.Kind != model.DecisionKindApproval {
+		return
+	}
+	if tr.permWireHasPending(taskID, t.CurrentDecision.ID) {
+		return
+	}
+	if age := time.Since(t.CurrentDecision.CreatedAt); age < decisionStaleGrace {
+		return
+	}
+	staleID := t.CurrentDecision.ID
+	updated, _ := tr.store.Update(taskID, func(t *model.Task) bool {
+		if t.CurrentDecision == nil || t.CurrentDecision.ID != staleID {
+			return false // 期间已被换掉/清掉，不覆盖
+		}
+		t.CurrentDecision = nil
+		return true
+	})
+	if updated == nil {
+		return
+	}
+	tr.logger.Warn("stale approval decision cleared (no pending owns it anymore)",
+		zap.String("task", taskID), zap.String("decision", staleID),
+		zap.String("status", string(updated.Status)))
+	tr.bus.Publish(Event{Type: "task_updated", TaskID: taskID, Task: updated})
+}
+
+// permWireHasPending 报告该 task 的 wire 是否仍挂着一个指定 id 的待审批请求。
+//
+// 语义是**保守 TRUE**：没有 wire（非 ACP 路径 / 会话刚关）时无法证伪，
+// 一律当作"可能还有人等"返回 true —— 宁可留一张卡，也不误清。
+func (tr *TaskRunner) permWireHasPending(taskID, reqID string) bool {
+	ph := tr.permWire(taskID)
+	if ph == nil {
+		return true
+	}
+	ph.mu.Lock()
+	defer ph.mu.Unlock()
+	_, ok := ph.pending[reqID]
+	return ok
 }
 
 // adapterDead 判断 adapter 底层进程是否已退出/连接断开（adapter.Done 关闭）。
@@ -1424,6 +1502,14 @@ func (tr *TaskRunner) Intervene(taskID string, in model.Intervention) error {
 				return fmt.Errorf("no pending permission on task %s", taskID)
 			}
 			if err := ph.Resolve(in.DecisionID, in.Choice); err != nil {
+				// 重复投递与"id 根本不存在"是两件事，错误文案必须分开 ——
+				// 用户看到的 409 就是这句话本身（见 api.intervene 的 409）。
+				//
+				// 判据：settled 表里有过这个 reqID ⇒ 它早就批过/拒过/超时了，
+				// 这次是**过期卡片**打回来的，不是"没有待审批"。
+				if ph.hasSettled(in.DecisionID) {
+					return fmt.Errorf("审批 %s 已经处理过了（那张卡是旧的）；这条命令不需要再批一次", in.DecisionID)
+				}
 				return err
 			}
 			// 落盘在**成功收下**之后：Resolve 失败 = 干预没发生，不能记（R6 / S3 §2.1）

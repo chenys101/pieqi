@@ -402,7 +402,11 @@ func TestWirePermission_Timeout(t *testing.T) {
 	}
 }
 
-// TestWirePermission_ResolveAfterTimeout 超时后再 Resolve 应失败（已被处理，先到先得）。
+// TestWirePermission_ResolveAfterTimeout 超时后再 Resolve：**幂等**（不报错、不驱动 adapter）。
+//
+// 为什么不报错（2026-10-23 改）：超时已经 Deny 过一次，agent 早就收到"拒绝"了。
+// 用户此刻点那张还在屏幕上的卡，得到 409 no pending 只会让他再点几次 —— 而真相是
+// "这一条已经超时被拒了"。Resolve 成功返回，但不再动 adapter 状态，也不改变结论。
 func TestWirePermission_ResolveAfterTimeout(t *testing.T) {
 	fa, _, _, store, taskID, pw, _ := setupPermWire(t, 50*time.Millisecond)
 	defer pw.Unwire()
@@ -410,8 +414,8 @@ func TestWirePermission_ResolveAfterTimeout(t *testing.T) {
 	fa.emitPerm(permReq("req-RT", "Bash", "execute", standardOptions()))
 	waitForStatus(t, store, taskID, model.TaskRunning, time.Second) // 等超时把 task 置回 running
 
-	if err := pw.Resolve("req-RT", "approve"); err == nil {
-		t.Fatal("Resolve after timeout should fail")
+	if err := pw.Resolve("req-RT", "approve"); err != nil {
+		t.Fatalf("超时后的重复投递应当幂等成功，实际: %v", err)
 	}
 	// 超时已 Deny 一次，Resolve 不应再驱动 adapter。
 	if got := fa.denyCount(); got != 1 {
@@ -1134,5 +1138,109 @@ func TestWirePermission_PersistFailureStillShowsCard(t *testing.T) {
 	}
 	if n := fa.approveCount(); n != 1 {
 		t.Errorf("approve calls = %d, want 1", n)
+	}
+}
+
+// --- 2026-10-23：no pending 刷屏的根因与幂等语义 ---
+
+// TestWirePermission_RepeatedApproveIsIdempotent 同一张卡连点两次「批准」：
+// 第二次**不得**报 no pending，也不得再驱动一次 adapter。
+//
+// 现场（f74bcb09，2026-10-23）：用户批了一条命令后 agent 紧接着发下一条请求，
+// 前端的 stale 卡片与重复点击被投回来，服务端刷出 16 条
+// "approval resolve FAILED: no pending permission" —— 而这些卡其实**都已经批过了**。
+func TestWirePermission_RepeatedApproveIsIdempotent(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-dup", "pwsh", "execute", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-dup", "approve"); err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	if err := pw.Resolve("req-dup", "approve"); err != nil {
+		t.Fatalf("重复批准应当幂等成功（不许再报 no pending），实际: %v", err)
+	}
+	if n := fa.approveCount(); n != 1 {
+		t.Fatalf("adapter.Approve 被调用 %d 次，want 1（重复投递不该再驱动一次）", n)
+	}
+	if tt, _ := store.Get(taskID); tt.Status != model.TaskRunning {
+		t.Fatalf("status = %q, want running", tt.Status)
+	}
+}
+
+// TestWirePermission_ApproveSameAfterSettledMakesKindAutoPermitted
+// 「已批过」的卡被改投 approve_same：不再报错，且该工具类别在本会话内免审。
+//
+// 这条是前端 2026-10-23 的补偿动作的服务端契约：审批请求一旦返回就没有载体，
+// 用户"再批一次"能兑现的唯一效果就是"以后同类直接过"。
+func TestWirePermission_ApproveSameAfterSettledMakesKindAutoPermitted(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-a", "pwsh", "execute", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-a", "approve"); err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	// 同一张卡改投 approve_same（模拟前端收到"已结算"后的补偿）
+	if _, err := pw.ResolveRepeated("req-a", "approve_same"); err != nil {
+		t.Fatalf("approve_same 应当幂等成功，实际: %v", err)
+	}
+	// 之后同 kind 的请求不再弹卡，直接放行
+	fa.emitPerm(permReq("req-b", "pwsh", "execute", standardOptions()))
+	if reqID, optionID, ok := fa.lastApprove(); !ok || reqID != "req-b" || optionID != "o1" {
+		t.Fatalf("approveCount = %d，want 2（同类应免审）", fa.approveCount())
+	}
+	if tt, _ := store.Get(taskID); tt.Status != model.TaskRunning {
+		t.Fatalf("status = %q, want running（同类不该再弹卡）", tt.Status)
+	}
+}
+
+// TestWirePermission_UnknownDecisionStillFails 真正不该糊弄的那一类：
+// 从来不存在（或属于别的任务）的 decisionID 必须继续报错 ——
+// 幂等不能把"串任务"这种真 bug 一起吞掉。
+func TestWirePermission_UnknownDecisionStillFails(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-real", "pwsh", "execute", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+
+	err := pw.Resolve("req-from-another-task", "approve")
+	if err == nil {
+		t.Fatal("未知 decisionID 必须报错（幂等只针对已结算的 id）")
+	}
+	if !strings.Contains(err.Error(), "no pending permission") {
+		t.Fatalf("错误文案应指出 no pending，实际: %v", err)
+	}
+	if n := fa.approveCount(); n != 0 {
+		t.Fatalf("approveCount = %d，want 0", n)
+	}
+}
+
+// TestWirePermission_AutoApprovedIsRemembered 自动放行（免审名单）也记 settled：
+// 否则"这条 id 怎么查不到"里会混进一批其实已经被自动放行的请求，排查方向直接跑偏。
+func TestWirePermission_AutoApprovedIsRemembered(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWireAuto(t, time.Minute, []string{"read"})
+
+	fa.emitPerm(permReq("req-auto", "ls", "read", standardOptions()))
+	if n := fa.approveCount(); n != 1 {
+		t.Fatalf("approveCount = %d，want 1（免审应自动放行）", n)
+	}
+	if !pw.hasSettled("req-auto") {
+		t.Fatal("自动放行的 reqID 必须记进 settled")
+	}
+	// store.Create 恒把新任务置 pending（见 task_store.go），本用例没有真的跑一轮，
+	// 所以判据是"免审**没有**把它推进 waiting_input"，而不是"等于 running"。
+	if tt, _ := store.Get(taskID); tt.Status == model.TaskWaitingInput || tt.CurrentDecision != nil {
+		t.Fatalf("status = %q decision=%+v，want 免审不进 waiting_input、不产生决策卡", tt.Status, tt.CurrentDecision)
+	}
+	// 事后那张（从未展示过的）卡被点：得到"已处理"，不是 no pending。
+	if err := pw.Resolve("req-auto", "approve"); err != nil {
+		t.Fatalf("已自动放行的 reqID 重复投递应当幂等成功，实际: %v", err)
+	}
+	if n := fa.approveCount(); n != 1 {
+		t.Fatalf("approveCount = %d，want 1（不该重复驱动 adapter）", n)
 	}
 }

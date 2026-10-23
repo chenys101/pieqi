@@ -32,6 +32,34 @@ import (
 // 默认审批超时上限（与 HookService 默认 30min 对齐）。WirePermission 传 timeout<=0 时用之。
 const defaultPermissionTimeout = 30 * time.Minute
 
+// 审批决策的三种判定结果（PermissionWire.Resolve / resolveLocked 的返回值）。
+//
+// 为什么要把「已经批过了」与「根本没这条审批」分开：两者在 pending 表里是**同一种形状**
+// （查不到 entry），但对用户来说是两件相反的事 ——
+//   - 已批过 = 那条命令**已经执行了**，第二下发起的同一条命令没有载体，
+//     若回给 agent 一个 Cancelled，agent 会以为自己被拒绝（实测表现为用户重复点击
+//     「批准」后，命令真的没跑，而界面看不出为什么）；
+//   - 已拒绝/超时 = agent 已经收到否定的答复，此时补一个 Cancelled 只是在重复告知。
+//
+// 这两条以前都落进"no pending permission"（HTTP 409），于是日志与界面上全是
+// 2026-10-23 f74bcb09 那次会话里的 "no pending"，而真相是"你已经批过了"。
+const (
+	// PermResolveMissing 从来没有过这个 reqID（或它属于别的 wire）。这是**调用方**的问题：
+	// 前端拿着陈旧/串任务的 decision_id 回投。
+	PermResolveMissing = "missing"
+	// PermResolveApproved 该 reqID 已经批过（含会话内免审/自动放行）。相同命令需放行。
+	PermResolveApproved = "approved"
+	// PermResolveDenied 该 reqID 已拒绝（人工拒绝或超时）。
+	PermResolveDenied = "denied"
+)
+
+// resolveResult Resolve 的细粒度结果。
+type resolveResult struct {
+	reqID  string
+	status string // 上面三个常量之一
+	timed  bool   // 超时（与人工拒绝同属 denied，但日志要能区分）
+}
+
 // PermissionWire WirePermission 返回的句柄。持有审批链路所需的依赖与 pending 表。
 // 调用方在任务结束/取消时 Unwire 拆卸，避免回调悬挂。
 type PermissionWire struct {
@@ -71,6 +99,31 @@ type PermissionWire struct {
 	// 处理后才逐个提升展示，保证每个挂起审批最终都被用户看到。
 	displayed string   // 当前已展示进 CurrentDecision 的 reqID；空 = 无展示
 	queue     []string // 等待展示的 reqID（FIFO）
+
+	// settled 已结算的请求（reqID → 结果）。**有界**FIFO，超过 settledMax 淘汰最旧。
+	//
+	// 为什么非要留痕：pending 只在"等人回"的窗口里有 entry，一旦批完就删；而前端手里的
+	// 那张卡不会随 task_updated 立刻消失（网络抖动、断线重连拿到的旧快照、用户手慢）。
+	// 于是"同一个 reqID 再投一次"是**常态**，不是异常。没有这张表就分不清
+	// "你早就批过了"与"这个 id 根本不存在"，只能一律回 409 no pending ——
+	// 2026-10-23 f74bcb09 会话后期 16 条 no pending 全属前者。
+	//
+	// 只存 reqID/结论/工具名，不存 options/RawInput：这里要回答的是"批过没有"，
+	// 不是"再批一次"（重放一次 allow 的意义在 approve_same 分支里单独论证）。
+	settled map[string]*settledPerm
+	order   []string // settled 的插入顺序（FIFO 淘汰用）
+}
+
+// settledMax settled 表上限。审批是低频动作（一场会话几十到上百次），256 足够覆盖
+// "用户还在看那一屏卡"的窗口；再往上加只是让内存随会话长度无界增长。
+const settledMax = 256
+
+// settledPerm 一个已结算请求的结论。
+type settledPerm struct {
+	toolTitle string
+	toolKind  string // ACP ToolKind；"已拒绝后又要批"时用它补一次同类免审
+	kind      string // PermResolveApproved / PermResolveDenied
+	timed     bool   // 超时（仅 denied 有意义）
 }
 
 // permPending 一个待审批请求的本地状态。
@@ -122,6 +175,7 @@ func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore,
 		logger:        logger,
 		pending:       make(map[string]*permPending),
 		sessionAlways: make(map[string]struct{}),
+		settled:       make(map[string]*settledPerm),
 	}
 	pw.setAutoApprove(autoApprove)
 	adapter.OnPermissionRequest(pw.onPermissionRequest)
@@ -219,7 +273,36 @@ func (pw *PermissionWire) tryAutoApprove(req agent.PermissionRequest) bool {
 	pw.logger.Debug("auto-approved permission (no review)",
 		zap.String("task", pw.taskID), zap.String("req", req.ReqID),
 		zap.String("tool_kind", req.ToolKind), zap.String("option", optionID))
+	// 免审也要留痕：否则"这条 id 怎么查不到"里会混进一批其实已经被自动放行的请求。
+	pw.rememberSettled(req.ReqID, req.ToolTitle, req.ToolKind, PermResolveApproved, false)
 	return true
+}
+
+// rememberSettled 记下一条审批的最终结论（有界 FIFO）。调用方不持 pw.mu 或自行持锁 ——
+// 本函数自己加锁，内部调用点都在释放 pw.mu 之后。
+func (pw *PermissionWire) rememberSettled(reqID, toolTitle, toolKind, conclusion string, timed bool) {
+	if reqID == "" {
+		return
+	}
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	pw.rememberSettledLocked(reqID, toolTitle, toolKind, conclusion, timed)
+}
+
+// rememberSettledLocked 同 rememberSettled，但要求调用方已持 pw.mu。
+func (pw *PermissionWire) rememberSettledLocked(reqID, toolTitle, toolKind, conclusion string, timed bool) {
+	if pw.settled == nil {
+		pw.settled = make(map[string]*settledPerm)
+	}
+	if _, exists := pw.settled[reqID]; !exists {
+		pw.order = append(pw.order, reqID)
+	}
+	pw.settled[reqID] = &settledPerm{toolTitle: toolTitle, toolKind: toolKind, kind: conclusion, timed: timed}
+	for len(pw.order) > settledMax {
+		old := pw.order[0]
+		pw.order = pw.order[1:]
+		delete(pw.settled, old)
+	}
 }
 
 // autoApproves 该 ToolKind 是否免审：配置名单（由 L0/L1 推导）命中，或用户本次会话点过
@@ -364,16 +447,65 @@ func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary
 //   - choice="deny"：选 reject 选项（reject_once 优先）用 Approve 选中；无 reject 选项则 adapter.Deny（→Cancelled）
 //
 // 成功后 task 回 running（清 CurrentDecision + Publish task_updated），停掉超时定时器。
-// reqID 已不存在或已被 Resolve/超时处理时返回错误。
+//
+// **幂等**：同一个 decisionID 批第二次（用户重复点、前端卡片过期、断线重连后的旧快照）不再
+// 返回 409 "no pending permission"。已批过 ⇒ 这台手机的 agent 确实已经执行过那条命令，
+// 这次"同一条命令"没有载体（RequestPermission 早已返回），只能把同一结论再投一次
+// （agent 已把它当成本次允许，见 ACP 语义：重复投递被忽略）。
+// 已拒绝/超时 ⇒ 同理再投一次拒绝；agent 早已收到"拒绝"，不会执行。
+// 只有**从来不存在**的 id 才返回 missing 错误 —— 那才是调用方的问题（串任务/伪造 id）。
 func (pw *PermissionWire) Resolve(decisionID, choice string) error {
+	r, err := pw.resolveLocked(decisionID, choice)
+	if err != nil {
+		return err
+	}
+	if r.status == PermResolveMissing {
+		return fmt.Errorf("no pending permission for decision %q", decisionID)
+	}
+	// 推进：有排队审批则提升下一个继续展示（task 仍 waiting_input），否则 task 回 running。
+	pw.advance(decisionID)
+	return nil
+}
+
+// ResolveRepeated 供"同一 decisionID 重复投递"的兜底路径（TaskRunner.Intervene 用）。
+//
+// 语义与 Resolve 相同，只是把"这在 ACP 里是一次重放"这件事写进日志，并显式返回结果状态，
+// 让调用方决定是否算作一次成功的干预。返回 PermResolveMissing 时错误非 nil。
+func (pw *PermissionWire) ResolveRepeated(decisionID, choice string) (string, error) {
+	startedAt := time.Now()
+	pw.logger.Info("approval resolve repeated (decision already settled)",
+		zap.String("task", pw.taskID),
+		zap.String("decision_id", decisionID),
+		zap.String("choice", choice),
+		zap.Time("at", startedAt),
+	)
+	r, err := pw.resolveLocked(decisionID, choice)
+	if err != nil {
+		return r.status, err
+	}
+	pw.advance(decisionID)
+	return r.status, nil
+}
+
+// hasSettled 报告 reqID 是否**已经**被批过或拒过（含自动放行）。供调用方在报告
+// "no pending" 之前先判断到底是"批过了"还是"从来没有"。
+func (pw *PermissionWire) hasSettled(reqID string) bool {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	_, ok := pw.settled[reqID]
+	return ok
+}
+
+// resolveLocked Resolve 的主体：查表 → 先到先得摘除 → 驱动 adapter → 记 settled。
+// 返回值 status 恒为 PermResolveMissing / PermResolveApproved / PermResolveDenied 之一。
+func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResult, error) {
 	startedAt := time.Now()
 	pw.mu.Lock()
 	entry, ok := pw.pending[decisionID]
+
 	if !ok {
-		// ── 审批生命周期日志③（失败）：无此 pending ───────────────────────────
-		// 这是用户看到"点了批准却没反应"的**直接原因**，必须留证。
-		// 带上 shown_at（若能查到）与 pending 表当前键，便于判断是"超时清掉了"
-		// 还是"本来就投错了 id"（后者是前端拿到陈旧 decision_id）。
+		// pending 里没有：先看 settled —— 那说明"这条早就处理过了"，不是"不存在"。
+		settled, was := pw.settled[decisionID]
 		pendingIDs := make([]string, 0, len(pw.pending))
 		for k := range pw.pending {
 			pendingIDs = append(pendingIDs, k)
@@ -382,31 +514,45 @@ func (pw *PermissionWire) Resolve(decisionID, choice string) error {
 		queueLen := len(pw.queue)
 		closed := pw.closed
 		pw.mu.Unlock()
-		pw.logger.Warn("approval resolve FAILED: no pending permission for decision",
+
+		if !was {
+			// ── 审批生命周期日志③（真正失败）：无此 pending 且从未结算 ───────────
+			// 这是"点了批准却没反应"里**唯一**真正该报警的形状：id 不属于本任务，
+			// 或前端把另一个任务的 decision_id 投了过来。
+			pw.logger.Warn("approval resolve FAILED: unknown decision id",
+				zap.String("task", pw.taskID),
+				zap.String("decision_id", decisionID),
+				zap.String("choice", choice),
+				zap.Strings("pending_now", pendingIDs),
+				zap.String("displayed_now", displayed),
+				zap.Int("queue_len", queueLen),
+				zap.Bool("wire_closed", closed),
+				zap.Time("resolved_at", startedAt),
+			)
+			return resolveResult{reqID: decisionID, status: PermResolveMissing},
+				fmt.Errorf("no pending permission for decision %q", decisionID)
+		}
+
+		// 已结算：把同一结论再投一次（见 Resolve 的幂等说明）。
+		pw.logger.Info("approval resolve re-delivered (already settled)",
 			zap.String("task", pw.taskID),
 			zap.String("decision_id", decisionID),
 			zap.String("choice", choice),
+			zap.String("settled_as", settled.kind),
+			zap.Bool("settled_by_timeout", settled.timed),
 			zap.Strings("pending_now", pendingIDs),
-			zap.String("displayed_now", displayed),
-			zap.Int("queue_len", queueLen),
-			zap.Bool("wire_closed", closed),
 			zap.Time("resolved_at", startedAt),
 		)
-		return fmt.Errorf("no pending permission for decision %q", decisionID)
+		return pw.redeliverSettled(decisionID, choice, settled)
 	}
+
 	if entry.done {
-		// ── 审批生命周期日志③（失败）：已被处理过（重复点击 / 与超时竞态） ──
+		// 理论到不了这里（done 的 entry 会同时被 delete 并写 settled），保险起见走同一套语义。
+		st := &settledPerm{toolTitle: entry.toolTitle, toolKind: entry.toolKind, kind: PermResolveDenied}
 		pw.mu.Unlock()
-		pw.logger.Warn("approval resolve FAILED: already resolved or timed out",
-			zap.String("task", pw.taskID),
-			zap.String("decision_id", decisionID),
-			zap.String("choice", choice),
-			zap.Time("shown_at", entry.shownAt),
-			zap.Time("resolved_at", startedAt),
-			zap.Duration("since_shown", startedAt.Sub(entry.shownAt)),
-		)
-		return fmt.Errorf("permission %q already resolved or timed out", decisionID)
+		return pw.redeliverSettled(decisionID, choice, st)
 	}
+
 	// 先到先得：标记 done 并摘除 entry，停定时器，确保超时回调不会重复驱动 adapter。
 	entry.done = true
 	if entry.timer != nil {
@@ -430,21 +576,30 @@ func (pw *PermissionWire) Resolve(decisionID, choice string) error {
 	pw.mu.Unlock()
 
 	var adapterErr error
+	status := PermResolveApproved
 	switch choice {
-	case "approve", "approve_session":
+	case "approve", "approve_session", "approve_same":
+		// approve_same：前端在"上一张卡已经批过"的竞态下改投的补偿动作 ——
+		// 那条命令本来就应该放行，只是它的审批请求已经没有载体。pieqi 侧记成
+		// "本会话同类免审"，让 agent 发起的**下一次**同类请求直接通过（不再等人工）。
+		// 这与 approve_session 的落点相同，差别只在语义来源：一个是用户主动授权，
+		// 一个是重放补偿。
 		optionID, ok := pickAllowOption(options)
 		if !ok {
-			return fmt.Errorf("no allow option to approve for decision %q", decisionID)
+			pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, PermResolveDenied, false)
+			return resolveResult{reqID: decisionID, status: PermResolveDenied},
+				fmt.Errorf("no allow option to approve for decision %q", decisionID)
 		}
 		adapterErr = pw.callAdapterApprove(decisionID, optionID)
 		// "同类免审"只在**这次真的放行了**之后记账：approve 失败说明这次没批，
 		// 记下去会让以后同类静默通过。
 		// 注意回给 agent 的仍是 allow_once —— 会话内的免审由 pieqi 自己判，
 		// agent 侧那份"始终允许"不会被写（理由见 PermissionWire.sessionAlways）。
-		if adapterErr == nil && choice == "approve_session" {
+		if adapterErr == nil && choice != "approve" {
 			pw.rememberKind(toolKind)
 		}
 	case "deny":
+		status = PermResolveDenied
 		if optID, ok := pickRejectOption(options); ok {
 			// 选中 reject 选项即拒绝（ACP Selected outcome 带该 optionId）。
 			adapterErr = pw.callAdapterApprove(decisionID, optID)
@@ -453,28 +608,71 @@ func (pw *PermissionWire) Resolve(decisionID, choice string) error {
 			adapterErr = pw.callAdapterDeny(decisionID)
 		}
 	default:
-		return fmt.Errorf("invalid choice %q (want approve/approve_session/deny)", choice)
+		// 非法 choice：**不写 settled**（这次投递没有生效，不能让之后的正确投递被当成重放），
+		// 也不推进 —— 但必须把 entry 放回 pending，否则这张卡就真的没人应答了。
+		pw.mu.Lock()
+		entry.done = false
+		pw.pending[decisionID] = entry
+		if wasDisplayed {
+			pw.displayed = decisionID
+		}
+		pw.mu.Unlock()
+		return resolveResult{reqID: decisionID, status: PermResolveMissing},
+			fmt.Errorf("invalid choice %q (want approve/approve_session/approve_same/deny)", choice)
 	}
 	if adapterErr != nil {
-		return fmt.Errorf("adapter: %w", adapterErr)
+		// adapter 拒绝（请求已被另一路解决 / 会话已关）：按已结算处理，让重复点击
+		// 不再落到 no pending 上；结论取"未批准"，因为它确实没被放行。
+		pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, PermResolveDenied, false)
+		return resolveResult{reqID: decisionID, status: PermResolveDenied},
+			fmt.Errorf("adapter: %w", adapterErr)
 	}
 
-	// ── 审批生命周期日志②（成功）：人类确认 ─────────────────────────────────
-	// 与"发起"配对，两端相减即"人等了多久"。这个数字是判断
-	// "是不是因为人看到得太晚才超时"的关键 —— 也是本次加日志的首要目的。
-	pw.logger.Info("approval resolved by human",
+	pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, status, false)
+
+	pw.logger.Info("approval settled",
 		zap.String("task", pw.taskID),
 		zap.String("decision_id", decisionID),
 		zap.String("choice", choice),
 		zap.Bool("was_displayed", wasDisplayed),
+		zap.String("tool", entry.toolTitle),
 		zap.Time("shown_at", shownAt),
 		zap.Time("resolved_at", startedAt),
 		zap.Duration("waited", startedAt.Sub(shownAt)),
 	)
+	return resolveResult{reqID: decisionID, status: status}, nil
+}
 
-	// 推进：有排队审批则提升下一个继续展示（task 仍 waiting_input），否则 task 回 running。
-	pw.advance(decisionID)
-	return nil
+// redeliverSettled 对一个已结算的 reqID 重投同一结论。
+//
+// 三条判据（都是"保守侧"）：
+//   - 已批准 + 又要批 → 幂等成功、不再驱动 adapter；若是 approve_same（前端的补偿动作）
+//     额外记一次同类免审，见下。
+//     agent 已经执行过这条命令了，此时唯一**错误**的答复是拒绝。
+//   - 已拒绝（人工或超时）+ 又要批 → 不再替 agent 补一个允许：RequestPermission 早已
+//     返回，这个"批准"没有载体；改为记"同类免审"，让下一次同类请求直接通过，
+//     同时把真实结论回报给调用方（否则用户会以为批准生效了）。
+//   - 其余（拒绝重投拒绝 / 批过再拒绝）→ 与已发生的结论冲突，只记日志不改状态。
+func (pw *PermissionWire) redeliverSettled(decisionID, choice string, settled *settledPerm) (resolveResult, error) {
+	wantApprove := choice == "approve" || choice == "approve_session" || choice == "approve_same"
+	switch {
+	case settled.kind == PermResolveApproved && choice == "approve_same":
+		// 已批过 + 前端改投 approve_same：这是**用户第二次表达"允许"**，而它唯一的
+		// 可兑现效果就是"以后同类直接过"（那条 RequestPermission 早已返回，没有载体）。
+		// 这一步不能省成"什么都不做"：省掉它，用户点两次批准后得到的只有一张消失的卡，
+		// 而 agent 下一次同类操作照样弹卡 —— 从用户视角看，就是"批了没用"。
+		pw.rememberKind(settled.toolKind)
+		return resolveResult{reqID: decisionID, status: PermResolveApproved}, nil
+	case settled.kind == PermResolveApproved && wantApprove:
+		// 已批准：重复投递不会再驱动一次执行，直接回"已经批过了"。
+		return resolveResult{reqID: decisionID, status: PermResolveApproved}, nil
+	case settled.kind == PermResolveDenied && wantApprove:
+		// 已拒绝：没有载体可补，改记同类免审（下一次同类请求自动通过）。
+		pw.rememberKind(settled.toolKind)
+		return resolveResult{reqID: decisionID, status: PermResolveDenied}, nil
+	default:
+		return resolveResult{reqID: decisionID, status: settled.kind}, nil
+	}
 }
 
 // handleTimeout 超时定时器回调：Deny agent + IM 通知超时 + task 回 running。
@@ -488,11 +686,15 @@ func (pw *PermissionWire) handleTimeout(reqID string) {
 	}
 	entry.done = true
 	delete(pw.pending, reqID)
+	// 超时即"已拒绝"：记进 settled，这样用户**事后**点那张卡（它还在屏幕上，
+	// 应用也还没收到 task_updated）时，得到的是"这一条已经超时被拒了"，
+	// 而不是 2026-10-23 那次会话里刷屏的 no pending。
+	pw.rememberSettledLocked(reqID, entry.toolTitle, entry.toolKind, PermResolveDenied, true)
 	shownAt := entry.shownAt
 	pw.mu.Unlock()
 
 	// ── 审批生命周期日志③（失败）：超时 ─────────────────────────────────────
-	// 这条是"卡片还在、点下去却报 no pending"的**直接前因**：超时把 pending 摘掉了，
+	// 这条是"卡片还在、点下去却没反应"的**直接前因**：超时把 pending 摘掉了，
 	// 而 CurrentDecision 由 advance→backToRunning 清理（若推进失败则残留）。
 	// 记 waited 便于与 idle_timeout（会话回收阈值）对照 —— 两者若接近，
 	// 说明"人还没点，会话先被 reaper 关了"。
@@ -618,6 +820,9 @@ func (pw *PermissionWire) Unwire() {
 	pw.pending = make(map[string]*permPending)
 	pw.queue = nil
 	pw.displayed = ""
+	// settled **不在这里清**：拆卸后同一进程里仍可能有卡片残留（前端还没收到
+	// task_updated），此时点下去应当得到"这次的审批随会话结束了"，而不是 no pending。
+	// settled 本身有界（settledMax），随 wire 一起被 GC。
 	pw.mu.Unlock()
 
 	for _, e := range entries {

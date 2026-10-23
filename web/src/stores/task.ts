@@ -22,6 +22,12 @@ export const useTaskStore = defineStore('task', {
      */
     loaded: false,
     error: null as string | null,
+    /**
+     * 进行中的单任务刷新（taskId → Promise），供 refreshTask 合并并发请求。
+     * 非响应式包装：Pinia 对 state 里的 Map 也会做响应式代理，这里**不需要**它参与渲染，
+     * 但也不需要特殊处理 —— 代价只是多一层 proxy，收益是并发天然收敛。
+     */
+    refreshing: new Map<string, Promise<Task>>(),
   }),
 
   getters: {
@@ -215,9 +221,21 @@ export const useTaskStore = defineStore('task', {
      * （它同时同步两个 store），否则会出现"状态已更新、时间线还是旧的"。
      */
     async refreshTask(id: string) {
-      const task = await api.getTask(id)
-      this.upsertTask(task)
-      return task
+      // 同一 id 的并发刷新合并成一次：审批提交与 WS 重连补拉可能同时来这里，
+      // 各发一份 GET 只会让后到那份覆盖先到那份，多付一次往返却拿到同一结果。
+      const inflight = this.refreshing.get(id)
+      if (inflight) return inflight
+      const p = api
+        .getTask(id)
+        .then((task) => {
+          this.upsertTask(task)
+          return task
+        })
+        .finally(() => {
+          this.refreshing.delete(id)
+        })
+      this.refreshing.set(id, p)
+      return p
     },
 
     /** 本地状态微调（审批提交后的乐观更新） */

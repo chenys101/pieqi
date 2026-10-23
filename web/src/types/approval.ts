@@ -6,7 +6,13 @@
 // 之后 agent 不再发 RequestPermission，后端的 L2/L3 硬边界就失去拦截点。
 // 会话级免审由后端记账（不落盘、随会话销毁），见 internal/core/agent_perm.go 的 sessionAlways。
 
-export type ApprovalChoice = 'approve' | 'approve_session' | 'deny'
+//   approve_same                  —— 后端的**补偿动作**：这张卡的审批请求已经有结论
+//     （已批准/已拒绝/已被新卡顶掉），再投"批"没有载体。approve_same 的语义是
+//     "这条本来就应该放行，把工具类别记成本会话免审"，让 agent 之后同类请求直接通过。
+//     它**不出现在按钮上**，只在"用户点允许、后端回报已结算"时由 approve() 自动改投。
+//     为什么要这个动作：ACP 的 RequestPermission 一旦返回就无法再被放行，用户看到的是
+//     "我批了，但那条命令没跑" —— 补偿到"同类免审"才有可兑现的效果。
+export type ApprovalChoice = 'approve' | 'approve_session' | 'approve_same' | 'deny'
 
 /** 审批风险分级。等级由**后端**判定（复用 riskLevelKinds），前端不自己算 —— 见 riskOf()。 */
 export type RiskLevel = 'L0' | 'L1' | 'L2' | 'L3'

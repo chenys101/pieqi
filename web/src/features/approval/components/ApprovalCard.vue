@@ -7,6 +7,7 @@ import Button from '@/components/ui/Button.vue'
 import { ApprovalDiffCard } from '@/features/feedback'
 import ApprovalSummary from './ApprovalSummary.vue'
 import { useApprovalStore } from '@/stores/approval'
+import { useNotificationStore } from '@/stores/notification'
 import { useTaskStore } from '@/stores/task'
 import { RISK_LABELS, riskOf, type ApprovalChoice, type ApprovalRequest, type RiskLevel } from '@/types/approval'
 import { timeAgo } from '@/utils/date'
@@ -14,6 +15,7 @@ import { timeAgo } from '@/utils/date'
 const props = defineProps<{ approval: ApprovalRequest }>()
 const approvalStore = useApprovalStore()
 const taskStore = useTaskStore()
+const notify = useNotificationStore()
 const router = useRouter()
 
 const loading = ref<ApprovalChoice | null>(null)
@@ -61,13 +63,20 @@ const tone = computed(() => TONE[risk.value])
 
 /** L3 二次确认：只拦"允许"，不拦"拒绝"（拒绝是安全方向，再确认一次是添堵） */
 const needsConfirm = computed(() => risk.value === 'L3')
-/** 被 L3 确认条拦下来的那个允许动作；null = 没有在确认中 */
+/**
+ * 被 L3 确认条拦下来的那个允许动作；null = 没有在确认中。
+ * 只可能是两个"可见的允许"按钮 —— approve_same 是补偿动作，不出现在按钮上
+ * （见 types/approval.ts），所以这里的联合类型刻意不含它。
+ */
 const pending = ref<'approve' | 'approve_session' | null>(null)
+
+/** act 只接"看得见的按钮"对应的三种 choice（approve_same 由 store 内部改投） */
+type ButtonChoice = Exclude<ApprovalChoice, 'approve_same'>
 
 /** 「同类免审」由后端在 options 里声明可用（只有 ACP 路径带） */
 const canApproveSession = computed(() => props.approval.options.includes('approve_session'))
 
-async function act(kind: ApprovalChoice) {
+async function act(kind: ButtonChoice) {
   if (kind !== 'deny' && needsConfirm.value && pending.value === null) {
     pending.value = kind
     return
@@ -79,6 +88,10 @@ async function act(kind: ApprovalChoice) {
     if (kind === 'approve') await approvalStore.approve(taskId)
     else if (kind === 'approve_session') await approvalStore.approveSession(taskId)
     else await approvalStore.deny(taskId)
+  } catch (err) {
+    // 仪表盘上的卡**没有 useSession 那层 notify**：不在这里说出来，失败就彻底静默
+    // （用户看到的就是"点了允许、卡还在"）。
+    notify.error(err instanceof Error ? err.message : '审批失败')
   } finally {
     loading.value = null
   }
@@ -130,6 +143,8 @@ async function act(kind: ApprovalChoice) {
         </template>
       </div>
       <div class="mt-2 flex gap-2">
+        <!-- act(pending)：模板里 pending 已收窄为 'approve' | 'approve_session'（非 deny），
+             与 ButtonChoice 对应；不用非空断言，让类型检查替我守住这条不变量 -->
         <Button variant="danger" size="sm" :loading="loading === pending" @click="act(pending)">确认允许</Button>
         <Button variant="ghost" size="sm" @click="pending = null">取消</Button>
       </div>

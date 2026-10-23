@@ -83,9 +83,10 @@ export interface IntervenePayload {
   decisionId?: string
   /**
    * approve=只批这一次；approve_session=批这一次并把同 kind 的操作记入本会话免审；
+   * approve_same=补偿动作（审批已有结论、再批无载体时改记同类免审，见 types/approval.ts）；
    * deny=拒绝。可用动作由后端 Decision.options 声明（不是所有路径都支持 approve_session）。
    */
-  choice?: 'approve' | 'approve_session' | 'deny'
+  choice?: 'approve' | 'approve_session' | 'approve_same' | 'deny'
   text?: string
   /**
    * 本轮要用的模型（不透明串，见 GET /api/agents/{agent}/models）；不传 = 沿用会话当前。
