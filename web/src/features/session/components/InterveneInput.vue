@@ -178,11 +178,16 @@ function onPaste(data: DataTransfer | null) {
              视觉 36×36，命中区用伪元素外扩到 44×44（AC-R8-04 允许视觉 36）。
              `@mousedown.prevent`：点按钮不该把输入框的焦点抢走（判据见 ModelPicker）。 -->
         <template #actions>
+          <!-- `data-testid` 与 aria-label 各司其职：aria-label 是给读屏与既有用例的**语义名**，
+               testid 是给"几何/可点性"断言用的稳定锚点。测试里若按 `button[aria-label="发送"]`
+               取，那一刻**中止**态下什么都没有 —— 布局断言会随"任务是不是在跑"时红时绿
+               （2026-10-24 踩过）。两枚按钮共用 `composer-send` 这一个 id，语义就是"这一行的主按钮"。 -->
           <button
             v-if="canCancel"
             class="pointer-events-auto relative shrink-0 rounded-[var(--radius-sm)] bg-error/15 p-2.5 text-error transition-colors after:absolute after:-inset-1 after:content-[''] hover:bg-error/25 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40"
             title="中止生成"
             aria-label="中止"
+            data-testid="composer-send"
             @click="emit('cancel')"
             @mousedown.prevent
           >
@@ -196,6 +201,7 @@ function onPaste(data: DataTransfer | null) {
             :disabled="sendDisabled"
             title="发送 (Ctrl+Enter)"
             aria-label="发送"
+            data-testid="composer-send"
             @click="onSend"
             @mousedown.prevent
           >

@@ -276,6 +276,17 @@ it('触发器显示会话当前模型的人读名（不是不透明串）', () =
   expect(trigger.getAttribute('aria-label')).toContain('X')
 })
 
+it('清单解析得到的长名字**原样显示**，不按字符截（截了就看不出选的哪个模型）', () => {
+  // 2026-10-24：TRIGGER_MAX_NAME 只在"解析不到"时兜底。早先无条件截断，
+  // 「DeepSeek-V4.1-Flash」会变成「DeepSeek-V4.1-…」；而触发器宽度已由 CSS
+  // （max-w-[8.75rem] + truncate）负责收窄，**不该再在数据层截**。
+  const LONG = [{ value: 'deepseek-official', name: 'DeepSeek-V4.1-Flash', group: 'DeepSeek' }]
+  const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: LONG, currentModel: LONG[0].value })
+  const trigger = host.querySelector('[data-testid="model-picker-trigger"]')!
+  expect(trigger.textContent).toContain('DeepSeek-V4.1-Flash')
+  expect(trigger.textContent).not.toContain('…')
+})
+
 it('弹层 Teleport 到 body（脱离输入栏的层叠上下文），由触发器 rect 算 fixed 定位', async () => {
   /**
    * 2026-10-23：这条用例原来断言的是 `bottom-full`（贴触发器往上弹的 absolute 定位）。

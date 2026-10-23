@@ -62,6 +62,9 @@ const currentName = computed(() => {
   return catalog.value.find((m) => m.value === props.model)?.name ?? '当前模型'
 })
 
+/** 清单能否**解析**当前值：只有这时 currentName 才是真正的名字，而不是"当前模型"兜底 */
+const currentResolved = computed(() => !!props.model && catalog.value.some((m) => m.value === props.model))
+
 /**
  * 触发器上的短名：太长的名字会把输入框挤扁，截断并用 title 兜住全名。
  *
@@ -69,10 +72,16 @@ const currentName = computed(() => {
  * 20 个字符的名字在 375 宽下会把行挤到换行（实测：`DeepSeek-V4.1-Flash` 19 字符时
  * 新建任务页的动作行从 62px 涨到 104px）。14 字符约 100px，三个控件在同一行放得下；
  * 鼠标悬停有全名，弹层头上也有「当前：全名」。
+ *
+ * ⚠️ 只在**解析不到**时用这个兜底（清单还没到、或当前值不在清单里）：
+ * 那时 `currentName` 是"当前模型"四个字。解析得到时直接用真正的名字 ——
+ * 它比不透明串短得多，按字符截反而会把 `DeepSeek-V4.1-Flash` 截成
+ * `DeepSeek-V4.1-…` 这种看不出在哪个模型上的样子。
  */
 const TRIGGER_MAX_NAME = 14
 const currentLabel = computed(() => {
   const n = currentName.value
+  if (currentResolved.value) return n
   return n.length > TRIGGER_MAX_NAME ? `${n.slice(0, TRIGGER_MAX_NAME - 1)}…` : n
 })
 
@@ -118,7 +127,14 @@ const placement = ref<Placement | null>(null)
  * 所以位置在打开时算一次、并跟着 `resize` / `scroll` 重算（见下面的监听）。
  * 算不出来（触发器还没布局）时置 null，模板里退化成"不给内联定位"，
  * 下一帧 `nextTick` 会再算一次。
+ *
+ * 触发器**本身**已经缩到 ≤140px（见模板上的 max-w），所以弹层需要的最小高度也变小了：
+ * 首项 + 两三项就该看得见。`FLOOR` = 这个下限（旧值 120 是按 160px 触发器 + 大内边距
+ * 定的）；真正的高度是 min(期望高度, 上方可用空间, 60% 视口高)，见 measure 末尾。
  */
+const FLOOR = 96
+const VIEW_MARGIN = 8
+
 function measure() {
   const el = root.value?.querySelector('button')
   if (!el) return
@@ -128,6 +144,8 @@ function measure() {
   const vh = window.innerHeight
   const mobile = vw < 768
   const above = r.top - GAP
+  // 上方可用空间（扣掉视口顶边留白）
+  const room = Math.max(0, above - VIEW_MARGIN)
   placement.value = {
     mobile,
     // 手机：横铺满视口（两侧各留 EDGE）；宽屏：对齐触发器左沿，别超出视口
@@ -135,8 +153,16 @@ function measure() {
     width: mobile ? vw - EDGE * 2 : Math.min(WIDE_WIDTH, vw - EDGE * 2),
     // 贴触发器上沿往上弹 —— 与"输入框永远在弹层下方"的视觉关系保持一致
     bottom: vh - above,
-    // 天花板：不能顶出视口（否则首项被裁），也不能遮满整屏（还要看得到时间线）
-    maxHeight: Math.max(120, Math.min(POPUP_MAX, above - EDGE)),
+    // 天花板 = min(期望高度, 上方可用空间, 视口高度的 60%)。
+    // ★ 2026-10-24（移动端多了一条「在「x」新建任务」入口后复测）：输入条整体上移，
+    //   触发器离视口顶越来越近，375×667 下原来恒定的 120px 下限会把"上方 99px"
+    //   的弹层算成 120px ⇒ 顶边伸到视口外、首项被裁。下限只能**在真有空间时**兜底。
+    maxHeight: Math.max(0, Math.min(POPUP_MAX, room, Math.round(vh * 0.6))),
+  }
+  if (placement.value.maxHeight < FLOOR) {
+    // 空间确实极小（矮屏 + 软键盘）：不再硬撑到 FLOOR，而是如实变小 ——
+    // 列表自己会滚动，至少首项完整可见（"看得到上面三项的一部分"不如"看得到第一项"）。
+    placement.value.maxHeight = Math.max(48, placement.value.maxHeight)
   }
 }
 
@@ -226,13 +252,18 @@ watch(hasCatalog, (has) => {
        div 上（2026-10-19 曾误以为在 div 上，写出过"被自己拦截"的假红）。 -->
   <!-- `min-w-0`：可压缩（理由见下面按钮的注释），否则窄屏时它撑住宽度、把动作行顶成两行 -->
   <div ref="root" class="pointer-events-auto relative min-w-0" data-testid="model-picker">
-    <!-- ⚠️ 触发器按钮的 `min-w-0` 必须显式给：按钮默认 `min-width:auto`，遇到长名字时
-         **不肯缩**，于是 flex 行宁可换行也不压缩它 —— 375 宽下新建任务页（加图按钮 +
-         选择器 + 发送按钮同行）会把行顶成两行、输入条白白高出一截（实测 62px → 104px）。
-         配合 `max-w-[10rem]` 与按钮内的 `truncate`，窄屏时文字自己省略、行不换。 -->
+    <!-- 布局口径（2026-10-24 调整，为"详情页新建任务"入口腾位）：
+           · 触发器**固定一个中性上限** `max-w-[8.75rem]`（140px），而不是随文字收缩；
+           · 容器给一个较小的 `basis`（84px）并允许拉伸：**行内还有空间时它长大到上限**，
+             空间不够时才被压缩 —— 这就是"长名字模型（如 DeepSeek-V4.1-Flash）平时仍读得出"
+             与"窄屏 + 多一个按钮也不会把行顶成两行"这两件事的唯一同时解。
+         ⚠️ 旧值 `max-w-[10rem]`（160px）+ 不压缩的触发器，在 375 宽下多一枚 36px 按钮时
+         **不会换行而是溢出**：模型名与右侧按钮的命中区外扩（after:-inset-1）共占 39px，
+         实测"模型选择器"与"发送"重叠 7px（修法见 e2e/layout/fixture.spec.ts 的
+         pickerClearance）。 -->
     <button
       type="button"
-      class="flex min-h-8 min-w-0 max-w-[10rem] flex-1 items-center gap-1.5 rounded-[var(--radius-sm)] px-2 py-1 text-xs transition-colors hover:bg-elevated focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
+      class="flex min-h-8 min-w-0 max-w-[8.75rem] flex-1 basis-[84px] items-center gap-1.5 rounded-[var(--radius-sm)] px-2 py-1 text-xs transition-colors hover:bg-elevated focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
       :class="open ? 'bg-elevated text-text' : 'text-muted'"
       :disabled="disabled"
       :aria-label="`模型：${currentName}，点击切换`"
