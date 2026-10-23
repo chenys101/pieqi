@@ -29,6 +29,36 @@ const sessionStore = useSessionStore()
 const agentStore = useAgentStore()
 const notify = useNotificationStore()
 
+/**
+ * 上游给的**预选项目路径**（目前只有一处来源：任务详情页的「新建任务」入口，
+ * 带 `?project=<当前任务的绝对路径>` 进来 —— 用户 2026-10-24 要求：从某个任务点创建时，
+ * 默认就该落在那个任务的项目里）。
+ *
+ * 为什么按"用户已经决定"对待（直接置 pathTouched）而不是当成另一个默认值：
+ * 这是**有来处**的选择（"我在看这个项目的任务，接着在这个项目里再开一个"），
+ * 比设置里的默认工作目录更具体。若只把它填进 selectedPath，下面那段默认值逻辑
+ * （默认目录 / 最近项目）会把它当成"系统猜的"继续覆盖，表现就是"点了没用"。
+ * 它不影响其余流程：用户仍可在选择器里换成任何别的项目，选了就照常生效。
+ */
+const props = withDefaults(defineProps<{ initialProjectPath?: string }>(), { initialProjectPath: '' })
+
+/** 预选值本身无效（空 / 非绝对路径 / 是根目录）时不预选：那只会让用户在一个怪目录里干活 */
+const presetPath = computed(() => {
+  const p = (props.initialProjectPath || '').trim()
+  if (!p) return ''
+  // 绝对路径判据只看形态（`C:\...` / `\\server\...` / `/...`），不猜盘符白名单：
+  // 前端拿不到服务端的路径是否为目录，真正的校验在后端 resolveTaskPath 里。
+  if (!/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(p)) return ''
+  if (/^[a-zA-Z]:[\\/]?$/.test(p) || p === '/') return ''
+  return p
+})
+/**
+ * 是否真的带着预选值进来的（决定那枚「来自当前任务」徽标露不露）。
+ * 用 ref 而不是直接看 presetPath：**一旦用户改成别的项目，徽标就该消失** ——
+ * 这个徽标说的是"这个项目是从那来的"，不是"这页是从那进来的"。
+ */
+const presetActive = ref(!!presetPath.value)
+
 const prompt = ref('')
 /** 已选图片（v-model 给 ImagePicker）。发送后清空 —— 图片是**按轮**载荷。 */
 const images = ref<PendingImage[]>([])
@@ -37,6 +67,11 @@ const imagePicker = ref<{ open: (data: DataTransfer) => void } | null>(null)
 const mode = ref<'select' | 'path'>('select')
 const selectedPath = ref('')
 const customPath = ref('')
+/**
+ * 预选项目落到哪一边：在历史项目清单里就用下拉框（`select`），不在就用自定义路径输入
+ * （`path`，例如是别的机器/别的工作区里的目录）。判据见下面 `presetUsesCustom` 的注释。
+ */
+const presetUsesCustom = ref(false)
 const creating = ref(false)
 
 /**
@@ -57,8 +92,11 @@ const pathTouched = ref(false)
  * 默认**收起**：默认目录就是绝大多数时候的答案，选择器摊在首屏等于每次都要
  * 从一堆无关的东西里穿过它才能打字。没有默认目录（且没有历史项目）时才展开，
  * 因为那时它是必填项。
+ *
+ * 从详情页带着项目进来时是**例外**（见 presetPath）：那一行的摘要不显示"默认目录"
+ * 徽标（它不是默认目录），用户需要能一眼看出"是哪个项目"，所以直接摊开选择器。
  */
-const showProjectPicker = ref(false)
+const showProjectPicker = ref(!!presetPath.value)
 
 /** 当前生效的项目路径（空 = 交给后端的默认目录） */
 const effectiveProjectPath = computed(() => {
@@ -136,7 +174,48 @@ onMounted(async () => {
   }
 })
 
+/**
+ * 预选项目（只做一次）。
+ *
+ * 为什么挂在"历史项目到了"之后而不是 onMounted 里立刻赋值：`mode` 取 select 还是 path
+ * 取决于**它是不是历史项目之一**（下拉框里没有那一项时，`<select>` 会显示成空白，
+ * 用户只看到"项目那一栏空着"—— 明明有值却像没选）。等清单到了再判，就一次判对；
+ * 清单拉不到时 taskStore.loaded 也会置真（见 store 的注释），所以不会一直等下去。
+ *
+ * 它同时置 `pathTouched`：这是详情页带过来的**有来处**的选择，必须压过下面那段
+ * 默认值逻辑（默认目录 / 最近项目），否则就是"点了新建，项目却换成了别的"。
+ */
+const presetApplied = ref(false)
+watch(
+  [projects, () => taskStore.loaded],
+  ([list]) => {
+    if (presetApplied.value) return
+    const p = presetPath.value
+    if (!p) {
+      presetApplied.value = true // 没有预选：交给下面的默认值逻辑
+      return
+    }
+    pathTouched.value = true
+    showProjectPicker.value = true
+    const hit = list.find((x) => groupKey(x.projectPath) === groupKey(p))
+    if (hit) {
+      selectedPath.value = hit.projectPath // 与下拉项完全一致（大小写/尾斜杠归一）
+    } else {
+      // 不在这里"等清单完整再判"：清单拉失败时它也会到（store 在 finally 里置 loaded），
+      // 但若就此把值填进 path 模式，用户后面看到下拉里出现它也不会被二次改写 ——
+      // 判据是"值已经填好、能提交"，不是"清单一定完整"。落错也不会出事故：
+      // 路径是详情页任务的真实项目，服务端会照常校验它是个目录。
+      presetUsesCustom.value = true
+      mode.value = 'path'
+      customPath.value = p
+    }
+    presetApplied.value = true
+  },
+  { immediate: true },
+)
+
 // 项目默认值（已不是必选项）：
+//   ⓪ 详情页带着当前任务的项目进来 → 已经选好（见上面的预选块），这里一概不动；
 //   ① 有默认工作目录 → 什么都不选，直接用它（不再自动选中"最近项目"：
 //      选一个用户没要的目录，比让默认目录生效更容易让人意外地在错的仓库里干活）；
 //   ② 没有默认目录但有历史项目 → 选中最近的一个（与从前一致）；
@@ -219,6 +298,17 @@ const canAttachImages = computed(() => selectedAgent.value?.imagePrompt === true
  */
 function onPaste(data: DataTransfer | null) {
   if (data) imagePicker.value?.open(data)
+}
+
+/**
+ * 用户动过项目就等于**放弃了预选**：那枚「来自当前任务」徽标不能再挂着 ——
+ * 它会变成一句假话（"这个项目来自当前任务"，而用户刚改成了别的）。
+ *
+ * 预选值本身仍留在 store 的 pathTouched 语义里（"用户已决定"），只是不再被强调。
+ */
+function markPathTouched() {
+  pathTouched.value = true
+  presetActive.value = false
 }
 
 async function submit() {
@@ -307,7 +397,18 @@ async function submit() {
                     <span class="min-w-0 truncate font-mono" :class="usingDefaultPath ? 'text-text-tertiary' : 'text-text'">
                       {{ projectSummary }}
                     </span>
-                    <span v-if="usingDefaultPath" class="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[11px] text-text-tertiary">
+                    <!-- 「来自当前任务」：从任务详情页点进来的预选值。**只说事实**（这个项目是
+                         从哪儿带过来的），不构成一条规则 —— 用户改成别的项目后徽标随之消失
+                         （见 clearPresetBadge）。两种形态都要有：历史项目里有的走下拉框、
+                         没有的（别的机器/别的工作区）走自定义路径输入。 -->
+                    <span
+                      v-if="presetActive"
+                      class="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[11px] text-text-tertiary"
+                      data-testid="project-from-task"
+                    >
+                      来自当前任务
+                    </span>
+                    <span v-else-if="usingDefaultPath" class="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[11px] text-text-tertiary">
                       默认目录
                     </span>
                   </div>
@@ -320,13 +421,19 @@ async function submit() {
               <div v-if="showProjectPicker" class="mt-2 flex flex-col gap-2 border-t border-border-subtle pt-2">
                 <div class="flex gap-2">
                   <template v-if="mode === 'select'">
-                    <Select v-model="selectedPath" class="min-w-0 flex-1" aria-label="历史项目" @change="pathTouched = true">
+                    <Select v-model="selectedPath" class="min-w-0 flex-1" aria-label="历史项目" @change="markPathTouched">
                       <!-- 空值项 = 用默认目录。显式列出它，用户才能在"选了历史项目"之后**退回**默认 -->
                       <option v-if="defaultProjectPath" value="">使用默认目录（{{ defaultProjectPath }}）</option>
                       <option v-for="p in projects" :key="groupKey(p.projectPath)" :value="p.projectPath">
                         {{ p.projectId || p.projectPath }}
                       </option>
                       <option v-if="!projects.length" value="" disabled>暂无历史项目 — 请自定义路径</option>
+                      <!-- 预选的项目在**清单到达前**就已决定用自定义路径（见预选块）；
+                           用户随时可以切回下拉，那一项要能找得到 —— 否则一按「选项目」
+                           预选值就从界面上消失，只剩一句"选一个"的空下拉。 -->
+                      <option v-if="presetUsesCustom && presetPath" :value="presetPath">
+                        {{ presetPath }}
+                      </option>
                     </Select>
                     <Button size="sm" @click="mode = 'path'">自定义路径</Button>
                   </template>
@@ -335,9 +442,15 @@ async function submit() {
                       v-model="customPath"
                       class="min-w-0 flex-1"
                       placeholder="输入绝对路径，如 G:\workspace\erp"
-                      @input="pathTouched = true"
+                      @input="markPathTouched"
                     />
-                    <Button v-if="projects.length || defaultProjectPath" size="sm" @click="mode = 'select'">选项目</Button>
+                    <Button
+                      v-if="projects.length || defaultProjectPath || (presetUsesCustom && presetPath)"
+                      size="sm"
+                      @click="mode = 'select'"
+                    >
+                      选项目
+                    </Button>
                   </template>
                 </div>
                 <!-- 兜底提示：既没默认目录也没选任何东西时，必须把"为什么发不出去"说出来 -->

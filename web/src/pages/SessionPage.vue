@@ -270,6 +270,28 @@ function askRemove() {
   removeConfirming.value = true
 }
 
+/**
+ * 「基于本项目新建任务」：带着**本任务的项目**跳到新建页（用户 2026-10-24 要求：
+ * 详情页点创建时，默认就该是当前任务的项目）。
+ *
+ * 传绝对路径而不是项目 id/名字：新建页提交用的就是 `project_path`
+ * （见 services/api/tasks.createTask 与后端 resolveTaskPath），传同一个口径
+ * 才不用在中间做一次"id → 路径"的反查（那份映射只在服务端，前端拿不到完整的）。
+ *
+ * ⚠️ 这里传**原样路径**，不要自己 `encodeURIComponent`：vue-router 生成 href 时已经编过
+ * （`?project=D%3A%2Fcode%2Fgo%2Fpieqi`），解析时又会解回原串。两边各编一次就会变成
+ * `D%253A…`，新建页拿到的是一个 `D%3A…` 开头的怪路径（2026-10-24 实测踩过——
+ * 页面显示 `D:/code/go/pieqi/web`、徽标消失，看起来像"预选没生效"）。
+ * 路径里的 `\ # % &` 由浏览器/vue-router 的编码负责，它们本来就是 URL 编码该管的事。
+ */
+const newTaskHref = computed(() => {
+  const p = (task.value?.projectPath || '').trim()
+  return {
+    path: '/tasks/new',
+    query: p ? { project: p } : {},
+  }
+})
+
 async function doRemove() {
   if (!task.value) return
   removeConfirming.value = false
@@ -346,6 +368,39 @@ async function doRemove() {
             @cancel="cancel"
             @switch-model="switchModel"
           />
+
+          <!-- 「基于本项目新建任务」：**只在移动端**出现（v-if 而不是 v-show）。
+               落点判据（2026-10-24，实测过四个候选）：
+                 · 头部那一行：横向已被 返回/标题/状态/用量/反馈图标 占满（375 宽下只剩 ~20px）；
+                   硬塞进去要么截断标题，要么截断状态 —— 那一行是常驻 chrome，不该为一次性动作让位。
+                 · 输入条动作行内（模型选择器旁边）：最贴近"要输入了，先开个新活"的意图，
+                   但它是 36px 图标 + 第 4 个控件，`DeepSeek-V4.1-Flash` 这类长名模型下
+                   380+8 宽即溢出/重叠（见 ModelPicker 的 max-w 注释）。可做，但要牺牲模型名可读性。
+                 · 输入框上方悬浮：正文变长后要跟 textarea 一起挪，且与底部横幅/软键盘抢位。
+                 · ★ 输入条**下方、底栏上方**（这里）：不截任何文字；拇指区；只有"想再开一个"时
+                   才看一眼，平时的视线停在输入框。整条点击区 44px，与底栏之间留 8px 间隙，
+                   避免手指从底栏滑上来时误触。
+               桌面/平板**不放**：那里有侧栏「＋ 新建任务」，Dashboard 与任务树都在一屏内，
+               再放一个就是同一件事两个入口（与「删除只放列表页」「中止只放输入框」同一条口径）。 -->
+          <!-- 「基于本项目新建任务」——**只在移动端**出现：`isMobile` 是 `useResponsive` 的
+               JS 布尔（与路由守卫同一个 `(max-width: 768px)`），换档位会重渲染。
+               刻意**不用** `md:hidden`（纯 CSS）：那会让这条 DOM 在平板/桌面上也存在，
+               量尺寸与时序断言会多一个"存在但看不见"的元素，而它的语义就是"这张屏上没有"。 -->
+          <div v-if="isMobile" class="shrink-0 px-3 pb-2" data-testid="session-new-task-bar">
+            <ContentColumn :resizable="false">
+              <RouterLink
+                :to="newTaskHref"
+                class="flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-xs font-medium text-text transition-colors hover:bg-elevated focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40"
+                :title="task.projectPath ? `在「${task.project || task.projectPath}」里新建任务` : '新建任务'"
+                data-testid="session-new-task"
+              >
+                <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                <span class="min-w-0 truncate">在「{{ task.project || '当前项目' }}」新建任务</span>
+              </RouterLink>
+            </ContentColumn>
+          </div>
         </div>
 
         <!-- 移动端：整屏反馈。放在左列内部（而不是它的兄弟）是因为那唯一一行
