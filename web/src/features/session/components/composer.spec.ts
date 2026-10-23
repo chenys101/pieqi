@@ -50,7 +50,8 @@ async function type(host: HTMLElement, value: string) {
 }
 
 /** 补全菜单容器（贴输入框上方那块）；未弹出时为 null */
-const menu = (host: HTMLElement) => host.querySelector('[class*="bottom-full"]')
+const menu = (host: HTMLElement) =>
+  host.querySelector('[data-testid="composer-frame"]')?.parentElement?.querySelector('[class*="bottom-full"]') ?? null
 /** 菜单里的候选按钮（分组标题是 div 不是 button，别把两者混在一个计数里） */
 const menuItems = (host: HTMLElement) =>
   menu(host) ? [...menu(host)!.querySelectorAll('button')].map((b) => b.textContent) : []
@@ -164,8 +165,25 @@ const MODELS = [
 async function openPicker(host: HTMLElement) {
   ;(host.querySelector('[data-testid="model-picker-trigger"]') as HTMLButtonElement).click()
   await nextTick()
+  await nextTick()
 }
-const pickerPopup = (host: HTMLElement) => host.querySelector('[data-testid="model-picker-popup"]')
+
+/**
+ * 模型选择器的**触发器**（在输入条动作行里）。
+ *
+ * ⚠️ 弹层已经 Teleport 到 body（2026-10-23），**不在 host 里** —— 见 pickerPopup 的注释。
+ */
+const pickerTrigger = (host: HTMLElement) => host.querySelector('[data-testid="model-picker-trigger"]')
+
+/**
+ * 模型选择器的**弹层**。
+ *
+ * 它被 Teleport 到 `document.body`，所以从 host 里查不到 —— 这不是"没渲染"，
+ * 而是刻意的结构：弹层必须离开输入栏的层叠上下文（`composer-bar` 有
+ * `backdrop-filter`，会自成层叠上下文，把弹层困在里面 ⇒ 上半截被时间线/消息盖住）。
+ * jsdom 量不出层叠，但能钉住"它在 body 下、不在输入条子树里"这个结构。
+ */
+const pickerPopup = () => document.querySelector('[data-testid="model-picker-popup"]')
 
 describe('InterveneInput', () => {
   it('宽度口径交给 ContentColumn（唯一一处定义），外条仍满宽承载 border-top —— AC-R8-01', () => {
@@ -258,27 +276,51 @@ it('触发器显示会话当前模型的人读名（不是不透明串）', () =
   expect(trigger.getAttribute('aria-label')).toContain('X')
 })
 
-it('弹层自下而上弹出（bottom-full）且贴着输入框上沿', async () => {
+it('弹层 Teleport 到 body（脱离输入栏的层叠上下文），由触发器 rect 算 fixed 定位', async () => {
+  /**
+   * 2026-10-23：这条用例原来断言的是 `bottom-full`（贴触发器往上弹的 absolute 定位）。
+   * 那个形态的问题不是"方向不对"，而是**弹层活在输入栏的层叠上下文里**：
+   * `composer-bar` 有 `backdrop-filter`（backdrop-blur），会自成层叠上下文，
+   * 弹层 `z-50` 只在那条输入栏内部有效 —— 一旦主体里元素盖上来，表现是
+   * "只看到露出输入框上方的一条缝"、点选项点到后面的消息。
+   * 所以判据从"定位类名"换成"结构 + 定位方式"：必须在 body 下、在输入条之外、
+   * 而且是 `fixed`（absolute 意味着又贴回了某个祖先）。
+   */
   const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
-  expect(pickerPopup(host)).toBeNull()
+  expect(pickerPopup()).toBeNull()
   await openPicker(host)
-  const popup = pickerPopup(host)!
-  expect(popup.className).toContain('bottom-full') // 向上展开，不是向下
-  expect(popup.className).toContain('mb-1') // 与触发器之间留缝
+  const popup = pickerPopup()!
+  // ① 不在输入条子树里（层的判据）
+  expect(host.contains(popup), '弹层还挂在输入条子树里：会被 compose-bar 的层叠上下文困住').toBe(false)
+  // ② 在 body 下（Teleport 的目标）
+  expect(popup.closest('body')).toBe(document.body)
+  // ③ fixed 定位（位置由触发器 rect 算，见 ModelPicker 的 measure()）
+  expect(popup.className).toContain('fixed')
+  // ④ 层级要盖过一切页面内容（底栏 / 侧栏 / 时间线）
+  expect(popup.className).toMatch(/z-\[(100|\d{3,})\]/)
 })
 
-it('移动端：限高 60dvh + 内部滚动 + 底部安全区内边距 + 每项 44px 命中区', async () => {
+it('移动端：高度由"触发器上方可用空间"夹取 + 内部滚动 + 底部安全区内边距 + 每项 44px 命中区', async () => {
   const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
   await openPicker(host)
-  const list = pickerPopup(host)!.querySelector('[role="listbox"]') as HTMLElement
-  // ① 小屏上不能盖满整屏：限高后内部滚动
-  expect(list.className).toContain('max-h-[min(60dvh,20rem)]')
+  const popup = pickerPopup()!
+  const list = popup.querySelector('[role="listbox"]') as HTMLElement
+  // ① 限高落在**弹层容器**（maxHeight 由 measure() 按触发器上方空间算，内联 style），
+  //    列表自己只负责滚动 —— 旧实现把 `max-h-[min(60dvh,20rem)]` 写死在列表上，
+  //    小屏上弹层顶会被裁到视口外（实测 -287px），首项直接看不见。
+  //
+  //    ⚠️ jsdom 里 `getBoundingClientRect()` 恒为 0，measure() 会主动放弃定位
+  //    （见它的 `if (!r.width && !r.height) return`）—— 所以这里量不到 max-height。
+  //    内联定位的真实数值归 e2e/layout（真浏览器，三视口）。这里只钉结构。
+  const style = popup.getAttribute('style') ?? ''
+  if (style) expect(style).toContain('max-height')
   expect(list.className).toContain('overflow-y-auto')
   expect(list.className).toContain('overscroll-contain') // 滚到底不带动背后的时间线
+  expect(list.className).toContain('min-h-0') // 可收缩，否则内容把弹层撑破
   // ② iPhone 底部横条 / Home 指示器不压住最后一项
   expect(list.className).toContain('pb-[env(safe-area-inset-bottom)]')
   // ③ 触控最小命中区 44px
-  for (const opt of pickerPopup(host)!.querySelectorAll('[role="option"]'))
+  for (const opt of popup.querySelectorAll('[role="option"]'))
     expect(opt.className, '选项触控区不足 44px').toContain('min-h-11')
 })
 
@@ -291,17 +333,17 @@ it('清单按分组渲染；选中某项 emit 的是那个不透明串（原样�
     onSwitchModel: onSwitch,
   })
   await openPicker(host)
-  expect(pickerPopup(host)!.textContent).toContain('magpie') // 分组标题
-  expect(pickerPopup(host)!.textContent).toContain('更强但更贵') // 选项说明
+  expect(pickerPopup()!.textContent).toContain('magpie') // 分组标题
+  expect(pickerPopup()!.textContent).toContain('更强但更贵') // 选项说明
 
-  const opt = [...pickerPopup(host)!.querySelectorAll('[role="option"]')].find(
+  const opt = [...pickerPopup()!.querySelectorAll('[role="option"]')].find(
     (o) => o.textContent!.includes('Y'),
   ) as HTMLButtonElement
   opt.click()
   await nextTick()
   expect(onSwitch).toHaveBeenCalledWith(MODELS[1].value)
   // 选中即关闭弹层（点完还杵着会挡住继续看时间线）
-  expect(pickerPopup(host)).toBeNull()
+  expect(pickerPopup()).toBeNull()
 })
 
 it('「Agent 默认」= 清空选择（emit 空串，交还 agent 路由）', async () => {
@@ -314,7 +356,7 @@ it('「Agent 默认」= 清空选择（emit 空串，交还 agent 路由）', as
     onSwitchModel: onSwitch,
   })
   await openPicker(host)
-  ;(host.querySelector('[data-testid="model-picker-default"]') as HTMLButtonElement).click()
+  ;(pickerPopup()!.querySelector('[data-testid="model-picker-default"]') as HTMLButtonElement).click()
   await nextTick()
   expect(onSwitch).toHaveBeenCalledWith('')
 })
@@ -327,11 +369,23 @@ it('该 agent 没有清单：触发器仍在，弹层里说明原因（不是静
     modelsLoaded: true,
   })
   // 触发器必须还在：整个藏起来会让用户以为功能不存在
-  expect(host.querySelector('[data-testid="model-picker-trigger"]')).not.toBeNull()
+  expect(pickerTrigger(host)).not.toBeNull()
   await openPicker(host)
-  expect(host.querySelector('[data-testid="model-picker-empty"]')!.textContent).toContain('不提供可选模型')
+  expect(pickerPopup()!.querySelector('[data-testid="model-picker-empty"]')!.textContent).toContain('不提供可选模型')
   // 弹层外另有一句说明（弹层关着时它才有出处）
   expect(host.querySelector('[data-testid="composer-model-unsupported"]')).not.toBeNull()
+})
+
+it('弹层开着时锁住页面滚动，收起后解除（滚动不逃逸到正文）', async () => {
+  const { host, app } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
+  await openPicker(host)
+  expect(document.documentElement.classList.contains('overflow-hidden'), '弹层开着却没锁页面滚动').toBe(true)
+  // 选中即收起 —— 锁也必须一起解除，否则整页从此滚不动
+  ;(pickerPopup()!.querySelector('[role="option"]') as HTMLButtonElement).click()
+  await nextTick()
+  expect(pickerPopup()).toBeNull()
+  expect(document.documentElement.classList.contains('overflow-hidden'), '弹层已收起但页面仍被锁住').toBe(false)
+  app.unmount()
 })
 
 it('运行中禁用切换（这一轮的模型已定死），不摆一个按了没用的开关', () => {
@@ -392,7 +446,7 @@ describe('框内控件不抢输入框焦点（mousedown.prevent）', () => {
     }
     // 弹层里的「Agent 默认」也一样：选完要能接着写
     await openPicker(host)
-    const def = pickerPopup(host)!.querySelector('[data-testid="model-picker-default"]')!
+    const def = pickerPopup()!.querySelector('[data-testid="model-picker-default"]')!
     const ev = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
     def.dispatchEvent(ev)
     expect(ev.defaultPrevented).toBe(true)

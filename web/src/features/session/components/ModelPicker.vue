@@ -6,8 +6,8 @@
 // 也无法控制移动端弹层的高度与安全区。要的就是这个弹层形态，所以自己实现。
 //
 // 三处移动端考量（模板里逐条标注）：
-//   1. 贴底弹出 + max-h-[min(60dvh,20rem)]：小屏上盖住输入框但不遮满整屏，还能往上滚；
-//   2. env(safe-area-inset-bottom)：iPhone 底部横条/Home 指示器会压住最后一项；
+//   1. 贴底弹出 + max-h 由「触发器上方可用空间」与 60dvh 取小：小屏上盖住输入框但不遮满整屏，还能往上滚；
+//   2. 贴视口底时避让安全区：iPhone 底部横条/Home 指示器会压住最后一项；
 //   3. 每个选项 min-h-11（44px）：满足触控最小命中区。
 //
 // 取值纪律：value 是 agent 下发的**不透明串**，原样回传，本组件不解析不拼接。
@@ -17,7 +17,22 @@
 // 但用户的操作顺序没变：先写一半、点一下换个模型、接着写。不拦 mousedown 的话，
 // 点触发器会把 input 的焦点抢走 —— 接着敲的字谁也不收（实测：点开再关掉，
 // `document.activeElement` 停在触发器上，输入框里一个字都没进去）。
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+//
+// ★★ 层叠（2026-10-23 改）：弹层 **Teleport 到 body**，用触发器 rect 算 fixed 定位。
+//
+//   旧实现把弹层 `absolute bottom-full z-50` 挂在触发器旁边 —— 它于是活在
+//   **输入栏的层叠上下文里**（`composer-bar` 有 `backdrop-blur`，backdrop-filter
+//   会自成层叠上下文）。z-50 只在那条输入栏内部有效，与时间线/正文谁在上由
+//   输入栏所在那一层决定。一旦被主体盖住，表现就是"只看到露出输入框上方的一条缝"、
+//   点选项点到后面的消息（本仓库 2026-10-19 记过同样症状）。
+//   Teleport 到 body 后弹层在最外层，不再受任何祖先层叠上下文牵连。
+//
+//   定位必须自己算：改 fixed 后 `bottom-full` / `left-0` 都失去意义。规则 ——
+//   手机**贴视口底部**（两侧留白，弹层比挂在窄触发器上宽得多，长描述不会挤成三行）；
+//   宽屏挂在触发器正上方（不左右横移，避免"点哪儿弹哪儿"的错位感）。
+//   高度上限 = `min(60dvh, 触发器上方可用空间 - 8)`：保证首项一定可见 ——
+//   旧实现实测在小屏上弹层顶被裁到视口外（375×667 时顶边 -287px）。
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { AgentModelDto } from '@/types/api'
 
 const props = withDefaults(
@@ -81,25 +96,109 @@ function pick(value: string) {
   open.value = false
 }
 
+// ---- 弹层定位（见文件头「层叠」）----
+
+/** 弹层与触发器之间的视觉间隙（px），与 `mb-1.5` 同一口径 */
+const GAP = 6
+/** 弹层离视口左右边缘的最小留白（手机贴底形态） */
+const EDGE = 8
+/** 弹层的最大期望高度；实际再用"触发器上方可用空间"夹一次 */
+const POPUP_MAX = 320
+/** 宽屏（挂在触发器上方）时的弹层宽度 */
+const WIDE_WIDTH = 336
+
+type Placement = { mobile: boolean; left: number; width: number; bottom: number; maxHeight: number }
+
+const placement = ref<Placement | null>(null)
+
+/**
+ * 依据触发器当前位置算 fixed 定位。
+ *
+ * `fixed` 的参照是**视口**，而 iOS 软键盘弹出时 `innerHeight` 会缩小 ——
+ * 所以位置在打开时算一次、并跟着 `resize` / `scroll` 重算（见下面的监听）。
+ * 算不出来（触发器还没布局）时置 null，模板里退化成"不给内联定位"，
+ * 下一帧 `nextTick` 会再算一次。
+ */
+function measure() {
+  const el = root.value?.querySelector('button')
+  if (!el) return
+  const r = el.getBoundingClientRect()
+  if (!r.width && !r.height) return
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const mobile = vw < 768
+  const above = r.top - GAP
+  placement.value = {
+    mobile,
+    // 手机：横铺满视口（两侧各留 EDGE）；宽屏：对齐触发器左沿，别超出视口
+    left: mobile ? EDGE : Math.min(Math.max(EDGE, r.left), Math.max(EDGE, vw - EDGE - WIDE_WIDTH)),
+    width: mobile ? vw - EDGE * 2 : Math.min(WIDE_WIDTH, vw - EDGE * 2),
+    // 贴触发器上沿往上弹 —— 与"输入框永远在弹层下方"的视觉关系保持一致
+    bottom: vh - above,
+    // 天花板：不能顶出视口（否则首项被裁），也不能遮满整屏（还要看得到时间线）
+    maxHeight: Math.max(120, Math.min(POPUP_MAX, above - EDGE)),
+  }
+}
+
+const popupStyle = computed(() => {
+  const p = placement.value
+  if (!p) return undefined
+  return {
+    left: `${p.left}px`,
+    width: `${p.width}px`,
+    bottom: `${p.bottom}px`,
+    maxHeight: `${p.maxHeight}px`,
+  }
+})
+
 function onDocPointer(e: MouseEvent) {
   if (!open.value) return
-  if (root.value && !root.value.contains(e.target as Node)) open.value = false
+  const t = e.target as Node
+  // Teleport 之后弹层已不在 root 里 —— 两处都要判，否则点弹层会被当成"点外部"
+  if (root.value?.contains(t)) return
+  if ((t as Element)?.closest?.('[data-testid="model-picker-popup"]')) return
+  open.value = false
 }
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && open.value) open.value = false
 }
+
+/**
+ * 滚动 / 尺寸变化时重算。
+ *
+ * 不关掉弹层而是重算：手机上时间线是滚动容器，用户完全可能在弹层开着时
+ * 顺手滚一下看上文 —— 直接关掉会让人以为"点错了"。
+ * `capture: true` 才能收到任意滚动容器（滚动事件不冒泡）。
+ */
+function onReflow() {
+  if (open.value) measure()
+}
+
 watch(open, (v) => {
   if (v) {
+    measure()
+    nextTick(measure)
+    // 打开期间锁住页面滚动：否则拖动弹层内部的列表会把整页一起带走（滚动逃逸）
+    document.documentElement.classList.add('overflow-hidden')
     document.addEventListener('mousedown', onDocPointer)
     document.addEventListener('keydown', onKey)
+    window.addEventListener('resize', onReflow)
+    window.addEventListener('scroll', onReflow, true)
   } else {
+    document.documentElement.classList.remove('overflow-hidden')
+    placement.value = null
     document.removeEventListener('mousedown', onDocPointer)
     document.removeEventListener('keydown', onKey)
+    window.removeEventListener('resize', onReflow)
+    window.removeEventListener('scroll', onReflow, true)
   }
 })
 onBeforeUnmount(() => {
+  document.documentElement.classList.remove('overflow-hidden')
   document.removeEventListener('mousedown', onDocPointer)
   document.removeEventListener('keydown', onKey)
+  window.removeEventListener('resize', onReflow)
+  window.removeEventListener('scroll', onReflow, true)
 })
 
 /**
@@ -151,76 +250,90 @@ watch(hasCatalog, (has) => {
       <span class="shrink-0 text-[9px] transition-transform" :class="open ? 'rotate-180' : ''">▾</span>
     </button>
 
-    <!-- 弹层：贴输入框上沿向上展开（bottom-full）。
-         ⚠️ 动作行现在在输入框**下方**，选择器离视口底部只有 ~50px —— 弹层向上展开会盖住
-         时间线，而时间线是**滚动容器**（自己的层叠上下文）：只给 z-30 是压不过它的，
-         实测 Playwright 点选项时报 "session-timeline intercepts pointer events"，
-         真机上则是"点一下弹层，点到的是后面的消息"。所以 z 要高于时间线所在的层级。 -->
-    <div
-      v-if="open"
-      class="absolute bottom-full left-0 z-50 mb-1.5 w-[min(21rem,calc(100vw-1.5rem))] overflow-hidden rounded-[var(--radius-md)] border border-border bg-elevated shadow-xl"
-      data-testid="model-picker-popup"
-    >
-      <!-- 空清单：说明为什么没有可选项，而不是给一个空壳弹层 -->
-      <p
-        v-if="!hasCatalog"
-        class="px-3 py-2.5 text-xs leading-relaxed text-muted"
-        data-testid="model-picker-empty"
-        @mousedown.prevent
+    <!-- 弹层：**Teleport 到 body** 后 fixed 定位（判据见文件头「层叠」）。
+         不再是 `absolute bottom-full` —— 那会把弹层关进输入栏的层叠上下文。
+         样式三处刻意为之（"看不清"的直接原因）：
+           · 底色 `bg-surface`（浅色 #FFF / 深色 #14161B）而不是旧的 `bg-elevated`
+             （= `surface-muted` #F0F2F5）：旧色与输入框底 `surface-subtle` #F8F9FB
+             只差 8 个色阶，弹层边界在屏幕上几乎看不出来；
+           · `border-border-strong` + `shadow-2xl`：浮层要"明显浮在正文之上"；
+           · `divide-y`：选项之间有线，数得清有几项、点到的是哪一项。 -->
+    <Teleport to="body">
+      <div
+        v-if="open"
+        class="fixed z-[100] flex flex-col overflow-hidden rounded-[var(--radius-md)] border border-border-strong bg-surface text-text shadow-2xl"
+        :style="popupStyle"
+        role="dialog"
+        aria-label="选择模型"
+        data-testid="model-picker-popup"
       >
-        {{ modelsLoaded ? '该 Agent 不提供可选模型，沿用其默认模型。' : '正在读取可选模型…' }}
-      </p>
-
-      <template v-else>
-        <div class="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
-          <span class="shrink-0 text-xs font-medium text-muted">模型</span>
-          <span class="min-w-0 truncate text-xs text-muted" :title="currentName">当前：{{ currentName }}</span>
-        </div>
-
-        <!-- 移动端 ①：限高 60dvh 并内部滚动；③：每项 min-h-11（44px 触控命中区）。
-             ②：pb-[env(safe-area-inset-bottom)] 避让 Home 指示器。 -->
-        <div
-          role="listbox"
-          class="max-h-[min(60dvh,20rem)] overflow-y-auto overscroll-contain pb-[env(safe-area-inset-bottom)]"
+        <!-- 空清单：说明为什么没有可选项，而不是给一个空壳弹层 -->
+        <p
+          v-if="!hasCatalog"
+          class="px-3 py-2.5 text-xs leading-relaxed text-text-secondary"
+          data-testid="model-picker-empty"
+          @mousedown.prevent
         >
-          <!-- 「Agent 默认」= 清空选择，交还 agent 自己的路由 -->
-          <button
-            type="button"
-            role="option"
-            :aria-selected="model === ''"
-            class="flex min-h-11 w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-surface"
-            :class="model === '' ? 'bg-surface' : ''"
-            data-testid="model-picker-default"
-            @click="pick('')"
-            @mousedown.prevent
-          >
-            <span class="w-3.5 shrink-0 text-accent">{{ model === '' ? '✓' : '' }}</span>
-            <span class="min-w-0 flex-1 break-words">Agent 默认</span>
-          </button>
+          {{ modelsLoaded ? '该 Agent 不提供可选模型，沿用其默认模型。' : '正在读取可选模型…' }}
+        </p>
 
-          <template v-for="g in groups" :key="g.name">
-            <div v-if="g.name" class="border-t border-border/50 px-3 py-1 text-xs text-muted">{{ g.name }}</div>
+        <template v-else>
+          <div class="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2">
+            <span class="shrink-0 text-xs font-semibold text-text-secondary">模型</span>
+            <span class="min-w-0 truncate text-xs text-text-tertiary" :title="currentName">当前：{{ currentName }}</span>
+          </div>
+
+          <!-- 移动端 ①：高度由外层 maxHeight 夹（触发器上方可用空间）；③：每项 min-h-11（44px 触控命中区）。
+               ②：pb-[env(safe-area-inset-bottom)] 避让 Home 指示器（手机贴底时最后一项紧挨屏幕底边）。
+               `min-h-0` + `flex-1`：这是唯一可滚的区域，滚动只发生在弹层内部，不会带走后面的正文。 -->
+          <div
+            role="listbox"
+            class="min-h-0 flex-1 divide-y divide-border-subtle overflow-y-auto overscroll-contain pb-[env(safe-area-inset-bottom)]"
+          >
+            <!-- 「Agent 默认」= 清空选择，交还 agent 自己的路由 -->
             <button
-              v-for="m in g.options"
-              :key="m.value"
               type="button"
               role="option"
-              :aria-selected="m.value === model"
-              class="flex min-h-11 w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-surface"
-              :class="m.value === model ? 'bg-surface' : ''"
-              @click="pick(m.value)"
+              :aria-selected="model === ''"
+              class="flex min-h-11 w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-surface-muted"
+              :class="model === '' ? 'bg-accent/10 font-medium' : ''"
+              data-testid="model-picker-default"
+              @click="pick('')"
               @mousedown.prevent
             >
-              <span class="w-3.5 shrink-0 text-accent">{{ m.value === model ? '✓' : '' }}</span>
-              <!-- min-w-0 + break-words：模型名含 "/" 且可能很长，不能横向溢出弹层 -->
-              <span class="min-w-0 flex-1">
-                <span class="block break-words text-sm">{{ m.name }}</span>
-                <span v-if="m.description" class="block break-words text-xs text-muted">{{ m.description }}</span>
-              </span>
+              <span class="w-3.5 shrink-0 text-accent">{{ model === '' ? '✓' : '' }}</span>
+              <span class="min-w-0 flex-1 break-words">Agent 默认</span>
             </button>
-          </template>
-        </div>
-      </template>
-    </div>
+
+            <template v-for="g in groups" :key="g.name">
+              <div
+                v-if="g.name"
+                class="shrink-0 bg-surface-subtle px-3 py-1 text-xs font-medium text-text-secondary"
+              >
+                {{ g.name }}
+              </div>
+              <button
+                v-for="m in g.options"
+                :key="m.value"
+                type="button"
+                role="option"
+                :aria-selected="m.value === model"
+                class="flex min-h-11 w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-surface-muted"
+                :class="m.value === model ? 'bg-accent/10' : ''"
+                @click="pick(m.value)"
+                @mousedown.prevent
+              >
+                <span class="w-3.5 shrink-0 text-accent">{{ m.value === model ? '✓' : '' }}</span>
+                <!-- min-w-0 + break-words：模型名含 "/" 且可能很长，不能横向溢出弹层 -->
+                <span class="min-w-0 flex-1">
+                  <span class="block break-words text-sm">{{ m.name }}</span>
+                  <span v-if="m.description" class="block break-words text-xs text-text-tertiary">{{ m.description }}</span>
+                </span>
+              </button>
+            </template>
+          </div>
+        </template>
+      </div>
+    </Teleport>
   </div>
 </template>

@@ -434,47 +434,76 @@ for (const sc of SCENES) {
         const popup = page.locator('[data-testid="model-picker-popup"]')
         await expect(popup, '点开模型选择器后没有弹层').toBeVisible()
         const popGeo = await page.evaluate(() => {
-          const ta = document.querySelector('textarea[aria-label="补充指令"]') as HTMLElement
           const pop = document.querySelector('[data-testid="model-picker-popup"]') as HTMLElement
           const trg = document.querySelector('[data-testid="model-picker"]') as HTMLElement
+          const composer = document.querySelector('[data-testid="composer-bar"]') as HTMLElement
           const pR = pop.getBoundingClientRect()
-          const taR = ta.getBoundingClientRect()
           const trR = trg.getBoundingClientRect()
           // 弹层中心点是否真的落在弹层上（被裁切/被时间线盖住时，这里会命中别的元素）
           const hit = document.elementFromPoint(pR.left + pR.width / 2, pR.top + pR.height / 2)
+          const opts = [...pop.querySelectorAll('[role="option"]')] as HTMLElement[]
+          const list = pop.querySelector('[role="listbox"]') as HTMLElement | null
+          const lR = list?.getBoundingClientRect()
           return {
             triggerGap: Math.round(trR.top - pR.bottom),
-            aboveText: pR.top < taR.top - 8,
             popTop: Math.round(pR.top),
-            taTop: Math.round(taR.top),
+            // 层叠：弹层必须已经 Teleport 出输入栏，否则它活在输入栏的层叠上下文里
+            inComposer: !!composer && composer.contains(pop),
             hitInside: !!hit && (hit === pop || pop.contains(hit)),
             hitDesc: hit ? hit.tagName + '.' + String(hit.className).slice(0, 30) : 'none',
+            // 选项级：每个选项中心点必须命中选项自己 —— 被盖住时命中的是后面的消息
+            opts: opts.length,
+            optsBlocked: opts.filter((o) => {
+              const b = o.getBoundingClientRect()
+              const h = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2)
+              return !(h === o || o.contains(h!))
+            }).length,
+            // 首项可见：第一项顶边必须落在列表可视区内（否则弹层顶被裁到视口外）
+            firstOptVisible: !!opts[0] && !!lR && opts[0].getBoundingClientRect().top >= lR.top - 1,
+            // 视口：弹层不得伸出屏幕，也不得盖住触发器本身
+            popAboveViewport: Math.round(-pR.top),
+            popBelowViewport: Math.round(pR.bottom - window.innerHeight),
+            popOverlapsTrigger: pR.bottom > trR.top + 1,
+            inViewportWidth: pR.left >= 0 && pR.right <= window.innerWidth + 0.5,
           }
         })
         /**
-         * 判据（实测校准）：
-         *   · 弹层**底边**在触发器**上方**（`<= 6 + 1`：`bottom-full mb-1.5` ⇒ 间隙 6px）；
-         *   · 弹层**顶边**必须伸到文本框上沿**以上**（用触发器/文本框的实际位置算，
-         *     不写死像素）。这条是关键：它同时排除"弹层跑到输入框下方"和
-         *     "弹层只贴在触发器上面一小条、没把可选项顶到文字区以上"两种坏形态。
+         * 判据（2026-10-23 重写）：旧版要求"弹层顶边伸到文本框上沿以上"，
+         * 而那条在小屏上**恒假** —— 内容 263px、输入框上方只有 141px，弹层必然伸出窗口，
+         * 反而把首项推到屏幕外（旧实现实测弹层顶 -287px，用户只看到被裁掉的一截）。
+         * 现在按"看得清"本身定义：每一项都必须可见、可点，弹层不得伸出视口。
          *
-         * ⚠️ 别拿"弹层底边 vs 文本框上沿"当判据：模型选择器在动作行里，正确形态下
-         *    弹层底边本来就比文本框上沿**低** 82px（要往上让过整个 40px 的文本框）。
-         *    第一版就这么写，把正确布局判成了失败。
+         * 另两条钉住层叠：`inComposer` 为真说明弹层又回到输入栏的层叠上下文里了
+         * （`composer-bar` 有 `backdrop-blur` ⇒ 自成层叠上下文），
+         * 表现是上半截可能被时间线/消息盖住、点选项点到后面的内容。
          */
         expect(
+          popGeo.inComposer,
+          '弹层又回到输入栏子树里了（没有 Teleport）：它会被输入栏的层叠上下文困住，' +
+            '上半截可能被时间线/消息盖住，点选项点到后面的内容',
+        ).toBe(false)
+        expect(
           popGeo.triggerGap,
-          `弹层底边没有贴着触发器上沿（间隙 ${popGeo.triggerGap}px）：它跑到输入框下方或别的地方去了`,
+          `弹层底边没有贴着触发器上沿（间隙 ${popGeo.triggerGap}px，应为 6px）：它跑到输入框下方或别的地方去了`,
         ).toBeLessThanOrEqual(7)
         expect(popGeo.triggerGap, `弹层在触发器下方（间隙 ${popGeo.triggerGap}px）`).toBeGreaterThan(-2)
+        expect(popGeo.opts, '弹层里一个选项都没有：夹具没喂到模型清单').toBeGreaterThan(1)
         expect(
-          popGeo.aboveText,
-          `弹层没有伸到文本框上沿以上（弹层顶 ${popGeo.popTop}px，文本框顶 ${popGeo.taTop}px）：可选项被输入框挡住，用户看不到也点不到`,
+          popGeo.firstOptVisible,
+          `弹层顶被裁到视口外（弹层顶 ${popGeo.popTop}px，首项看不到）：高度上限没有按"触发器上方可用空间"夹取`,
         ).toBe(true)
+        expect(popGeo.popAboveViewport, `弹层伸出视口上沿 ${popGeo.popAboveViewport}px`).toBeLessThanOrEqual(0)
+        expect(popGeo.popBelowViewport, `弹层越过视口底沿 ${popGeo.popBelowViewport}px`).toBeLessThanOrEqual(0)
+        expect(popGeo.popOverlapsTrigger, '弹层压住了触发器本身（会挡住再点一次收起）').toBe(false)
+        expect(popGeo.inViewportWidth, '弹层横向超出视口').toBe(true)
         expect(
           popGeo.hitInside,
           `弹层中心点命中的是 ${popGeo.hitDesc}（不是弹层自己）：它被裁切或被时间线盖住了`,
         ).toBe(true)
+        expect(
+          popGeo.optsBlocked,
+          `${popGeo.optsBlocked}/${popGeo.opts} 个选项中心点命中的不是选项自己（被盖住/点不到）`,
+        ).toBe(0)
         // 收起，避免影响后续断言
         await picker.click()
 
