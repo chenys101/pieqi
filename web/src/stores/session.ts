@@ -36,6 +36,15 @@ export const useSessionStore = defineStore('session', {
      * 这里记住结果，把扫描降到每任务一次。缺省 false = 未知 ⇒ 回退扫描（与改动前一致）。
      */
     hasText: {} as Record<string, boolean>,
+    /**
+     * taskId → 本地这份事件流**是否来自权威载荷**（带 events 数组的详情/事件推送）。
+     *
+     * 存在的理由：`eventsBySession[id]` 为空有两种完全不同的含义 ——
+     * 「拉到过，后端说这个任务确实没有事件」与「还没拉到」。只有后者需要详情页去拉；
+     * 而把前者也当成"没有"去重拉，会让一条本该显示"暂无输出"的页面反复打接口。
+     * 判据因此必须是一个**独立位**，不能从数组长度反推（那正是 2026-10-23 的 bug）。
+     */
+    eventsLoaded: {} as Record<string, boolean>,
   }),
 
   getters: {
@@ -44,6 +53,15 @@ export const useSessionStore = defineStore('session', {
     },
     events(state) {
       return (taskId: string): AgentEvent[] => state.eventsBySession[taskId] ?? []
+    },
+    /**
+     * 本地事件流是否**已由权威载荷载入过**（供详情页决定"还要不要去拉"）。
+     *
+     * 与 `events(id).length > 0` 是两件事：后者把"拉到过且确实为空"和"还没拉到"
+     * 混成同一个答案，而详情页恰恰要靠这个区别来决定是否发请求。
+     */
+    eventsKnown(state) {
+      return (taskId: string): boolean => !!state.eventsLoaded[taskId]
     },
     isThinking(state) {
       return (taskId: string): boolean => !!state.thinking[taskId]
@@ -83,11 +101,19 @@ export const useSessionStore = defineStore('session', {
      * task_updated / task_created / 单任务详情：同步会话元信息 + 全量事件。
      * events 为后端持久化真相（已含此前推送的增量），直接替换并登记去重。
      *
-     * ⚠️ **events 缺失（undefined）时必须保留本地事件流**，不能替换成空数组。
-     * 列表快照（WS snapshot / GET /api/tasks）下发的是轻量视图，本来就不含 events；
-     * 早期实现无条件 `= events`，会把已渲染的时间线清空 —— 表现正是
-     * 「追加了一次会话，但没展示追加内容」。只有真的带了 events 才覆盖，
-     * 空数组是「后端明确说没有事件」，与 undefined（没带）语义不同。
+     * ⚠️ **载荷没带事件流时，既不能清空、也不能"假装知道它是空的"**。
+     *
+     * 两种"没带"的形态都要认（2026-10-23 修）：
+     *   - `'events' in dto === false`：TS 层的 TaskSummaryDto（Omit 掉了 events）；
+     *   - **`dto.events === null`**：wire 层的实况。后端的 TaskSummary 用非 omitempty 的
+     *     `Events []TaskEvent` **遮蔽**了 Task 的同名字段，nil 切片序列化出来是
+     *     `"events": null` —— 于是后端模型上明确标注的"不下发"，到了前端 DOM 里
+     *     变成了"这个任务有 0 条事件"。这两个语义的差别正是详情页打不开的成因：
+     *     详情页判据是「本地已有事件流就跳过拉取」（见 SessionPage 的 loadDetail），
+     *     被写成"空数组"之后那条判据被满足，页面就既不渲染、也不再去要数据。
+     *
+     * 判据统一收敛到 `shouldReplaceEvents`：**只有数组才算"后端说了什么"**，
+     * 空数组（`[]`）仍然表示"后端明确说没有事件"。
      */
     syncFromTask(dto: TaskDto | TaskSummaryDto) {
       this.sessions[dto.id] = {
@@ -101,12 +127,16 @@ export const useSessionStore = defineStore('session', {
       }
       // 用 'events' in dto 而非 dto.events 做类型收窄：TaskSummaryDto 上根本没有
       // 这个属性（Omit 掉了），直接访问过不了 TS 检查。
-      if ('events' in dto && dto.events) {
+      // 而 `in` 单独**不够**：wire 上的 null 也满足 `in`（见 shouldReplaceEvents）。
+      if (shouldReplaceEvents(dto)) {
         const events = normalizeEvents(dto.id, dto.events)
         this.eventsBySession[dto.id] = events
         this.deduper(dto.id).addAll(events)
         // 重算性能缓存：全量替换后，之前的判断可能不再成立。
         this.hasText[dto.id] = events.some((e) => e.type === 'text_delta')
+        // ★ 只有**权威载荷**（显式数组）才算"本地已知该会话的事件流"。
+        // 详情页据此决定"还要不要去拉"：没拉到过就必须拉，否则时间线永远空着。
+        this.eventsLoaded[dto.id] = true
       }
 
       // 终态 / 需决策：清除思考占位（此时是请求决策而非思考）
@@ -170,9 +200,25 @@ export const useSessionStore = defineStore('session', {
       delete this.deltaCounters[taskId]
       delete this.dedupers[taskId]
       delete this.hasText[taskId]
+      delete this.eventsLoaded[taskId]
     },
   },
 })
+
+/**
+ * 这条 DTO 是否**真带了一份事件流**（可以覆盖本地）。
+ *
+ * 判据是「是数组」。三档语义必须分清，混掉任何两档都会出 bug：
+ *   - 缺字段 / `null` → **没说**（后端模型里就是"不下发"，TaskSummary 用 nil 切片遮蔽）
+ *   - `[]`            → **说了：没有事件**
+ *   - `[...]`         → 说了：这些就是全部
+ *
+ * 放宽成 `'events' in dto` 会让 Wire 上的 `null` 走进"说了没有事件"那一档，
+ * 而它真正想说的是"我没给你"。这条函数就是那个分界线，不要在每个调用点各写一遍。
+ */
+export function shouldReplaceEvents(dto: TaskDto | TaskSummaryDto): boolean {
+  return 'events' in dto && Array.isArray((dto as TaskDto).events)
+}
 
 /** Store 实例类型（dispatcher 等消费方引用） */
 export type SessionStore = ReturnType<typeof useSessionStore>

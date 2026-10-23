@@ -9,9 +9,13 @@ import { timeAgo, duration } from '@/utils/date'
 const props = defineProps<{ task: Task }>()
 const router = useRouter()
 
-// 运行中展示已运行时长，其余展示最近活跃时间
+// 运行中展示已运行时长，其余展示最近活跃时间。
+//
+// ⚠️ `pending` 不算"运行中"：它还没有开始（后端 Create 只写 CreatedAt，started_at 为空），
+// 而 duration() 对空 startedAt 返回空串 —— 卡片会显示成 "项目 ·"（时间位是空的）。
+// 待运行任务回答的是"它多久没动静了"，那是 updatedAt 能给出的答案。
 const timeText = computed(() =>
-  props.task.status === 'running' || props.task.status === 'pending'
+  props.task.status === 'running'
     ? duration(props.task.startedAt)
     : `${timeAgo(props.task.updatedAt || props.task.createdAt)}前`,
 )

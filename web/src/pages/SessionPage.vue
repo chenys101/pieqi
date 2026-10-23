@@ -12,7 +12,7 @@ import { useTaskStore } from '@/stores/task'
 import { useSessionStore } from '@/stores/session'
 import { useAgentStore } from '@/stores/agent'
 import * as api from '@/services/api/tasks'
-import { adaptTask } from '@/services/api/client'
+import { adaptTask, ApiError } from '@/services/api/client'
 import { useSession } from '@/composables/useSession'
 import { useResponsive } from '@/composables/useResponsive'
 import { onRealtimeResync } from '@/composables/useWebSocket'
@@ -131,6 +131,23 @@ const decision = computed(() => (task.value?.status === 'waiting_input' ? task.v
 const approvalBusy = ref(false)
 /** 冷启动探测完成（详情已尝试拉取），仍无任务 → 视为不存在 */
 const probed = ref(false)
+/**
+ * 详情**拉取失败**的原因（超时/断网/5xx/服务重启中）。
+ *
+ * 与「任务不存在」分开：前者是"这次没拿到"，后者是"服务端说不给你"。
+ * 合并成一句话会让人删掉一个其实还在的任务（2026-10-23 用户反馈的直接观感就是
+ * "任务详情看不了了"）。有值时页面给出重试入口，而不是一条死路。
+ */
+const loadError = ref('')
+
+/** 重新拉详情（「重新加载」按钮） */
+function retryLoadDetail() {
+  const id = taskId.value
+  if (!id) return
+  loadError.value = ''
+  probed.value = false
+  void loadDetail(id)
+}
 
 /** Agent 执行中禁止回退（静止边界原则）；面板仍可查看 */
 const canRewind = computed(() => !!task.value && task.value.status !== 'running' && task.value.status !== 'pending')
@@ -160,10 +177,12 @@ function openFeedback() {
 // 详情加载：WS 快照 / 列表只给**轻量视图**（不含 events），所以进入详情页时
 // 必须按 id 拉一次完整详情来填充时间线。
 //
-// ⚠️ 判据是「本地是否已有该会话的事件流」，**不是**「任务是否已在列表里」。
-// 早期实现只要 taskStore.byId(id) 命中就跳过拉取 —— 而列表/快照现在必然命中，
-// 于是详情页永远拿不到 events：表现是「追加了一次会话，但没展示追加内容」。
-// 拉取本身很轻（单任务 300KB 级），且 syncFromTask 是幂等替换 + 去重。
+// ⚠️ 判据是「本地是否已有该会话的**权威**事件流」，**不是**「任务是否已在列表里」，
+// 也**不是**「本地事件数组非空」—— 后者是 2026-10-23「无法查看任务详情」的成因：
+//   快照 → sessionStore 拿到 events=null → 被当成"空事件流" →
+//   这条判据被满足 → 既不渲染时间线、也不再发请求 → 页面只剩一句「任务不存在」。
+// 现在问的是 sessionStore.eventsKnown(id)：只有**真的由带 events 的载荷载入过**
+// 才算已知。没拉到过就必须拉 —— 详情页的职责是保证时间线有数据，而不是猜。
 watch(
   taskId,
   (id) => {
@@ -171,8 +190,7 @@ watch(
     // 换任务回到时间线：停在「变更反馈」里换到一个新任务，看到的是上一任务的语境残留
     mobilePane.value = 'timeline'
     if (!id) return
-    const hasEvents = sessionStore.events(id).length > 0
-    if (taskStore.byId(id) && hasEvents) {
+    if (taskStore.byId(id) && sessionStore.eventsKnown(id)) {
       probed.value = true
       return
     }
@@ -186,16 +204,30 @@ watch(
  *
  * 统一走这个函数而不是直接调 taskStore.refreshTask：会话事件流由 sessionStore 持有，
  * 只刷新 taskStore 会让任务状态更新、时间线却还是旧的（两处状态各自为政）。
+ *
+ * 返回是否成功：调用方要靠它区分「拉到了」和「拉挂了」—— 后者必须让页面如实报错，
+ * 不能停在"任务不存在"。listLoaded 用来判断"404 到底是不是真的不存在"
+ * （本地列表里有它 ⇒ 服务端状态异常，而不是用户点错了链接）。
  */
-async function loadDetail(id: string) {
+async function loadDetail(id: string): Promise<'ok' | 'not-related' | 'error'> {
   try {
     const dto = await api.getTaskDto(id)
     taskStore.upsertTask(adaptTask(dto))
     sessionStore.syncFromTask(dto)
-  } catch {
-    // 拉取失败：保持现状，由 probed 决定是否显示"任务不存在"
+    return 'ok'
+  } catch (err) {
+    const status = err instanceof ApiError ? err.status : 0
+    // 换了任务就别再拿旧请求的结果去改页面状态（用户已经走了）
+    if (taskId.value !== id) return 'not-related'
+    // 404 / 401：服务端明确说"不给你这个任务"（已删除 / 鉴权没通）。
+    // 这两类没有重试价值，照旧落到「任务不存在或已删除」。
+    if (status === 404 || status === 401) return 'error'
+    // 其余（超时 / 断网 / 5xx / 服务重启中）都**不是**"任务不存在"：
+    // 如实说"详情没加载出来"并给一个重试入口，比让人以为任务被删了要好得多。
+    loadError.value = err instanceof Error ? err.message : '详情加载失败'
+    return 'error'
   } finally {
-    probed.value = true
+    if (taskId.value === id) probed.value = true
   }
 }
 
@@ -341,13 +373,26 @@ async function doRemove() {
     </div>
   </div>
 
-  <!-- 任务不存在（已删除 / 链接失效 / 探测中） -->
+  <!-- 没有任务可渲染时的三种真实情形，**不要说成同一句**：
+       · 还在拉            → 加载中…
+       · 拉挂了（超时/断网/5xx）→ 说清楚原因 + 重试入口（它并不等于任务没了）
+       · 服务端说没有这个任务  → 任务不存在或已删除 -->
   <div v-else class="flex h-full items-center justify-center">
     <EmptyState
-      :title="probed ? '任务不存在或已删除' : '加载中…'"
-      :hint="probed ? '任务可能已被删除，或链接失效' : ''"
+      :title="!probed ? '加载中…' : loadError ? '任务详情加载失败' : '任务不存在或已删除'"
+      :hint="!probed ? '' : loadError ? loadError : '任务可能已被删除，或链接失效'"
     >
-      <RouterLink to="/dashboard" class="text-xs text-accent hover:underline">← 返回仪表盘</RouterLink>
+      <div class="flex items-center gap-3">
+        <button
+          v-if="probed && loadError"
+          type="button"
+          class="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90"
+          @click="retryLoadDetail"
+        >
+          重新加载
+        </button>
+        <RouterLink to="/dashboard" class="text-xs text-accent hover:underline">← 返回仪表盘</RouterLink>
+      </div>
     </EmptyState>
   </div>
 </template>

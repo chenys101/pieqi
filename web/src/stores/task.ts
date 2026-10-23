@@ -107,9 +107,35 @@ export const useTaskStore = defineStore('task', {
       }
     },
 
-    /** WS snapshot 全量替换 */
+    /**
+     * WS snapshot：把服务端的轻量视图并进本地列表。
+     *
+     * **不再是整表替换**（2026-10-23 改）。两条理由，都对应真实故障：
+     *
+     *  1. 轻量视图是**残缺的**副本：后端 `model.NewTaskSummary` 显式裁掉了
+     *     `Baseline` / `Output`（判据见该类型的说明），而详情页拉到的完整 DTO
+     *     里这两样都在（`output` 是"旧任务无事件"时的兜底正文，反馈面板要读 `baseline`）。
+     *     整表替换 = 用一份被裁剪的数据覆盖掉更完整的那份 —— 症状是"读着读着详情页
+     *     只剩一行标题"。同一个任务在本地只能有一份，且必须是更完整的那份。
+     *  2. 快照是**周期性**的：断线重连、订阅缓冲溢出都会补发（见 api/ws.go 的 dropped
+     *     标记）。每次都用残缺副本盖一遍，等于把所有本地细节都变成"等下次重连才恢复"。
+     *
+     * 合并口径：
+     *   - 后端**权威**的元数据（状态/时间/error/用量/决策…）一律以新载荷为准，
+     *     `undefined` 也是答案（例如 output 被续问清空）—— 不能保留旧值；
+     *   - 事件流**不属于**这个视图（它由 sessionStore 持有），这里本来就没有它，
+     *     所以合并不会碰到时间线。
+     *
+     * 快照里消失的任务（服务端已删）仍然从列表里移除：列表的成员资格以服务端为准。
+     */
     applySnapshot(tasks: Task[]) {
-      this.tasks = tasks
+      const prev = new Map(this.tasks.map((t) => [t.id, t]))
+      this.tasks = tasks.map((t) => {
+        const old = prev.get(t.id)
+        // 注意 output 的语义：完整 DTO 里空串也被 omitempty 省掉，
+        // 所以"有值就用新值、没值就清掉"这条对两者都成立。
+        return old ? { ...old, ...t } : t
+      })
       this.loaded = true
     },
 
