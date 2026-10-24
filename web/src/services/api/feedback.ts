@@ -68,8 +68,20 @@ export function taskAttachmentURL(taskId: string, hash: string): string {
   return `/api/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(hash)}`
 }
 
-/** GET /api/tasks/:id/file 的原始文本（markdown 渲染前拉取）。 */
-export async function getTaskFileText(taskId: string, path: string): Promise<string> {
+/**
+ * GET /api/tasks/:id/local-image 的 URL：结论正文里引用的**本地图片**。
+ *
+ * 为什么需要：Agent 刚把文件写到磁盘，结论里就会写
+ * `![总览](D:\code\go\pieqi\.tmp-avatar\final\_contact-6up.png)`。浏览器没有 D 盘，
+ * 这个 src 会被当同源相对路径 → 拿回 SPA 兜底页 → 永远是一枚破图（2026-10-24 反馈）。
+ * 后端只放行该任务项目目录内、扩展名为图片白名单的文件（见 api/local_image.go）。
+ */
+export function taskLocalImageURL(taskId: string, path: string): string {
+  const qs = new URLSearchParams({ path })
+  return `/api/tasks/${encodeURIComponent(taskId)}/local-image?${qs}`
+}
+
+/** GET /api/tasks/:id/file 的原始文本（markdown 渲染前拉取）。 */export async function getTaskFileText(taskId: string, path: string): Promise<string> {
   const qs = new URLSearchParams({ path })
   return requestText(`/tasks/${encodeURIComponent(taskId)}/file?${qs}`)
 }

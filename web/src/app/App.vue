@@ -3,6 +3,7 @@
 import { setupProviders } from './providers'
 import AppLayout from '@/layouts/AppLayout.vue'
 import ToastHost from '@/components/ui/ToastHost.vue'
+import ImageViewer from '@/components/ui/ImageViewer.vue'
 import { useAppStore } from '@/stores/app'
 
 setupProviders()
@@ -30,4 +31,6 @@ const bannerClass = {
   </AppLayout>
 
   <ToastHost />
+  <!-- 全局看图遮罩：时间线里的工具图与结论正文里的 markdown 图共用（composables/useImageViewer） -->
+  <ImageViewer />
 </template>

@@ -620,7 +620,7 @@ function jumpToLatest() {
             <TimelineEventView v-for="event in events" :key="event.id" :event="event" />
           </template>
           <!-- 旧任务兜底：直接展示累积输出 -->
-          <TextBubble v-if="outputFallback" :text="task!.output!" />
+          <TextBubble v-if="outputFallback" :text="task!.output!" :task-id="task!.id" />
           <ThinkingBadge v-if="showThinking" />
           </div>
         </ContentColumn>

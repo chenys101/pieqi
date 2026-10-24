@@ -6,21 +6,69 @@
 //
 // `looksLikeMarkdown` 为假时退回 `whitespace-pre-wrap` 纯文本 —— 一句话的回复
 // 不该被包成段落块，也不该因为里面有个 `*` 就变成斜体。
-import { computed } from 'vue'
+//
+// 图片（2026-10-24 加）：正文里的 `![x](D:\...\a.png)` 必须在**送进 marked 之前**
+// 改写成本地图片端点，理由见 markdownImages.ts 顶部（反斜杠会被当转义吃掉）。
+// 渲染完再把"读不到"的图降级成一行说明，并让图片可点开全屏（与工具图共用遮罩）。
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { looksLikeMarkdown, renderMarkdown } from '../markdown'
+import { degradeFailedLocalImages, rewriteLocalImageTargets } from '../markdownImages'
+import { useImageViewer } from '@/composables/useImageViewer'
 
-const props = defineProps<{ text: string }>()
+const props = defineProps<{ text: string; taskId?: string }>()
+
+const { open } = useImageViewer()
 
 const isMarkdown = computed(() => looksLikeMarkdown(props.text))
-const html = computed(() => (isMarkdown.value ? renderMarkdown(props.text) : ''))
+const html = computed(() =>
+  isMarkdown.value ? renderMarkdown(rewriteLocalImageTargets(props.text, props.taskId ?? '')) : '',
+)
+
+const body = ref<HTMLElement | null>(null)
+
+/**
+ * 渲染后处理：给图片挂失败降级。
+ *
+ * 必须在 DOM 更新**之后**（v-html 的节点此时才存在），且每次正文变化都要重挂 ——
+ * 流式输出时这个函数一秒内会被调用很多次，所以内部只做 querySelectorAll + 一次 addEventListener，
+ * 不做任何会读布局的操作（读布局会强制同步回流，在流式场景里很贵）。
+ */
+async function afterRender() {
+  if (!isMarkdown.value) return
+  await nextTick()
+  const el = body.value
+  if (el) degradeFailedLocalImages(el)
+}
+
+watch(() => [props.text, props.taskId], afterRender)
+onMounted(afterRender)
+
+/**
+ * 点图看大图。用**委托**而不是给每个 <img> 挂 click：
+ * 节点是 v-html 造出来的，每次重渲染都是新节点，逐个挂既漏又积。
+ */
+function onClick(e: MouseEvent) {
+  const target = e.target as HTMLElement | null
+  const img = target?.closest?.('img') as HTMLImageElement | null
+  if (!img) return
+  e.preventDefault()
+  open({
+    // 取属性而不是 `img.src`：后者是**绝对化后**的 URL（jsdom 里还带 host 前缀），
+    // 遮罩用相对地址就够（同源），也让断言/日志里看到的是真正写进 DOM 的那个值。
+    src: img.getAttribute('src') ?? img.src,
+    alt: img.getAttribute('alt') || '',
+  })
+}
 </script>
 
 <template>
   <div
     v-if="isMarkdown"
+    ref="body"
     class="md-body break-words text-sm leading-relaxed"
     data-testid="markdown-body"
     v-html="html"
+    @click="onClick"
   />
   <div v-else class="whitespace-pre-wrap break-words" data-testid="plain-body">{{ text }}</div>
 </template>
@@ -78,7 +126,24 @@ const html = computed(() => (isMarkdown.value ? renderMarkdown(props.text) : '')
   opacity: 0.85;
 }
 .md-body :deep(a) { color: rgb(var(--color-accent)); text-decoration: underline; }
-.md-body :deep(img) { max-width: 100%; border-radius: 0.375em; }
+/* 正文图片：只缩小不放大（位图放大只会糊），点开由全屏遮罩负责看清楚 */
+.md-body :deep(img) {
+  max-width: 100%;
+  border-radius: 0.375em;
+  cursor: zoom-in;
+}
+/* 本地图片读不到时的降级说明（markdownImages.degradeFailedLocalImages 造出来的节点）。
+   用虚线框 + 小字：让"图没了"看起来是**一条可读的事实**，而不是一枚破图图标。 */
+.md-body :deep(.md-image-missing) {
+  display: block;
+  margin: 0.35em 0;
+  border: 1px dashed rgb(var(--color-text) / 0.25);
+  border-radius: 0.375em;
+  padding: 0.4em 0.6em;
+  font-size: 0.85em;
+  opacity: 0.75;
+  word-break: break-all;
+}
 .md-body :deep(hr) { border: 0; border-top: 1px solid rgb(var(--color-text) / 0.2); margin: 0.7em 0; }
 .md-body :deep(table) { border-collapse: collapse; margin: 0.5em 0; display: block; overflow-x: auto; }
 .md-body :deep(th),

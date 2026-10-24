@@ -55,7 +55,7 @@ const clock = computed(() => formatClock(props.event.timestamp))
   </div>
 
   <div v-else-if="event.type === 'text_delta'" class="event-enter flex flex-col items-start gap-0.5">
-    <TextBubble :text="event.payload.text ?? ''" />
+    <TextBubble :text="event.payload.text ?? ''" :task-id="event.taskId" />
     <span
       v-if="clock"
       class="shrink-0 font-mono text-[10px] leading-none text-text-tertiary tabular-nums"

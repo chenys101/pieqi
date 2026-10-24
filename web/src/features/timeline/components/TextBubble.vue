@@ -10,13 +10,16 @@
 // 气泡拉满整行、与用户气泡的右对齐在视觉上分不出方向。
 import MarkdownBody from './MarkdownBody.vue'
 
-defineProps<{ text: string }>()
+// taskId 往下传是给正文里的**本地图片**用的：`![x](D:\code\...\a.png)` 要靠它拼出
+// /api/tasks/:id/local-image?path=... （见 MarkdownBody / markdownImages.ts）。
+// 可空：旧任务兜底（直接用 task.output 拼一个气泡）那条路径早期没有 id 概念。
+defineProps<{ text: string; taskId?: string }>()
 </script>
 
 <template>
   <div class="event-enter max-w-full" data-testid="text-bubble">
     <div class="break-words rounded-xl border border-border/60 bg-surface px-3.5 py-2 text-sm leading-relaxed">
-      <MarkdownBody :text="text" />
+      <MarkdownBody :text="text" :task-id="taskId" />
     </div>
   </div>
 </template>
