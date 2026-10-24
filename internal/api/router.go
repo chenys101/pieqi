@@ -220,6 +220,8 @@ func (s *Server) Register(r gin.IRouter) {
 		api.POST("/tasks/:id/push", s.postPush)
 		// 文件预览（markdown/pdf 原始内容，file_preview.go）
 		api.GET("/tasks/:id/file", s.getTaskFile)
+		// 产物清单（agent 产出、可直接打开的文件；artifacts.go）
+		api.GET("/tasks/:id/artifacts", s.getTaskArtifacts)
 		// 结论正文里引用的**本地图片**（Agent 写 `![x](D:\...\a.png)`，local_image.go）
 		api.GET("/tasks/:id/local-image", s.getTaskLocalImage)
 		// 工具结果里的图片字节（read_image；按内容寻址的 hash 取，见 attachments.go）

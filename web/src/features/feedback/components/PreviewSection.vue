@@ -9,11 +9,12 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import {
   getPreviewAttach,
   getPreviewStatus,
+  getTaskArtifacts,
   restartPreview,
   startPreview,
   stopPreview,
 } from '@/services/api/feedback'
-import type { PreviewAttachDto, PreviewStatusDto } from '@/types/api'
+import type { ArtifactDto, PreviewAttachDto, PreviewStatusDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useNotificationStore } from '@/stores/notification'
@@ -30,9 +31,39 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 const attach = ref<PreviewAttachDto | null>(null)
 const attaching = ref(false)
 
+/**
+ * 产物清单（agent 产出的可查看文件：方案页 / 报告 / 截图 / pdf）。
+ *
+ * 与「预览」按钮的关系：产物是**文件**，点开即看，不需要先启动；preview 只在
+ * 需要完整同源资源（多文件页面的相对 css/js）时才用得上。服务端已经把每项的
+ * 打开 URL 算好（目录内 html → preview 路径，其余 → /file），前端不判断通道。
+ */
+const artifacts = ref<ArtifactDto[]>([])
+const showAllArtifacts = ref(false)
+const ARTIFACT_PREVIEW_COUNT = 6
+const visibleArtifacts = computed(() =>
+  showAllArtifacts.value ? artifacts.value : artifacts.value.slice(0, ARTIFACT_PREVIEW_COUNT),
+)
+
+const KIND_LABEL: Record<string, string> = {
+  html: '页面',
+  markdown: '文档',
+  image: '图片',
+  pdf: 'PDF',
+}
+
+function fmtSize(n?: number): string {
+  if (!n) return ''
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
 const stateLabel = computed(() => {
   const map: Record<string, string> = {
-    unavailable: '不可用（未识别到 dev server）',
+    // 两形态都可预览（dev server / 静态产物），所以不说"未识别到 dev server"——
+    // 真实原因常是"还没把页面放到预览目录"，具体原因由下面的 hint 说明。
+    unavailable: '不可用',
     available: '可用',
     starting: '启动中',
     running: '运行中',
@@ -44,6 +75,11 @@ const stateLabel = computed(() => {
 
 const isRunning = computed(() => status.value?.state === 'running')
 const isStarting = computed(() => status.value?.state === 'starting')
+/**
+ * 静态产物：pieqi 进程内直接读文件，没有进程可重启、也没有必要"停止"
+ * （"停止"只会让页面暂时打不开，是纯粹的坑）。所以只留「打开 / 外链」。
+ */
+const isStatic = computed(() => status.value?.framework === 'static')
 
 /** 代理入口（相对路径，同源携带鉴权） */
 const previewURL = computed(() => `/preview/${encodeURIComponent(props.taskId)}/`)
@@ -53,6 +89,15 @@ async function refresh() {
     status.value = await getPreviewStatus(props.taskId)
   } catch {
     /* 静默：面板内已有错误提示通道 */
+  }
+}
+
+/** 拉产物清单（失败静默：没有产物不是错误，列表为空即可）。 */
+async function refreshArtifacts() {
+  try {
+    artifacts.value = await getTaskArtifacts(props.taskId)
+  } catch {
+    artifacts.value = []
   }
 }
 
@@ -77,6 +122,7 @@ async function onStart() {
   try {
     await startPreview(props.taskId)
     await refresh()
+    await refreshArtifacts() // 静态目录登记后，页面的打开通道会变成 preview
     pollWhileStarting()
   } catch (err) {
     notify.error(err instanceof Error ? err.message : '启动失败')
@@ -104,6 +150,7 @@ async function onRestart() {
   try {
     await restartPreview(props.taskId)
     await refresh()
+    await refreshArtifacts()
     pollWhileStarting()
   } catch (err) {
     notify.error(err instanceof Error ? err.message : '重启失败')
@@ -135,7 +182,7 @@ async function onAttach() {
 // 用户点完「启动」切去别的 Tab 再切回来会重新挂载；只刷新不续轮询的话，
 // 状态会一直停在"启动中"直到下次切回来，看起来像卡死了。
 async function init() {
-  await refresh()
+  await Promise.all([refresh(), refreshArtifacts()])
   if (isStarting.value) pollWhileStarting()
 }
 
@@ -163,9 +210,9 @@ onUnmounted(stopPoll)
         >打开</a>
         <!-- 「截图」按钮及其背后的视觉采集（截图/console/network）已于 2026-10-15 移除，
              见 ADR-0012 / ADR-0013。保留 preview 的启动/重启/打开——那是 P1 能力，与采集无关。 -->
-        <!-- P1：重启（停止后重启，代码改动非 HMR 时手动刷新） -->
+        <!-- P1：重启（停止后重启，代码改动非 HMR 时手动刷新）。静态产物无进程可重启 -->
         <Button
-          v-if="!isStarting"
+          v-if="!isStarting && !isStatic"
           variant="ghost"
           size="sm"
           :loading="busy"
@@ -175,8 +222,47 @@ onUnmounted(stopPoll)
         <!-- P1：外链 + 二维码（隧道可达时在外部浏览器打开） -->
         <Button variant="ghost" size="sm" :loading="attaching" title="生成外链与二维码" @click="onAttach">外链</Button>
         <Button v-if="!isRunning && !isStarting" variant="secondary" size="sm" :loading="busy" @click="onStart">启动</Button>
-        <Button v-else variant="ghost" size="sm" :loading="busy" @click="onStop">停止</Button>
+        <!-- 静态产物没有「停止」：它不占进程，停掉只会让页面暂时打不开（见 isStatic 注释） -->
+        <Button v-else-if="!isStatic" variant="ghost" size="sm" :loading="busy" @click="onStop">停止</Button>
       </span>
+    </div>
+
+    <!-- 产物：agent 产出的可查看文件。点开即看，不需要先「启动」——
+         启动是 dev server 的概念，文件本身没有准备期。 -->
+    <div v-if="artifacts.length" class="mt-2">
+      <div class="mb-1 flex items-center gap-1.5 text-[11px] text-muted">
+        <span>产物</span>
+        <span class="text-text-tertiary">{{ artifacts.length }}</span>
+      </div>
+      <div class="flex flex-col gap-1">
+        <a
+          v-for="a in visibleArtifacts"
+          :key="a.path"
+          :href="a.open"
+          target="_blank"
+          rel="noopener"
+          class="flex min-h-11 items-center gap-2 rounded-md border border-border/50 bg-background/40 px-2 py-1 text-xs hover:bg-surface-muted"
+          :title="a.path"
+        >
+          <span class="shrink-0 rounded bg-background/80 px-1 text-[10px] text-muted">{{ KIND_LABEL[a.kind] ?? a.kind }}</span>
+          <span class="min-w-0 flex-1 truncate">{{ a.path }}</span>
+          <span class="shrink-0 text-[10px] text-text-tertiary">{{ fmtSize(a.size) }}</span>
+        </a>
+      </div>
+      <button
+        v-if="artifacts.length > ARTIFACT_PREVIEW_COUNT"
+        type="button"
+        class="mt-1 text-[11px] text-muted hover:text-text"
+        @click="showAllArtifacts = !showAllArtifacts"
+      >
+        {{ showAllArtifacts ? '收起' : `展开全部 ${artifacts.length} 个` }}
+      </button>
+    </div>
+
+    <!-- 指路：认不出预览入口时，直接告诉用户/agent 该把产物放哪（ADR-0017 补记）。
+         目录约定是"魔法位置"，只回一句"不可用"会让人以为功能坏了。 -->
+    <div v-if="status?.hint" class="mt-2 rounded-md border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-[11px] leading-relaxed text-muted">
+      {{ status.hint }}
     </div>
 
     <!-- P1：Attach 结果（外链 + 二维码，供其他设备扫码访问） -->

@@ -56,7 +56,13 @@ _Avoid_: patch
 
 **Preview**:
 项目的运行态反馈能力：把 Agent 改完的代码真实跑起来（dev server），经鉴权代理在手机上查看。可选能力：unavailable / available / recommended / running。
+两种形态：**dev server**（spawn 子进程，任务终态回收）与**静态产物**（worktree 的 `.pieqi/preview/` 有 `.html` 时由 pieqi 进程内直接 serve，零进程、任务完成后仍可访问，见 ADR-0017）。
+静态形态的目录是**一组候选**（`.pieqi/preview` 权威，另含 `proposals/`、`previews/`、`docs/proposals/` 等常见落点）：位置不该成为正确性前提；认不出时 `PreviewStatus` 用 `convention` / `hint` / `suspected` 指路，而不是静默 unavailable。
 _Avoid_: 代码预览, Web IDE
+
+**产物（Artifact）**:
+Agent 产出的、人可以直接打开查看的文件（HTML 方案页 / 报告、markdown、图片、PDF）。与「变更」的分工：变更是"改了什么"（含代码），产物是"有什么能看"（只列白名单类型）。默认即可访问（静态产物免启动），打开通道由服务端算好；HTML 以 pieqi 源打开时强制 CSP sandbox（不给同源），因为 agent 生成的内容不可信。见 ADR-0018。
+_Avoid_: 附件, 下载区, 文件管理
 
 ### 控制闭环（P1）
 

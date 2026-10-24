@@ -51,7 +51,23 @@ func (s *Server) getTaskFile(c *gin.Context) {
 	ct := fileContentType(path, content)
 	c.Header("Content-Type", ct)
 	c.Header("X-Content-Type-Options", "nosniff")
+	// agent 生成的 HTML/SVG 是**不可信内容**：直接以 pieqi 的源打开，等于把它塞进
+	// 宿主页面同一个 origin —— 它能读 localStorage 里的 token、能以用户身份打 /api
+	// （驱动 agent 跑命令）。产物"默认可访问"的前提是**不给宿主权限**：
+	// CSP sandbox（**刻意不写 allow-same-origin**）把文档关进 opaque origin，
+	// 脚本照跑、页面照看，但拿不到宿主的存储与凭据，fetch 同源 API 也会被 CORS 挡下。
+	if isSandboxedDocType(ct) {
+		c.Header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
+		c.Header("Referrer-Policy", "no-referrer")
+	}
 	c.Data(http.StatusOK, ct, content)
+}
+
+// isSandboxedDocType 哪些 Content-Type 会被浏览器**当文档执行**（含脚本能力）。
+// 只认这两类：图片/PDF/markdown 是纯展示，不需要额外限制。
+func isSandboxedDocType(ct string) bool {
+	base := strings.ToLower(strings.TrimSpace(strings.SplitN(ct, ";", 2)[0]))
+	return base == "text/html" || base == "image/svg+xml"
 }
 
 // fileContentType 按扩展名返回 Content-Type；markdown 显式标 text/markdown，

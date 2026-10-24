@@ -472,6 +472,28 @@ export interface PreviewStatusDto {
   framework?: string
   port?: number
   error?: string
+  /** 静态预览实际 serve 的目录（相对 worktree 根）；非 static 为空。ADR-0017 补记。 */
+  dir?: string
+  /** 权威约定目录（未启动时也返回），UI 空态直接展示，避免用户记路径。 */
+  convention?: string
+  /** unavailable 时可行动的提示（含"产物该放哪"）。 */
+  hint?: string
+  /** 疑似方案页（相对路径）；discovery 失败时用于指路。 */
+  suspected?: string[]
+}
+
+/** GET /api/tasks/:id/artifacts 的单项：agent 产出、可直接打开的文件（ADR-0017 补记）。 */
+export interface ArtifactDto {
+  /** repo 相对路径（与 Change 列表同口径） */
+  path: string
+  /** 文件名，列表展示用 */
+  name: string
+  kind: 'html' | 'markdown' | 'image' | 'pdf'
+  size?: number
+  /** 最后产生它的 turn */
+  turn?: number
+  /** 打开 URL（服务端算好：目录内 html 走 preview，其余走 /file） */
+  open: string
 }
 
 /** GET /api/tasks/:id/preview/attach 响应（P1：外链 + 二维码） */

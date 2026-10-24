@@ -13,12 +13,17 @@ package api
 
 import (
 	"bytes"
+	"html"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"pieqi/internal/core"
@@ -114,7 +119,7 @@ func (s *Server) restartPreview(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"ok": true, "state": core.PreviewStarting})
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "state": s.preview.Status(task).State})
 }
 
 // startPreview POST /api/tasks/:id/preview/start。
@@ -132,11 +137,21 @@ func (s *Server) startPreview(c *gin.Context) {
 		return
 	}
 	if err := s.preview.Start(task); err != nil {
-		// discovery 失败 → unavailable（不猜）
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "state": core.PreviewUnavailable})
+		// discovery 失败 → unavailable（不猜），但**不静默**：把权威目录与"疑似方案页"
+		// 一并返回。目录约定是魔法位置，只回一句 "no package.json found" 会让人不知道
+		// 下一步该做什么（用户以为功能坏了，或者只能去猜 agent 把文件放哪了）。
+		st := s.preview.Status(task)
+		c.JSON(http.StatusConflict, gin.H{
+			"error":      err.Error(),
+			"state":      core.PreviewUnavailable,
+			"convention": st.Convention,
+			"hint":       st.Hint,
+			"suspected":  st.Suspected,
+		})
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"ok": true, "state": core.PreviewStarting})
+	// static 预览登记即 running（无启动期），dev server 则是 starting 需轮询
+	c.JSON(http.StatusAccepted, gin.H{"ok": true, "state": s.preview.Status(task).State})
 }
 
 // stopPreview POST /api/tasks/:id/preview/stop。
@@ -159,7 +174,7 @@ func (s *Server) previewStatus(c *gin.Context) {
 		return
 	}
 	if s.preview == nil {
-		c.JSON(http.StatusOK, core.PreviewStatus{State: core.PreviewUnavailable})
+		c.JSON(http.StatusOK, core.PreviewStatus{State: core.PreviewUnavailable, Convention: core.PreviewStaticDir})
 		return
 	}
 	c.JSON(http.StatusOK, s.preview.Status(task))
@@ -180,7 +195,9 @@ func (s *Server) previewAttach(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "preview not enabled"})
 		return
 	}
-	if s.preview.RunningPort(task.ID) == 0 {
+	// 前置条件用 Running 而非 RunningPort：静态预览没有端口（port 恒 0），
+	// 按端口判断会让静态预览永远拿不到外链。
+	if !s.preview.Running(task.ID) {
 		c.JSON(http.StatusConflict, gin.H{"error": "preview not running"})
 		return
 	}
@@ -229,12 +246,25 @@ func splitTunnelToken(u string) (base, token string) {
 }
 
 // previewProxy ANY /api/tasks/:id/preview/*path：反向代理到该 task 绑定的 127.0.0.1 端口。
+// static 预览没有端口：由 serveStaticPreview 在进程内直接读文件（不 spawn、不转发）。
 func (s *Server) previewProxy(c *gin.Context) {
 	if s.preview == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "preview not enabled"})
 		return
 	}
 	taskID := c.Param("id")
+	if dir := s.preview.StaticDir(taskID); dir != "" {
+		s.serveStaticPreview(c, taskID, dir)
+		return
+	}
+	// 静态产物免启动：直接打开 /preview/<id>/（新标签、收藏、分享链接）时不该先要求
+	// 用户回面板点「启动」。只有 dev server 需要那个准备动作（spawn + 端口探测）。
+	if task, ok := s.store.Get(taskID); ok {
+		if dir := s.preview.EnsureStatic(task); dir != "" {
+			s.serveStaticPreview(c, taskID, dir)
+			return
+		}
+	}
 	port := s.preview.RunningPort(taskID)
 	if port == 0 {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "preview not running"})
@@ -271,6 +301,11 @@ func (s *Server) previewProxy(c *gin.Context) {
 // next/nuxt(_next/_nuxt)。vite 另有 --base 前缀化兜底（见 core/preview.go spawn），此处为非 vite 框架兜底。
 var absoluteRootAssetRe = regexp.MustCompile(`((?:src|href)=["'])/((?:@|assets|node_modules|src|\.|_next|_nuxt|__next)[^"']*)["']`)
 
+// staticRootAbsRefRe 静态页的根绝对引用：src="/x"、href='/x'。
+// 比 absoluteRootAssetRe 更宽（不限定资源段），因为静态产物（方案对比页、HTML 报告）
+// 的文件名不可预知；[^/"'] 排除协议相对地址（//cdn...）与已带前缀的路径。
+var staticRootAbsRefRe = regexp.MustCompile(`((?:src|href)=["'])/([^/"'][^"']*)["']`)
+
 // rewritePreviewHTML HTML 重写中间件（p0-design.md §7.3）：
 // 注入 <base href="/api/tasks/:id/preview/">，并把根绝对 src/href 改写成子路径前缀。
 // 已知限制：客户端路由写死根绝对路径的复杂 SPA 可能失效（P0 接受）。
@@ -289,26 +324,196 @@ func rewritePreviewHTML(prefix string) func(*http.Response) error {
 		}
 		_ = resp.Body.Close()
 
-		base := "<base href=\"" + prefix + "/\">"
-		rewritten := absoluteRootAssetRe.ReplaceAll(data, []byte("${1}"+prefix+"/${2}\""))
+		out := injectBaseAndRewrite(data, prefix, absoluteRootAssetRe)
 
-		// base 标签注入在 <head> 之后（有 head 时），否则拼在开头
-		out := bytes.Buffer{}
-		if i := bytes.Index(lower(rewritten), []byte("<head")); i >= 0 {
-			end := bytes.IndexByte(rewritten[i:], '>')
-			out.Write(rewritten[:i+end+1])
-			out.WriteString(base)
-			out.Write(rewritten[i+end+1:])
-		} else {
-			out.WriteString(base)
-			out.Write(rewritten)
-		}
-
-		resp.Body = io.NopCloser(bytes.NewReader(out.Bytes()))
-		resp.Header.Set("Content-Length", itoa(out.Len()))
+		resp.Body = io.NopCloser(bytes.NewReader(out))
+		resp.Header.Set("Content-Length", itoa(len(out)))
 		resp.Header.Del("Content-Encoding") // 重写后内容已解压，防止 gzip 长度/编码不匹配
 		return nil
 	}
+}
+
+// injectBaseAndRewrite 注入 <base href="<prefix>/"> 并按 re 前缀化根绝对引用。
+// reverse proxy（注入到被代理响应）与静态 serve（直接读盘）共用这一份改写逻辑，
+// 避免两处 base 规则漂移（漂移的表现是「静态页能开、图片全裂」这类难查问题）。
+func injectBaseAndRewrite(data []byte, prefix string, re *regexp.Regexp) []byte {
+	rewritten := data
+	if re != nil {
+		rewritten = re.ReplaceAll(data, []byte("${1}"+prefix+"/${2}\""))
+	}
+
+	base := "<base href=\"" + prefix + "/\">"
+	out := bytes.Buffer{}
+	if i := bytes.Index(lower(rewritten), []byte("<head")); i >= 0 {
+		end := bytes.IndexByte(rewritten[i:], '>')
+		out.Write(rewritten[:i+end+1])
+		out.WriteString(base)
+		out.Write(rewritten[i+end+1:])
+	} else {
+		out.WriteString(base)
+		out.Write(rewritten)
+	}
+	return out.Bytes()
+}
+
+// serveStaticPreview 进程内 serve 静态预览目录（PreviewStatic，见 core.PreviewStatic）。
+//
+// 与 reverse proxy 的差异（有意为之）：
+//   - 不 spawn 进程 ⇒ 零内存；任务终态后仍可访问（core 的 stopIfProcess 不回收 static）
+//   - 仍注入 <base href> + 前缀化根绝对引用 ⇒ 页面里的相对链接可用
+//   - HTML 一律 no-store：方案页会被反复重写，缓存住旧版本会让人误以为 agent 没改
+func (s *Server) serveStaticPreview(c *gin.Context, taskID, root string) {
+	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
+		return
+	}
+	prefix := strings.TrimSuffix(core.PreviewBasePath(taskID), "/")
+	rel := strings.TrimPrefix(c.Request.URL.Path, prefix)
+	// path.Clean 先行折叠 ".."；pathWithin 二次校验，防拼接意外把根目录之外的文件读出去
+	clean := path.Clean("/" + strings.TrimPrefix(rel, "/"))
+	fsPath := filepath.Join(root, filepath.FromSlash(clean))
+	if !pathWithin(root, fsPath) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	fi, err := os.Stat(fsPath)
+	isDir := err == nil && fi.IsDir()
+	if isDir {
+		// 目录 → index.html（约定俗成）
+		if idx := filepath.Join(fsPath, "index.html"); fileExistsAsFile(idx) {
+			if st, serr := os.Stat(idx); serr == nil {
+				fsPath, fi = idx, st
+			}
+			isDir = false
+		}
+	}
+	if isDir {
+		s.serveStaticDirFallback(c, prefix, fsPath, clean)
+		return
+	}
+	if err != nil || fi.IsDir() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found", "path": clean})
+		return
+	}
+
+	c.Header("Cache-Control", "no-store")
+	if strings.EqualFold(filepath.Ext(fsPath), ".html") {
+		data, readErr := os.ReadFile(fsPath)
+		if readErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": readErr.Error()})
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", injectBaseAndRewrite(data, prefix, staticRootAbsRefRe))
+		return
+	}
+
+	f, openErr := os.Open(fsPath)
+	if openErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": openErr.Error()})
+		return
+	}
+	defer func() { _ = f.Close() }()
+	// ServeContent 负责 Content-Type（按扩展名）、Content-Length、Range、Last-Modified
+	http.ServeContent(c.Writer, c.Request, filepath.Base(fsPath), fi.ModTime(), f)
+}
+
+// serveStaticDirFallback 目录请求没有 index.html 时的兜底。
+//
+// 场景：agent 把多方案写成 <dir>/variant-a/index.html、<dir>/variant-b/index.html
+// （或只丢一个 proposal.html 在子目录），根路径没有 index.html。旧行为是裸 404 JSON，
+// 手机上看到一坨 {"error":"not found"}，用户只会以为"功能坏了"。
+// 现在：唯一入口 → 302 过去；多个 → 生成一个极简索引页（纯链接），点哪个看哪个。
+func (s *Server) serveStaticDirFallback(c *gin.Context, prefix, dir, clean string) {
+	files := staticDirHTMLs(dir)
+	base := strings.TrimSuffix(clean, "/") // "" 或 "/sub"
+	switch len(files) {
+	case 0:
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "not found",
+			"path":  clean,
+			"hint":  "该目录里没有 .html",
+		})
+		return
+	case 1:
+		c.Header("Cache-Control", "no-store")
+		c.Redirect(http.StatusFound, prefix+base+"/"+files[0])
+		return
+	}
+
+	c.Header("Cache-Control", "no-store")
+	title := "预览目录"
+	var b strings.Builder
+	b.WriteString("<!doctype html><meta charset=\"utf-8\">")
+	b.WriteString("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+	b.WriteString("<title>" + title + "</title>")
+	b.WriteString("<style>body{font:16px/1.9 system-ui,-apple-system,\"Segoe UI\",sans-serif;margin:24px;color:#111}" +
+		"a{color:#2563eb;text-decoration:none}li{margin:6px 0}" +
+		"p{color:#666;font-size:13px}</style>")
+	b.WriteString("<h3>" + title + "</h3>")
+	b.WriteString("<p>" + html.EscapeString(base + "/") + "</p><ul>")
+	for _, f := range files {
+		href := prefix + base + "/" + f
+		b.WriteString("<li><a href=\"" + html.EscapeString(href) + "\">" + html.EscapeString(f) + "</a></li>")
+	}
+	b.WriteString("</ul>")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(b.String()))
+}
+
+// staticDirHTMLs 列出 dir 下（递归两层）的 HTML，返回相对 dir 的 "/" 分隔路径（上限 30 条）。
+// 复用与 discovery 相同的深度语义：agent 的目录结构深浅不一，但两层够覆盖
+// <dir>/variant-a/index.html 这类常见写法。
+func staticDirHTMLs(dir string) []string {
+	const maxDepth = 3
+	var out []string
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() && p != dir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, rerr := filepath.Rel(dir, p)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			if strings.Count(rel, "/")+1 >= maxDepth {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(p), ".html") {
+			return nil
+		}
+		out = append(out, rel)
+		if len(out) >= 30 {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	sort.Strings(out)
+	return out
+}
+
+// fileExistsAsFile 存在且不是目录。
+func fileExistsAsFile(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
+}
+
+// pathWithin p 是否落在 root 之内（Clean 后按分隔符比较，防目录穿越）。
+func pathWithin(root, p string) bool {
+	ar, err1 := filepath.Abs(root)
+	ap, err2 := filepath.Abs(p)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	ar, ap = filepath.Clean(ar), filepath.Clean(ap)
+	if ar == ap {
+		return true
+	}
+	return strings.HasPrefix(ap, ar+string(os.PathSeparator))
 }
 
 // itoa 局部小工具。

@@ -41,6 +41,41 @@ const (
 	PreviewError       = "error"
 )
 
+// PreviewStatic 静态目录预览：**不 spawn 任何进程**，由 pieqi 进程内的
+// http 处理函数直接读 worktree 里的文件（见 api/preview.go 的 serveStaticPreview）。
+//
+// 存在理由：agent 产出的**静态产物**（UI 多方案对比页、纯 HTML 报告）没有 dev server
+// 可跑，而它们恰恰要用手机点开看。走进程模型既多花几十 MB 内存，又会在任务终态被
+// WatchBus 收掉 —— 用户回头想看方案页时已经打不开了。进程内 serve 同时解决这两点。
+const PreviewStatic = "static"
+
+// PreviewStaticDir 静态预览的**权威**约定目录（相对 worktree 根）。
+// 该目录（递归两层）含至少一个 .html 时，DiscoverPreview 直接返回 static；
+// 也可在 .pieqi/preview.json 里用 {"framework":"static","dir":"<相对路径>"} 覆盖。
+const PreviewStaticDir = ".pieqi/preview"
+
+// PreviewStaticDirCandidates 静态预览的兼容候选目录（按优先级）。
+//
+// 为什么不只认一个：目录约定本质是"魔法位置"，**正确性不该押在 agent 记住它**。
+// 实测 agent 的常见落点是 previews/、proposals/、docs/proposals/、
+// web/public/proposals/（各语言/框架的惯性写法），让用户每条 prompt 都交代路径
+// 既烦又容易漏。发现层宽容认领后，用户只需说"出一份能点的对比页"。
+//
+// 权威值仍是 PreviewStaticDir：startStatic 的默认值、给用户/agent 的提示文案都用它。
+var PreviewStaticDirCandidates = []string{
+	PreviewStaticDir,
+	".pieqi/previews",
+	".pieqi/proposals",
+	"docs/proposals",
+	"design/proposals",
+	"web/public/proposals",
+	"public/proposals",
+	"proposals",
+	"previews",
+	"preview",
+	"docs/preview",
+}
+
 // --- Preview 挂载点 ---
 //
 // 刻意不挂在 /api 下：被预览项目普遍把 /api 代理到自己的后端（本项目自身即是），
@@ -60,18 +95,32 @@ func PreviewBasePath(taskID string) string {
 
 // PreviewProfile Discovery 结果：如何启动这个项目的 dev server。
 type PreviewProfile struct {
-	Framework string   `json:"framework"` // vite | next | nuxt | node
-	Command   []string `json:"command"`  // 完整命令（含参数，不含端口覆盖）
+	Framework string   `json:"framework"` // vite | next | nuxt | node | static
+	Command   []string `json:"command"`  // 完整命令（含参数，不含端口覆盖）；static 时为空
 	Port      int      `json:"port"`     // 配置声明的端口（实际以进程输出为准）
 	Cwd       string   `json:"cwd"`       // 相对项目根的工作目录
+	// Dir 仅供 static：要 serve 的目录（相对项目根，默认 .pieqi/preview）。
+	Dir string `json:"dir,omitempty"`
 }
 
 // PreviewStatus 查询结果（feedback 总览 / 状态轮询共用）。
+//
+// Dir / Convention / Hint / Suspected 四个字段是给**调用方指路**用的：
+// 静态预览的目录约定是"魔法位置"，调用方（前端空态、手机端提示）需要能直接告诉
+// 用户/agent「该把页面放哪」，而不是只看到一个 unavailable 干瞪眼。
 type PreviewStatus struct {
 	State     string `json:"state"`
 	Framework string `json:"framework,omitempty"`
 	Port      int    `json:"port,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// Dir 静态预览实际 serve 的目录（相对 worktree 根）；非 static 为空。
+	Dir string `json:"dir,omitempty"`
+	// Convention 权威约定目录（未启动时也返回），供 UI 空态/提示直接展示。
+	Convention string `json:"convention,omitempty"`
+	// Hint unavailable 时可行动的提示（含"产物该放哪"的一句话）。
+	Hint string `json:"hint,omitempty"`
+	// Suspected 疑似方案页（相对 worktree 根，最多 5 条）；discovery 失败时用于指路。
+	Suspected []string `json:"suspected,omitempty"`
 }
 
 // previewInstance 一个 Task 的 preview 进程句柄。
@@ -81,9 +130,10 @@ type previewInstance struct {
 	framework   string
 	port        int
 	state       string
-	cmd         *exec.Cmd
+	cmd         *exec.Cmd // static 时为 nil（无子进程）
 	logFile     *os.File
-	stopped     bool // 用户主动 Stop（区别于异常退出的 error）
+	staticDir   string // 仅 static：绝对路径目录
+	stopped     bool   // 用户主动 Stop（区别于异常退出的 error）
 }
 
 // PreviewManager 管理 taskID → dev server 进程。
@@ -120,7 +170,36 @@ func (pm *PreviewManager) Start(task *model.Task) error {
 	if err != nil {
 		return err
 	}
+	if profile.Framework == PreviewStatic {
+		return pm.startStatic(task, profile)
+	}
 	go pm.spawn(task.ID, task.WorktreePath, profile)
+	return nil
+}
+
+// startStatic 登记一个**无子进程**的 preview 实例（直接 running）。
+// 校验只做一次：目录必须存在且能读到（否则立刻失败，而不是让用户在浏览器里看 404）。
+func (pm *PreviewManager) startStatic(task *model.Task, profile PreviewProfile) error {
+	rel := profile.Dir
+	if rel == "" {
+		rel = PreviewStaticDir
+	}
+	dir := filepath.Join(task.WorktreePath, filepath.FromSlash(rel))
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return fmt.Errorf("preview: static dir missing: %s", rel)
+	}
+
+	pm.mu.Lock()
+	pm.instances[task.ID] = &previewInstance{
+		taskID:      task.ID,
+		projectPath: task.WorktreePath,
+		framework:   PreviewStatic,
+		staticDir:   dir,
+		state:       PreviewRunning, // 无启动期：登记即可用
+	}
+	pm.mu.Unlock()
+	pm.logger.Info("preview static ready", zap.String("task", task.ID), zap.String("dir", dir))
 	return nil
 }
 
@@ -264,6 +343,9 @@ func (pm *PreviewManager) Stop(taskID string) {
 	inst, ok := pm.instances[taskID]
 	if ok {
 		inst.stopped = true
+		if inst.cmd == nil { // static：没有进程可收，直接落终态
+			inst.state = PreviewStopped
+		}
 	}
 	pm.mu.Unlock()
 	if !ok || inst.cmd == nil || inst.cmd.Process == nil {
@@ -295,15 +377,40 @@ func (pm *PreviewManager) Status(task *model.Task) PreviewStatus {
 	}
 	pm.mu.Lock()
 	inst, ok := pm.instances[task.ID]
+	var st PreviewStatus
+	var staticDir, framework string
+	if ok {
+		st = PreviewStatus{State: inst.state, Framework: inst.framework, Port: inst.port}
+		staticDir = inst.staticDir
+		framework = inst.framework
+	}
 	pm.mu.Unlock()
 	if ok {
-		return PreviewStatus{State: inst.state, Framework: inst.framework, Port: inst.port}
+		// static：把实际 serve 的目录（相对 worktree）一并返回，调用方可据此提示
+		// "这次认领了哪" —— 候选目录有多个时，用户能看出 agent 写到哪被认了。
+		if framework == PreviewStatic && staticDir != "" {
+			if rel, err := filepath.Rel(task.WorktreePath, staticDir); err == nil {
+				st.Dir = filepath.ToSlash(rel)
+			}
+		}
+		return st
 	}
-	// 无实例：discovery 判定可运行性
-	if _, err := DiscoverPreview(task.WorktreePath); err != nil {
-		return PreviewStatus{State: PreviewUnavailable}
+	// 无实例：discovery 判定可运行性。
+	// 静态产物**默认可访问**（见 EnsureStatic）：认出静态目录就地登记（无进程、零成本），
+	// 直接报 running —— "启动/停止"是 dev server 的概念（有准备期、有端口），
+	// 静态产物没有准备期，多一步点击只是把产物当成了服务。
+	if dir := pm.EnsureStatic(task); dir != "" {
+		rel, err := filepath.Rel(task.WorktreePath, dir)
+		if err != nil {
+			rel = dir
+		}
+		return PreviewStatus{State: PreviewRunning, Framework: PreviewStatic, Dir: filepath.ToSlash(rel)}
 	}
-	return PreviewStatus{State: PreviewAvailable}
+	profile, err := DiscoverPreview(task.WorktreePath)
+	if err != nil {
+		return previewUnavailableStatus(task.WorktreePath)
+	}
+	return PreviewStatus{State: PreviewAvailable, Framework: profile.Framework}
 }
 
 // RunningPort 代理用：返回 task 绑定的 127.0.0.1 端口；未运行返回 0。
@@ -328,6 +435,85 @@ func (pm *PreviewManager) RunningFramework(taskID string) string {
 	return inst.framework
 }
 
+// StaticDir 静态预览根目录（仅当实例处于 running 且为 static）；否则返回 ""。
+// 代理层据此分流：非空 → 进程内 serve 文件，不再走 reverse proxy。
+func (pm *PreviewManager) StaticDir(taskID string) string {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	inst, ok := pm.instances[taskID]
+	if !ok || inst.state != PreviewRunning || inst.framework != PreviewStatic {
+		return ""
+	}
+	return inst.staticDir
+}
+
+// EnsureStatic "静态产物默认可访问"的唯一入口：有静态产物目录就地登记，返回其绝对路径。
+//
+// 三处需要同一语义 —— Status（面板一打开就应是 running）、previewProxy（直接打开/
+// 收藏链接不该先要求启动）、artifacts（打开 URL 要指对通道）。写三份必然漂移：
+// 一旦某处漏了，表现是"同一件 HTML 这次用 /preview 打开、下次退化成 /file"，
+// 而 /file 不解析同目录相对资源 ⇒ 只有多文件页面会坏，很难查。
+//
+// 用户显式 Stop 过则不自动拉起（否则「停止」按钮看起来没反应）。
+func (pm *PreviewManager) EnsureStatic(task *model.Task) string {
+	if task == nil || task.WorktreePath == "" {
+		return ""
+	}
+	pm.mu.Lock()
+	var state, framework, staticDir string
+	has := false
+	if inst, ok := pm.instances[task.ID]; ok {
+		has, state, framework, staticDir = true, inst.state, inst.framework, inst.staticDir
+	}
+	pm.mu.Unlock()
+	if has {
+		if state == PreviewRunning && framework == PreviewStatic {
+			return staticDir
+		}
+		if state == PreviewStopped {
+			return ""
+		}
+	}
+
+	profile, err := DiscoverPreview(task.WorktreePath)
+	if err != nil || profile.Framework != PreviewStatic {
+		return ""
+	}
+	if err := pm.startStatic(task, profile); err != nil {
+		return ""
+	}
+	return pm.StaticDir(task.ID)
+}
+
+// Running 是否处于运行态（static 与子进程两种形态都算）。
+// Attach 等端点用它判断前置条件 —— 静态预览没有端口（RunningPort 恒 0），
+// 曾按端口判断会导致静态预览永远拿不到外链。
+func (pm *PreviewManager) Running(taskID string) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	inst, ok := pm.instances[taskID]
+	return ok && inst.state == PreviewRunning
+}
+
+// Forget 丢弃实例登记（任务删除时用；静态预览没有进程，不删会随任务数线性泄漏）。
+func (pm *PreviewManager) Forget(taskID string) {
+	pm.mu.Lock()
+	delete(pm.instances, taskID)
+	pm.mu.Unlock()
+}
+
+// stopIfProcess 只停止**有子进程**的 preview。
+// 静态预览零成本且任务终态后仍应可访问（方案页在任务完成后还要能看），故不随终态回收。
+func (pm *PreviewManager) stopIfProcess(taskID string) {
+	pm.mu.Lock()
+	inst, ok := pm.instances[taskID]
+	static := ok && inst.cmd == nil
+	pm.mu.Unlock()
+	if ok && !static {
+		pm.Stop(taskID)
+	}
+}
+
 // CleanupAll 停止全部 preview（服务器关停时）。
 func (pm *PreviewManager) CleanupAll() {
 	pm.mu.Lock()
@@ -349,11 +535,13 @@ func (pm *PreviewManager) WatchBus(bus *EventBus) {
 			switch ev.Type {
 			case "task_deleted":
 				pm.Stop(ev.TaskID)
+				pm.Forget(ev.TaskID)
 			case "task_completed", "task_failed":
-				pm.Stop(ev.TaskID)
+				// 静态预览零成本且任务终态后仍要能看（方案页/报告），只收进程
+				pm.stopIfProcess(ev.TaskID)
 			case "task_updated":
 				if ev.Task != nil && (ev.Task.Status == model.TaskCancelled) {
-					pm.Stop(ev.TaskID)
+					pm.stopIfProcess(ev.TaskID)
 				}
 			}
 		}
@@ -380,14 +568,183 @@ func (pm *PreviewManager) markState(taskID, state, errMsg string) {
 // previewOverrideFile 项目级覆盖配置（.pieqi/preview.json）。
 const previewOverrideFile = ".pieqi/preview.json"
 
+// hasStaticHTML 判定 relDir（相对 projectPath）是否存在且**递归两层**含 .html。
+//
+// 递归而非只看一层：agent 常把多方案写成 proposals/variant-a/index.html 这种
+// 一层子目录结构，只看当层会判"空"→ unavailable（用户点预览直接失败）。
+func hasStaticHTML(projectPath, relDir string) bool {
+	root := filepath.Join(projectPath, filepath.FromSlash(relDir))
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		return false
+	}
+	found := false
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() && p != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if p == root {
+			return nil
+		}
+		if d.IsDir() {
+			// 目录深度 ≥2 就不再下探 ⇒ 文件最多取到 <dir>/<a>/<b>/index.html。
+			if rel, rerr := filepath.Rel(root, p); rerr == nil && strings.Count(filepath.ToSlash(rel), "/") >= 2 {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.EqualFold(filepath.Ext(p), ".html") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+// DiscoverStaticPreviewDir 按 PreviewStaticDirCandidates 的顺序找第一个含 html 的目录。
+// 返回相对 projectPath 的目录（用 "/" 分隔）与是否命中。
+func DiscoverStaticPreviewDir(projectPath string) (string, bool) {
+	for _, rel := range PreviewStaticDirCandidates {
+		if hasStaticHTML(projectPath, rel) {
+			return rel, true
+		}
+	}
+	return "", false
+}
+
+// checkStaticDir 校验 static profile 的目录可用（存在为目录即可，不强制含 html：
+// 覆盖文件是用户的显式指令，空目录也照 serve，让用户在浏览器里看到目录为空而不是"启动失败"）。
+func checkStaticDir(projectPath, relDir string) error {
+	fi, err := os.Stat(filepath.Join(projectPath, filepath.FromSlash(relDir)))
+	if err != nil || !fi.IsDir() {
+		return fmt.Errorf("preview: static dir missing: %s", relDir)
+	}
+	return nil
+}
+
+// --- 疑似方案页探测（只用于指路，不自动认领） ---
+//
+// 为什么**不**自动把散落的 html 当预览根：静态预览是"整目录 serve"，把 worktree 根
+// 当地址等于把源码全暴露在 /preview/<id>/ 下。所以根目录/任意目录里的孤立 html 只
+// 报告（Hint + Suspected），由用户决定是让 agent 挪进约定目录、还是写 preview.json 指路。
+
+// previewPageKeywords 文件名里出现即视为"疑似方案页"（小写比较）。
+var previewPageKeywords = []string{
+	"proposal", "preview", "variant", "compare", "mockup", "wireframe", "prototype",
+	"方案", "对比",
+}
+
+// previewScanSkipDirs 扫描时跳过的噪声目录（依赖/构建产物/元数据）。
+var previewScanSkipDirs = map[string]bool{
+	".git": true, "node_modules": true, "dist": true, "build": true, "vendor": true,
+	".next": true, "target": true, "coverage": true, ".venv": true, "venv": true,
+	"__pycache__": true, ".cache": true, ".idea": true, ".vscode": true,
+}
+
+// SuspectedPreviewPages 在 worktree 里找"看起来是方案页"的 html（相对路径，最多 5 条）。
+// 仅用于 discovery 失败时的 hint —— 猜错只是提示不准，不会把源码当预览根。
+func SuspectedPreviewPages(projectPath string) []string {
+	const (
+		maxDepth   = 3
+		maxResults = 5
+		maxScan    = 4000 // 遍历预算：大仓库里 status 轮询不该变成全盘扫描
+	)
+	var (
+		out   []string
+		scans int
+	)
+	_ = filepath.WalkDir(projectPath, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() && p != projectPath {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if p == projectPath {
+			return nil
+		}
+		scans++
+		if scans > maxScan {
+			return filepath.SkipAll
+		}
+		rel, rerr := filepath.Rel(projectPath, p)
+		if rerr != nil {
+			return nil
+		}
+		depth := strings.Count(filepath.ToSlash(rel), "/") + 1
+		if d.IsDir() {
+			if previewScanSkipDirs[strings.ToLower(d.Name())] || depth > maxDepth {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(p), ".html") {
+			return nil
+		}
+		base := strings.ToLower(d.Name())
+		// index.html 是目录入口，通常是被认领目录的一部分；单独存在时更像站点入口而非方案页。
+		if base == "index.html" {
+			return nil
+		}
+		for _, kw := range previewPageKeywords {
+			if strings.Contains(base, kw) {
+				out = append(out, filepath.ToSlash(rel))
+				break
+			}
+		}
+		if len(out) >= maxResults {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return out
+}
+
+// previewUnavailableStatus 构造 unavailable 状态，并附上可行动的指路信息。
+//
+// 设计取舍：不把"位置"当正确性前提。发现层先宽容认领候选目录；这里再兜住
+// "散落在别处"的情况 —— 告诉调用方权威路径 + 已发现的疑似页面，而不是静默失败。
+func previewUnavailableStatus(projectPath string) PreviewStatus {
+	st := PreviewStatus{State: PreviewUnavailable, Convention: PreviewStaticDir}
+	if sus := SuspectedPreviewPages(projectPath); len(sus) > 0 {
+		st.Suspected = sus
+		st.Hint = "已发现疑似方案页 " + strings.Join(sus, "、") +
+			"，但不在预览目录内。让 agent 把它们移到 " + PreviewStaticDir +
+			"/（或写 .pieqi/preview.json 指定 dir）后重新点预览。"
+		return st
+	}
+	st.Hint = "未找到可预览的页面。让 agent 把产物（HTML）写到 " + PreviewStaticDir +
+		"/ 下即可在此打开（也可写 .pieqi/preview.json 显式指定 static 目录）。"
+	return st
+}
+
 // DiscoverPreview 探测 projectPath 的 dev server 形态。识别不了返回错误（→ unavailable，不猜）。
 func DiscoverPreview(projectPath string) (PreviewProfile, error) {
 	// 0. 项目覆盖文件优先
 	if data, err := os.ReadFile(filepath.Join(projectPath, previewOverrideFile)); err == nil {
 		var p PreviewProfile
-		if jsonUnmarshal(data, &p) == nil && len(p.Command) > 0 {
+		if jsonUnmarshal(data, &p) == nil && (len(p.Command) > 0 || p.Framework == PreviewStatic) {
+			if p.Framework == PreviewStatic {
+				if p.Dir == "" {
+					p.Dir = PreviewStaticDir
+				}
+				if err := checkStaticDir(projectPath, p.Dir); err != nil {
+					return PreviewProfile{}, err
+				}
+			}
 			return p, nil
 		}
+	}
+
+	// 0.5 静态目录：worktree 里有约定目录（含 .html）→ 进程内 serve，无 dev server 可跑。
+	// 刻意排在 package.json 之前：约定目录是**显式**意图（agent 明确把产物放进来了），
+	// 比"猜这个仓库想跑哪个 dev server"更可信。
+	// 认领范围是候选清单（PreviewStaticDirCandidates），不是单个魔法路径 —— 见那里的说明。
+	if dir, ok := DiscoverStaticPreviewDir(projectPath); ok {
+		return PreviewProfile{Framework: PreviewStatic, Dir: dir}, nil
 	}
 
 	// 1. 探测项目根（及常见前端子目录）最近的 package.json

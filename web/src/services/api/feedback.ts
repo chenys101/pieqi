@@ -18,6 +18,7 @@
 import { request, requestText } from './client'
 import type {
   ApprovalDiffDto,
+  ArtifactDto,
   CheckDto,
   ChecksResponseDto,
   ContinueResponseDto,
@@ -84,6 +85,19 @@ export function taskLocalImageURL(taskId: string, path: string): string {
 /** GET /api/tasks/:id/file 的原始文本（markdown 渲染前拉取）。 */export async function getTaskFileText(taskId: string, path: string): Promise<string> {
   const qs = new URLSearchParams({ path })
   return requestText(`/tasks/${encodeURIComponent(taskId)}/file?${qs}`)
+}
+
+/**
+ * GET /api/tasks/:id/artifacts：agent 产出的可查看文件清单（html / markdown / image / pdf）。
+ *
+ * 与「变更」列表的区别：变更回答"改了什么"，产物回答"有什么能看"——只列**人看得懂**的
+ * 产出（代码/配置不进），并按 html → markdown → image → pdf 排序，打开 URL 由服务端算好。
+ */
+export async function getTaskArtifacts(taskId: string): Promise<ArtifactDto[]> {
+  const res = await request<{ artifacts: ArtifactDto[] }>(
+    `/tasks/${encodeURIComponent(taskId)}/artifacts`,
+  )
+  return res.artifacts ?? []
 }
 
 /**
