@@ -184,7 +184,38 @@ echo Starting pieqi.exe from %RUNDIR% ...
 echo.
 cd /d "%RUNDIR%"
 set "PIEQI_CONFIG=%REPO%config.yaml"
-start "" "%EXE%"
+
+REM Keep the runtime copy of config.yaml in sync. The explorer channel below
+REM does NOT propagate this script's environment (no PIEQI_CONFIG for the new
+REM process), so startup relies on the convention "cwd = exe dir; the default
+REM config.yaml resolves to the runtime copy" (see cmd/pieqi/main.go, the
+REM comment near the config-path resolution). Single source of truth stays the
+REM repo file; this copy is just the boot-time snapshot.
+if exist "%REPO%config.yaml" copy /Y "%REPO%config.yaml" "%RUNDIR%config.yaml" >nul
+
+REM Hand the launch to the standing explorer shell. "explorer.exe <file>" does
+REM not start a new explorer -- it forwards an ShellExecute request to the
+REM ALREADY-RUNNING user shell, so the new process is parented to explorer and
+REM lives OUTSIDE this console's job object. Plain "start" (used before
+REM 2026-10-24) inherits the caller's kill-on-close job: two instances
+REM (PID 30400, 20732, both launched by agent sessions) silently died the
+REM moment the session that ran this script ended -- no panic, no log.
+REM
+REM ? measured 2026-10-24: an explorer-launched EXE runs with cwd
+REM C:\Windows\System32 -- NOT the exe's own directory. pieqi resolves
+REM "config.yaml" against the cwd, finds nothing there and log.Fatalf's to a
+REM stderr nobody sees: instant death, zero log lines. So we never hand the
+REM exe to explorer directly; we generate a tiny launcher NEXT TO the exe
+REM that cd's to its own directory first, then starts pieqi from there. The
+REM launcher itself is explorer-launched, and pieqi (its child) inherits the
+REM safe context: outside the caller's job, correct cwd.
+REM NOTE: explorer.exe returns 0 regardless of outcome; the :3000 wait loop
+REM below is the ONLY reliable success signal. Judge the port, never the code.
+set "LAUNCHER=%RUNDIR%\pieqi-detached.cmd"
+> "%LAUNCHER%" echo @echo off
+>> "%LAUNCHER%" echo cd /d "%%~dp0"
+>> "%LAUNCHER%" echo start "" "%%~dp0pieqi.exe"
+explorer.exe "%LAUNCHER%"
 
 REM ---------------------------------------------------------------------------
 REM Wait for the port, then summarise.
