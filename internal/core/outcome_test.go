@@ -80,6 +80,17 @@ func TestBuildEvidence_TaskScope(t *testing.T) {
 	if len(ev.DiffBrief) != 2 || !strings.Contains(ev.DiffBrief[0], "a.go") {
 		t.Fatalf("diffBrief: %v", ev.DiffBrief)
 	}
+	// Files 与 DiffBrief 必须同序同量：前端概览的文件清单就是拿它挂「打开」入口的，
+	// 少一条 = 那个文件看得见点不开（这条断言防的正是"只维护了 diff_brief"）。
+	if len(ev.Files) != len(ev.DiffBrief) {
+		t.Fatalf("files/diffBrief 数量不一致: %d vs %d", len(ev.Files), len(ev.DiffBrief))
+	}
+	if ev.Files[0].Path != "a.go" || ev.Files[0].Operation != "modify" || ev.Files[0].Additions != 10 || ev.Files[0].Deletions != 2 {
+		t.Fatalf("files[0]: %+v", ev.Files[0])
+	}
+	if ev.Files[0].Open != "" {
+		t.Fatalf("core 不应填 Open（那是 api 层的知识）: %+v", ev.Files[0])
+	}
 	if len(ev.Checks) != 2 || ev.Errors != 1 {
 		t.Fatalf("checks/errors: %+v %d", ev.Checks, ev.Errors)
 	}

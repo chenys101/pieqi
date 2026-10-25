@@ -9,6 +9,7 @@ import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useNotificationStore } from '@/stores/notification'
+import { artifactOpenLabel } from '../filePreview'
 
 const props = defineProps<{
   taskId: string
@@ -40,6 +41,45 @@ const hasSignal = computed(() => {
   const ev = evidence.value
   if (!ev) return false
   return ev.changes.files > 0 || ev.checks.length > 0 || ev.errors > 0
+})
+
+/**
+ * 概览里那份「文件清单」的行。
+ *
+ * 优先用后端给的结构化 `files`（能挂「打开」），老响应 / 空 files 时回退到
+ * `diff_brief` 纯文本行 —— 概览是手机端主验收面，**光看到文件名点不开等于没交付**，
+ * 但也不可能因为一个字段缺失就整块不显示。
+ *
+ * 为什么标签来自 artifactOpenLabel 而不是后端：哪些类型值得新标签打开是**前端
+ * 交互决定**（md/pdf 已有内联预览），后端只负责给出通道 URL 与类型。
+ */
+const briefRows = computed(() => {
+  const ev = evidence.value
+  interface Row {
+    key: string
+    path: string
+    text: string
+    additions?: number
+    deletions?: number
+    open?: string
+    label?: string
+  }
+  if (!ev) return [] as Row[]
+  if (ev.files?.length) {
+    return ev.files.map<Row>((f, i) => {
+      const label = f.kind ? artifactOpenLabel(f.kind) : null
+      return {
+        key: f.path + '#' + i,
+        path: f.path,
+        text: f.path,
+        additions: f.additions,
+        deletions: f.deletions,
+        open: label ? f.open : undefined,
+        label: label ?? undefined,
+      }
+    })
+  }
+  return (ev.diff_brief ?? []).map<Row>((line, i) => ({ key: 'b' + i, path: line, text: line }))
 })
 
 async function refresh() {
@@ -127,10 +167,27 @@ watch(
         </div>
         <div v-if="evidence.errors > 0" class="text-error">末轮 {{ evidence.errors }} 个工具调用失败</div>
         <div v-if="evidence.preview" class="text-muted">预览：{{ evidence.preview.state }}</div>
-        <!-- 每文件一行摘要（默认折叠 3 条，超出可展开） -->
-        <details v-if="evidence.diff_brief.length" class="text-muted">
-          <summary class="cursor-pointer select-none text-[11px]">文件清单（{{ evidence.diff_brief.length }}）</summary>
-          <div v-for="(line, i) in evidence.diff_brief" :key="i" class="truncate font-mono text-[11px]">{{ line }}</div>
+        <!-- 每文件一行（默认折叠）：html / 图片行带「打开」——概览是主验收面，
+             看到方案页点不开等于没交付。md/pdf 由「变更」Tab 的内联预览承担。 -->
+        <details v-if="briefRows.length" class="text-muted">
+          <summary class="cursor-pointer select-none text-[11px]">文件清单（{{ briefRows.length }}）</summary>
+          <div
+            v-for="r in briefRows"
+            :key="r.key"
+            class="flex items-center gap-1.5"
+          >
+            <span class="min-w-0 flex-1 truncate font-mono text-[11px]" :title="r.path">{{ r.text }}</span>
+            <span v-if="r.additions" class="shrink-0 font-mono text-[11px] text-success">+{{ r.additions }}</span>
+            <span v-if="r.deletions" class="shrink-0 font-mono text-[11px] text-error">-{{ r.deletions }}</span>
+            <a
+              v-if="r.open"
+              :href="r.open"
+              target="_blank"
+              rel="noopener"
+              class="inline-flex shrink-0 items-center px-2.5 py-1 text-xs text-accent hover:underline"
+              :title="`新标签打开 ${r.path}`"
+            >{{ r.label }}</a>
+          </div>
         </details>
 
         <!-- 视觉证据区（截图 → 2026-10-15；console/网络 → 同日，见 ADR-0012/0013）已整体移除 -->

@@ -29,7 +29,23 @@ type Evidence struct {
 	Errors      int              `json:"errors"` // 末轮 is_error tool_result 数
 	Changes     ChangeSummary   `json:"changes"`
 	DiffBrief   []string         `json:"diff_brief"` // 每文件一行摘要
+	Files       []EvidenceFile   `json:"files"`      // 与 DiffBrief 同序的结构化版本（前端挂"打开"用）
 	CreatedAt   string           `json:"created_at"`
+}
+
+// EvidenceFile 证据卡里的一个文件行。
+//
+// 为什么不能只给 DiffBrief 那些字符串：概览页的「文件清单」要能直接点开产物
+// （HTML 方案页 / 图片），而字符串行是给人读的，前端从里面解析路径又脆又脏。
+// 这里只放**结构性事实**（路径/动作/±行数），Kind 与 Open 由 api 层填 ——
+// core 不关心 URL 是什么形态，也不该知道 preview 与 file 两条通道的差别。
+type EvidenceFile struct {
+	Path      string `json:"path"`
+	Operation string `json:"operation"`         // create | modify | delete
+	Additions int    `json:"additions,omitempty"`
+	Deletions int    `json:"deletions,omitempty"`
+	Kind      string `json:"kind,omitempty"`    // html | markdown | image | pdf（api 填）
+	Open      string `json:"open,omitempty"`    // 可直接打开的 URL（api 填）
 }
 
 // 注：P2 的 Console/Network 摘要（及更早的 Screenshot）已于 2026-10-15 整体移除，
@@ -63,6 +79,12 @@ func BuildEvidence(task *model.Task, changes []FileChange, checks []Check, previ
 			line += fmt.Sprintf(" (+%d -%d)", fc.Additions, fc.Deletions)
 		}
 		ev.DiffBrief = append(ev.DiffBrief, line)
+		ev.Files = append(ev.Files, EvidenceFile{
+			Path:      fc.Path,
+			Operation: fc.Operation,
+			Additions: fc.Additions,
+			Deletions: fc.Deletions,
+		})
 	}
 
 	for _, ck := range checks {

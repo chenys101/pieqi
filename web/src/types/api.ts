@@ -581,7 +581,24 @@ export interface EvidenceDto {
   changes: ChangeSummaryDto
   /** 每文件一行摘要（如 "modify src/a.vue (+10 -2)"） */
   diff_brief: string[]
+  /**
+   * 与 `diff_brief` 同序的结构化版本 —— 概览页的「文件清单」靠它挂钩「打开」入口。
+   * `kind` / `open` 只在文件属于产物类型（html / image / md / pdf）且仍在磁盘上时才有值。
+   */
+  files?: EvidenceFileDto[]
   created_at: string
+}
+
+/** Evidence 文件行：结构性事实 + （可选）产物打开通道 */
+export interface EvidenceFileDto {
+  path: string
+  operation: string
+  additions?: number
+  deletions?: number
+  /** html | markdown | image | pdf */
+  kind?: string
+  /** 可直接打开的 URL（html 在静态产物目录内时走 /preview，其余走 /file） */
+  open?: string
 }
 
 // ---------- Feedback P2（p2-design.md §9，wire 与 Go JSON tag 一致） ----------

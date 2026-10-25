@@ -95,3 +95,30 @@ func (s *Server) buildEvidence(task *model.Task, scope string, turn int) core.Ev
 	}
 	return evidence
 }
+
+// attachArtifactOpens 给证据卡的文件行补上 kind 与「打开」URL。
+//
+// 为什么放在 api 层：URL 形态（静态目录内的 html 走 /preview，其余走 /file）
+// 是 api 的知识，core 只手产结构性事实。
+//
+// 为什么复用 collectArtifacts 而不是另算一遍：打开的通道**只允许有一处定义**。
+// 概览的文件清单与「变更 → 累计变化」的清单指的是同一批文件，各自拼一份 URL
+// 迟早会出现"同一份 html 两个不同的打开地址"，而那正是上一轮把产物并入文件清单
+// 时要消灭的漂移。
+func (s *Server) attachArtifactOpens(task *model.Task, ev *core.Evidence) {
+	if ev == nil || len(ev.Files) == 0 {
+		return
+	}
+	byPath := make(map[string]artifactDTO, len(ev.Files))
+	for _, a := range s.collectArtifacts(task) {
+		byPath[a.Path] = a
+	}
+	for i := range ev.Files {
+		a, ok := byPath[ev.Files[i].Path]
+		if !ok {
+			continue // 非产物类型（代码/配置）或文件已不在磁盘：不挂入口
+		}
+		ev.Files[i].Kind = a.Kind
+		ev.Files[i].Open = a.Open
+	}
+}

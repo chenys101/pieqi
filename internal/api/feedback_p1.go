@@ -191,7 +191,9 @@ func (s *Server) getEvidence(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "scope=turn requires turn"})
 		return
 	}
-	c.JSON(http.StatusOK, s.buildEvidence(task, scope, turn))
+	ev := s.buildEvidence(task, scope, turn)
+	s.attachArtifactOpens(task, &ev)
+	c.JSON(http.StatusOK, ev)
 }
 
 // --- Evidence → Continue（§8 ⭐ 控制闭环） ---
