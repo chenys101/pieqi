@@ -11,8 +11,8 @@
 //
 // 数据流：打开/刷新时现场派生（后端不存第二份聚合，ADR-0001）。
 import { computed, nextTick, ref, watch } from 'vue'
-import { rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
-import type { FileStatDto, RewindVerificationDto } from '@/types/api'
+import { getTaskArtifacts, rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
+import type { ArtifactDto, FileStatDto, RewindVerificationDto } from '@/types/api'
 import SegmentedControl from '@/components/ui/SegmentedControl.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import TurnCard from './TurnCard.vue'
@@ -22,7 +22,8 @@ import OutcomeCard from './OutcomeCard.vue'
 import EvidenceCard from './EvidenceCard.vue'
 import DiffView from './DiffView.vue'
 import FilePreview from './FilePreview.vue'
-import { previewKind } from '../filePreview'
+import { artifactOpenLabel, previewKind } from '../filePreview'
+import { baseNameOf, groupByFolder } from '../fileGroups'
 import { useNotificationStore } from '@/stores/notification'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
 import { useFeedbackBundleStore } from '@/stores/feedbackBundle'
@@ -99,6 +100,62 @@ const turnsDesc = computed(() => [...(bundle.value?.turns ?? [])].reverse())
 const cumulativeFiles = computed<FileStatDto[]>(() => bundle.value?.cumulative?.entries ?? [])
 
 /**
+ * 产物索引：path → artifact。open URL 由服务端算好（静态预览目录内的 html 走
+ * `/preview/<id>/<rel>`，其余走 `/file`）。
+ *
+ * 文件清单**只在这张表里查"能不能点开"**，绝不自己拼 URL：拼错的表现是 404 或
+ * CSP 下的空白页，而用户无从判断是"这个文件本来就不是产物"还是"通道坏了"。
+ */
+const artifactsByPath = ref<Map<string, ArtifactDto>>(new Map())
+
+/** 一行 = 一个文件 + 展示名 + 打开入口（open 为 null = 该文件没有"新标签打开"形态） */
+interface FileRow {
+  fc: FileStatDto
+  /** 分组内只显示文件名（目录由分组头承担）；单一目录时保留完整路径 */
+  name: string
+  open: { href: string; label: string } | null
+}
+
+/**
+ * 累计变更按目录分组，**默认全部收起**。
+ *
+ * 只有一个目录时 `grouped` 为 false：分组是为了收掉长列表，一组还能收起
+ * 等于"多点一次才看得到内容"，且行内只剩文件名会丢掉唯一的目录上下文。
+ */
+const cumulativeGroups = computed(() => {
+  const groups = groupByFolder(cumulativeFiles.value)
+  const grouped = groups.length > 1
+  return groups.map((g) => ({
+    ...g,
+    grouped,
+    rows: g.files.map<FileRow>((fc) => ({
+      fc,
+      name: grouped ? baseNameOf(fc.path) : fc.path,
+      open: openLinkOf(fc.path),
+    })),
+  }))
+})
+
+/** 分组展开态：dir → 是否展开（缺省收起） */
+const openDirs = ref<Record<string, boolean>>({})
+
+function isDirOpen(dir: string): boolean {
+  return openDirs.value[dir] === true
+}
+
+function toggleDir(dir: string): void {
+  openDirs.value = { ...openDirs.value, [dir]: !openDirs.value[dir] }
+}
+
+/** 该路径的可打开入口（html / 图片）；无产物登记、或该类型已有内联预览时返回 null */
+function openLinkOf(path: string): { href: string; label: string } | null {
+  const a = artifactsByPath.value.get(path)
+  if (!a) return null
+  const label = artifactOpenLabel(a.kind)
+  return label ? { href: a.open, label } : null
+}
+
+/**
  * 贴边条上的变更文件数 —— **收起态自带的"要不要展开"判据**。
  *
  * 取后端 `cumulative.files`（走 `git diff --numstat` 与基线对比），
@@ -137,11 +194,26 @@ async function refresh() {
   loading.value = true
   try {
     // force：回退 / 重跑后必须看到新数字，本地有缓存也要重拉
-    await bundleStore.load(props.taskId, true)
+    await Promise.all([bundleStore.load(props.taskId, true), loadArtifacts()])
   } catch (err) {
     notify.error(err instanceof Error ? err.message : '加载反馈数据失败')
   } finally {
     loading.value = false
+  }
+}
+
+/**
+ * 拉产物索引（失败静默：没有产物不是错误，清单照常显示，只是没有"打开"入口）。
+ *
+ * 与 bundle 同批拉：两者都影响文件清单的同一次渲染，分开拉会出现"先渲染出
+ * 没入口的清单、下一帧才长出按钮"的跳动。
+ */
+async function loadArtifacts() {
+  try {
+    const list = await getTaskArtifacts(props.taskId)
+    artifactsByPath.value = new Map(list.map((a) => [a.path, a]))
+  } catch {
+    artifactsByPath.value = new Map()
   }
 }
 
@@ -336,6 +408,7 @@ watch(
                 :key="t.turn"
                 :task-id="taskId"
                 :turn="t"
+                :artifacts="artifactsByPath"
                 :checkpointed="checkpointSet.has(t.turn)"
                 :can-rewind="canRewind && rewinding === null && rewindingFile === null"
                 :highlighted="fb.activeTurn === t.turn"
@@ -344,35 +417,65 @@ watch(
               />
               <div v-if="!turnsDesc.length" class="py-6 text-center text-xs text-text-tertiary">暂无 Turn 记录</div>
             </div>
+            <!-- 累计文件清单：按目录分组、默认收起。
+                 分组头自带文件数与 +/- 合计 —— 收起态就携带"值不值得展开"的判据。
+                 单一目录时不套分组头（见 cumulativeGroups 注释）。 -->
             <div v-else class="rounded-lg border border-border/60 bg-surface/60">
               <div v-if="!cumulativeFiles.length" class="px-3 py-2 text-xs text-text-tertiary">暂无累计变更</div>
-              <div v-for="fc in cumulativeFiles" :key="fc.path" class="border-b border-border/30 last:border-b-0">
-                <div class="flex items-center gap-2">
-                  <button
-                    type="button"
-                    class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-surface-muted"
-                    @click="openBaselinePath = openBaselinePath === fc.path ? null : fc.path"
-                  >
-                    <span class="min-w-0 flex-1 truncate font-mono text-text-secondary" :title="fc.path">{{ fc.path }}</span>
-                    <span class="shrink-0 font-mono">
-                      <span v-if="fc.additions || fc.deletions" class="text-success">+{{ fc.additions }}</span>
-                      <span v-if="fc.additions || fc.deletions" class="ml-1 text-error">-{{ fc.deletions }}</span>
-                    </span>
-                    <span class="shrink-0 text-text-tertiary transition-transform" :class="openBaselinePath === fc.path ? '' : '-rotate-90'">▾</span>
-                  </button>
-                  <button
-                    v-if="previewKind(fc.path)"
-                    type="button"
-                    class="shrink-0 cursor-pointer px-2.5 py-1 text-xs"
-                    :class="previewBaselinePath === fc.path ? 'text-accent' : 'text-text-tertiary hover:text-text'"
-                    @click="previewBaselinePath = previewBaselinePath === fc.path ? null : fc.path"
-                  >预览</button>
+              <template v-for="g in cumulativeGroups" :key="g.dir || '.'">
+                <button
+                  v-if="g.grouped"
+                  type="button"
+                  class="flex min-h-11 w-full cursor-pointer items-center gap-2 border-b border-border/30 bg-surface-muted/40 px-3 py-2 text-left text-[11.5px] hover:bg-surface-muted"
+                  :aria-expanded="isDirOpen(g.dir)"
+                  :title="g.dir ? `展开/收起 ${g.dir}` : '展开/收起仓库根目录下的文件'"
+                  @click="toggleDir(g.dir)"
+                >
+                  <span class="shrink-0 text-text-tertiary transition-transform" :class="isDirOpen(g.dir) ? '' : '-rotate-90'">▾</span>
+                  <span class="min-w-0 flex-1 truncate font-mono" :class="isDirOpen(g.dir) ? 'text-text' : 'text-text-secondary'">{{ g.label }}</span>
+                  <span class="shrink-0 text-text-tertiary">{{ g.files.length }} 个</span>
+                  <span v-if="g.additions" class="shrink-0 font-mono text-success">+{{ g.additions }}</span>
+                  <span v-if="g.deletions" class="shrink-0 font-mono text-error">-{{ g.deletions }}</span>
+                </button>
+                <div v-if="!g.grouped || isDirOpen(g.dir)">
+                  <div v-for="row in g.rows" :key="row.fc.path" class="border-b border-border/30 last:border-b-0">
+                    <div class="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        class="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-surface-muted"
+                        @click="openBaselinePath = openBaselinePath === row.fc.path ? null : row.fc.path"
+                      >
+                        <span class="min-w-0 flex-1 truncate font-mono text-text-secondary" :title="row.fc.path">{{ row.name }}</span>
+                        <span v-if="row.fc.additions" class="shrink-0 font-mono text-success">+{{ row.fc.additions }}</span>
+                        <span v-if="row.fc.deletions" class="shrink-0 font-mono text-error">-{{ row.fc.deletions }}</span>
+                        <span class="shrink-0 text-text-tertiary transition-transform" :class="openBaselinePath === row.fc.path ? '' : '-rotate-90'">▾</span>
+                      </button>
+                      <!-- 产物「新标签打开」：html 是真页面（样式/脚本/同目录资源都生效），
+                           图片由浏览器直接显示。与「预览」并列而非取代 —— 预览是内联看，
+                           打开是拿去用（点、切、分享，或直接发给别人）。 -->
+                      <a
+                        v-if="row.open"
+                        :href="row.open.href"
+                        target="_blank"
+                        rel="noopener"
+                        class="shrink-0 px-2.5 py-1 text-xs text-accent hover:underline"
+                        :title="`新标签打开 ${row.fc.path}`"
+                      >{{ row.open.label }}</a>
+                      <button
+                        v-if="previewKind(row.fc.path)"
+                        type="button"
+                        class="shrink-0 cursor-pointer px-2.5 py-1 text-xs"
+                        :class="previewBaselinePath === row.fc.path ? 'text-accent' : 'text-text-tertiary hover:text-text'"
+                        @click="previewBaselinePath = previewBaselinePath === row.fc.path ? null : row.fc.path"
+                      >预览</button>
+                    </div>
+                    <!-- turn 省略 = Baseline 累计 diff -->
+                    <DiffView v-if="openBaselinePath === row.fc.path" :task-id="taskId" :path="row.fc.path" />
+                    <!-- 文件预览（markdown/pdf） -->
+                    <FilePreview v-if="previewBaselinePath === row.fc.path" :task-id="taskId" :path="row.fc.path" />
+                  </div>
                 </div>
-                <!-- turn 省略 = Baseline 累计 diff -->
-                <DiffView v-if="openBaselinePath === fc.path" :task-id="taskId" :path="fc.path" />
-                <!-- 文件预览（markdown/pdf） -->
-                <FilePreview v-if="previewBaselinePath === fc.path" :task-id="taskId" :path="fc.path" />
-              </div>
+              </template>
             </div>
           </template>
 

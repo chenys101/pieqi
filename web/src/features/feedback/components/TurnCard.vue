@@ -2,12 +2,13 @@
 // TurnCard：Feedback 总览里的单个 Turn 卡片（p0-design.md §5.1）。
 // 折叠态 = 一行摘要；展开态 = 文件变更列表（每项再展开懒加载 diff）。
 // 回退按钮：恢复到「Turn N 开始之前」（时间线事件永不删除，仅改文件）。
-import { ref, watch } from 'vue'
-import type { FileChangeDto, TurnInfoDto } from '@/types/api'
+import { computed, ref, watch } from 'vue'
+import type { ArtifactDto, FileChangeDto, TurnInfoDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import DiffView from './DiffView.vue'
 import FilePreview from './FilePreview.vue'
-import { previewKind } from '../filePreview'
+import { artifactOpenLabel, previewKind } from '../filePreview'
+import { baseNameOf, groupByFolder } from '../fileGroups'
 
 const props = withDefaults(
   defineProps<{
@@ -19,6 +20,11 @@ const props = withDefaults(
     canRewind: boolean
     /** Timeline「查看本轮变更」联动高亮（AC-R3-06）：变化瞬间展开+描边 */
     highlighted?: boolean
+    /**
+     * 产物索引（path → artifact），用于给 html / 图片提供「打开」入口。
+     * 缺省 = 不给入口（不猜 URL，见 FeedbackPanel.openLinkOf）。
+     */
+    artifacts?: Map<string, ArtifactDto>
   }>(),
   { highlighted: false },
 )
@@ -49,6 +55,43 @@ function toggleFile(path: string) {
 
 function togglePreview(path: string) {
   previewPath.value = previewPath.value === path ? null : path
+}
+
+/**
+ * 本轮文件按目录分组，**默认收起**；只有一个目录时不套分组头
+ * （分组的价值是收掉长列表，一组还能收起等于多点一次才看到内容）。
+ */
+const groups = computed(() => {
+  const gs = groupByFolder(props.turn.changes ?? [])
+  const grouped = gs.length > 1
+  return gs.map((g) => ({
+    ...g,
+    grouped,
+    rows: g.files.map((fc) => ({
+      fc,
+      name: grouped ? baseNameOf(fc.path) : fc.path,
+      open: openLinkOf(fc.path),
+    })),
+  }))
+})
+
+/** 分组展开态：dir → 是否展开（缺省收起） */
+const openDirs = ref<Record<string, boolean>>({})
+
+function isDirOpen(dir: string): boolean {
+  return openDirs.value[dir] === true
+}
+
+function toggleDir(dir: string): void {
+  openDirs.value = { ...openDirs.value, [dir]: !openDirs.value[dir] }
+}
+
+/** html / 图片的「打开」入口；md/pdf 有内联预览，不再给新标签 */
+function openLinkOf(path: string): { href: string; label: string } | null {
+  const a = props.artifacts?.get(path)
+  if (!a) return null
+  const label = artifactOpenLabel(a.kind)
+  return label ? { href: a.open, label } : null
 }
 
 /** 整轮回退的待确认态（null = 未发起） */
@@ -112,54 +155,80 @@ function confirmRewindFile() {
     </button>
 
     <div v-if="expanded" class="border-t border-border/40">
-      <!-- 文件变更列表 -->
+      <!-- 文件变更列表：按目录分组、默认收起（多目录才有分组头） -->
       <div v-if="!turn.changes?.length" class="px-3 py-2 text-xs text-muted">本轮无文件变更</div>
-      <div v-for="fc in turn.changes" :key="fc.path" class="border-b border-border/30 last:border-b-0">
-        <div class="flex items-center gap-2">
-          <button
-            class="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-elevated"
-            @click="toggleFile(fc.path)"
-          >
-            <span class="shrink-0 rounded border px-1 text-[10px]" :class="opMeta[fc.operation].cls">
-              {{ opMeta[fc.operation].label }}
-            </span>
-            <span class="min-w-0 flex-1 truncate font-mono text-muted" :title="fc.path">{{ fc.path }}</span>
-            <span class="shrink-0 font-mono">
-              <span v-if="fc.additions || fc.deletions" class="text-success">+{{ fc.additions ?? 0 }}</span>
-              <span v-if="fc.additions || fc.deletions" class="ml-1 text-error">-{{ fc.deletions ?? 0 }}</span>
-            </span>
-            <span class="shrink-0 text-muted transition-transform" :class="openPath === fc.path ? '' : '-rotate-90'">▾</span>
-          </button>
-          <!-- markdown/pdf 预览入口 -->
-          <button
-            v-if="previewKind(fc.path)"
-            class="shrink-0 px-2.5 py-1 text-xs"
-            :class="previewPath === fc.path ? 'text-accent' : 'text-muted hover:text-text'"
-            @click="togglePreview(fc.path)"
-          >预览</button>
+      <template v-for="g in groups" :key="g.dir || '.'">
+        <button
+          v-if="g.grouped"
+          type="button"
+          class="flex min-h-11 w-full items-center gap-2 border-b border-border/40 bg-elevated/40 px-3 py-2 text-left text-[11.5px] hover:bg-elevated"
+          :aria-expanded="isDirOpen(g.dir)"
+          :title="g.dir ? `展开/收起 ${g.dir}` : '展开/收起仓库根目录下的文件'"
+          @click="toggleDir(g.dir)"
+        >
+          <span class="shrink-0 text-muted transition-transform" :class="isDirOpen(g.dir) ? '' : '-rotate-90'">▾</span>
+          <span class="min-w-0 flex-1 truncate font-mono" :class="isDirOpen(g.dir) ? 'text-text' : 'text-muted'">{{ g.label }}</span>
+          <span class="shrink-0 text-muted">{{ g.files.length }} 个</span>
+          <span v-if="g.additions" class="shrink-0 font-mono text-success">+{{ g.additions }}</span>
+          <span v-if="g.deletions" class="shrink-0 font-mono text-error">-{{ g.deletions }}</span>
+        </button>
+
+        <div v-if="!g.grouped || isDirOpen(g.dir)">
+          <div v-for="row in g.rows" :key="row.fc.path" class="border-b border-border/30 last:border-b-0">
+            <div class="flex items-center gap-1.5">
+              <button
+                class="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-elevated"
+                @click="toggleFile(row.fc.path)"
+              >
+                <span class="shrink-0 rounded border px-1 text-[10px]" :class="opMeta[row.fc.operation].cls">
+                  {{ opMeta[row.fc.operation].label }}
+                </span>
+                <span class="min-w-0 flex-1 truncate font-mono text-muted" :title="row.fc.path">{{ row.name }}</span>
+                <span v-if="row.fc.additions" class="shrink-0 font-mono text-success">+{{ row.fc.additions }}</span>
+                <span v-if="row.fc.deletions" class="shrink-0 font-mono text-error">-{{ row.fc.deletions }}</span>
+                <span class="shrink-0 text-muted transition-transform" :class="openPath === row.fc.path ? '' : '-rotate-90'">▾</span>
+              </button>
+              <!-- 产物「新标签打开」：html 是真页面，图片浏览器直接显示 -->
+              <a
+                v-if="row.open"
+                :href="row.open.href"
+                target="_blank"
+                rel="noopener"
+                class="shrink-0 px-2.5 py-1 text-xs text-accent hover:underline"
+                :title="`新标签打开 ${row.fc.path}`"
+              >{{ row.open.label }}</a>
+              <!-- markdown/pdf 预览入口 -->
+              <button
+                v-if="previewKind(row.fc.path)"
+                class="shrink-0 px-2.5 py-1 text-xs"
+                :class="previewPath === row.fc.path ? 'text-accent' : 'text-muted hover:text-text'"
+                @click="togglePreview(row.fc.path)"
+              >预览</button>
+            </div>
+            <!-- 单文件 diff（懒加载：展开时才请求） -->
+            <DiffView v-if="openPath === row.fc.path" :task-id="taskId" :path="row.fc.path" :turn="row.fc.turn" />
+            <!-- 文件预览（markdown/pdf） -->
+            <FilePreview v-if="previewPath === row.fc.path" :task-id="taskId" :path="row.fc.path" />
+            <!-- P2：文件级回退入口（展开审视单文件 diff 的时刻提供，不影响其他文件） -->
+            <div v-if="pendingFile === row.fc.path" class="flex flex-wrap items-center gap-2 px-3 pb-1.5">
+              <span class="min-w-0 flex-1 text-[11px] text-warning">
+                仅回退此文件到 Turn #{{ turn.turn }} 之前？其他文件不受影响。
+              </span>
+              <Button variant="ghost" size="sm" @click="pendingFile = null">取消</Button>
+              <Button variant="danger" size="sm" @click="confirmRewindFile">确认回退</Button>
+            </div>
+            <div v-else-if="openPath === row.fc.path" class="flex justify-end px-3 pb-1.5">
+              <Button
+                variant="ghost"
+                size="sm"
+                :disabled="!canRewind"
+                :title="canRewind ? '仅回退此文件到本轮开始之前' : 'Agent 执行中，暂不可回退'"
+                @click="askRewindFile(row.fc.path)"
+              >↩ 仅回退此文件</Button>
+            </div>
+          </div>
         </div>
-        <!-- 单文件 diff（懒加载：展开时才请求） -->
-        <DiffView v-if="openPath === fc.path" :task-id="taskId" :path="fc.path" :turn="fc.turn" />
-        <!-- 文件预览（markdown/pdf） -->
-        <FilePreview v-if="previewPath === fc.path" :task-id="taskId" :path="fc.path" />
-        <!-- P2：文件级回退入口（展开审视单文件 diff 的时刻提供，不影响其他文件） -->
-        <div v-if="pendingFile === fc.path" class="flex flex-wrap items-center gap-2 px-3 pb-1.5">
-          <span class="min-w-0 flex-1 text-[11px] text-warning">
-            仅回退此文件到 Turn #{{ turn.turn }} 之前？其他文件不受影响。
-          </span>
-          <Button variant="ghost" size="sm" @click="pendingFile = null">取消</Button>
-          <Button variant="danger" size="sm" @click="confirmRewindFile">确认回退</Button>
-        </div>
-        <div v-else-if="openPath === fc.path" class="flex justify-end px-3 pb-1.5">
-          <Button
-            variant="ghost"
-            size="sm"
-            :disabled="!canRewind"
-            :title="canRewind ? '仅回退此文件到本轮开始之前' : 'Agent 执行中，暂不可回退'"
-            @click="askRewindFile(fc.path)"
-          >↩ 仅回退此文件</Button>
-        </div>
-      </div>
+      </template>
 
       <!-- 回退：恢复到本轮开始之前 -->
       <div v-if="pendingRewind" class="flex flex-wrap items-center gap-2 px-3 py-2">

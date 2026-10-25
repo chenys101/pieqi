@@ -9,12 +9,11 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import {
   getPreviewAttach,
   getPreviewStatus,
-  getTaskArtifacts,
   restartPreview,
   startPreview,
   stopPreview,
 } from '@/services/api/feedback'
-import type { ArtifactDto, PreviewAttachDto, PreviewStatusDto } from '@/types/api'
+import type { PreviewAttachDto, PreviewStatusDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useNotificationStore } from '@/stores/notification'
@@ -31,33 +30,10 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 const attach = ref<PreviewAttachDto | null>(null)
 const attaching = ref(false)
 
-/**
- * 产物清单（agent 产出的可查看文件：方案页 / 报告 / 截图 / pdf）。
- *
- * 与「预览」按钮的关系：产物是**文件**，点开即看，不需要先启动；preview 只在
- * 需要完整同源资源（多文件页面的相对 css/js）时才用得上。服务端已经把每项的
- * 打开 URL 算好（目录内 html → preview 路径，其余 → /file），前端不判断通道。
- */
-const artifacts = ref<ArtifactDto[]>([])
-const showAllArtifacts = ref(false)
-const ARTIFACT_PREVIEW_COUNT = 6
-const visibleArtifacts = computed(() =>
-  showAllArtifacts.value ? artifacts.value : artifacts.value.slice(0, ARTIFACT_PREVIEW_COUNT),
-)
-
-const KIND_LABEL: Record<string, string> = {
-  html: '页面',
-  markdown: '文档',
-  image: '图片',
-  pdf: 'PDF',
-}
-
-function fmtSize(n?: number): string {
-  if (!n) return ''
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
-}
+// 产物清单（agent 产出的可查看文件）不在这个 Tab 里列 —— 它本质是**文件**，
+// 已经归「变更」Tab 的文件清单管（那里按目录分组，并且每行都带「打开」入口）。
+// 一处在两处列会形成两个真相：同一份 html，预览这边列的和变更那边列的条数/路径
+// 迟早对不上，用户不知道该信哪个。
 
 const stateLabel = computed(() => {
   const map: Record<string, string> = {
@@ -92,15 +68,6 @@ async function refresh() {
   }
 }
 
-/** 拉产物清单（失败静默：没有产物不是错误，列表为空即可）。 */
-async function refreshArtifacts() {
-  try {
-    artifacts.value = await getTaskArtifacts(props.taskId)
-  } catch {
-    artifacts.value = []
-  }
-}
-
 /** starting → 每 2s 轮询直到 running/error（面板在即可轮询） */
 function pollWhileStarting() {
   stopPoll()
@@ -122,7 +89,6 @@ async function onStart() {
   try {
     await startPreview(props.taskId)
     await refresh()
-    await refreshArtifacts() // 静态目录登记后，页面的打开通道会变成 preview
     pollWhileStarting()
   } catch (err) {
     notify.error(err instanceof Error ? err.message : '启动失败')
@@ -150,7 +116,6 @@ async function onRestart() {
   try {
     await restartPreview(props.taskId)
     await refresh()
-    await refreshArtifacts()
     pollWhileStarting()
   } catch (err) {
     notify.error(err instanceof Error ? err.message : '重启失败')
@@ -182,7 +147,7 @@ async function onAttach() {
 // 用户点完「启动」切去别的 Tab 再切回来会重新挂载；只刷新不续轮询的话，
 // 状态会一直停在"启动中"直到下次切回来，看起来像卡死了。
 async function init() {
-  await Promise.all([refresh(), refreshArtifacts()])
+  await refresh()
   if (isStarting.value) pollWhileStarting()
 }
 
@@ -225,38 +190,6 @@ onUnmounted(stopPoll)
         <!-- 静态产物没有「停止」：它不占进程，停掉只会让页面暂时打不开（见 isStatic 注释） -->
         <Button v-else-if="!isStatic" variant="ghost" size="sm" :loading="busy" @click="onStop">停止</Button>
       </span>
-    </div>
-
-    <!-- 产物：agent 产出的可查看文件。点开即看，不需要先「启动」——
-         启动是 dev server 的概念，文件本身没有准备期。 -->
-    <div v-if="artifacts.length" class="mt-2">
-      <div class="mb-1 flex items-center gap-1.5 text-[11px] text-muted">
-        <span>产物</span>
-        <span class="text-text-tertiary">{{ artifacts.length }}</span>
-      </div>
-      <div class="flex flex-col gap-1">
-        <a
-          v-for="a in visibleArtifacts"
-          :key="a.path"
-          :href="a.open"
-          target="_blank"
-          rel="noopener"
-          class="flex min-h-11 items-center gap-2 rounded-md border border-border/50 bg-background/40 px-2 py-1 text-xs hover:bg-surface-muted"
-          :title="a.path"
-        >
-          <span class="shrink-0 rounded bg-background/80 px-1 text-[10px] text-muted">{{ KIND_LABEL[a.kind] ?? a.kind }}</span>
-          <span class="min-w-0 flex-1 truncate">{{ a.path }}</span>
-          <span class="shrink-0 text-[10px] text-text-tertiary">{{ fmtSize(a.size) }}</span>
-        </a>
-      </div>
-      <button
-        v-if="artifacts.length > ARTIFACT_PREVIEW_COUNT"
-        type="button"
-        class="mt-1 text-[11px] text-muted hover:text-text"
-        @click="showAllArtifacts = !showAllArtifacts"
-      >
-        {{ showAllArtifacts ? '收起' : `展开全部 ${artifacts.length} 个` }}
-      </button>
     </div>
 
     <!-- 指路：认不出预览入口时，直接告诉用户/agent 该把产物放哪（ADR-0017 补记）。
