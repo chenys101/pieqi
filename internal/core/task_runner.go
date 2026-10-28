@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"pieqi/internal/agent"
+	"pieqi/internal/exechide"
 	"pieqi/internal/model"
 
 	"github.com/google/uuid"
@@ -849,6 +850,7 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 	runClaude := func(resume bool, sessionID string) (error, string, int, int) {
 		cmd := exec.CommandContext(ctx, "claude", buildArgs(resume, sessionID)...)
 		cmd.Dir = task.WorktreePath
+		exechide.Command(cmd)
 
 		stdin, err := cmd.StdinPipe()
 		if err != nil {

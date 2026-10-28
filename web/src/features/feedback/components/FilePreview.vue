@@ -1,7 +1,7 @@
 <script setup lang="ts">
-// FilePreview：文件预览（markdown / pdf）。
-// pdf 直接 iframe 内嵌（浏览器原生渲染，同源 URL 带鉴权 cookie）；
-// markdown 拉取原文后用 marked 渲染 + DOMPurify 消毒（Agent 产物不可信，防 XSS）。
+// FilePreview：只读文件预览（markdown / pdf / code / text）。
+// html 不走这里——真页面要新标签 URL（样式/脚本/相对资源）。
+// Agent 产物不可信：markdown 经 marked + DOMPurify；code/text 仅纯文本展示，无编辑。
 import { computed, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -15,6 +15,7 @@ const kind = computed(() => previewKind(props.path))
 const pdfURL = computed(() => taskFileURL(props.taskId, props.path))
 
 const mdHtml = ref('')
+const plainText = ref('')
 const loading = ref(false)
 const errorMsg = ref('')
 
@@ -23,7 +24,6 @@ async function loadMarkdown() {
   errorMsg.value = ''
   try {
     const text = await getTaskFileText(props.taskId, props.path)
-    // marked 渲染 + DOMPurify 消毒（agent 生成的 markdown 属不可信输入）
     const raw = marked.parse(text, { async: false }) as string
     mdHtml.value = DOMPurify.sanitize(raw)
   } catch (err) {
@@ -33,18 +33,30 @@ async function loadMarkdown() {
   }
 }
 
+async function loadPlain() {
+  loading.value = true
+  errorMsg.value = ''
+  try {
+    plainText.value = await getTaskFileText(props.taskId, props.path)
+  } catch (err) {
+    errorMsg.value = err instanceof Error ? err.message : '加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+
 watch(
-  () => [props.taskId, props.path],
-  () => {
-    if (kind.value === 'markdown') loadMarkdown()
+  () => [props.taskId, props.path, kind.value] as const,
+  ([, , k]) => {
+    if (k === 'markdown') loadMarkdown()
+    else if (k === 'code' || k === 'text') loadPlain()
   },
   { immediate: true },
 )
 </script>
 
 <template>
-  <div class="border-t border-border/40">
-    <!-- markdown：渲染为 HTML（样式见下方 scoped） -->
+  <div class="min-h-0">
     <template v-if="kind === 'markdown'">
       <div v-if="loading" class="flex items-center gap-2 px-3 py-2 text-muted">
         <Spinner class="h-3 w-3" /> 加载预览…
@@ -53,18 +65,30 @@ watch(
       <div v-else class="md-body px-3 py-2 text-xs" v-html="mdHtml" />
     </template>
 
-    <!-- pdf：浏览器原生内嵌 -->
+    <template v-else-if="kind === 'code' || kind === 'text'">
+      <div v-if="loading" class="flex items-center gap-2 px-3 py-2 text-muted">
+        <Spinner class="h-3 w-3" /> 加载预览…
+      </div>
+      <div v-else-if="errorMsg" class="px-3 py-2 text-xs text-error">{{ errorMsg }}</div>
+      <pre
+        v-else
+        class="max-h-[70vh] overflow-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-[11px] leading-relaxed text-text"
+        data-testid="file-preview-plain"
+      >{{ plainText }}</pre>
+    </template>
+
     <iframe
       v-else-if="kind === 'pdf'"
       :src="pdfURL"
       class="h-[60vh] w-full border-0 bg-surface"
       title="PDF 预览"
     />
+
+    <div v-else class="px-3 py-2 text-xs text-muted">此类型请用「打开」在新标签查看</div>
   </div>
 </template>
 
 <style scoped>
-/* markdown 渲染体的最小可读样式（项目未引入 tailwind typography，此处手工收敛） */
 .md-body :deep(h1),
 .md-body :deep(h2),
 .md-body :deep(h3) {

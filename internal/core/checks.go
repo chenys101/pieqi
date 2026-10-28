@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"pieqi/internal/exechide"
 	"pieqi/internal/model"
 
 	"github.com/google/uuid"
@@ -200,6 +201,7 @@ func (cr *CheckRunner) exec(task *model.Task, ck *Check) {
 	cmd := exec.CommandContext(ctx, "sh", "-c", ck.Command)
 	cmd.Dir = task.WorktreePath
 	cmd.Env = previewEnv() // 白名单环境（同 preview：剔除 token，保 PATH/NODE_ 等）
+	exechide.Command(cmd)
 	out, err := cmd.CombinedOutput()
 
 	finished := time.Now()

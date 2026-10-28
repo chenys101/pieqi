@@ -44,7 +44,7 @@ type EvidenceFile struct {
 	Operation string `json:"operation"`         // create | modify | delete
 	Additions int    `json:"additions,omitempty"`
 	Deletions int    `json:"deletions,omitempty"`
-	Kind      string `json:"kind,omitempty"`    // html | markdown | image | pdf（api 填）
+	Kind      string `json:"kind,omitempty"`    // html | markdown | image | pdf | code | text（api 填）
 	Open      string `json:"open,omitempty"`    // 可直接打开的 URL（api 填）
 }
 

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"pieqi/internal/channel"
+	"pieqi/internal/exechide"
 	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
@@ -252,6 +253,7 @@ func (a *Adapter) pollQRCodeStatus(_ context.Context, qrcodeID string) (token, s
 	url := fmt.Sprintf("%s/ilink/bot/get_qrcode_status?bot_type=3&qrcode=%s", a.baseURL, qrcodeID)
 	// Windows 下 Go HTTP 客户端偶发卡死，用 curl
 	cmd := exec.Command("curl", "-s", "-m", "2", "--connect-timeout", "2", "-H", "SKRouteTag: 1001", url)
+	exechide.Command(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", "", fmt.Errorf("curl qrcode status: %w", err)

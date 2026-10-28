@@ -9,7 +9,8 @@ import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useNotificationStore } from '@/stores/notification'
-import { artifactOpenLabel } from '../filePreview'
+import { useArtifactsStore } from '@/stores/artifacts'
+import { artifactOpenLabel, artifactOpensInApp } from '../filePreview'
 
 const props = defineProps<{
   taskId: string
@@ -20,6 +21,7 @@ const props = defineProps<{
 const emit = defineEmits<{ continued: [prompt: string] }>()
 
 const notify = useNotificationStore()
+const artifactsStore = useArtifactsStore()
 const evidence = ref<EvidenceDto | null>(null)
 const loading = ref(false)
 const instruction = ref('')
@@ -63,6 +65,7 @@ const briefRows = computed(() => {
     deletions?: number
     open?: string
     label?: string
+    kind?: string
   }
   if (!ev) return [] as Row[]
   if (ev.files?.length) {
@@ -74,13 +77,23 @@ const briefRows = computed(() => {
         text: f.path,
         additions: f.additions,
         deletions: f.deletions,
-        open: label ? f.open : undefined,
+        // html/image：外链 open；md/code/text/pdf：按钮走应用内 viewer（open 可空）
+        open: label && f.kind && !artifactOpensInApp(f.kind) ? f.open : undefined,
         label: label ?? undefined,
+        kind: f.kind,
       }
     })
   }
   return (ev.diff_brief ?? []).map<Row>((line, i) => ({ key: 'b' + i, path: line, text: line }))
 })
+
+function onFileAction(r: { path: string; open?: string; kind?: string; label?: string }) {
+  if (r.kind && artifactOpensInApp(r.kind)) {
+    artifactsStore.openPath(props.taskId, r.path)
+    return
+  }
+  if (r.open) window.open(r.open, '_blank', 'noopener')
+}
 
 async function refresh() {
   loading.value = true
@@ -179,14 +192,13 @@ watch(
             <span class="min-w-0 flex-1 truncate font-mono text-[11px]" :title="r.path">{{ r.text }}</span>
             <span v-if="r.additions" class="shrink-0 font-mono text-[11px] text-success">+{{ r.additions }}</span>
             <span v-if="r.deletions" class="shrink-0 font-mono text-[11px] text-error">-{{ r.deletions }}</span>
-            <a
-              v-if="r.open"
-              :href="r.open"
-              target="_blank"
-              rel="noopener"
+            <button
+              v-if="r.label"
+              type="button"
               class="inline-flex shrink-0 items-center px-2.5 py-1 text-xs text-accent hover:underline"
-              :title="`新标签打开 ${r.path}`"
-            >{{ r.label }}</a>
+              :title="r.path"
+              @click="onFileAction(r)"
+            >{{ r.label }}</button>
           </div>
         </details>
 

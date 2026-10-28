@@ -34,10 +34,10 @@ import (
 type artifactDTO struct {
 	Path string `json:"path"`           // repo 相对路径（与 Change 列表同口径）
 	Name string `json:"name"`           // 文件名，列表展示用
-	Kind string `json:"kind"`           // html | markdown | image | pdf
+	Kind string `json:"kind"`           // html | markdown | image | pdf | code | text
 	Size int64  `json:"size,omitempty"` // 字节数
 	Turn int    `json:"turn,omitempty"` // 最后产生它的 turn（用于"第几轮出的"）
-	Open string `json:"open"`           // 打开 URL（html 在同源隔离沙箱里渲染）
+	Open string `json:"open"`           // 打开 URL（html 在同源隔离沙箱里渲染；其余走 /file）
 }
 
 // getTaskArtifacts GET /api/tasks/:id/artifacts：列出可查看产物。
@@ -76,7 +76,7 @@ func (s *Server) collectArtifacts(task *model.Task) []artifactDTO {
 		}
 		kind := artifactKind(fc.Path)
 		if kind == "" {
-			continue // 代码/配置不是"可查看产物"，别把 changelist 塞进列表
+			continue // 未知/二进制扩展名不进清单（白名单外一律不列）
 		}
 		full := filepath.Join(task.WorktreePath, filepath.FromSlash(fc.Path))
 		if !pathWithin(task.WorktreePath, full) {
@@ -114,10 +114,11 @@ func (s *Server) collectArtifacts(task *model.Task) []artifactDTO {
 
 // artifactKind 扩展名 → 产物类型；返回 "" 表示"不是可查看产物"。
 //
-// 白名单而不是黑名单：这是给**人看**的通道，放进来的每种类型都要能被浏览器安全渲染
-// （html 另有 sandbox 头，见 file_preview.go）。
+// 白名单而不是黑名单：这是给**人看**的通道。html 另有 sandbox 头（file_preview.go）；
+// code/text 由前端只读拉取 /file 原文展示，不做编辑。
 func artifactKind(path string) string {
-	switch strings.ToLower(filepath.Ext(path)) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
 	case ".html", ".htm":
 		return "html"
 	case ".md", ".markdown", ".mdown", ".mkd":
@@ -126,11 +127,24 @@ func artifactKind(path string) string {
 		return "image"
 	case ".pdf":
 		return "pdf"
+	case ".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+		".vue", ".svelte", ".py", ".rs", ".java", ".kt", ".kts",
+		".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh",
+		".cs", ".rb", ".php", ".swift", ".scala", ".r",
+		".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
+		".sql", ".graphql", ".gql", ".proto",
+		".css", ".scss", ".sass", ".less",
+		".toml", ".ini", ".cfg", ".conf":
+		return "code"
+	case ".txt", ".text", ".log", ".csv", ".tsv",
+		".yaml", ".yml", ".json", ".jsonc", ".json5",
+		".xml", ".svg":
+		return "text"
 	}
 	return ""
 }
 
-// artifactKindRank 列表排序权重：可视化产出优先。
+// artifactKindRank 列表排序权重：可视化产出优先，代码/文本靠后。
 func artifactKindRank(kind string) int {
 	switch kind {
 	case "html":
@@ -141,6 +155,10 @@ func artifactKindRank(kind string) int {
 		return 2
 	case "pdf":
 		return 3
+	case "code":
+		return 4
+	case "text":
+		return 5
 	}
 	return 9
 }
@@ -149,8 +167,8 @@ func artifactKindRank(kind string) int {
 //
 //   - HTML 落在静态预览目录内 → 走 preview 路径：同目录的相对资源（css/js/图片）能一起解析，
 //     这是多文件方案页能正常显示的前提；
-//   - 其余（HTML 在目录外、markdown、图片、pdf）→ 走 /file 原始字节：
-//     markdown 由前端 fetch 后渲染，图片/pdf 直接作 src。
+//   - 其余（HTML 在目录外、markdown、图片、pdf、code、text）→ 走 /file 原始字节：
+//     markdown/code/text 由前端 fetch 后渲染或只读展示，图片/pdf 直接作 src。
 func artifactOpenURL(taskID, staticDir, full, rel, kind string) string {
 	if kind == "html" && staticDir != "" {
 		if r, err := filepath.Rel(staticDir, full); err == nil && !strings.HasPrefix(r, "..") {

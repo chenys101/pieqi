@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"pieqi/internal/exechide"
+
 	"go.uber.org/zap"
 )
 
@@ -224,6 +226,7 @@ func (m *TunnelManager) Start(ctx context.Context, ttl time.Duration) (TunnelRes
 
 	subCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(subCtx, m.cfg.BinaryPath, "tunnel", "--url", m.cfg.LocalURL)
+	exechide.Command(cmd)
 	// cloudflared 把日志（含 trycloudflare URL）打到 stderr 而非 stdout，
 	// 因此两条管道都要扫。每条管道一个 goroutine，命中 URL 发 urlCh；
 	// 主协程用 select+timer 等结果 —— 阻塞式 Scan 会让 15s deadline 失效。
@@ -374,6 +377,7 @@ func (m *TunnelManager) startNamed(ctx context.Context, ttl time.Duration, tok s
 	// /proc/<pid>/cmdline），等于把隧道凭据写在明处。
 	cmd := exec.CommandContext(subCtx, m.cfg.BinaryPath, "tunnel", "--no-autoupdate", "run")
 	cmd.Env = append(os.Environ(), "TUNNEL_TOKEN="+m.cfg.TunnelToken)
+	exechide.Command(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()

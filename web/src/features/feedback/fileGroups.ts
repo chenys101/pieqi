@@ -44,6 +44,17 @@ export function baseNameOf(path: string): string {
 }
 
 /**
+ * 目录组头的展示文案：尾段优先（末两级），过长时前缀 `…/`。
+ * 完整 dir 仍放 title；主文案绝不能塞整条深路径（375 宽会挤掉行内按钮）。
+ */
+export function tailDirLabel(dir: string, maxSegments = 2): string {
+  if (!dir) return ROOT_GROUP_LABEL
+  const parts = dir.replace(/\\/g, '/').split('/').filter(Boolean)
+  if (parts.length <= maxSegments) return parts.join('/')
+  return `…/${parts.slice(-maxSegments).join('/')}`
+}
+
+/**
  * 按目录分组。
  *
  * 顺序**不按出现顺序**：git 的 diff 顺序在改名 / 新增后会变，每次刷新列表跟着

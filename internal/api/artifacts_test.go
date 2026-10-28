@@ -37,7 +37,10 @@ func setupArtifactTest(t *testing.T) (*Server, *gin.Engine, *model.Task) {
 		"proposals/style.css":  "body{color:red}",
 		"docs/notes.md":        "# 记录\n",
 		"shot.png":             "PNG",
+		"web/src/Login.vue":    "<script setup></script>\n",
+		"notes.txt":            "plain\n",
 		"secret.env":           "TOKEN=abc\n",
+		"blob.bin":             "\x00\x01\x02",
 	}
 	for rel, content := range files {
 		full := filepath.Join(wt, filepath.FromSlash(rel))
@@ -63,7 +66,7 @@ func setupArtifactTest(t *testing.T) (*Server, *gin.Engine, *model.Task) {
 		t.Fatal(err)
 	}
 
-	// 事件：turn1 写 index.html / notes.md / shot.png；turn2 写 style.css。
+	// 事件：turn1 写 html/md/png/vue/txt；turn2 写 css + 未登记的 bin。
 	// secret.env 存在但**从未被触碰** —— 必须不出现在清单里。
 	updated, err := store.Update(task.ID, func(tk *model.Task) bool {
 		tk.Events = []model.TaskEvent{
@@ -74,9 +77,15 @@ func setupArtifactTest(t *testing.T) (*Server, *gin.Engine, *model.Task) {
 				Input: json.RawMessage(`{"file_path":"docs/notes.md"}`)},
 			{Seq: 4, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "w3",
 				Input: json.RawMessage(`{"file_path":"shot.png"}`)},
-			{Seq: 5, Type: model.EventUser, Text: "样式"},
-			{Seq: 6, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "w4",
+			{Seq: 5, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "w5",
+				Input: json.RawMessage(`{"file_path":"web/src/Login.vue"}`)},
+			{Seq: 6, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "w6",
+				Input: json.RawMessage(`{"file_path":"notes.txt"}`)},
+			{Seq: 7, Type: model.EventUser, Text: "样式"},
+			{Seq: 8, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "w4",
 				Input: json.RawMessage(`{"file_path":"proposals/style.css"}`)},
+			{Seq: 9, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "w7",
+				Input: json.RawMessage(`{"file_path":"blob.bin"}`)},
 		}
 		tk.Status = model.TaskCompleted
 		return true
@@ -131,6 +140,9 @@ func TestAPI_Artifacts_List(t *testing.T) {
 		"proposals/index.html": "html",
 		"docs/notes.md":        "markdown",
 		"shot.png":             "image",
+		"web/src/Login.vue":    "code",
+		"notes.txt":            "text",
+		"proposals/style.css":  "code",
 	} {
 		if byPath[path] != kind {
 			t.Errorf("%s kind = %q, want %q（清单=%v）", path, byPath[path], kind, byPath)
@@ -140,9 +152,9 @@ func TestAPI_Artifacts_List(t *testing.T) {
 	if _, ok := byPath["secret.env"]; ok {
 		t.Error("未触碰文件不应出现在产物清单里")
 	}
-	// 非"可查看产物"（css）不塞进列表，避免把 changelist 当产物
-	if _, ok := byPath["proposals/style.css"]; ok {
-		t.Error("css 不是可查看产物")
+	// 未知二进制扩展名不进清单
+	if _, ok := byPath["blob.bin"]; ok {
+		t.Error("未知扩展名不应出现在产物清单里")
 	}
 	// html 排最前（这轮迭代最常被打开的就是方案页）
 	if len(resp.Artifacts) == 0 || resp.Artifacts[0].Kind != "html" {

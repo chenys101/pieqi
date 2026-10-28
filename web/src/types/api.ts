@@ -488,7 +488,7 @@ export interface ArtifactDto {
   path: string
   /** 文件名，列表展示用 */
   name: string
-  kind: 'html' | 'markdown' | 'image' | 'pdf'
+  kind: 'html' | 'markdown' | 'image' | 'pdf' | 'code' | 'text'
   size?: number
   /** 最后产生它的 turn */
   turn?: number

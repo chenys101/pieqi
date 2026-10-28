@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"pieqi/internal/exechide"
 )
 
 // gitCmdTimeout 单条 git 命令的超时（防止大 repo 卡死请求）。
@@ -27,6 +29,7 @@ func gitOutput(repo string, args ...string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repo
+	exechide.Command(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
@@ -93,6 +96,7 @@ func GitCatFileAtHead(repo, head, path string) ([]byte, bool) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "cat-file", "-e", head+":"+path)
 	cmd.Dir = repo
+	exechide.Command(cmd)
 	if err := cmd.Run(); err != nil {
 		return nil, false
 	}

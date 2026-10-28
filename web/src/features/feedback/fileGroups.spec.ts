@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { baseNameOf, dirOf, groupByFolder } from './fileGroups'
+import { baseNameOf, dirOf, groupByFolder, tailDirLabel } from './fileGroups'
 
 // 文件清单的分组是**纯展示逻辑**，但它决定用户能不能在长列表里找到东西：
 // 顺序不稳会"每次刷新换个位置"，根目录不置顶会让最浅的文件沉到中间。
@@ -45,5 +45,14 @@ describe('dirOf / baseNameOf', () => {
     expect(baseNameOf('a/b/c.md')).toBe('c.md')
     expect(dirOf('README.md')).toBe('')
     expect(baseNameOf('README.md')).toBe('README.md')
+  })
+})
+
+describe('tailDirLabel', () => {
+  it('短目录原样；深路径只留末两级并加 …/', () => {
+    expect(tailDirLabel('docs')).toBe('docs')
+    expect(tailDirLabel('docs/proposals')).toBe('docs/proposals')
+    expect(tailDirLabel('web/src/features/session/components')).toBe('…/session/components')
+    expect(tailDirLabel('')).toBe('根目录')
   })
 })

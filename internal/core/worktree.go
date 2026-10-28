@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"pieqi/internal/exechide"
 	"pieqi/internal/model"
 
 	"go.uber.org/zap"
@@ -80,6 +81,7 @@ func (wm *WorktreeManager) Cleanup(ctx context.Context, project *model.Project, 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	exechide.Command(cmd)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

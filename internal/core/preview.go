@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"pieqi/internal/exechide"
 	"pieqi/internal/model"
 
 	"go.uber.org/zap"
@@ -245,6 +246,7 @@ func (pm *PreviewManager) spawn(taskID, projectPath string, profile PreviewProfi
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = env
+	exechide.Command(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = logFile.Close()
@@ -353,7 +355,9 @@ func (pm *PreviewManager) Stop(taskID string) {
 	}
 	if runtime.GOOS == "windows" {
 		// Windows 无 SIGTERM 且 Kill 只杀直系进程；用 taskkill /T 连 npm→vite 孙进程一起收掉，防端口泄漏
-		_ = exec.Command("taskkill", "/PID", strconv.Itoa(inst.cmd.Process.Pid), "/T", "/F").Run()
+		tk := exec.Command("taskkill", "/PID", strconv.Itoa(inst.cmd.Process.Pid), "/T", "/F")
+		exechide.Command(tk)
+		_ = tk.Run()
 		return
 	}
 	_ = inst.cmd.Process.Signal(syscall.SIGTERM)

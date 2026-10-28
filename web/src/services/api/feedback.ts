@@ -88,10 +88,11 @@ export function taskLocalImageURL(taskId: string, path: string): string {
 }
 
 /**
- * GET /api/tasks/:id/artifacts：agent 产出的可查看文件清单（html / markdown / image / pdf）。
+ * GET /api/tasks/:id/artifacts：agent 产出的可查看文件清单
+ * （html / markdown / image / pdf / code / text）。
  *
- * 与「变更」列表的区别：变更回答"改了什么"，产物回答"有什么能看"——只列**人看得懂**的
- * 产出（代码/配置不进），并按 html → markdown → image → pdf 排序，打开 URL 由服务端算好。
+ * 与「变更」列表的区别：变更回答"改了什么"，产物回答"有什么能看"。
+ * 打开 URL 由服务端算好；前端不自拼。
  */
 export async function getTaskArtifacts(taskId: string): Promise<ArtifactDto[]> {
   const res = await request<{ artifacts: ArtifactDto[] }>(

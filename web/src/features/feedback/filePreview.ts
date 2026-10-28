@@ -1,27 +1,87 @@
-// filePreview 文件预览的类型判定（markdown / pdf）。
-// TurnCard 与 Baseline 文件行据此决定是否显示「预览」入口；FilePreview 据此分派渲染器。
+// filePreview 文件预览的类型判定与产物打开文案。
+// TurnCard / Baseline / 时间线产物条据此决定「打开」vs「查看」、以及 viewer 渲染器。
 
-export type PreviewableKind = 'markdown' | 'pdf'
+export type PreviewableKind = 'markdown' | 'pdf' | 'code' | 'text'
 
-/** 由文件路径判定是否可预览，及预览类型。不可预览返回 null。 */
+/** 由文件路径判定是否可应用内预览。不可预览（html 走 URL、未知）返回 null。 */
 export function previewKind(path: string): PreviewableKind | null {
   const ext = path.split('.').pop()?.toLowerCase() ?? ''
   if (['md', 'markdown', 'mdown', 'mkd'].includes(ext)) return 'markdown'
   if (ext === 'pdf') return 'pdf'
+  if (
+    [
+      'go',
+      'ts',
+      'tsx',
+      'js',
+      'jsx',
+      'mjs',
+      'cjs',
+      'vue',
+      'svelte',
+      'py',
+      'rs',
+      'java',
+      'kt',
+      'kts',
+      'c',
+      'h',
+      'cpp',
+      'cc',
+      'cxx',
+      'hpp',
+      'hh',
+      'cs',
+      'rb',
+      'php',
+      'swift',
+      'scala',
+      'r',
+      'sh',
+      'bash',
+      'zsh',
+      'fish',
+      'ps1',
+      'bat',
+      'cmd',
+      'sql',
+      'graphql',
+      'gql',
+      'proto',
+      'css',
+      'scss',
+      'sass',
+      'less',
+      'toml',
+      'ini',
+      'cfg',
+      'conf',
+    ].includes(ext)
+  ) {
+    return 'code'
+  }
+  if (['txt', 'text', 'log', 'csv', 'tsv', 'yaml', 'yml', 'json', 'jsonc', 'json5', 'xml', 'svg'].includes(ext)) {
+    return 'text'
+  }
   return null
 }
 
 /**
- * 产物里哪些类型值得「新标签打开」，以及按钮文案。
+ * 产物入口文案。
  *
- * md / pdf 已有内联预览（FilePreview），再给一个"打开"只会把人带离面板。
- * html 与图片**没有**内联渲染器：html 要的是真页面（样式/脚本/同目录资源都生效，
- * 方案对比页能点、能切），图片浏览器直接显示 —— 这两类才需要新标签。
- *
- * 返回 null = 不给入口（没有产物登记，或该类型已由内联预览覆盖）。
+ * - html →「打开」（新标签 URL，真页面）
+ * - image →「查看」（新标签）
+ * - markdown / code / text / pdf →「查看」（应用内只读 sheet；pdf 可内嵌）
+ * - 未知 → null
  */
 export function artifactOpenLabel(kind: string): string | null {
   if (kind === 'html') return '打开'
   if (kind === 'image') return '查看'
+  if (kind === 'markdown' || kind === 'code' || kind === 'text' || kind === 'pdf') return '查看'
   return null
+}
+
+/** html 走外链；其余可应用内查看（含 image/pdf 也可新标签，由调用方决定） */
+export function artifactOpensInApp(kind: string): boolean {
+  return kind === 'markdown' || kind === 'code' || kind === 'text' || kind === 'pdf'
 }

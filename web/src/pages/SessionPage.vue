@@ -17,9 +17,10 @@ import { useSession } from '@/composables/useSession'
 import { useResponsive } from '@/composables/useResponsive'
 import { onRealtimeResync } from '@/composables/useWebSocket'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
+import { useArtifactsStore } from '@/stores/artifacts'
 import { useNotificationStore } from '@/stores/notification'
 import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '@/features/session'
-import { FeedbackPanel } from '@/features/feedback'
+import { FeedbackPanel, ArtifactViewer } from '@/features/feedback'
 import type { PendingImage } from '@/features/session/imageAttach'
 import Drawer from '@/components/ui/Drawer.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
@@ -33,9 +34,11 @@ const sessionStore = useSessionStore()
 const agentStore = useAgentStore()
 const { isMobile, isWide } = useResponsive()
 const fbPanel = useFeedbackPanelStore()
+const artifactsStore = useArtifactsStore()
 const notify = useNotificationStore()
 
 const taskId = computed(() => route.params.id as string)
+const viewing = computed(() => artifactsStore.viewing)
 const { task, canCancel, canSendPrompt, submitPrompt, cancel, approve, approveSession, deny, consumeForceScroll } =
   useSession(taskId)
 
@@ -426,6 +429,15 @@ async function doRemove() {
         <FeedbackPanel mode="drawer" :task-id="task.id" :can-rewind="canRewind" @close="feedbackOpen = false" />
       </Drawer>
     </div>
+
+    <!-- 产物只读 viewer（时间线 / 概览证据卡共用；html 不进这里） -->
+    <ArtifactViewer
+      :open="!!viewing && viewing.taskId === task.id"
+      :task-id="task.id"
+      :path="viewing?.path ?? null"
+      :kind="viewing?.kind"
+      @close="artifactsStore.closeViewer()"
+    />
   </div>
 
   <!-- 没有任务可渲染时的三种真实情形，**不要说成同一句**：

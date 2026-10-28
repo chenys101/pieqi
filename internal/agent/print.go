@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 
+	"pieqi/internal/exechide"
+
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -529,6 +531,7 @@ func (p *execProcess) Write(b []byte) (int, error) {
 func defaultSpawn(ctx context.Context, name string, args []string, dir string) (claudeProcess, io.WriteCloser, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	exechide.Command(cmd)
 	proc := &execProcess{}
 	cmd.Stderr = proc // proc 实现 io.Writer
 	stdin, err := cmd.StdinPipe()

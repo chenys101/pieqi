@@ -7,7 +7,7 @@ import type { ArtifactDto, FileChangeDto, TurnInfoDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import DiffView from './DiffView.vue'
 import FilePreview from './FilePreview.vue'
-import { artifactOpenLabel, previewKind } from '../filePreview'
+import { previewKind } from '../filePreview'
 import { baseNameOf, groupByFolder } from '../fileGroups'
 
 const props = withDefaults(
@@ -86,12 +86,13 @@ function toggleDir(dir: string): void {
   openDirs.value = { ...openDirs.value, [dir]: !openDirs.value[dir] }
 }
 
-/** html / 图片的「打开」入口；md/pdf 有内联预览，不再给新标签 */
+/** html / 图片的「打开」入口；md/code/text/pdf 走内联预览，不再给新标签 */
 function openLinkOf(path: string): { href: string; label: string } | null {
   const a = props.artifacts?.get(path)
   if (!a) return null
-  const label = artifactOpenLabel(a.kind)
-  return label ? { href: a.open, label } : null
+  if (a.kind === 'html') return { href: a.open, label: '打开' }
+  if (a.kind === 'image') return { href: a.open, label: '查看' }
+  return null
 }
 
 /** 整轮回退的待确认态（null = 未发起） */

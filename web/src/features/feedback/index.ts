@@ -10,3 +10,8 @@ export { default as ChecksPanel } from './components/ChecksPanel.vue'
 export { default as OutcomeCard } from './components/OutcomeCard.vue'
 export { default as EvidenceCard } from './components/EvidenceCard.vue'
 export { default as ApprovalDiffCard } from './components/ApprovalDiffCard.vue'
+// 产物优先（时间线入口）
+export { default as ArtifactList } from './components/ArtifactList.vue'
+export { default as ArtifactsBar } from './components/ArtifactsBar.vue'
+export { default as ArtifactViewer } from './components/ArtifactViewer.vue'
+export { default as FilePreview } from './components/FilePreview.vue'

@@ -11,8 +11,8 @@
 //
 // 数据流：打开/刷新时现场派生（后端不存第二份聚合，ADR-0001）。
 import { computed, nextTick, ref, watch } from 'vue'
-import { getTaskArtifacts, rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
-import type { ArtifactDto, FileStatDto, RewindVerificationDto } from '@/types/api'
+import { rewindFileToTurn, rewindToTurn } from '@/services/api/feedback'
+import type { FileStatDto, RewindVerificationDto } from '@/types/api'
 import SegmentedControl from '@/components/ui/SegmentedControl.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import TurnCard from './TurnCard.vue'
@@ -22,11 +22,12 @@ import OutcomeCard from './OutcomeCard.vue'
 import EvidenceCard from './EvidenceCard.vue'
 import DiffView from './DiffView.vue'
 import FilePreview from './FilePreview.vue'
-import { artifactOpenLabel, previewKind } from '../filePreview'
+import { previewKind } from '../filePreview'
 import { baseNameOf, groupByFolder } from '../fileGroups'
 import { useNotificationStore } from '@/stores/notification'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
 import { useFeedbackBundleStore } from '@/stores/feedbackBundle'
+import { useArtifactsStore } from '@/stores/artifacts'
 
 const props = withDefaults(
   defineProps<{
@@ -50,6 +51,7 @@ const notify = useNotificationStore()
 const fb = useFeedbackPanelStore()
 /** bundle 数据持有者 = 共享 store（Timeline 分组头同源，AC-R3-02/06） */
 const bundleStore = useFeedbackBundleStore()
+const artifactsStore = useArtifactsStore()
 
 /** 四个视图：SPEC §5.2 的「概览 · 变更 · 检查 · 预览」 */
 const TABS = [
@@ -100,13 +102,10 @@ const turnsDesc = computed(() => [...(bundle.value?.turns ?? [])].reverse())
 const cumulativeFiles = computed<FileStatDto[]>(() => bundle.value?.cumulative?.entries ?? [])
 
 /**
- * 产物索引：path → artifact。open URL 由服务端算好（静态预览目录内的 html 走
- * `/preview/<id>/<rel>`，其余走 `/file`）。
- *
- * 文件清单**只在这张表里查"能不能点开"**，绝不自己拼 URL：拼错的表现是 404 或
- * CSP 下的空白页，而用户无从判断是"这个文件本来就不是产物"还是"通道坏了"。
+ * 产物索引：与 Timeline 共用 artifacts store（ADR-0018 单一事实源）。
+ * 文件清单**只在这张表里查"能不能点开"**，绝不自己拼 URL。
  */
-const artifactsByPath = ref<Map<string, ArtifactDto>>(new Map())
+const artifactsByPath = computed(() => artifactsStore.byPath(props.taskId))
 
 /** 一行 = 一个文件 + 展示名 + 打开入口（open 为 null = 该文件没有"新标签打开"形态） */
 interface FileRow {
@@ -147,12 +146,14 @@ function toggleDir(dir: string): void {
   openDirs.value = { ...openDirs.value, [dir]: !openDirs.value[dir] }
 }
 
-/** 该路径的可打开入口（html / 图片）；无产物登记、或该类型已有内联预览时返回 null */
+/** 该路径的可打开入口；无产物登记时返回 null。html/image 给外链；其余仍给 open（面板内联预览另有入口） */
 function openLinkOf(path: string): { href: string; label: string } | null {
   const a = artifactsByPath.value.get(path)
   if (!a) return null
-  const label = artifactOpenLabel(a.kind)
-  return label ? { href: a.open, label } : null
+  // 面板行内：html/image 新标签；md 已有内联「预览」，不再重复「查看」外链
+  if (a.kind === 'html') return { href: a.open, label: '打开' }
+  if (a.kind === 'image') return { href: a.open, label: '查看' }
+  return null
 }
 
 /**
@@ -194,26 +195,14 @@ async function refresh() {
   loading.value = true
   try {
     // force：回退 / 重跑后必须看到新数字，本地有缓存也要重拉
-    await Promise.all([bundleStore.load(props.taskId, true), loadArtifacts()])
+    await Promise.all([
+      bundleStore.load(props.taskId, true),
+      artifactsStore.load(props.taskId, true),
+    ])
   } catch (err) {
     notify.error(err instanceof Error ? err.message : '加载反馈数据失败')
   } finally {
     loading.value = false
-  }
-}
-
-/**
- * 拉产物索引（失败静默：没有产物不是错误，清单照常显示，只是没有"打开"入口）。
- *
- * 与 bundle 同批拉：两者都影响文件清单的同一次渲染，分开拉会出现"先渲染出
- * 没入口的清单、下一帧才长出按钮"的跳动。
- */
-async function loadArtifacts() {
-  try {
-    const list = await getTaskArtifacts(props.taskId)
-    artifactsByPath.value = new Map(list.map((a) => [a.path, a]))
-  } catch {
-    artifactsByPath.value = new Map()
   }
 }
 

@@ -13,16 +13,23 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { looksLikeMarkdown, renderMarkdown } from '../markdown'
 import { degradeFailedLocalImages, rewriteLocalImageTargets } from '../markdownImages'
+import { artifactPathFromHash, rewriteLocalArtifactLinks } from '../markdownArtifactLinks'
 import { useImageViewer } from '@/composables/useImageViewer'
+import { useArtifactsStore } from '@/stores/artifacts'
 
 const props = defineProps<{ text: string; taskId?: string }>()
 
 const { open } = useImageViewer()
+const artifactsStore = useArtifactsStore()
 
 const isMarkdown = computed(() => looksLikeMarkdown(props.text))
-const html = computed(() =>
-  isMarkdown.value ? renderMarkdown(rewriteLocalImageTargets(props.text, props.taskId ?? '')) : '',
-)
+const html = computed(() => {
+  if (!isMarkdown.value) return ''
+  const taskId = props.taskId ?? ''
+  let md = rewriteLocalImageTargets(props.text, taskId)
+  if (taskId) md = rewriteLocalArtifactLinks(md, artifactsStore.list(taskId))
+  return renderMarkdown(md)
+})
 
 const body = ref<HTMLElement | null>(null)
 
@@ -49,6 +56,23 @@ onMounted(afterRender)
  */
 function onClick(e: MouseEvent) {
   const target = e.target as HTMLElement | null
+  // 产物本地链（md/code/text）：hash → 只读 viewer
+  const anchor = target?.closest?.('a') as HTMLAnchorElement | null
+  if (anchor) {
+    const href = anchor.getAttribute('href') ?? ''
+    const artPath = artifactPathFromHash(href)
+    if (artPath && props.taskId) {
+      e.preventDefault()
+      artifactsStore.openPath(props.taskId, artPath)
+      return
+    }
+    // html/image 已改写成 /preview 或 /file：新标签打开，避免离开 SPA
+    if (href.startsWith('/preview/') || href.includes('/file?')) {
+      e.preventDefault()
+      window.open(href, '_blank', 'noopener')
+      return
+    }
+  }
   const img = target?.closest?.('img') as HTMLImageElement | null
   if (!img) return
   e.preventDefault()

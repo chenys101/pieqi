@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"pieqi/internal/config"
+	"pieqi/internal/exechide"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
@@ -484,6 +485,7 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 			zap.String("configured", a.cmdName), zap.String("resolved", binPath))
 	}
 	cmd := exec.CommandContext(a.lifeCtx, binPath, a.cmdArgs...)
+	exechide.Command(cmd) // Windows：模型探测 / 标题 / 会话均不弹 cmd
 	// 子进程的工作目录 = 任务的项目目录（见 acpWorkDir）。
 	// 必须在 Start 之前设，且目录必须存在，否则 exec 直接失败。
 	if dir := acpWorkDir(a.workDir); dir != "" {

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"pieqi/internal/agent"
+	"pieqi/internal/exechide"
 	"pieqi/internal/model"
 
 	"go.uber.org/zap"
@@ -455,6 +456,7 @@ func (tr *TaskRunner) titleFromClaudePrint(ctx context.Context, t *model.Task) (
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = dir
+	exechide.Command(cmd)            // Windows：不弹 cmd 黑窗（标题补齐是后台活）
 	out, err := cmd.CombinedOutput() // CombinedOutput 而非 Output：stderr 是唯一的失败线索
 	if err != nil {
 		tail := claudeStderrTail(out)

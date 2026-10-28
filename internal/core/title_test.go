@@ -131,8 +131,11 @@ func TestGenerateTitle_SucceedsOverridesHeuristic(t *testing.T) {
 	dir := t.TempDir()
 	task, _ := store.Create(&model.Task{ProjectID: "p", Prompt: "修复标题不更新", ProjectPath: dir})
 	// 用 shell 冒充 claude：覆盖二进制即可（不依赖本机 claude 装没装、凭据有没有效）。
+	// CREATE_NO_WINDOW 下控制台 API 不可用，pwsh 默认按 OEM(GBK) 写 stdout；
+	// 显式 UTF-8，否则 Go 端读到的标题是乱码（与生产 claude.exe UTF-8 输出无关）。
 	tr.titleClaudeBinary = "pwsh"
-	tr.titleClaudeArgs = []string{"-NoProfile", "-Command", "Write-Output '修复会话标题不更新'"}
+	tr.titleClaudeArgs = []string{"-NoProfile", "-Command",
+		"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; Write-Output '修复会话标题不更新'"}
 
 	// 必须推 task_updated，否则前端要刷新才看得到新标题 —— 与落库一起等。
 	tr.GenerateTitleAsync(task.ID)
@@ -164,7 +167,8 @@ func TestBackfillTitles(t *testing.T) {
 	tr, store, _ := observedRunner(t)
 	dir := t.TempDir()
 	tr.titleClaudeBinary = "pwsh"
-	tr.titleClaudeArgs = []string{"-NoProfile", "-Command", "Write-Output '补齐出来的标题'"}
+	tr.titleClaudeArgs = []string{"-NoProfile", "-Command",
+		"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; Write-Output '补齐出来的标题'"}
 
 	empty, _ := store.Create(&model.Task{ProjectID: "p", Prompt: "p1", ProjectPath: dir})
 	titled, _ := store.Create(&model.Task{ProjectID: "p", Prompt: "p2", ProjectPath: dir, Title: "已有标题"})
@@ -203,7 +207,8 @@ func TestBackfillTitles(t *testing.T) {
 	// 后者会把用户/模型产出的现有标题冲掉，那不是补齐该做的事。
 	// 为了验证重扫真的会走到生成，这里再放一个空标题任务进去。
 	again, _ := store.Create(&model.Task{ProjectID: "p", Prompt: "p3", ProjectPath: dir})
-	tr.titleClaudeArgs = []string{"-NoProfile", "-Command", "Write-Output '二次补齐的标题'"}
+	tr.titleClaudeArgs = []string{"-NoProfile", "-Command",
+		"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; Write-Output '二次补齐的标题'"}
 	if n := tr.BackfillTitles(true); n != 1 {
 		t.Fatalf("force 补齐排期 %d 个，want 1（只有 again）", n)
 	}
@@ -282,7 +287,8 @@ func TestGenerateTitle_FallsBackWhenAgentPathFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr.titleClaudeBinary = "pwsh"
-	tr.titleClaudeArgs = []string{"-NoProfile", "-Command", "Write-Output '兜底生成的标题'"}
+	tr.titleClaudeArgs = []string{"-NoProfile", "-Command",
+		"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; Write-Output '兜底生成的标题'"}
 
 	tr.GenerateTitleAsync(task.ID)
 	waitFor(t, 10*time.Second, "兜底标题落库", func() bool {

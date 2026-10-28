@@ -20,6 +20,7 @@ import (
 
 	"pieqi/internal/agent/claude/bridge"
 	"pieqi/internal/config"
+	"pieqi/internal/exechide"
 
 	"go.uber.org/zap"
 )
@@ -106,6 +107,7 @@ func (p *Proc) EnsureRunning(ctx context.Context) error {
 
 	cmd := exec.Command(p.cfg.NodeCmd, "src/index.js")
 	cmd.Dir = dir
+	exechide.Command(cmd)
 	cmd.Env = append(os.Environ(),
 		"BRIDGE_PORT="+p.portStr(),
 		"BRIDGE_HOST=127.0.0.1",

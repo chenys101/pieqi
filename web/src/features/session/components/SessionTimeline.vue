@@ -21,16 +21,19 @@ import { useSessionStore } from '@/stores/session'
 import { useTaskStore } from '@/stores/task'
 import { useFeedbackBundleStore } from '@/stores/feedbackBundle'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
+import { useArtifactsStore } from '@/stores/artifacts'
 import { useTimelineScroll, BOTTOM_SLACK } from '@/composables/useSession'
 import { isTerminalStatus } from '@/types/task'
 import { groupEventsByTurn, countUserMessages } from '../groupTurns'
 import type { TurnGroup, TurnRailItem } from '../groupTurns'
 import type { AgentEvent, AgentEventType } from '@/types/event'
+import type { ArtifactDto } from '@/types/api'
 import TimelineEventView from '@/features/timeline/components/TimelineEventView.vue'
 import ThinkingBadge from '@/features/timeline/components/ThinkingBadge.vue'
 import TextBubble from '@/features/timeline/components/TextBubble.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import TurnRail from './TurnRail.vue'
+import { ArtifactsBar, ArtifactList } from '@/features/feedback'
 
 const props = defineProps<{
   taskId: string
@@ -41,11 +44,21 @@ const props = defineProps<{
 const sessionStore = useSessionStore()
 const taskStore = useTaskStore()
 const bundleStore = useFeedbackBundleStore()
+const artifactsStore = useArtifactsStore()
 const fb = useFeedbackPanelStore()
 
 const events = computed(() => sessionStore.events(props.taskId))
 const task = computed(() => taskStore.byId(props.taskId))
 const bundle = computed(() => bundleStore.bundle(props.taskId))
+const allArtifacts = computed(() => artifactsStore.list(props.taskId))
+
+function turnArtifacts(turn: number): ArtifactDto[] {
+  return artifactsStore.forTurn(props.taskId, turn)
+}
+
+function onArtifactOpen(a: ArtifactDto) {
+  artifactsStore.openArtifact(props.taskId, a)
+}
 
 /** 思考占位：提交后标记 / 冷启动（运行中且无事件无输出）兜底 */
 const showThinking = computed(() => {
@@ -64,18 +77,22 @@ const outputFallback = computed(() => events.value.length === 0 && !!task.value?
 const groups = computed(() => groupEventsByTurn(events.value, bundle.value?.turns))
 const userMsgCount = computed(() => countUserMessages(events.value))
 
-// 初载拉 bundle（失败静默：分组照常渲染，增强等面板侧的重试 —— 那边有 toast）
+// 初载拉 bundle + 产物（失败静默：分组照常渲染，增强等面板侧的重试 —— 那边有 toast）
 watch(
   () => props.taskId,
   (id) => {
     bundleStore.load(id).catch(() => {})
+    artifactsStore.load(id).catch(() => {})
   },
   { immediate: true },
 )
 
 // bundle 落后于事件流（新一轮 user_message 已进流但 turns 还没它）→ 增量重拉（AC-R3-05）
 watch(userMsgCount, (n) => {
-  if (n > (bundle.value?.turns.length ?? 0)) bundleStore.load(props.taskId, true).catch(() => {})
+  if (n > (bundle.value?.turns.length ?? 0)) {
+    bundleStore.load(props.taskId, true).catch(() => {})
+    artifactsStore.load(props.taskId, true).catch(() => {})
+  }
 })
 
 /** 收起的 Turn 集合 —— 按 turn 号记账，新分组出现不影响已有开关状态（AC-R3-05） */
@@ -507,7 +524,14 @@ function jumpToLatest() {
 </script>
 
 <template>
-  <div class="flex min-h-0 flex-1">
+  <div class="flex min-h-0 flex-1 flex-col">
+    <!-- 全部产物：会话顶折叠条（默认收起，不占路径宽度） -->
+    <ArtifactsBar
+      :items="allArtifacts"
+      @open="onArtifactOpen"
+      @view="onArtifactOpen"
+    />
+    <div class="flex min-h-0 flex-1">
     <!-- 左侧快速跳转：≥2 个 Turn 才出现（移动端由 TurnRail 自身隐藏） -->
     <TurnRail
       v-if="railTurns.length > 1"
@@ -612,6 +636,15 @@ function jumpToLatest() {
                     <TimelineEventView :event="event" />
                   </div>
                 </template>
+                <!-- 本轮产物：时间线主入口（不依赖反馈面板） -->
+                <ArtifactList
+                  v-if="g.turn > 0 && turnArtifacts(g.turn).length"
+                  class="mt-1"
+                  title="本轮产物"
+                  :items="turnArtifacts(g.turn)"
+                  @open="onArtifactOpen"
+                  @view="onArtifactOpen"
+                />
               </section>
             </template>
           </template>
@@ -666,6 +699,7 @@ function jumpToLatest() {
             </button>
           </div>
       </div>
+    </div>
     </div>
   </div>
 </template>

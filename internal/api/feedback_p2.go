@@ -116,7 +116,7 @@ func (s *Server) attachArtifactOpens(task *model.Task, ev *core.Evidence) {
 	for i := range ev.Files {
 		a, ok := byPath[ev.Files[i].Path]
 		if !ok {
-			continue // 非产物类型（代码/配置）或文件已不在磁盘：不挂入口
+			continue // 白名单外扩展名或文件已不在磁盘：不挂入口
 		}
 		ev.Files[i].Kind = a.Kind
 		ev.Files[i].Open = a.Open
