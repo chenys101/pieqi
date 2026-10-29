@@ -197,5 +197,6 @@ web/test-results/
 /config.yaml
 *.local.yaml
 
-# agent 协作指南：本机维护，不入库（CLAUDE.md 指针已删除，两份都不进仓库）。
-/AGENTS.md
+# agent 协作指南（AGENTS.md）**入库**：README / docs 都以它为入口，
+# 且 git worktree、CI、别人的 clone 里都必须能读到同一份规则。
+# 早前「本机维护、不入库」的约定已于 2026-10-29 撤销（见该提交说明）。
