@@ -94,9 +94,30 @@ for (const vp of [
   { name: 'tablet', width: 834, height: 1112 },
   { name: 'desktop', width: 1440, height: 900 },
 ] as const) {
-  test(`新建任务入口 · ${vp.name} 不出现（侧栏已有「＋ 新建任务」）`, async ({ page }) => {
+  /**
+   * 桌面/平板：**没有**头部那枚移动端入口（那边由侧栏「＋ 新建任务」承接）。
+   *
+   * 而"承接"不只是"有个按钮"：用户 2026-10-29 报的缺陷正是这里 —— 侧栏入口
+   * 当时是无上下文的 `/tasks/new`，于是从详情页点新建，项目落回设置里的默认目录
+   * （`C:\Users\…\.pieqi\workspace`），而不是当前任务的项目。
+   * 所以判据必须是"点下去**真的**带着当前任务的项目进新建页"，和移动端那条一样。
+   */
+  test(`新建任务入口 · ${vp.name}：头部无移动端入口，侧栏入口带着当前任务的项目`, async ({ page }) => {
     await page.setViewportSize({ width: vp.width, height: vp.height })
     await openSession(page)
     await expect(entry(page), `${vp.name} 上不该有移动端专属的新建入口（同一件事两个入口）`).toHaveCount(0)
+
+    const sidebarNew = page.locator('[data-testid="sidebar-new-task"]')
+    await expect(sidebarNew, `${vp.name} 的侧栏没有「＋ 新建任务」入口`).toBeVisible()
+    // 悬停说明先说明"这一下会落在哪个项目"（点之前就可读）
+    await expect(sidebarNew).toHaveAttribute('title', /pieqi/)
+
+    await sidebarNew.click()
+    await expect(page).toHaveURL(/\/tasks\/new\?project=/)
+    // 判据是"新页面的项目已经是当前任务的"，而不是"URL 里有参数"
+    await expect(page.locator('[data-testid="project-summary"]')).toContainText(LONG_PROJECT)
+    await expect(page.locator('[data-testid="project-from-task"]'), '侧栏入口没把当前任务的项目带过来').toHaveText(
+      '来自当前任务',
+    )
   })
 }

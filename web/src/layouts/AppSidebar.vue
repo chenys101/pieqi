@@ -30,6 +30,48 @@ const notify = useNotificationStore()
 /** 当前会话 id（/sessions/:id），用于自动展开所在项目 */
 const currentSessionId = computed(() => route.path.match(/^\/sessions\/([^/]+)/)?.[1] ?? null)
 
+/**
+ * 当前正在看的任务（**仅详情页**有值）。
+ *
+ * 取 `route.params.id` 而不是复用上面的路径正则：生产里带 `:id` 的真实路由
+ * 只有详情页（`/tasks/:id`、`/session/:id` 都是重定向别名），而 e2e 夹具的整页
+ * 详情是 `/__e2e/detail/:id/sessionpage` —— 两条路径共用"id 在路由参数里"这个事实。
+ * 判据写成"有没有 id 参数"，用例才测得到真实接线，而不是在夹具里另铺一条生产
+ * 不存在的判断。
+ */
+const currentTask = computed(() => {
+  const id = route.params.id
+  return typeof id === 'string' && id ? taskStore.byId(id) : undefined
+})
+
+/**
+ * 「＋ 新建任务」的落点：**在详情页上时带上当前任务的项目**。
+ *
+ * 用户 2026-10-29 反馈：从某个任务的详情页点「新建任务」，默认项目却落回设置里的
+ * 默认工作目录（`C:\Users\…\.pieqi\workspace`），而不是这个任务所在的项目。
+ *
+ * 成因不在新建页：移动端的详情页头部那枚「新建任务」会带 `?project=`（见
+ * SessionHeader 的 newTaskHref），但**桌面/平板的详情页没有那枚按钮** ——
+ * 2026-10-23 定的是"侧栏已有「＋ 新建任务」，同一件事不给两个入口"。
+ * 而侧栏这枚是无上下文的 `/tasks/new`，于是桌面上这条链路必然丢掉项目。
+ *
+ * 修法就放在这枚既有入口上（而不是再加一个头部按钮）：**操作发生在哪个任务的
+ * 上下文里，就带上那个任务的项目**。判据只看"当前路由是不是某个任务详情"，
+ * 与默认目录、最近项目都无关 —— 那两者是"没有上下文时"的兜底。
+ * 取不到任务（冷启动深链、列表还没到）时不带参，退回默认目录，与从前一致：
+ * 宁可让默认值生效，也不要给出一个错的预选。
+ */
+const newTaskTarget = computed(() => {
+  const p = (currentTask.value?.projectPath || '').trim()
+  return p ? { path: '/tasks/new', query: { project: p } } : '/tasks/new'
+})
+
+/** 悬停说明：带上项目名，让"这一下会落在哪"在点之前就可读 */
+const newTaskTitle = computed(() => {
+  const name = currentTask.value?.project || currentTask.value?.projectPath
+  return name ? `在「${name}」新建任务` : '新建任务'
+})
+
 /** 项目是否展开：手动操作优先；默认收起，仅当前会话所在项目自动展开 */
 function isProjectOpen(g: TaskGroup): boolean {
   if (tree.openProjects[g.key] !== undefined) return tree.openProjects[g.key]
@@ -97,9 +139,13 @@ async function doDelete(id: string) {
              （批准一条 Bash 命令时要看得见它在改哪个项目的哪个文件），独立页做不到这点。
              待审批的**计数**没丢：它在仪表盘（首页）那一块，而不是挪到导航项上。 -->
       </nav>
+      <!-- 落点见 newTaskTarget：在详情页上时带上该任务的项目（桌面/平板没有头部的
+           那枚「新建任务」，这枚就是它们唯一的入口，所以上下文必须由它承接）。 -->
       <button
         class="mt-2 w-full rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
-        @click="router.push('/tasks/new')"
+        :title="newTaskTitle"
+        data-testid="sidebar-new-task"
+        @click="router.push(newTaskTarget)"
       >
         ＋ 新建任务
       </button>
