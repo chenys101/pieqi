@@ -14,9 +14,11 @@ import { computed, ref } from 'vue'
 import PromptInput from './PromptInput.vue'
 import ModelPicker from './ModelPicker.vue'
 import ImagePicker from './ImagePicker.vue'
+import UsageBadge from './UsageBadge.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import { useNotificationStore } from '@/stores/notification'
 import type { AgentModelDto } from '@/types/api'
+import type { TaskUsage } from '@/types/task'
 import type { PendingImage } from '../imageAttach'
 
 const props = defineProps<{
@@ -43,6 +45,15 @@ const props = defineProps<{
    * 比没有这个功能更糟（用户会反复试，而每次都以一句 agent 报错收场）。
    */
   canAttachImages?: boolean
+  /**
+   * 上下文用量（agent 上报）。undefined = 该 agent 不报，整块不渲染。
+   * 从头部下移到输入条（方案 C）：运行中禁用输入时它仍然可见。
+   */
+  usage?: TaskUsage
+  /** 执行 Agent 展示名（Claude Code / Qoder CLI）；与用量、模型并排 */
+  agentLabel?: string
+  /** Agent 悬停说明：业务名 + transport（显示名相同、通道不同时用来区分） */
+  agentTitle?: string
 }>()
 const emit = defineEmits<{
   send: [text: string, images: PendingImage[]]
@@ -51,6 +62,9 @@ const emit = defineEmits<{
 }>()
 
 const notify = useNotificationStore()
+
+/** Agent 胶囊的首字母（模板里不做 undefined 收窄；显示名首字母即可） */
+const agentInitial = computed(() => (props.agentLabel || '').slice(0, 1).toUpperCase())
 
 /**
  * 输入框的**文字区**高度上限（px，不含内边距、不含动作行）。
@@ -165,6 +179,23 @@ function onPaste(data: DataTransfer | null) {
               v-model="images"
               :disabled="submitting"
             />
+            <!-- 上下文用量：从头部下移到这里，紧跟图片按钮（方案 C 需求 2）。
+                 没有上报的 agent 整块不渲染；运行中图片按钮消失时它自然落到行首。 -->
+            <UsageBadge v-if="usage" :usage="usage" dense class="text-[10px] text-muted" />
+            <!-- 执行 Agent：始终可见（终态/运行中都显示）；与模型选择器并排。
+                 不是按钮 —— 它只回答"是谁在跑"，不承担切换动作。 -->
+            <span
+              v-if="agentLabel"
+              class="inline-flex min-w-0 max-w-[96px] items-center gap-1 rounded-[var(--radius-sm)] border border-border bg-surface-subtle px-1.5 py-0.5 text-[10px] text-text-secondary"
+              :title="agentTitle"
+              data-testid="composer-agent"
+            >
+              <span
+                class="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-[3px] bg-accent/10 text-[8px] font-bold text-accent"
+                aria-hidden="true"
+              >{{ agentInitial }}</span>
+              <span class="truncate">{{ agentLabel }}</span>
+            </span>
             <ModelPicker
               :model="currentModel"
               :models="models"

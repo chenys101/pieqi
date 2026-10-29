@@ -222,21 +222,38 @@ describe('需求 2：中止入口唯一', () => {
     expect(badge!.getAttribute('title')).toContain('claude')
   })
 
-  it('移动端：agent 只在执行中单独占一行（终态不额外占常驻版面）', () => {
-    const running = mount(SessionHeader, {
+  it('移动端：agent 不再占头部行，改为状态浮层里可见（输入条上另见 composer-agent）', async () => {
+    const header = mount(SessionHeader, {
       task: { ...baseTask, agent: 'claude', status: 'running' } as unknown as Task,
       canCancel: true,
       compact: true,
     })
-    expect(running.host.querySelector('[data-testid="session-agent-compact"]')).not.toBeNull()
+    // 旧的"执行中"agent 行已移除（方案 C：agent 下移到输入条）
+    expect(header.host.querySelector('[data-testid="session-agent-compact"]')).toBeNull()
 
-    document.body.innerHTML = ''
-    const done = mount(SessionHeader, {
-      task: { ...baseTask, agent: 'claude', status: 'completed' } as unknown as Task,
-      canCancel: false,
+    // 状态点单独成键；点开是状态详情，agent 仍可在这里看到
+    const status = header.host.querySelector<HTMLButtonElement>('[data-testid="session-status"]')!
+    expect(status).not.toBeNull()
+    expect(status.getAttribute('aria-label')).toContain('运行中')
+    status.click()
+    await nextTick()
+    const pop = header.host.querySelector('[data-testid="session-status-pop"]')
+    expect(pop).not.toBeNull()
+    expect(pop!.textContent).toContain('运行中')
+    expect(header.host.querySelector('[data-testid="session-status-agent"]')!.textContent).toContain('Claude Code')
+  })
+
+  it('移动端：状态点与任务列表是两个独立入口（不共用 ● 5）', () => {
+    const header = mount(SessionHeader, {
+      task: { ...baseTask, agent: 'claude', status: 'running' } as unknown as Task,
+      canCancel: true,
       compact: true,
     })
-    expect(done.host.querySelector('[data-testid="session-agent-compact"]')).toBeNull()
+    expect(header.host.querySelector('[data-testid="session-status"]')).not.toBeNull()
+    // store 里没有其他任务 → 任务按钮不渲染；有任务时见 otherTasks.spec
+    expect(header.host.querySelector('[data-testid="session-tasks"]')).toBeNull()
+    // 旧的合并入口（hub）没有 testid，但名字也不该再出现在头部
+    expect(header.host.textContent).not.toContain('状态与任务')
   })
 
   it('运行中的中止入口只剩输入框那一枚（emit cancel 一次）', () => {

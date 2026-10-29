@@ -1,5 +1,5 @@
-// 真点击 · 详情页「在「x」新建任务」入口（用户 2026-10-24 要求）：
-//   ① 移动端：入口**出现**、点在拇指区、点下去**真的导航**到新建页；
+// 真点击 · 详情页「新建任务」入口（用户 2026-10-24 要求；2026-10-29 方案 C 上移到顶栏）：
+//   ① 移动端：入口**出现**在顶栏、点下去**真的导航**到新建页；
 //   ② 新建页的**项目 = 当前任务的项目**（预选，且标着「来自当前任务」）；
 //   ③ 用户改了项目之后，那枚徽标消失（它说的只能是事实）；
 //   ④ 平板/桌面：**没有**这个入口（那边有侧栏「＋ 新建任务」，同一件事不给两个入口）。
@@ -30,28 +30,31 @@ async function openSession(page: Page): Promise<void> {
 test.describe('新建任务入口 · 移动端', () => {
   test.use({ viewport: { width: 375, height: 667 } })
 
-  test('入口出现、落在拇指区，点下去带着当前任务的项目进新建页', async ({ page }) => {
+  test('入口出现在顶栏，点下去带着当前任务的项目进新建页', async ({ page }) => {
     await openSession(page)
 
     const link = entry(page)
     await expect(link, '移动端详情页没有「新建任务」入口').toBeVisible()
-    await expect(link).toContainText('pieqi') // 名字来自任务的项目（project_id）
+    // 方案 C 的入口是图标按钮（无文字），项目名放在 title / aria-label 里
+    await expect(link).toHaveAttribute('title', /pieqi/)
 
     /**
-     * 几何判据（与"用户能不能单手点到"直接相关）：
-     *   · 命中区高度 ≥44（iOS HIG / Material 的下限，本仓库 AC-R8-04 同口径）；
-     *   · 整块在视口内 —— 用户不该为了"再开一个任务"去滚动；
-     *   · 在输入条**下方**、底栏**上方**：它不是输入框的一部分，也不是导航项。
+     * 几何判据（方案 C 把入口从底栏上方的 44px 条改成了顶栏 28px 圆钮）：
+     *   · 命中区 ≥24（图标按钮的可点下限；顶栏常驻 chrome 的既有口径是 28）；
+     *   · 整块在视口内；
+     *   · 在时间线之上（顶栏），不能压到输入条/底栏 —— 顶栏如果溢出到下面，
+     *     说明窄屏宽度预算已经炸了。
      */
     const box = await link.boundingBox()
     expect(box, '入口没有布局盒（未渲染或 display:none）').not.toBeNull()
-    expect(box!.height, `入口命中区只有 ${box!.height}px 高（应 ≥44）`).toBeGreaterThanOrEqual(44)
+    expect(box!.height, `入口命中区只有 ${box!.height}px 高（应 ≥24）`).toBeGreaterThanOrEqual(24)
+    expect(box!.y, '入口超出视口顶部').toBeGreaterThanOrEqual(0)
     expect(box!.y + box!.height, '入口超出视口底部').toBeLessThanOrEqual(667)
     const composer = await page.locator('[data-testid="composer-bar"]').boundingBox()
     const nav = await page.locator('nav[aria-label="主导航"]').boundingBox()
     expect(composer, '输入条不存在').not.toBeNull()
     expect(nav, '移动端底栏不存在').not.toBeNull()
-    expect(box!.y, '入口与输入条重叠').toBeGreaterThanOrEqual(composer!.y + composer!.height)
+    expect(box!.y + box!.height, '入口压到输入条，顶栏高度预算已溢出').toBeLessThanOrEqual(composer!.y)
     expect(box!.y + box!.height, '入口与底栏重叠（会挡住点击）').toBeLessThanOrEqual(nav!.y)
 
     // ★ 真点击（click 自带可操作性检查：被遮挡会红在这里）

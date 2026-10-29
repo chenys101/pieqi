@@ -1,38 +1,37 @@
 <script setup lang="ts">
 // Session Header：返回 / 标题 / 状态 / 元信息 / 操作
 //
-// **compact（移动端）只留一行**：返回 + 标题 + 状态 + 反馈图标。
-// 这一行是滚不走的常驻 chrome，每省一行都是真的还给时间线，所以：
-//   - #id / 项目 / 时间不显示（手机上横向空间本来就紧，id 又没有可操作性）；
-//   - 删除不放在这里 —— 移动端删任务的入口是任务列表页，详情页不该有一个不可恢复的动作常驻；
-//   - 反馈入口从文字按钮换成图标，把宽度让给标题。
-// 例外是 error：任务为什么失败在别处看不到，所以只有它值得再多占一行。
+// **compact（移动端）是四个独立入口**（用户 2026-10-29 定案，方案 C）：
+//   · 状态：裸圆点按钮，点开是状态详情浮层。**不再**和"其他任务数"挤在同一个按钮里 ——
+//     一个入口同时代表两件事，用户既分不清哪个是状态、也点不开想要的那个。
+//   · 其他任务：描边圆 + 堆叠图标 + 数量，点开**顶部下拉**（待决策优先，最多 3 个，
+//     其余走「查看全部」）。它和状态点靠形状/填充/图标/数字区分。
+//   · 新建任务：accent 实心圆 + 加号，从底栏上移到顶栏（方案 C 的需求 4）。
+//   · 反馈：方形面板图标（无文字、无 +/-），与新建的实心圆在形状/填充/图标上区分。
 //
-// **用量角标（UsageBadge）是第二个例外**，但只占行内一小段：它随 agent 的
-// usage_update 实时变（每轮多条），放在时间线里会刷屏，放在反馈面板里又看不见。
-// 移动端用 dense 形态（只有条 + 百分比）挤进头部那一行；没有上报的 agent 整块不渲染。
+// **Agent 与上下文用量都已下移到输入条**（见 InterveneInput 的 #lead）：
+//   头部只负责"当前是谁、在什么状态、还能去哪"，执行上下文（agent / model / usage）
+//   跟着输入条走，运行中禁用输入时也始终可见。移动端不再有"执行中"那一行。
 //
-// **agent 名是第三个例外**（用户 2026-10-23 要求：详情页要能看出这个任务跑在哪个 agent 上）：
-// 它是这个会话最重要的上下文之一 —— 同一句话交给 claude 和 qoder，行为与审批路径都不同
-// （claude 走 PreToolUse hook、没有"同类免审"）。此前详情页只有新建页能选 agent、
-// 进去之后就再也看不到，只能靠"印象"回忆。桌面放在元信息行（与项目名同级），
-// 移动端放不进那一行（横向已被标题/状态/用量占满），改由标题下一行承载，
-// 且**只在执行运行时出现** —— 它回答的是"现在是谁在干活"。
+// 桌面（非 compact）保持原样：状态徽章 + 元信息行（#id / agent / 项目 / 时间 / 用量）
+// + 反馈/删除按钮。移动端不常驻删除（不可恢复的动作不该在拇指区）。
 //
 // **「中止」不在这里**（详情页 UI 优化 · 需求 2）：它与输入框内右下角那枚 ■ 是同一个
 // 动作（都 emit cancel → taskStore.cancelTask），顶部再挂一个就是同一件事给两个入口，
 // 且顶部那个在手机上还紧挨着「返回」，误触成本高。中止的唯一入口 = 输入框内那枚按钮
 // （InterveneInput 的 canCancel 双态按钮），它就在拇指区、且与发送同位。
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAgentStore } from '@/stores/agent'
+import { useTaskStore } from '@/stores/task'
 import StatusBadge from '@/components/task/StatusBadge.vue'
 import Button from '@/components/ui/Button.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import UsageBadge from './UsageBadge.vue'
+import { otherRunningTasks } from '../otherTasks'
 import type { Task } from '@/types/task'
+import { STATUS_DOT, STATUS_LABELS, shortId } from '@/utils/format'
 import { timeAgo } from '@/utils/date'
-import { shortId } from '@/utils/format'
 
 const props = withDefaults(
   defineProps<{
@@ -48,21 +47,17 @@ const props = withDefaults(
      * 再挂一个按钮就是同一件事给两个入口，而且位置还不是它真正生效的地方。
      */
     showFeedback?: boolean
-    /** 移动端一行式头部（见文件头注释）：去元信息行与删除，反馈入口改为最右侧图标 */
+    /** 移动端四个独立入口（见文件头注释）；桌面仍走原头部 */
     compact?: boolean
     /** 移动端：当前是否正看着变更反馈（图标按下态） */
     feedbackActive?: boolean
   }>(),
   { showFeedback: true, compact: false, feedbackActive: false },
 )
-/**
- * 唯一真的会被 emit 的是 remove / feedback —— `cancel` 仍声明着（调用方与既有测试
- * 按它接线），但本组件已不再 emit 它（中止入口收归输入框，见文件头注释）。
- */
 const emit = defineEmits<{ cancel: []; remove: []; feedback: [] }>()
 const router = useRouter()
-
 const agentStore = useAgentStore()
+const taskStore = useTaskStore()
 
 /**
  * 本任务的 agent：**展示名**（Claude Code / Qoder CLI）而非业务名（claude / qoder）。
@@ -84,8 +79,69 @@ const agentTitle = computed(() => {
   return info ? `${info.name}（${id} · ${info.transport}）` : id
 })
 
-/** 正在执行中：此时 agent 决定"此刻是谁在动这个仓库" */
-const isActive = computed(() => props.task.status === 'running' || props.task.status === 'pending')
+/** 当前状态：移动端只显示圆点，文字在这里，点开浮层才出现 */
+const statusLabel = computed(() => STATUS_LABELS[props.task.status])
+const statusDotClass = computed(() => STATUS_DOT[props.task.status])
+/** 需决策：在圆点外补一圈光晕（9px 的点只靠颜色不够，且不能破坏"只有一个点"） */
+const statusDotRing = computed(() => (props.task.status === 'waiting_input' ? 'ring-4 ring-warning/15' : ''))
+
+/**
+ * 其他运行中任务：规则在 otherTasks.ts（待决策 → 运行中 → 待运行，同档 updatedAt 倒序）。
+ * 取前 3 个常显，其余走「查看全部」；一个都没有时连按钮都不渲染。
+ */
+const otherTasks = computed(() => otherRunningTasks(taskStore.tasks, props.task.id))
+const visibleOtherTasks = computed(() => otherTasks.value.slice(0, 3))
+const otherCount = computed(() => otherTasks.value.length)
+/** 按钮里放两位数没问题；100 个以上才收成 99+（不要一过 9 就把 18 伪装成 9+） */
+const otherCountLabel = computed(() => (otherCount.value > 99 ? '99+' : String(otherCount.value)))
+
+/** 新建任务：带着当前任务的项目进新建页（原底栏入口上移，口径不变） */
+const newTaskHref = computed(() => {
+  const p = (props.task.projectPath || '').trim()
+  return { path: '/tasks/new', query: p ? { project: p } : {} }
+})
+const newTaskTitle = computed(() => {
+  const name = props.task.project || props.task.projectPath
+  return name ? `在「${name}」新建任务` : '新建任务'
+})
+
+/** 同一时刻只允许一个浮层：打开任务下拉会顺手收起状态详情（反之亦然）。 */
+const openPopover = ref<'status' | 'tasks' | null>(null)
+function togglePopover(which: 'status' | 'tasks') {
+  openPopover.value = openPopover.value === which ? null : which
+}
+function closePopovers() {
+  openPopover.value = null
+}
+
+/** 点空白 / Esc 收起。触发器与浮层各自 @click.stop，因此这里收到的只可能是"外面"。 */
+function onDocClick() {
+  closePopovers()
+}
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') closePopovers()
+}
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+  document.addEventListener('keydown', onKeydown)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocClick)
+  document.removeEventListener('keydown', onKeydown)
+})
+
+function goNewTask() {
+  closePopovers()
+  void router.push(newTaskHref.value)
+}
+function goTask(id: string) {
+  closePopovers()
+  void router.push(`/sessions/${id}`)
+}
+function goAllTasks() {
+  closePopovers()
+  void router.push('/tasks')
+}
 
 /**
  * ← 是"回上一页"，不是"回首页"：手机上多数是从 /tasks 列表或仪表盘待审批组点进来的，
@@ -103,11 +159,11 @@ function goBack() {
 </script>
 
 <template>
-  <header class="border-b border-border bg-surface/60 px-3 py-2 md:px-4">
+  <header class="relative z-30 border-b border-border bg-surface/60 px-3 py-2 md:px-4">
     <!-- 正文列口径由 ContentColumn 统一给（宽屏左对齐 + 可调宽度，窄屏居中 max-w-3xl）。
          头部两行必须与时间线/输入框共用同一条左边界 —— 这正是"错位"的修复点。 -->
     <ContentColumn :resizable="false">
-      <div class="flex items-center gap-2">
+      <div class="flex items-center" :class="compact ? 'gap-1' : 'gap-2'">
         <button
           class="shrink-0 rounded-md px-1.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-text"
           title="返回"
@@ -123,56 +179,118 @@ function goBack() {
           {{ task.title }}
         </h1>
 
-        <StatusBadge :status="task.status" />
-        <!-- 上下文用量：**只在该 agent 上报过时才显示**（task.usage 为 undefined 就整块不渲染）。
-             移动端走 dense（只有条 + 百分比）—— 头部这一行是常驻 chrome，token 数不值得
-             占掉标题的宽度；桌面有整行元信息位，就放在那里给全数字。 -->
-        <UsageBadge v-if="task.usage && compact" :usage="task.usage" dense class="text-xs text-muted" />
-        <!-- 变更反馈入口：移动端图标（＋上－下 = diff），其余档文字按钮 -->
-        <button
-          v-if="compact"
-          class="shrink-0 rounded-md px-1.5 py-1 text-muted transition-colors hover:bg-elevated hover:text-text aria-pressed:bg-elevated aria-pressed:text-accent"
-          :aria-pressed="feedbackActive"
-          title="变更反馈"
-          aria-label="变更反馈"
-          @click="emit('feedback')"
-        >
-          <svg
-            viewBox="0 0 24 24"
-            class="h-4 w-4"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            aria-hidden="true"
+        <!-- ── 移动端：状态 / 任务列表 / 新建 / 反馈，四个独立入口 ─────────── -->
+        <template v-if="compact">
+          <!-- 当前状态：裸圆点；点开是这个任务的状态详情 -->
+          <div class="relative shrink-0">
+            <button
+              class="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-text"
+              :class="task.status === 'waiting_input' ? 'bg-warning/5' : ''"
+              :aria-label="`任务状态：${statusLabel}`"
+              :aria-expanded="openPopover === 'status'"
+              aria-haspopup="dialog"
+              data-testid="session-status"
+              title="任务状态"
+              @click.stop="togglePopover('status')"
+            >
+              <span class="block h-2 w-2 rounded-full" :class="[statusDotClass, statusDotRing]" />
+            </button>
+
+            <div
+              v-if="openPopover === 'status'"
+              class="absolute left-1/2 top-full z-50 mt-2 w-56 -translate-x-1/2 rounded-lg border border-border bg-surface p-3 shadow-md"
+              data-testid="session-status-pop"
+              @click.stop
+            >
+              <div class="flex items-center gap-2 text-xs font-semibold">
+                <span class="block h-2 w-2 rounded-full" :class="[statusDotClass, statusDotRing]" />
+                {{ statusLabel }}
+              </div>
+              <div class="mt-0.5 pl-4 text-[10px] text-text-tertiary">
+                {{ timeAgo(task.updatedAt || task.createdAt) }}前
+              </div>
+              <div
+                v-if="agentLabel"
+                class="mt-2 flex items-center justify-between gap-3 border-t border-border-subtle pt-1.5 text-[10px]"
+                data-testid="session-status-agent"
+              >
+                <span class="shrink-0 text-text-tertiary">Agent</span>
+                <span class="min-w-0 truncate text-text" :title="agentTitle">{{ agentLabel }}</span>
+              </div>
+              <div v-if="task.project" class="mt-1 flex items-center justify-between gap-3 text-[10px]">
+                <span class="shrink-0 text-text-tertiary">项目</span>
+                <span class="min-w-0 truncate text-text">{{ task.project }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 其他任务：描边圆 + 堆叠图标 + 数量；下拉只列任务，不混状态详情 -->
+          <button
+            v-if="otherCount"
+            class="flex h-7 w-7 shrink-0 items-center justify-center gap-0.5 rounded-full border border-border bg-surface-subtle text-muted transition-colors hover:border-border-strong hover:bg-elevated hover:text-text"
+            :aria-label="`其他运行中任务（${otherCount} 个）`"
+            :aria-expanded="openPopover === 'tasks'"
+            aria-haspopup="dialog"
+            data-testid="session-tasks"
+            title="其他运行中任务"
+            @click.stop="togglePopover('tasks')"
           >
-            <path d="M12 4v7" />
-            <path d="M8.5 7.5h7" />
-            <path d="M8.5 18h7" />
-          </svg>
-        </button>
-        <Button v-else-if="showFeedback" variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
-        <!-- 中止按钮**不在这里**：与输入框内那枚 ■ 重叠（详情页 UI 优化 · 需求 2） -->
-        <!-- 删除只在非移动端常驻：不可恢复的动作不该出现在拇指最容易碰到的地方 -->
-        <Button v-if="!compact" variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="4" y="5" width="16" height="4" rx="1.5" />
+              <rect x="6" y="11" width="12" height="4" rx="1.5" />
+              <rect x="8" y="17" width="8" height="4" rx="1.5" />
+            </svg>
+            <span class="text-[8px] font-bold tabular-nums">{{ otherCountLabel }}</span>
+          </button>
+
+          <!-- 新建任务：accent 实心圆 + 加号（从底栏上移） -->
+          <button
+            type="button"
+            class="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-accent text-white shadow-sm transition-opacity hover:opacity-90 active:scale-95"
+            :title="newTaskTitle"
+            :aria-label="newTaskTitle"
+            data-testid="session-new-task"
+            @click="goNewTask"
+          >
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
+
+          <!-- 变更反馈：方形面板图标（无文字、无 +/-），与实心圆新建区分 -->
+          <button
+            type="button"
+            class="grid h-7 w-7 shrink-0 place-items-center rounded-md border transition-colors"
+            :class="
+              feedbackActive
+                ? 'border-accent/40 bg-accent/10 text-accent'
+                : 'border-border bg-surface-subtle text-muted hover:border-border-strong hover:bg-elevated hover:text-text'
+            "
+            :aria-pressed="feedbackActive"
+            aria-label="变更反馈"
+            title="变更反馈"
+            data-testid="session-feedback"
+            @click="emit('feedback')"
+          >
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+              <path d="M14.5 4.5v15" />
+              <path d="M16.2 8.5h2.4M16.2 12h2.4" />
+            </svg>
+          </button>
+        </template>
+
+        <!-- ── 桌面 / 平板：原头部（状态徽章 + 反馈/删除） ─────────────────── -->
+        <template v-else>
+          <StatusBadge :status="task.status" />
+          <Button v-if="showFeedback" variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
+          <Button variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
+        </template>
       </div>
 
-      <!-- 移动端：agent 名单独一行（在标题下方、与标题左对齐）。
-           为什么不塞进上面那一行：横向已被标题/状态/用量占满，再挤会截标题；
-           而 agent 是"谁在干活"这种一等上下文，值得占一行**短行**。
-           只在执行中出现：终态任务的 agent 已在元信息事实里，不必额外占常驻版面。 -->
-      <div
-        v-if="compact && agentLabel && isActive"
-        class="mt-1 flex items-center gap-1.5 pl-8 text-xs text-muted"
-        data-testid="session-agent-compact"
-      >
-        <span class="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[11px] text-text" :title="agentTitle">
-          {{ agentLabel }}
-        </span>
-        <span class="text-text-tertiary">执行中</span>
-      </div>
+      <!-- 移动端不再有 agent 行：agent 已下移到输入条（见 InterveneInput #lead） -->
 
-      <!-- 元信息行：移动端只在有 error 时出现（#id 没有可操作性，项目名与时间在手机上不值得再占一行） -->
+      <!-- 元信息行：移动端只在有 error 时出现；桌面展示 #id / agent / 项目 / 时间 / 用量 -->
       <div v-if="!compact || task.error" class="mt-1 flex items-center gap-2 pl-8 text-xs text-muted">
         <template v-if="!compact">
           <span class="font-mono">#{{ shortId(task.id) }}</span>
@@ -190,9 +308,65 @@ function goBack() {
           <span>{{ timeAgo(task.updatedAt || task.createdAt) }}前</span>
         </template>
         <!-- 桌面：用量跟在时间后面（同一行，同一层级的信息） -->
-        <UsageBadge v-if="task.usage && !compact" :usage="task.usage" />
+        <UsageBadge v-if="!compact && task.usage" :usage="task.usage" />
         <span v-if="task.error" class="min-w-0 truncate text-error" :title="task.error">{{ task.error }}</span>
       </div>
     </ContentColumn>
+
+    <!-- 其他任务下拉：挂在 header 上、右对齐（不是挂在 28px 的按钮上，
+         否则 320 宽时 300px 的面板会从左边溢出）。只有 compact 才有。 -->
+    <div
+      v-if="compact && openPopover === 'tasks'"
+      class="absolute right-3 top-full z-50 mt-1.5 w-[300px] max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-border bg-surface shadow-md"
+      data-testid="session-tasks-pop"
+      @click.stop
+    >
+      <div class="flex items-center gap-2 px-3 pb-1.5 pt-2.5">
+        <span class="flex-1 text-xs font-semibold">其他运行中任务</span>
+        <span class="grid h-4 min-w-4 place-items-center rounded-full bg-elevated px-1 text-[9px] font-bold text-muted">
+          {{ otherCount }}
+        </span>
+        <button
+          type="button"
+          class="grid h-6 w-6 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-text"
+          aria-label="关闭"
+          @click="closePopovers"
+        >
+          ×
+        </button>
+      </div>
+      <div class="px-3 pb-1.5 text-[9px] text-text-tertiary">待决策优先 · 最多显示 3 个</div>
+      <div class="max-h-[60vh] overflow-y-auto px-2 pb-2">
+        <button
+          v-for="t in visibleOtherTasks"
+          :key="t.id"
+          type="button"
+          class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs transition-colors hover:bg-elevated"
+          :class="t.status === 'waiting_input' ? 'border border-warning/25 bg-warning/5' : 'border border-transparent'"
+          :data-testid="`session-other-task-${t.id}`"
+          @click="goTask(t.id)"
+        >
+          <span class="block h-1.5 w-1.5 shrink-0 rounded-full" :class="STATUS_DOT[t.status]" />
+          <span class="min-w-0 flex-1">
+            <span class="block truncate">{{ t.title }}</span>
+            <span class="block truncate text-[9px] text-text-tertiary">
+              {{ t.project }} · {{ timeAgo(t.updatedAt) }}前
+            </span>
+          </span>
+          <span class="shrink-0 text-[10px] text-text-tertiary">{{ STATUS_LABELS[t.status] }}</span>
+          <span class="shrink-0 text-text-tertiary" aria-hidden="true">›</span>
+        </button>
+
+        <button
+          v-if="otherCount > 3"
+          type="button"
+          class="mt-1 flex h-9 w-full items-center justify-center rounded-md border border-dashed border-border-strong text-[11px] text-accent transition-colors hover:bg-accent/5"
+          data-testid="session-all-tasks"
+          @click="goAllTasks"
+        >
+          查看全部 {{ otherCount }} 个运行中任务 →
+        </button>
+      </div>
+    </div>
   </header>
 </template>
