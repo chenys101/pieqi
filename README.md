@@ -77,9 +77,9 @@
 
 * **ACP**：JSON-RPC over stdio，`session/request_permission` / `session/prompt` / `session/resume` / `session/set_config_option` 为协议级能力（`internal/agent/acp.go`）。模型清单有**两条通道**（标准 `configOptions` 优先，`_meta["pieqi/configOptions"]` 为兜底），选哪条由 `internal/agent/model_catalog.go` 的 `catalogSource` 判定。
 
-* 加一个 ACP agent 只碰三处：`config.AgentsConfig` 加一节、`agent.defaultACPAgentType` 加一行、`ACPProviderConfigFromAgents` 加一个分支（细节见 `AGENTS.md`）。
+* 加一个 ACP agent **只改一处**：`internal/agent/manifest.go` 加一条（transport / agent_type / 默认 spawn / 超时都是代码事实，不写进配置）。用户侧只剩运行期两件事：`settings.json` 的 `agents.enabled`（开不开）与 `agents.spawn_overrides`（装在哪），可热改；前端目录来自 `GET /api/agents`，不用改。
 
-> 旧配置 `pieqi.acp.*` 已弃用（P5 迁移），显式配置会触发告警；请使用 `agents.*` 节。详见 [`docs/multi-agent.md`](docs/multi-agent.md)。
+> 旧配置 `pieqi.acp.*` 与 `agents.qoder/dsh/codebuddy` 各节均已移除（显式配置会触发告警并指出新落点）；详见 [`docs/multi-agent.md`](docs/multi-agent.md)。
 
 ### 任务生命周期与两条审批路径
 
@@ -378,7 +378,7 @@ GOOS=windows GOARCH=amd64 go build -o build/release/pieqi-windows-amd64.exe ./cm
 | 多 Agent 架构（`agents.*`、桥 / print / ACP） | [`docs/multi-agent.md`](docs/multi-agent.md)、[`docs/phase2-acp.md`](docs/phase2-acp.md) |
 | 安全模型与整改判据 | [`docs/security-hardening.md`](docs/security-hardening.md) |
 | 反馈体系（P0–P3 设计） | [`docs/feedback/`](docs/feedback/README.md) |
-| 关键决策记录（ADR 0001–0015） | [`docs/adr/`](docs/adr) |
+| 关键决策记录（ADR 0001–0018） | [`docs/adr/`](docs/adr) |
 | UI 真机验收（Playwright 三层） | [`docs/testing/ui-e2e.md`](docs/testing/ui-e2e.md)、[`docs/testing/ui-e2e-next.md`](docs/testing/ui-e2e-next.md)、[`docs/testing/ui-e2e-online.md`](docs/testing/ui-e2e-online.md) |
 | UI 设计规范与落地 | [`docs/ui-design/UI-DESIGN-SPEC.md`](docs/ui-design/UI-DESIGN-SPEC.md)、[`docs/ui-design/IMPLEMENTATION-PLAN.md`](docs/ui-design/IMPLEMENTATION-PLAN.md) |
 | 前端 V2 重构与迁移报告 | [`docs/frontend-v2/migration-report.md`](docs/frontend-v2/migration-report.md)（含已归档的设计原文 [`架构升级技术方案`](docs/frontend-v2/Pieqi%20Frontend%20V2%20架构升级技术方案.md)） |

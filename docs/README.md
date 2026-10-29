@@ -10,14 +10,15 @@
 
 | 目录 / 文件 | 内容 | 状态 |
 |---|---|---|
-| [`adr/`](adr) | **架构决策记录**（ADR 0001–0015），改相关代码前先读对应 ADR | 长期有效 |
+| [`adr/`](adr) | **架构决策记录**（ADR 0001–0018），改相关代码前先读对应 ADR | 长期有效 |
 | [`feedback/`](feedback/README.md) | 反馈体系（Observe→Verify→Control→Intervene）：功能点全量规划 + P0–P3 设计 | Design / Roadmap |
 | [`testing/`](testing) | UI 真机验收（Playwright 三层）、下版待办、线上复量方案 | 已落地 |
 | [`ui-design/`](ui-design) | UI 设计规范（`UI-DESIGN-SPEC.md`）、原型（`prototype/`）、落地实施方案 | Stable |
 | [`frontend-v2/`](frontend-v2) | 前端 V2 重构的契约基准（`baseline.md`）、迁移完成报告、**设计原文归档**（`Pieqi Frontend V2 架构升级技术方案.md`） | 已完成（设计原文仅存档） |
 | [`requirements/`](requirements/overview.md) | 2.2 版本需求流水线 S0–S5（规划 / PRD / 技术方案 / 排期 / 实施记录） | 已放行 |
 | [`v2.1/`](v2.1) | 下一阶段综合功能迭代规划 v1.0 与功能点清单 | 规划 |
-| [`performance/`](performance/perf-backlog-2026-10-22.md) | 性能瓶颈修复任务队列（P0–P3，2026-10-22 诊断产出：写锁饥饿 / 5.4MB 首页 payload） | **待执行** |
+| [`performance/`](performance/perf-backlog-2026-10-22.md) | 性能瓶颈修复任务队列（P0–P3，2026-10-22 诊断产出：写锁饥饿 / 5.4MB 首页 payload） | **执行中**（交接见 [`exec/perf-backlog/state.md`](exec/perf-backlog/state.md)） |
+| [`exec/`](exec/perf-backlog/state.md) | 执行交接：性能 backlog 各段进度、实测证据与下一步（会话之间的唯一交接载体） | 进行中 |
 | [`superpowers/plans/`](superpowers/plans) | 飞书 IM 绑定 + cloudflared 隧道、飞书长连接 + Device Flow 的实施计划 | 历史存档 |
 | [`spikes/`](spikes/claude-sdk-bridge/README.md) | P0 spike 存档（claude-sdk-bridge 验证脚本，非产品代码） | 历史存档 |
 | [`multi-agent.md`](multi-agent.md) | 多 Agent 技术方案（`agents.*` 配置、桥 / print / ACP、P0–P5 演进） | 现行 |
@@ -53,6 +54,9 @@
 | [0013](adr/0013-remove-visual-capture-entirely.md) | 移除 console/network，**视觉反馈层整体下线** |
 | [0014](adr/0014-requirement-closed-loop.md) | 需求开发闭环（Requirement / Task Graph / Issue）—— 提议中 |
 | [0015](adr/0015-approval-noise-reduction-keep-deletes.md) | 审批降噪：测试/构建/只读探查免审，**删除一律人工** |
+| [0016](adr/0016-go-build-work-dir-must-be-inside-workspace.md) | `GOTMPDIR` 必须指向工作区内，否则 go 建不出 work dir |
+| [0017](adr/0017-static-preview-served-in-process.md) | 静态产物由 pieqi 进程内直接 serve（不 spawn、无端口、终态不回收） |
+| [0018](adr/0018-artifacts-default-accessible-with-sandbox.md) | 产物默认可访问；入口并入文件清单；agent HTML 强制 CSP sandbox |
 
 > 约定：新决策与既有 ADR 冲突时**新增** `adr/00NN-*.md`，不改写旧 ADR。
 
