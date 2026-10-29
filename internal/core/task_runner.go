@@ -146,6 +146,9 @@ type acpWires struct {
 	usage *UsageHandle
 	// goal 可能为 nil —— 该 agent 没有 goal 状态事件（见 WireGoal 的选择性）。
 	goal *GoalHandle
+	// plan / mode 可能为 nil —— print 路径或不实现对应 Reporter。
+	plan *PlanHandle
+	mode *ModeHandle
 }
 
 // NewTaskRunner 创建 runner。
@@ -1009,7 +1012,10 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	// Model 一并带上（task.Model = 建任务时选的模型）：Open/NewSession 时经 ACP 请求
 	// 的 _meta 落到会话上。会话已有历史路由时以历史为准（agent 自己记的更准），
 	// 故这里是"该任务想要的模型"的兜底。按轮换模型走 Run 的参数，不经过这里。
-	cfg := agent.SessionConfig{Cwd: task.WorktreePath, ResumeFrom: resumeFrom, Agent: task.Agent, TaskID: task.ID, Model: task.Model}
+	cfg := agent.SessionConfig{
+		Cwd: task.WorktreePath, ResumeFrom: resumeFrom, Agent: task.Agent,
+		TaskID: task.ID, Model: task.Model, Mode: task.Mode,
+	}
 	if resumeFrom != "" {
 		tr.logger.Debug("agent session open (resume)",
 			zap.String("task", task.ID), zap.String("agent", task.Agent),
@@ -1054,7 +1060,11 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	uh := WireUsage(adapter, tr.bus, tr.store, task.ID)
 	// goal 状态（当前仅 claude 桥有该事件；dsh/qoder 的 goal 走工具调用）。
 	gh := WireGoal(adapter, tr.bus, tr.store, task.ID, tr.logger)
-	tr.setWires(task.ID, dh, ph, th, uh, gh)
+	plh := WirePlan(adapter, tr.bus, tr.store, task.ID, tr.logger)
+	mh := WireMode(adapter, tr.bus, tr.store, task.ID, tr.logger)
+	tr.setWires(task.ID, dh, ph, th, uh, gh, plh, mh)
+	// 把 session/new 协商到的 modes 写进 Task，前端 ModePicker 才有清单。
+	SyncModesFromAdapter(tr.store, tr.bus, task.ID, adapter)
 
 	// Open 成功后立即持久化真实 session ID（续问用）。
 	// ACP 路径（!fellBack）：sessionID 即真实协议资源 ID，存 ACPSessionID。
@@ -1324,6 +1334,8 @@ func (tr *TaskRunner) onAgentSessionClosed(taskID string) {
 		w.tool.Unwire()
 		w.usage.Unwire() // nil-safe（agent 不上报用量时 wire 就是 nil）
 		w.goal.Unwire()  // nil-safe（agent 没有 goal 事件时 wire 就是 nil）
+		w.plan.Unwire()
+		w.mode.Unwire()
 	}
 	// 非 worktree 任务（WorktreePath==ProjectPath，如生产直接跑原目录）不清理，避免误删原项目目录。
 	if tr.cleanupWorktrees {
@@ -1342,12 +1354,29 @@ func (tr *TaskRunner) CloseAgentSession(taskID string) {
 	_ = tr.agentMgr.Close(taskID)
 }
 
+// ApplyLiveMode 若该任务有活着的 ACP 会话且实现 ModeSetter，立刻 session/set_mode。
+// 无活会话 → nil（下次 Open 经 SessionConfig.Mode + applyMode 落定）。
+func (tr *TaskRunner) ApplyLiveMode(ctx context.Context, taskID, modeID string) error {
+	if tr.agentMgr == nil || modeID == "" {
+		return nil
+	}
+	adapter := tr.agentMgr.Adapter(taskID)
+	if adapter == nil {
+		return nil
+	}
+	setter, ok := adapter.(agent.ModeSetter)
+	if !ok {
+		return nil
+	}
+	return setter.SetMode(ctx, modeID)
+}
+
 // setWires 登记 ACP 路径的 wire 句柄（供 Intervene 审批决策取 PermissionWire）。
-// uh（用量）/ gh（goal）可为 nil —— 该 agent 不上报对应信息。
-func (tr *TaskRunner) setWires(taskID string, dh *DeltaHandle, ph *PermissionWire, th *ToolCallHandle, uh *UsageHandle, gh *GoalHandle) {
+// uh/gh/plh/mh 可为 nil —— 该 agent 不上报对应信息。
+func (tr *TaskRunner) setWires(taskID string, dh *DeltaHandle, ph *PermissionWire, th *ToolCallHandle, uh *UsageHandle, gh *GoalHandle, plh *PlanHandle, mh *ModeHandle) {
 	tr.wireMu.Lock()
 	defer tr.wireMu.Unlock()
-	tr.wires[taskID] = &acpWires{delta: dh, perm: ph, tool: th, usage: uh, goal: gh}
+	tr.wires[taskID] = &acpWires{delta: dh, perm: ph, tool: th, usage: uh, goal: gh, plan: plh, mode: mh}
 }
 
 // clearWires 摘除 task 的 wire 句柄登记（句柄本身的 Unwire 由调用方负责）。

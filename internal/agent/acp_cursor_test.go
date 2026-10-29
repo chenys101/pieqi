@@ -43,20 +43,52 @@ func TestHandleCursorExtension_AskQuestionSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := resp.(map[string]any)
-	if m["outcome"] != "skipped" || m["reason"] != "unsupported_by_client" {
-		t.Fatalf("resp=%v", resp)
+	inner, _ := m["outcome"].(map[string]any)
+	if inner["outcome"] != "skipped" || inner["reason"] != "unsupported_by_client" {
+		t.Fatalf("want nested skipped, got %v", resp)
 	}
 }
 
-func TestHandleCursorExtension_CreatePlanCancelled(t *testing.T) {
+func TestHandleCursorExtension_CreatePlanAcceptedAndEmitsPlan(t *testing.T) {
 	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
-	resp, err := a.handleCursorExtension(context.Background(), "_cursor/create_plan", nil, true)
+	var got PlanUpdate
+	a.OnPlanUpdate(func(u PlanUpdate) { got = u })
+	raw := []byte(`{"toolCallId":"c1","name":"Demo","overview":"ov","plan":"do x","todos":[{"id":"1","content":"Inspect","status":"completed"},{"id":"2","content":"Edit","status":"pending"}]}`)
+	resp, err := a.handleCursorExtension(context.Background(), "cursor/create_plan", raw, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m, _ := resp.(map[string]any)
-	if m["outcome"] != "cancelled" {
+	inner, _ := m["outcome"].(map[string]any)
+	if inner["outcome"] != "accepted" {
+		t.Fatalf("want nested accepted, got %v", resp)
+	}
+	if len(got.Entries) != 2 || got.Entries[0].Content != "Inspect" || got.Entries[0].Status != "completed" {
+		t.Fatalf("plan entries=%+v", got.Entries)
+	}
+}
+
+func TestHandleCursorExtension_UpdateTodosMerge(t *testing.T) {
+	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
+	var got PlanUpdate
+	a.OnPlanUpdate(func(u PlanUpdate) { got = u })
+	_, err := a.handleCursorExtension(context.Background(), "cursor/update_todos",
+		json.RawMessage(`{"todos":[{"id":"1","content":"A","status":"pending"}],"merge":false}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := a.handleCursorExtension(context.Background(), "cursor/update_todos",
+		json.RawMessage(`{"todos":[{"id":"1","content":"A","status":"completed"},{"id":"2","content":"B","status":"pending"}],"merge":true}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := resp.(map[string]any)
+	inner, _ := m["outcome"].(map[string]any)
+	if inner["outcome"] != "accepted" {
 		t.Fatalf("resp=%v", resp)
+	}
+	if len(got.Entries) != 2 || got.Entries[0].Status != "completed" || got.Entries[1].Content != "B" {
+		t.Fatalf("merged entries=%+v", got.Entries)
 	}
 }
 

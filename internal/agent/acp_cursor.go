@@ -150,7 +150,7 @@ func (a *ACPAgent) HandleExtensionMethod(ctx context.Context, method string, par
 
 var _ acp.ExtensionMethodHandler = (*ACPAgent)(nil)
 
-func (a *ACPAgent) handleCursorExtension(_ context.Context, method string, params json.RawMessage, asRequest bool) (any, error) {
+func (a *ACPAgent) handleCursorExtension(ctx context.Context, method string, params json.RawMessage, asRequest bool) (any, error) {
 	norm := strings.TrimPrefix(method, "_")
 	toolCallID := peekJSONString(params, "toolCallId")
 	a.logger.Debug("acp extension method",
@@ -162,13 +162,17 @@ func (a *ACPAgent) handleCursorExtension(_ context.Context, method string, param
 
 	switch norm {
 	case "cursor/ask_question":
+		// 嵌套 outcome（官方 docs）；平铺会被 Cursor 当成 cancelled。
 		a.logger.Debug("acp extension default reply",
 			zap.String("method", method), zap.String("reply", "skipped/unsupported_by_client"))
-		return map[string]any{"outcome": "skipped", "reason": "unsupported_by_client"}, nil
+		return cursorNestedOutcome(map[string]any{
+			"outcome": "skipped",
+			"reason":  "unsupported_by_client",
+		}), nil
 	case "cursor/create_plan":
-		a.logger.Debug("acp extension default reply",
-			zap.String("method", method), zap.String("reply", "cancelled"))
-		return map[string]any{"outcome": "cancelled"}, nil
+		return a.handleCursorCreatePlan(ctx, params)
+	case "cursor/update_todos":
+		return a.handleCursorUpdateTodos(params, asRequest)
 	case "cursor/generate_image":
 		// 生图由 Cursor agent 完成；客户端只做产物门禁：
 		// filePath 落在本任务 workDir 内且文件存在 → 合成 GenerateImage 写事件进产物链；
@@ -179,15 +183,15 @@ func (a *ACPAgent) handleCursorExtension(_ context.Context, method string, param
 		}
 		a.logger.Debug("acp extension default reply",
 			zap.String("method", method), zap.String("reply", "accepted"))
-		return map[string]any{"outcome": "accepted"}, nil
-	case "cursor/update_todos", "cursor/task", "cursor/list_available_models":
+		return cursorNestedOutcome(map[string]any{"outcome": "accepted"}), nil
+	case "cursor/task", "cursor/list_available_models":
 		if !asRequest {
 			a.logger.Debug("acp extension notification swallowed", zap.String("method", method))
 			return nil, nil
 		}
 		a.logger.Debug("acp extension default reply",
 			zap.String("method", method), zap.String("reply", "accepted"))
-		return map[string]any{"outcome": "accepted"}, nil
+		return cursorNestedOutcome(map[string]any{"outcome": "accepted"}), nil
 	default:
 		a.logger.Warn("acp unknown extension method", zap.String("method", method))
 		return nil, acp.NewMethodNotFound(method)

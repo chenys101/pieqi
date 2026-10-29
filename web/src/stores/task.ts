@@ -197,8 +197,9 @@ export const useTaskStore = defineStore('task', {
       agent?: string,
       model?: string,
       images?: ImagePayload[],
+      mode?: string,
     ): Promise<Task> {
-      const dto = await api.createTask(projectPath, prompt, agent, model, images)
+      const dto = await api.createTask(projectPath, prompt, agent, model, images, mode)
       const task = adaptTask(dto)
       this.upsertTask(task)
       return task

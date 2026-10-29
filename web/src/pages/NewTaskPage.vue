@@ -10,6 +10,7 @@ import Select from '@/components/ui/Select.vue'
 import PromptInput from '@/features/session/components/PromptInput.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import ModelPicker from '@/features/session/components/ModelPicker.vue'
+import ModePicker from '@/features/session/components/ModePicker.vue'
 import ImagePicker from '@/features/session/components/ImagePicker.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useRouter } from 'vue-router'
@@ -36,6 +37,8 @@ const {
   projectSummary,
   agent,
   model,
+  sessionMode,
+  sessionModes,
   projects,
   catalog,
   selectedAgent,
@@ -202,6 +205,15 @@ const {
                      必须放 #lead 而不是 #actions（后者整行 justify-end，会被推到最右与创建按钮挤在一起）。
                      显隐依据见 canAttachImages 的注释（只有 ACP 系 agent 才可能收图）。 -->
                 <ImagePicker v-if="canAttachImages" ref="imagePicker" v-model="images" :disabled="creating" />
+                <!-- 模式与模型同属「发这条提示词时的选择」：Cursor agent/plan/ask 等。
+                     清单来自目录 modes；空则不显示（claude 等无预置模式）。 -->
+                <ModePicker
+                  v-if="sessionModes.length"
+                  :mode="sessionMode"
+                  :modes="sessionModes"
+                  data-testid="new-task-mode-picker"
+                  @update:mode="sessionMode = $event"
+                />
                 <ModelPicker
                   v-if="agent"
                   :model="model"

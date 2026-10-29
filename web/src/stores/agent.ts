@@ -47,6 +47,11 @@ export const useAgentStore = defineStore('agent', {
     modelsLoaded: {} as Record<string, boolean>,
     /** 正在拉取清单的 agent（下拉框显示加载中） */
     modelsLoading: {} as Record<string, boolean>,
+    /**
+     * 各 agent 的 ACP 模式清单（随 models 探测捎带）。
+     * 空数组 = 已探测且不下发；未加载过时也是空 —— 此时新建页回落目录 DefaultModes。
+     */
+    modesByAgent: {} as Record<string, import('@/types/api').ModeOptionDto[]>,
   }),
 
   getters: {
@@ -90,6 +95,10 @@ export const useAgentStore = defineStore('agent', {
     modelsOf(state) {
       return (id: string): AgentModelDto[] => state.modelsByAgent[id] ?? []
     },
+    /** 某 agent 探测到的 ACP 模式（未探测过返回空，调用方回落 catalog.modes） */
+    modesOf(state) {
+      return (id: string) => state.modesByAgent[id] ?? []
+    },
   },
 
   actions: {
@@ -114,6 +123,7 @@ export const useAgentStore = defineStore('agent', {
           goalStateVisible: a.goal_state_visible === true,
           sessionAlways: a.session_always === true,
           modelSelectable: a.model_selectable === true,
+          modes: Array.isArray(a.modes) ? a.modes : [],
           coldStartCold: a.cold_start_cold === true,
         }))
         this.defaultAgentId = res.default || agents[0].name
@@ -138,6 +148,7 @@ export const useAgentStore = defineStore('agent', {
       try {
         const res = await getAgentModels(agentId)
         this.modelsByAgent = { ...this.modelsByAgent, [agentId]: res.models ?? [] }
+        this.modesByAgent = { ...this.modesByAgent, [agentId]: res.modes ?? [] }
         this.modelsLoaded = { ...this.modelsLoaded, [agentId]: true }
       } catch {
         // 保持未加载：下次再试

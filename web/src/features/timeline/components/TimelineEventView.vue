@@ -12,6 +12,8 @@ import ToolResultCard from './ToolResultCard.vue'
 import EventImages from './EventImages.vue'
 import RewindCard from './RewindCard.vue'
 import ModelSwitchNote from './ModelSwitchNote.vue'
+import ModeSwitchNote from './ModeSwitchNote.vue'
+import PlanCard from './PlanCard.vue'
 
 const props = defineProps<{ event: AgentEvent }>()
 
@@ -97,6 +99,8 @@ const clock = computed(() => formatClock(props.event.timestamp))
   <RewindCard v-else-if="event.type === 'rewind'" :event="event" />
   <!-- 会话内切换模型：灰色单行留痕（不抢戏，但可回溯"这一轮跑在哪个模型上"） -->
   <ModelSwitchNote v-else-if="event.type === 'model_switch'" :event="event" />
+  <ModeSwitchNote v-else-if="event.type === 'mode_switch'" :event="event" />
+  <PlanCard v-else-if="event.type === 'plan'" :event="event" />
   <div
     v-else-if="event.type === 'error'"
     class="event-enter rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-sm text-error"

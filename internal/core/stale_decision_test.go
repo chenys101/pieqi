@@ -50,7 +50,7 @@ func setApprovalCard(t *testing.T, store *TaskStore, taskID, id string, createdA
 // 看起来像判据写反，实际是被测链路根本没接上。
 func registerTestWires(t *testing.T, tr *TaskRunner, taskID string, ph *PermissionWire) {
 	t.Helper()
-	tr.setWires(taskID, nil, ph, nil, nil, nil)
+	tr.setWires(taskID, nil, ph, nil, nil, nil, nil, nil)
 	if tr.permWire(taskID) == nil {
 		t.Fatal("wire 未登记成功：被测的清理链路在第一步就断了")
 	}

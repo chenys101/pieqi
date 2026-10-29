@@ -130,6 +130,21 @@ type ACPAgent struct {
 	onPerm     PermissionRequestFunc
 	onToolCall ToolCallUpdateFunc
 	onUsage    UsageUpdateFunc
+	onPlan     PlanUpdateFunc
+	onMode     ModeUpdateFunc
+
+	// modeMu/modeState：最近一次协商或 current_mode_update 后的模式状态。
+	// 供 ModeProvider.Modes / 用户 ModePicker / applyMode 校验。
+	modeMu    sync.RWMutex
+	modeState ModeState
+	// lastSessionID 最近一次 NewSession/Load/Resume 成功的 ACP sessionId。
+	// SetMode 需要它（ModeSetter 接口不带 session 参数）；一任务一 adapter，至多一个。
+	lastSessionID string
+
+	// cursorTodos / cursorTodoMu：Cursor cursor/update_todos 的 merge 基线。
+	// 标准 ACP Plan 是整表替换；Cursor 的 merge=true 要靠客户端记得上一份。
+	cursorTodoMu sync.Mutex
+	cursorTodos  []cursorTodo
 
 	// 权限请求挂起表：reqID -> chan PermissionResponse。
 	// RequestPermission 注册并阻塞等；Approve/Deny 投递响应后唤醒。
@@ -190,6 +205,7 @@ type acpConn interface {
 	// SetSessionConfigOption 是标准通道下"切模型"的手段（原生 agent，如 qodercli / 官方 dsh-acp）。
 	// _meta 通道的 agent 隐藏了 configOptions，调它会抛错，故只对 catalogStandard 使用。
 	SetSessionConfigOption(ctx context.Context, params acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error)
+	SetSessionMode(ctx context.Context, params acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error)
 	Prompt(ctx context.Context, params acp.PromptRequest) (acp.PromptResponse, error)
 	Cancel(ctx context.Context, params acp.CancelNotification) error
 	CloseSession(ctx context.Context, params acp.CloseSessionRequest) (acp.CloseSessionResponse, error)
@@ -689,6 +705,7 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 				return "", fmt.Errorf("acp: load session %s: %w", cfg.ResumeFrom, err)
 			}
 			a.rememberCatalog(resp.ConfigOptions, resp.Meta)
+			a.rememberModes(resp.Modes)
 		} else {
 			resp, err := a.conn.ResumeSession(sessCtx, acp.ResumeSessionRequest{
 				Cwd:        cfg.Cwd,
@@ -700,12 +717,19 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 				return "", fmt.Errorf("acp: resume session %s: %w", cfg.ResumeFrom, err)
 			}
 			a.rememberCatalog(resp.ConfigOptions, resp.Meta)
+			a.rememberModes(resp.Modes)
 		}
 		// 续问也要落定模型：会话被接回来后不一定还保持上次的路由（重启/换进程），
 		// 而 t.Model 是"这个会话现在该跑在哪个模型上"的持久事实。
 		if err := a.applyModel(sessCtx, string(sid), cfg.Model); err != nil {
 			return "", err
 		}
+		if err := a.applyMode(sessCtx, string(sid), cfg.Mode); err != nil {
+			return "", err
+		}
+		a.modeMu.Lock()
+		a.lastSessionID = string(sid)
+		a.modeMu.Unlock()
 		return string(sid), nil
 	}
 
@@ -724,6 +748,7 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 	// 清单可能来自标准 configOptions（原生 agent）或 _meta（兜底通道），
 	// 顺手记下供探测接口读 —— 读到哪条通道也决定了后面往哪条写。
 	a.rememberCatalog(resp.ConfigOptions, resp.Meta)
+	a.rememberModes(resp.Modes)
 	if err := a.applyModel(sessCtx, string(resp.SessionId), cfg.Model); err != nil {
 		// 失败即摘缓存：最常见的原因是"清单里那一项已被上游下架"，而清单是跨天缓存的
 		// （见 model_catalog.go 的 modelCatalogTTL）。不清掉的话，用户会一直看到一个
@@ -736,6 +761,12 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 		InvalidateAgentModels(agentName)
 		return "", err
 	}
+	if err := a.applyMode(sessCtx, string(resp.SessionId), cfg.Mode); err != nil {
+		return "", err
+	}
+	a.modeMu.Lock()
+	a.lastSessionID = string(resp.SessionId)
+	a.modeMu.Unlock()
 	return string(resp.SessionId), nil
 }
 
@@ -848,6 +879,96 @@ func modelMeta(model string) map[string]any {
 		return nil
 	}
 	return map[string]any{"model": model}
+}
+
+// rememberModes 记下 session/new|load|resume 下发的模式清单与当前 id。
+// modes==nil 表示该 agent 不暴露 mode —— 清空本地状态，前端据此隐藏 ModePicker。
+func (a *ACPAgent) rememberModes(modes *acp.SessionModeState) {
+	a.modeMu.Lock()
+	defer a.modeMu.Unlock()
+	if modes == nil {
+		a.modeState = ModeState{}
+		return
+	}
+	avail := make([]ModeOption, 0, len(modes.AvailableModes))
+	for _, m := range modes.AvailableModes {
+		opt := ModeOption{ID: string(m.Id), Name: m.Name}
+		if m.Description != nil {
+			opt.Description = *m.Description
+		}
+		avail = append(avail, opt)
+	}
+	a.modeState = ModeState{
+		CurrentID: string(modes.CurrentModeId),
+		Available: avail,
+	}
+}
+
+// applyMode 把 modeID 落到会话上（session/set_mode）。
+//
+// modeID 为空：若协商清单非空且当前 id 已在清单里，不动；否则设为清单首项
+// （与 fallbackModel 同判据——agent 声明过的才可信）。无清单则静默跳过。
+// modeID 非空但不在清单里：报错（前端只该提交清单内值；越界比静默失败更响）。
+func (a *ACPAgent) applyMode(ctx context.Context, sessionID, modeID string) error {
+	a.modeMu.RLock()
+	st := a.modeState
+	a.modeMu.RUnlock()
+	if len(st.Available) == 0 {
+		return nil // 该 agent 不暴露 mode
+	}
+	if modeID == "" {
+		if st.CurrentID != "" {
+			for _, o := range st.Available {
+				if o.ID == st.CurrentID {
+					return nil // 已有合法当前值
+				}
+			}
+		}
+		modeID = st.Available[0].ID
+	} else {
+		ok := false
+		for _, o := range st.Available {
+			if o.ID == modeID {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return fmt.Errorf("acp: unknown mode %q", modeID)
+		}
+	}
+	if a.conn == nil {
+		return fmt.Errorf("acp: not connected")
+	}
+	if _, err := a.conn.SetSessionMode(ctx, acp.SetSessionModeRequest{
+		SessionId: acp.SessionId(sessionID),
+		ModeId:    acp.SessionModeId(modeID),
+	}); err != nil {
+		return fmt.Errorf("acp: set mode %q on session %s: %w", modeID, sessionID, err)
+	}
+	a.modeMu.Lock()
+	a.modeState.CurrentID = modeID
+	a.modeMu.Unlock()
+	return nil
+}
+
+// toolCallContentText 从 toolCall.content 抽出文本块（换行拼接）。
+// switch_mode 请示常把方案正文放在 content 的 text 块里，而不是 RawInput。
+func toolCallContentText(content []acp.ToolCallContent) string {
+	if len(content) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, item := range content {
+		if item.Content == nil || item.Content.Content.Text == nil {
+			continue
+		}
+		t := strings.TrimSpace(item.Content.Content.Text.Text)
+		if t != "" {
+			parts = append(parts, t)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // rememberCatalog 记下本次会话协商下发的可选模型清单**与它的来源通道**。
@@ -1195,10 +1316,14 @@ func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, text string, block
 	return nil
 }
 
-// 编译期断言：ACPAgent 支持图文 prompt（可选能力）。
+// 编译期断言：ACPAgent 支持图文 prompt / 模式 / plan 推送（可选能力）。
 var (
 	_ RichPromptSender   = (*ACPAgent)(nil)
 	_ ImagePromptCapable = (*ACPAgent)(nil)
+	_ ModeProvider       = (*ACPAgent)(nil)
+	_ ModeSetter         = (*ACPAgent)(nil)
+	_ PlanReporter       = (*ACPAgent)(nil)
+	_ ModeReporter       = (*ACPAgent)(nil)
 )
 
 // OnContentDelta 注册内容增量回调。
@@ -1220,6 +1345,45 @@ func (a *ACPAgent) OnToolCallUpdate(fn ToolCallUpdateFunc) {
 	a.cbMu.Lock()
 	a.onToolCall = fn
 	a.cbMu.Unlock()
+}
+
+// OnPlanUpdate 注册 ACP plan 推送回调。
+func (a *ACPAgent) OnPlanUpdate(fn PlanUpdateFunc) {
+	a.cbMu.Lock()
+	a.onPlan = fn
+	a.cbMu.Unlock()
+}
+
+// OnModeUpdate 注册 current_mode_update 回调。
+func (a *ACPAgent) OnModeUpdate(fn ModeUpdateFunc) {
+	a.cbMu.Lock()
+	a.onMode = fn
+	a.cbMu.Unlock()
+}
+
+// Modes 实现 ModeProvider：最近协商/更新后的模式状态。
+func (a *ACPAgent) Modes() ModeState {
+	a.modeMu.RLock()
+	defer a.modeMu.RUnlock()
+	out := ModeState{CurrentID: a.modeState.CurrentID}
+	if len(a.modeState.Available) > 0 {
+		out.Available = append([]ModeOption(nil), a.modeState.Available...)
+	}
+	return out
+}
+
+// SetMode 实现 ModeSetter：session/set_mode。
+func (a *ACPAgent) SetMode(ctx context.Context, modeID string) error {
+	if modeID == "" {
+		return fmt.Errorf("acp: empty mode id")
+	}
+	a.modeMu.RLock()
+	sid := a.lastSessionID
+	a.modeMu.RUnlock()
+	if sid == "" {
+		return fmt.Errorf("acp: no active session for set_mode")
+	}
+	return a.applyMode(ctx, sid, modeID)
 }
 
 // OnUsageUpdate 注册上下文用量回调（实现 UsageReporter）。传 nil 注销。
@@ -1535,8 +1699,35 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		}
 		a.logger.Debug("acp usage update",
 			zap.Int("used", u.UsageUpdate.Used), zap.Int("size", u.UsageUpdate.Size))
+	case u.Plan != nil:
+		// ACP Agent Plan：每次带完整 entries，客户端整表替换（见协议 Agent Plan）。
+		entries := make([]PlanEntry, 0, len(u.Plan.Entries))
+		for _, e := range u.Plan.Entries {
+			entries = append(entries, PlanEntry{
+				Content:  e.Content,
+				Priority: string(e.Priority),
+				Status:   string(e.Status),
+			})
+		}
+		a.cbMu.RLock()
+		pfn := a.onPlan
+		a.cbMu.RUnlock()
+		if pfn != nil {
+			pfn(PlanUpdate{SessionID: sid, Entries: entries})
+		}
+	case u.CurrentModeUpdate != nil:
+		modeID := string(u.CurrentModeUpdate.CurrentModeId)
+		a.modeMu.Lock()
+		a.modeState.CurrentID = modeID
+		a.modeMu.Unlock()
+		a.cbMu.RLock()
+		mfn := a.onMode
+		a.cbMu.RUnlock()
+		if mfn != nil {
+			mfn(ModeUpdate{SessionID: sid, ModeID: modeID})
+		}
 	}
-	// 其他更新类型（Plan/UserMessageChunk 等）暂不处理，留给后续里程碑。
+	// UserMessageChunk / AvailableCommands 等暂不处理。
 	return nil
 }
 
@@ -1778,14 +1969,15 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 		}
 	}
 	perm := PermissionRequest{
-		ReqID:      reqID,
-		SessionID:  string(params.SessionId),
-		ToolCallID: string(params.ToolCall.ToolCallId),
-		ToolTitle:  title,
-		ToolKind:   toolKindString(params.ToolCall.Kind),
-		Status:     toolCallStatusString(params.ToolCall.Status),
-		RawInput:   rawInput,
-		Options:    opts,
+		ReqID:       reqID,
+		SessionID:   string(params.SessionId),
+		ToolCallID:  string(params.ToolCall.ToolCallId),
+		ToolTitle:   title,
+		ToolKind:    toolKindString(params.ToolCall.Kind),
+		Status:      toolCallStatusString(params.ToolCall.Status),
+		RawInput:    rawInput,
+		ContentText: toolCallContentText(params.ToolCall.Content),
+		Options:     opts,
 	}
 	// 第一步：按**工具名**修正 agent 报错的 kind（toolkind_map.go）。
 	// dsh 把一切写死成 other(L2)，read/grep/edit 因此全要人工点；

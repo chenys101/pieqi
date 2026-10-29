@@ -16,6 +16,8 @@ import type {
   AgentEventImage,
   RewindPayload,
   ModelSwitchPayload,
+  ModeSwitchPayload,
+  PlanPayload,
 } from '@/types/event'
 import type { Task, TaskUsage } from '@/types/task'
 import { adaptTask } from '@/services/api/client'
@@ -111,6 +113,8 @@ const EVENT_TYPE_MAP: Record<TaskEventDto['type'], AgentEventType> = {
   status: 'status',
   rewind: 'rewind',
   model_switch: 'model_switch',
+  mode_switch: 'mode_switch',
+  plan: 'plan',
 }
 
 /** rewind 事件的 input 载荷（后端 rewindEventPayload） */
@@ -149,6 +153,34 @@ function adaptModelSwitchInput(raw: unknown): ModelSwitchPayload | undefined {
   const input = raw as ModelSwitchInput
   if (typeof input.to !== 'string') return undefined
   return { from: typeof input.from === 'string' ? input.from : '', to: input.to }
+}
+
+interface ModeSwitchInput {
+  from?: string
+  to?: string
+}
+
+function adaptModeSwitchInput(raw: unknown): ModeSwitchPayload | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const input = raw as ModeSwitchInput
+  if (typeof input.to !== 'string') return undefined
+  return { from: typeof input.from === 'string' ? input.from : '', to: input.to }
+}
+
+function adaptPlanInput(raw: unknown): PlanPayload | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const entries = (raw as { entries?: unknown }).entries
+  if (!Array.isArray(entries)) return undefined
+  return {
+    entries: entries.map((e) => {
+      const o = (e ?? {}) as Record<string, unknown>
+      return {
+        content: typeof o.content === 'string' ? o.content : '',
+        priority: typeof o.priority === 'string' ? o.priority : 'medium',
+        status: typeof o.status === 'string' ? o.status : 'pending',
+      }
+    }),
+  }
 }
 
 /**
@@ -208,6 +240,8 @@ export function normalizeEvents(taskId: string, events: TaskEventDto[] | undefin
         rewind: ev.type === 'rewind' ? adaptRewindInput(ev.input) : undefined,
         // model_switch 事件：结构化载荷（from / to 均为不透明选择值）
         modelSwitch: ev.type === 'model_switch' ? adaptModelSwitchInput(ev.input) : undefined,
+        modeSwitch: ev.type === 'mode_switch' ? adaptModeSwitchInput(ev.input) : undefined,
+        plan: ev.type === 'plan' ? adaptPlanInput(ev.input) : undefined,
       },
     }
   })

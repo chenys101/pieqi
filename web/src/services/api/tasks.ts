@@ -69,6 +69,7 @@ export async function createTask(
   agent?: string,
   model?: string,
   images?: ImagePayload[],
+  mode?: string,
 ): Promise<TaskDto> {
   return request<TaskDto>('/tasks', {
     method: 'POST',
@@ -79,6 +80,7 @@ export async function createTask(
       prompt,
       agent: agent || undefined,
       model: model || undefined,
+      mode: mode || undefined,
       images: images?.length ? images : undefined,
     },
   })
@@ -158,6 +160,11 @@ export async function getTaskCapabilities(taskId: string): Promise<{ imagePrompt
  */
 export async function setTaskModel(taskId: string, model: string): Promise<void> {
   await request(`/tasks/${encodeURIComponent(taskId)}/model`, { method: 'POST', body: { model } })
+}
+
+/** POST /api/tasks/:id/mode：会话内切换 ACP 运行模式（落库 + 时间线；活会话立刻 set_mode） */
+export async function setTaskMode(taskId: string, mode: string): Promise<void> {
+  await request(`/tasks/${encodeURIComponent(taskId)}/mode`, { method: 'POST', body: { mode } })
 }
 
 /** POST /api/tasks/:id/cancel */

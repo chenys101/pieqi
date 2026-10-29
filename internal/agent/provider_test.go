@@ -389,6 +389,12 @@ func TestAvailableAgents(t *testing.T) {
 		if !cur.ModelSelectable {
 			t.Error("cursor ModelSelectable=false：session/new 下发 configOptions")
 		}
+		if len(cur.Modes) != 3 {
+			t.Fatalf("cursor Modes=%v，期望 agent/plan/ask 三档（新建页 ModePicker）", cur.Modes)
+		}
+		if cur.Modes[0].ID != "agent" || cur.Modes[1].ID != "plan" || cur.Modes[2].ID != "ask" {
+			t.Fatalf("cursor Modes ids=%v", cur.Modes)
+		}
 		if cur.GoalMode != "" || cur.GoalStateVisible {
 			t.Errorf("cursor goal=(%q,%v)，无实测证据时应留空/false", cur.GoalMode, cur.GoalStateVisible)
 		}

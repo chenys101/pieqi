@@ -114,7 +114,11 @@ func (s *Server) listAgentModels(c *gin.Context) {
 	if models == nil {
 		models = []agent.ModelOption{} // 空清单给 [] 而不是 null，前端少一个分支
 	}
-	resp := gin.H{"agent": name, "models": models}
+	modes := cat.Modes
+	if modes == nil {
+		modes = []agent.ModeOption{}
+	}
+	resp := gin.H{"agent": name, "models": models, "modes": modes}
 	if cat.Current != "" {
 		resp["current"] = cat.Current
 	}

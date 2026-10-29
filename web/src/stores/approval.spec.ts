@@ -30,6 +30,8 @@ function task(over: Partial<Task> = {}): Task {
     status: 'waiting_input',
     agent: 'dsh',
     model: '',
+    mode: '',
+    modes: [],
     sessionId: 's1',
     createdAt: '2026-10-23T00:00:00Z',
     updatedAt: '2026-10-23T00:01:00Z',

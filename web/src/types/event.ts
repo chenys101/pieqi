@@ -14,6 +14,8 @@ export type AgentEventType =
   | 'status' // 状态变更
   | 'rewind' // 用户回退代码（Feedback P0）
   | 'model_switch' // 会话内切换模型（留痕，后端 model_switch.go）
+  | 'mode_switch' // 会话内切换 ACP 模式（留痕）
+  | 'plan' // ACP Agent Plan 清单
   | 'completed' // 会话完成
   | 'error' // 错误
 
@@ -35,6 +37,23 @@ export interface ModelSwitchPayload {
   from: string
   /** 切换到的模型；空串 = 交还 agent 默认路由 */
   to: string
+}
+
+/** mode_switch 事件载荷（后端 ModeSwitchPayload） */
+export interface ModeSwitchPayload {
+  from: string
+  to: string
+}
+
+/** plan 事件条目（后端 PlanEntry） */
+export interface PlanEntryPayload {
+  content: string
+  priority: string
+  status: string
+}
+
+export interface PlanPayload {
+  entries: PlanEntryPayload[]
 }
 
 /**
@@ -70,6 +89,10 @@ export interface AgentEventPayload {
   rewind?: RewindPayload
   /** 仅 model_switch 事件填充 */
   modelSwitch?: ModelSwitchPayload
+  /** 仅 mode_switch 事件填充 */
+  modeSwitch?: ModeSwitchPayload
+  /** 仅 plan 事件填充 */
+  plan?: PlanPayload
 }
 
 export interface AgentEvent {

@@ -76,6 +76,9 @@ type SessionConfig struct {
 	// 请求拖到秒级），要么依赖可能过期的缓存 —— 错的取值会在建会话时**明确报错**，
 	// 失败是响亮的，不会静默跑错。
 	Model string
+	// Mode 打开会话时指定的运行模式（ACP SessionModeId；空 = 沿用 agent 协商默认）。
+	// 取值必须来自该会话 session/new 下发的 availableModes，原样回传。
+	Mode string
 }
 
 // UsageInfo 一次上下文用量上报（映射 ACP 的 SessionUsageUpdate）。
@@ -217,7 +220,73 @@ type PermissionRequest struct {
 	ToolKind   string          // 工具类别（可选）
 	Status     string          // 工具当前状态（可选）
 	RawInput   json.RawMessage // 工具原始入参（可选）
-	Options    []PermissionOption
+	// ContentText 取自 toolCall.content 里的文本块（ACP switch_mode 常把方案正文放这里）。
+	// 空 = 没有文本 content；审批摘要优先用它（见 core.buildPermSummary）。
+	ContentText string
+	Options     []PermissionOption
+}
+
+// ModeOption 会话可选运行模式（映射 ACP SessionMode）。
+//
+// JSON tag 必须小写：GET /api/agents 的 modes 与前端 ModeOptionDto 对齐；
+// 缺 tag 会序列化成 ID/Name，前端读 id/name 恒为空 → ModePicker 显示「模式」空壳。
+type ModeOption struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// ModeState 会话当前模式 + 可选清单（session/new 或 current_mode_update 后）。
+type ModeState struct {
+	CurrentID string
+	Available []ModeOption
+}
+
+// PlanEntry 执行计划条目（映射 ACP PlanEntry）。
+type PlanEntry struct {
+	Content  string
+	Priority string // high / medium / low
+	Status   string // pending / in_progress / completed
+}
+
+// PlanUpdate 一次完整 plan 替换（协议：每次带全量 entries）。
+type PlanUpdate struct {
+	SessionID string
+	Entries   []PlanEntry
+}
+
+// ModeUpdate agent 主动切换模式（session/update current_mode_update）。
+type ModeUpdate struct {
+	SessionID string
+	ModeID    string
+}
+
+// PlanUpdateFunc ACP plan 推送回调。
+type PlanUpdateFunc func(update PlanUpdate)
+
+// ModeUpdateFunc ACP current_mode_update 回调。
+type ModeUpdateFunc func(update ModeUpdate)
+
+// ModeProvider 由支持会话模式的 adapter 实现（当前仅 ACP）。
+//
+// Modes() 返回最近一次协商/更新后的清单与当前 id；无 mode 能力时 Available 为空。
+type ModeProvider interface {
+	Modes() ModeState
+}
+
+// ModeSetter 由支持 session/set_mode 的 adapter 实现。
+type ModeSetter interface {
+	// SetMode 把会话切到 modeID（必须是 Modes().Available 之一）。
+	SetMode(ctx context.Context, modeID string) error
+}
+
+// PlanReporter / ModeReporter 可选回调注册（未实现 = 该传输不推 plan/mode）。
+type PlanReporter interface {
+	OnPlanUpdate(fn PlanUpdateFunc)
+}
+
+type ModeReporter interface {
+	OnModeUpdate(fn ModeUpdateFunc)
 }
 
 // Command 取该请求对应的 shell 命令原文；取不到返回空串。

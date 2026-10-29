@@ -44,6 +44,12 @@ export interface Task {
    * 所以这里只反映建任务时选的那个。
    */
   model: string
+  /** ACP 当前运行模式 id；空 = 未协商 */
+  mode: string
+  /** 本会话可选模式；空数组 = 不暴露 ModePicker */
+  modes: import('./api').ModeOptionDto[]
+  /** 当前 ACP Agent Plan；undefined = 尚未收到 */
+  plan?: import('./api').PlanPayloadDto
   /** 会话 id（claude_session_id） */
   sessionId: string
   /** 当前待决策（waiting_input 时存在） */

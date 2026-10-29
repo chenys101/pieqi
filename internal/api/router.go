@@ -202,6 +202,9 @@ func (s *Server) Register(r gin.IRouter) {
 		// 会话内切换模型：落库 + 追加一条 model_switch 事件（时间线上的切换记录）。
 		// 与 intervene 的 per-turn model 分工见 model_switch.go 顶部。
 		api.POST("/tasks/:id/model", s.setTaskModel)
+		// 会话内切换 ACP 运行模式（plan/agent/ask…）：落库 + mode_switch 事件；
+		// 有活会话时立刻 session/set_mode。
+		api.POST("/tasks/:id/mode", s.setTaskMode)
 		api.POST("/tasks/:id/cancel", s.cancelTask)
 		api.DELETE("/tasks/:id", s.deleteTask)
 		// Feedback P0（p0-design.md §5）：总览 / Diff / Rewind / Preview

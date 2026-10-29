@@ -259,6 +259,10 @@ type AgentInfo struct {
 	// 因为取清单要起一次 agent 进程。这里只说明"值不值得去拉"。
 	ModelSelectable bool `json:"model_selectable"`
 
+	// Modes 建任务前可展示的 ACP 运行模式（来自 manifest.DefaultModes）。
+	// 空 = 新建页不显示 ModePicker；会话里仍以 session/new 协商为准。
+	Modes []ModeOption `json:"modes,omitempty"`
+
 	// ColdStartCold 冷启动是否明显慢（>30s）。目前 dsh 实测 >90s。
 	//
 	// 用途不是"显示一个数字"，而是**提醒用户别在错误的时机选它**：
@@ -314,6 +318,11 @@ func AvailableAgents(rt AgentRuntimeConfig) []AgentInfo {
 			SessionAlways:    spec.SessionAlways,
 			ModelSelectable:  spec.ModelSelectable,
 			ColdStartCold:    spec.ColdStartCold,
+		}
+		// DefaultModes（静态）∪ 探测/会话缓存：Cursor 靠静态立刻可显示；
+		// 其它 ACP agent 在拉过一次 models 或跑过会话后也能出现 ModePicker。
+		if modes := ResolveAgentModes(spec.Name, spec.DefaultModes); len(modes) > 0 {
+			info.Modes = modes
 		}
 		// claude 的图像能力取决于**实际** transport：桥能把图转成 SDK content blocks，
 		// 而 print 回退是纯文本 prompt 通道。配置决定能力，不是 agent 名决定能力 ——

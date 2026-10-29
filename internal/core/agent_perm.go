@@ -904,6 +904,15 @@ func (pw *PermissionWire) callAdapterDeny(reqID string) error {
 // 转义后的乱码（转义符、字段名、英文说明混在一起，看不到"要执行什么"）。
 // dsh 的 ACP 实现恰好不发 title 也不发 kind，一旦走到兜底分支，卡片上就只剩这串 JSON。
 func buildPermSummary(req agent.PermissionRequest) string {
+	// switch_mode 请示：方案正文在 toolCall.content 文本块里（ACP 协议示例），
+	// 不在 RawInput。优先用 ContentText，否则用户只能看到"Ready for implementation"
+	// 这种标题，看不到要批准的计划。
+	if req.ContentText != "" {
+		if req.ToolTitle != "" && req.ToolTitle != req.ContentText {
+			return joinToolAndInput(req.ToolTitle, req.ContentText)
+		}
+		return req.ContentText
+	}
 	// 工具名和命令**必须都在**卡片上（2026-10-21 用户反馈"移动端审批卡还是看不到具体命令"）：
 	// 此前 title 非空就直接 return，而 dsh 的 title 恒为工具名（`pwsh` / `edit`），
 	// 于是命令原文虽已回填进 RawInput，却被这一行抢掉了 —— 卡片上只剩"pwsh"三个字母。

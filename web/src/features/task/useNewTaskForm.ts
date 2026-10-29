@@ -118,6 +118,12 @@ export function useNewTaskForm(initialProjectPath: () => string) {
   // 自己拼的取值会被 agent 判为未知模型，任务直接失败。
   const model = ref('')
 
+  /**
+   * ACP 运行模式（SessionModeId）。空 = agent 协商默认。
+   * 清单来自目录项 modes（manifest.DefaultModes），与「项目路径 mode（select|path）」无关。
+   */
+  const sessionMode = ref('')
+
   const projects = computed(() => taskStore.recentProjects)
   /** Agent 目录（选择器的选项来源） */
   const catalog = computed(() => agentStore.catalog)
@@ -133,6 +139,16 @@ export function useNewTaskForm(initialProjectPath: () => string) {
    */
   const modelsLoaded = computed(() => !!agentStore.modelsLoaded[agent.value])
 
+  /**
+   * 建任务前可选 ACP 模式。
+   * 优先用拉 models 时捎带回来的清单（真协商）；否则用目录里的 DefaultModes（Cursor）。
+   */
+  const sessionModes = computed(() => {
+    const probed = agentStore.modesOf(agent.value)
+    if (probed.length) return probed
+    return selectedAgent.value?.modes ?? []
+  })
+
   // 选中模型的说明（仅直接选中的那个有；"Agent 默认"没有）
   const selectedModelHint = computed(() => models.value.find((m) => m.value === model.value)?.description || '')
 
@@ -143,12 +159,30 @@ export function useNewTaskForm(initialProjectPath: () => string) {
   // 在 qoder 下选的图再切到 claude，提交时整条任务会被后端以 ErrImageNotSupported
   // 拒绝 —— 用户刚只是换了个 agent，却收到一句关于图片的报错，成因离操作很远。
   // 清空比"悄悄把图带上再报错"好，也比默默丢图好（静默丢图是最坏的一种，见 agent/session.go）。
+  //
+  // 模式同理：Cursor 的 agent/plan/ask 与其它 agent 的清单无关，换 agent 必须清空。
   watch(
     agent,
     (a) => {
       model.value = ''
+      sessionMode.value = ''
       images.value = []
       agentStore.loadModels(a)
+    },
+    { immediate: true },
+  )
+
+  // 清单到位后默认选中首项（优先 id=agent）：避免触发器一直显示空的「模式」。
+  watch(
+    sessionModes,
+    (modes) => {
+      if (!modes.length) {
+        sessionMode.value = ''
+        return
+      }
+      if (sessionMode.value && modes.some((m) => m.id === sessionMode.value)) return
+      const preferred = modes.find((m) => m.id === 'agent') ?? modes[0]
+      sessionMode.value = preferred.id
     },
     { immediate: true },
   )
@@ -354,6 +388,7 @@ export function useNewTaskForm(initialProjectPath: () => string) {
         agent.value || undefined,
         model.value || undefined,
         images.value.map((i) => ({ data: i.data, mime_type: i.mimeType })),
+        sessionMode.value || undefined,
       )
       sessionStore.setThinking(task.id, true)
       router.push(`/sessions/${task.id}`)
@@ -382,6 +417,8 @@ export function useNewTaskForm(initialProjectPath: () => string) {
     projectSummary,
     agent,
     model,
+    sessionMode,
+    sessionModes,
     projects,
     catalog,
     selectedAgent,

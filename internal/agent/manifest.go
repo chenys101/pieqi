@@ -65,6 +65,10 @@ type AgentManifest struct {
 	SessionAlways    bool
 	ModelSelectable  bool
 	ColdStartCold    bool
+	// DefaultModes 建任务前就能展示的 ACP 模式清单（session/new 前的 ModePicker）。
+	// 空 = 该 agent 不在新建页暴露模式选择；会话协商后仍以 session/new 为准。
+	// id 必须与 agent 真实 SessionModeId 一致（原样回传给 set_mode）。
+	DefaultModes []ModeOption
 
 	// InitTimeout / IdleTimeout 默认超时。0 = 用全局默认。
 	InitTimeout time.Duration
@@ -179,13 +183,20 @@ var agentManifests = []AgentManifest{
 		DefaultSpawn: []string{"agent", "acp"},
 		GoalMode:         "",
 		GoalStateVisible: false,
-		ImagePrompt:      true, // initialize promptCapabilities.image=true
-		SessionAlways:    true, // loadSession=true
-		ModelSelectable:  true, // session/new 下发标准 configOptions
-		ColdStartCold:    false,
-		InitTimeout:      30 * time.Second,
-		IdleTimeout:      15 * time.Minute,
-		OptIn:            true, // 需要登录或 CURSOR_API_KEY
+		ImagePrompt:     true, // initialize promptCapabilities.image=true
+		SessionAlways:   true, // loadSession=true
+		ModelSelectable: true, // session/new 下发标准 configOptions
+		// Cursor ACP 静态 availableModes（cursor-agent 3635.index.js）。
+		// 展示名用中文（id 仍是协议原样）；session/new 协商后名称可能被英文盖掉一次，可接受。
+		DefaultModes: []ModeOption{
+			{ID: "agent", Name: "执行", Description: "完整工具能力，可改代码、跑命令"},
+			{ID: "plan", Name: "计划", Description: "只读规划：先设计方案再动手"},
+			{ID: "ask", Name: "问答", Description: "只读问答：不改文件、不执行命令"},
+		},
+		ColdStartCold: false,
+		InitTimeout:   30 * time.Second,
+		IdleTimeout:   15 * time.Minute,
+		OptIn:         true, // 需要登录或 CURSOR_API_KEY
 	},
 }
 

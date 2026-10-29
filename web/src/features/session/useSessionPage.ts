@@ -85,6 +85,8 @@ export function useSessionPage(taskId: ComputedRef<string>) {
   /** 会话当前模型（不透明值，空 = Agent 默认）—— 触发器上显示的就是它。
    *  来自 Task.Model：切换走 POST /tasks/:id/model 落库，WS task_updated 推回来。 */
   const currentModel = computed(() => task.value?.model || '')
+  const currentMode = computed(() => task.value?.mode || '')
+  const sessionModes = computed(() => task.value?.modes ?? [])
 
   /**
    * 执行 Agent 展示名 / 悬停说明：输入条上的 agent 胶囊用（方案 C 把 agent 下移到输入条）。
@@ -106,6 +108,7 @@ export function useSessionPage(taskId: ComputedRef<string>) {
    *  与其摆一个按了没用的开关，不如禁用并说明。 */
   const canSwitchModel = computed(() => !canCancel.value)
   const switchingModel = ref(false)
+  const switchingMode = ref(false)
 
   /**
    * 切换会话模型：落库 + 在时间线上留一条 model_switch 记录。
@@ -126,6 +129,20 @@ export function useSessionPage(taskId: ComputedRef<string>) {
       notify.error(err instanceof Error ? err.message : '切换模型失败')
     } finally {
       switchingModel.value = false
+    }
+  }
+
+  /** 切换 ACP 运行模式（plan/agent/ask…）：落库 + mode_switch 事件；活会话立刻 set_mode。 */
+  async function switchMode(value: string) {
+    const id = task.value?.id
+    if (!id || value === currentMode.value || switchingMode.value) return
+    switchingMode.value = true
+    try {
+      await api.setTaskMode(id, value)
+    } catch (err) {
+      notify.error(err instanceof Error ? err.message : '切换模式失败')
+    } finally {
+      switchingMode.value = false
     }
   }
 
@@ -341,6 +358,10 @@ export function useSessionPage(taskId: ComputedRef<string>) {
     switchingModel,
     canSwitchModel,
     switchModel,
+    currentMode,
+    sessionModes,
+    switchingMode,
+    switchMode,
     agentLabel,
     agentTitle,
     canAttachImages,

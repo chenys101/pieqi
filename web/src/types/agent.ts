@@ -42,6 +42,11 @@ export interface AgentInfo {
   sessionAlways?: boolean
   /** 是否会下发可选模型清单（清单本身按需拉，见 stores/agent 的 modelsByAgent） */
   modelSelectable?: boolean
+  /**
+   * 建任务前可展示的 ACP 模式（来自 GET /api/agents 的 modes）。
+   * 空 = 新建页不显示 ModePicker；会话协商后以 Task.modes 为准。
+   */
+  modes?: import('./api').ModeOptionDto[]
   /** 冷启动是否明显慢（dsh 实测 >90s）—— 用来提醒"点了创建要等一会儿" */
   coldStartCold?: boolean
 }

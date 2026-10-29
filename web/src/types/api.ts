@@ -20,6 +20,26 @@ export type TaskEventTypeDto =
   | 'status'
   | 'rewind'
   | 'model_switch'
+  | 'mode_switch'
+  | 'plan'
+
+/** ACP 会话模式选项（Task.modes） */
+export interface ModeOptionDto {
+  id: string
+  name: string
+  description?: string
+}
+
+/** ACP Agent Plan 条目 */
+export interface PlanEntryDto {
+  content: string
+  priority: 'high' | 'medium' | 'low' | string
+  status: 'pending' | 'in_progress' | 'completed' | string
+}
+
+export interface PlanPayloadDto {
+  entries: PlanEntryDto[]
+}
 
 /** 决策类型：approval=权限审批（进程存活）；choice=多选（已废弃，兜底保留） */
 export type DecisionKindDto = 'approval' | 'choice'
@@ -84,6 +104,12 @@ export interface TaskDto {
    * 旧任务/未指定模型时不下发 → 由 agent 自己的默认决定。
    */
   model?: string
+  /** ACP 当前运行模式 id；空 = 未协商 */
+  mode?: string
+  /** 本会话可选模式清单（session/new）；空 = 不暴露 ModePicker */
+  modes?: ModeOptionDto[]
+  /** 当前 ACP Agent Plan 快照 */
+  plan?: PlanPayloadDto
   project_id: string
   project_path: string
   worktree_path: string
@@ -675,6 +701,8 @@ export interface AgentDto {
   session_always?: boolean
   /** 是否会下发可选模型清单（清单本身按需拉） */
   model_selectable?: boolean
+  /** 建任务前可展示的 ACP 模式（空 = 新建页不显示 ModePicker） */
+  modes?: ModeOptionDto[]
   /** 冷启动是否明显慢（dsh 实测 >90s） */
   cold_start_cold?: boolean
 }
@@ -700,6 +728,8 @@ export interface AgentModelsResponseDto {
   /** 该 agent 当前生效的选择值（未开过会话时缺省） */
   current?: string
   models: AgentModelDto[]
+  /** 同一次探测捎带的 ACP 模式清单（空 = 该 agent 不暴露 mode） */
+  modes?: ModeOptionDto[]
   /** 探测失败原因（仅在 502 时有值） */
   error?: string
 }

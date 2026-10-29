@@ -152,10 +152,22 @@ func (f *fakeModelConn) NewSession(context.Context, acp.NewSessionRequest) (acp.
 	return f.newSessionResp, nil
 }
 func (f *fakeModelConn) LoadSession(context.Context, acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
-	return acp.LoadSessionResponse{ConfigOptions: f.newSessionResp.ConfigOptions, Meta: f.newSessionResp.Meta}, nil
+	return acp.LoadSessionResponse{
+		ConfigOptions: f.newSessionResp.ConfigOptions,
+		Modes:         f.newSessionResp.Modes,
+		Meta:          f.newSessionResp.Meta,
+	}, nil
 }
 func (f *fakeModelConn) ResumeSession(context.Context, acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
-	return acp.ResumeSessionResponse{ConfigOptions: f.newSessionResp.ConfigOptions, Meta: f.newSessionResp.Meta}, nil
+	return acp.ResumeSessionResponse{
+		ConfigOptions: f.newSessionResp.ConfigOptions,
+		Modes:         f.newSessionResp.Modes,
+		Meta:          f.newSessionResp.Meta,
+	}, nil
+}
+func (f *fakeModelConn) SetSessionMode(_ context.Context, p acp.SetSessionModeRequest) (acp.SetSessionModeResponse, error) {
+	f.order = append(f.order, "set_mode:"+string(p.ModeId))
+	return acp.SetSessionModeResponse{}, nil
 }
 func (f *fakeModelConn) SetSessionConfigOption(_ context.Context, p acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
 	if f.setErr != nil {

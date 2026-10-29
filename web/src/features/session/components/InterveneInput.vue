@@ -13,11 +13,12 @@
 import { computed, ref } from 'vue'
 import PromptInput from './PromptInput.vue'
 import ModelPicker from './ModelPicker.vue'
+import ModePicker from './ModePicker.vue'
 import ImagePicker from './ImagePicker.vue'
 import UsageBadge from './UsageBadge.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import { useNotificationStore } from '@/stores/notification'
-import type { AgentModelDto } from '@/types/api'
+import type { AgentModelDto, ModeOptionDto } from '@/types/api'
 import type { TaskUsage } from '@/types/task'
 import type { PendingImage } from '@/types/image'
 
@@ -38,6 +39,12 @@ const props = defineProps<{
   switching?: boolean
   /** 运行中不可切换（这一轮的模型已经定死了，见后端 setTaskModel） */
   switchDisabled?: boolean
+  /** 本会话可选 ACP 模式（空 = 不显示 ModePicker） */
+  modes?: ModeOptionDto[]
+  /** 会话当前模式 id */
+  currentMode?: string
+  /** 模式切换在途 */
+  switchingMode?: boolean
   /**
    * 该 agent 能否收图（后端 agentCapabilities.promptCapabilities.image）。
    *
@@ -59,6 +66,7 @@ const emit = defineEmits<{
   send: [text: string, images: PendingImage[]]
   cancel: []
   'switch-model': [value: string]
+  'switch-mode': [value: string]
 }>()
 
 const notify = useNotificationStore()
@@ -196,6 +204,15 @@ function onPaste(data: DataTransfer | null) {
               >{{ agentInitial }}</span>
               <span class="truncate">{{ agentLabel }}</span>
             </span>
+            <!-- 模式可在 running 中切换（ACP session/set_mode 随时可切；Cursor agent/plan/ask）。
+                 模型仍跟 switchDisabled：本轮 prompt 已发出就不能换模型。 -->
+            <ModePicker
+              v-if="modes?.length"
+              :mode="currentMode"
+              :modes="modes"
+              :disabled="switchingMode"
+              @update:mode="(v) => emit('switch-mode', v)"
+            />
             <ModelPicker
               :model="currentModel"
               :models="models"

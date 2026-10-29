@@ -183,6 +183,9 @@ export function adaptTask(dto: TaskDto | TaskSummaryDto): Task {
     agent: dto.agent || DEFAULT_AGENT,
     // 模型选择值（不透明串）；旧任务/未指定 → 空串（由 agent 默认决定）
     model: dto.model || '',
+    mode: dto.mode || '',
+    modes: Array.isArray(dto.modes) ? dto.modes : [],
+    plan: dto.plan && Array.isArray(dto.plan.entries) ? dto.plan : undefined,
     sessionId: dto.claude_session_id || dto.acp_session_id || dto.id,
     decision: dto.current_decision
       ? {

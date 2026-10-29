@@ -11,6 +11,7 @@ import { useRoute } from 'vue-router'
 import { useSessionPage } from '@/features/session/useSessionPage'
 import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '@/features/session'
 import { FeedbackPanel, ArtifactViewer } from '@/features/feedback'
+import PlanList from '@/features/timeline/components/PlanList.vue'
 import Drawer from '@/components/ui/Drawer.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
@@ -50,6 +51,10 @@ const {
   switchingModel,
   canSwitchModel,
   switchModel,
+  currentMode,
+  sessionModes,
+  switchingMode,
+  switchMode,
   agentLabel,
   agentTitle,
   canAttachImages,
@@ -93,6 +98,18 @@ const {
             </ContentColumn>
           </div>
 
+          <!-- 当前计划快照（Task.plan）：Cursor create_plan / ACP session/update(plan)
+               写入；刷新后仍在。时间线里另有逐次 EventPlan 卡片保留历史。 -->
+          <div
+            v-if="task.plan?.entries?.length"
+            class="shrink-0 px-3 pb-2 md:px-4"
+            data-testid="session-plan-sticky"
+          >
+            <ContentColumn :resizable="false">
+              <PlanList :entries="task.plan.entries" />
+            </ContentColumn>
+          </div>
+
           <SessionTimeline
             :task-id="task.id"
             :consume-force-scroll="consumeForceScroll"
@@ -126,6 +143,9 @@ const {
             :current-model="currentModel"
             :switching="switchingModel"
             :switch-disabled="!canSwitchModel"
+            :modes="sessionModes"
+            :current-mode="currentMode"
+            :switching-mode="switchingMode"
             :can-attach-images="canAttachImages"
             :usage="isMobile ? task.usage : undefined"
             :agent-label="isMobile ? agentLabel : ''"
@@ -133,6 +153,7 @@ const {
             @send="onSendPrompt"
             @cancel="cancel"
             @switch-model="switchModel"
+            @switch-mode="switchMode"
           />
         </div>
 

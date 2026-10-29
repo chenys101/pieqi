@@ -109,6 +109,8 @@ const (
 	EventStatus      TaskEventType = "status"       // 状态变更(进入 waiting_input 等)
 	EventRewind      TaskEventType = "rewind"       // 用户回退代码（Feedback P0）：Input 载结构化载荷，Text 放人读摘要
 	EventModelSwitch TaskEventType = "model_switch" // 会话内切换模型：Input 载 {from,to}，Text 放人读摘要
+	EventModeSwitch  TaskEventType = "mode_switch"  // 会话内切换模式：Input 载 {from,to}，Text 放人读摘要
+	EventPlan        TaskEventType = "plan"         // ACP Agent Plan：Input 载 PlanPayload（完整 entries 替换）
 )
 
 // ModelSwitchPayload 是 EventModelSwitch 的 Input 结构化载荷。
@@ -121,6 +123,52 @@ const (
 type ModelSwitchPayload struct {
 	From string `json:"from,omitempty"`
 	To   string `json:"to"`
+}
+
+// ModeSwitchPayload 是 EventModeSwitch 的 Input 结构化载荷。
+//
+// From/To 是 ACP SessionModeId（不透明）；人读名比对 Task.Modes。
+type ModeSwitchPayload struct {
+	From string `json:"from,omitempty"`
+	To   string `json:"to"`
+}
+
+// ModeOption 会话可选的一种运行模式（映射 ACP SessionMode）。
+type ModeOption struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// PlanEntryStatus / PlanEntryPriority 与 ACP 协议同字面值。
+type PlanEntryStatus string
+
+const (
+	PlanPending    PlanEntryStatus = "pending"
+	PlanInProgress PlanEntryStatus = "in_progress"
+	PlanCompleted  PlanEntryStatus = "completed"
+)
+
+type PlanEntryPriority string
+
+const (
+	PlanPriorityHigh   PlanEntryPriority = "high"
+	PlanPriorityMedium PlanEntryPriority = "medium"
+	PlanPriorityLow    PlanEntryPriority = "low"
+)
+
+// PlanEntry 执行计划中的一条（映射 ACP PlanEntry）。
+type PlanEntry struct {
+	Content  string            `json:"content"`
+	Priority PlanEntryPriority `json:"priority"`
+	Status   PlanEntryStatus   `json:"status"`
+}
+
+// PlanPayload 是 EventPlan 的 Input，也是 Task.Plan 的快照。
+//
+// 协议要求每次 session/update(plan) 都带**完整** entries，客户端整表替换。
+type PlanPayload struct {
+	Entries []PlanEntry `json:"entries"`
 }
 
 // TaskEvent 执行流中的一个事件,按时间顺序追加到 Task.Events。
@@ -279,7 +327,16 @@ type Task struct {
 	//
 	// 注意这里存的是**首轮**的模型；会话续问时用户还可以在发提示词时另选一个（按轮生效，
 	// 不落库，见 api.interveneReq.Model）。
-	Model           string      `json:"model,omitempty"`
+	Model string `json:"model,omitempty"`
+	// Mode 本任务会话当前 ACP 运行模式（SessionModeId，空 = agent 未声明 / 未协商）。
+	// 来自 session/new 的 modes.currentModeId，或用户 POST /tasks/:id/mode，或
+	// agent 的 current_mode_update。与 Model 一样是不透明串，原样存取。
+	Mode string `json:"mode,omitempty"`
+	// Modes 本会话可选模式清单（session/new 下发；空 = 该 agent 不暴露 mode UI）。
+	// 随会话协商刷新，不跨 agent 复用。
+	Modes []ModeOption `json:"modes,omitempty"`
+	// Plan 当前 ACP Agent Plan 快照（整表替换；nil = 尚未收到 / 已清空）。
+	Plan *PlanPayload `json:"plan,omitempty"`
 	ProjectID       string      `json:"project_id"`
 	ProjectPath     string      `json:"project_path"`             // repo root，REQ-01 分组依据
 	WorktreePath    string      `json:"worktree_path"`            // worktree 建好后填

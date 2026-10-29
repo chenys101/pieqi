@@ -34,6 +34,9 @@ type createTaskReq struct {
 	// 秒级）、要么依赖可能过期的缓存。两者都不值当 —— 错的取值会让会话打开时**明确报错**
 	// （agent 报未知模型），失败是响亮的，不会静默跑错。
 	Model string `json:"model"`
+	// Mode 可选的 ACP 运行模式（见 GET /api/agents 的 modes；空 = agent 协商默认）。
+	// 取值是 SessionModeId，必须原样回传；Open 时经 SessionConfig.Mode → session/set_mode。
+	Mode string `json:"mode"`
 	// Images 随首轮 prompt 一起发出的图片（可选）。
 	//
 	// ⚠️ 与 Model 不同，这里的取值**必须校验**，且在**建任务之前**校验：base64 与 mime
@@ -98,6 +101,13 @@ func (s *Server) createTask(c *gin.Context) {
 		return
 	}
 
+	modeID := strings.TrimSpace(req.Mode)
+	seedModes, err := s.resolveCreateMode(agentName, modeID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	// 项目不再预注册：一律用 project_path（绝对路径），deriveProjectID 派生稳定 id。
 	abs, err := s.resolveTaskPath(req.ProjectPath)
 	if err != nil {
@@ -116,6 +126,8 @@ func (s *Server) createTask(c *gin.Context) {
 		Source:       model.SourceHTTP,
 		Agent:        agentName,
 		Model:        strings.TrimSpace(req.Model),
+		Mode:         modeID,
+		Modes:        seedModes,
 		ProjectID:    projectID,
 		ProjectPath:  projectPath,
 		WorktreePath: worktreePath,
@@ -139,6 +151,37 @@ func (s *Server) createTask(c *gin.Context) {
 	// 异步生成一句话标题（大模型摘要）：不阻塞创建，生成后经 WS 推送替换前端截断标题
 	s.runner.GenerateTitleAsync(task.ID)
 	c.JSON(http.StatusCreated, task)
+}
+
+// resolveCreateMode 校验建任务时的 mode，并返回可预填的 Modes 清单。
+//
+// 空 mode：合法（沿用 agent 协商默认）；有预置清单时一并种进 Task.Modes，
+// 让会话页 ModePicker 在 session/new 之前就能显示。
+// 非空 mode：若该 agent 有预置清单则必须命中；无清单则放行（session/set_mode 再校验）。
+func (s *Server) resolveCreateMode(agentName, modeID string) ([]model.ModeOption, error) {
+	var catalog []agent.ModeOption
+	for _, a := range s.agentCatalog() {
+		if a.Name == agentName {
+			catalog = a.Modes
+			break
+		}
+	}
+	seed := make([]model.ModeOption, 0, len(catalog))
+	for _, m := range catalog {
+		seed = append(seed, model.ModeOption{ID: m.ID, Name: m.Name, Description: m.Description})
+	}
+	if modeID == "" {
+		return seed, nil
+	}
+	if len(catalog) == 0 {
+		return seed, nil
+	}
+	for _, m := range catalog {
+		if m.ID == modeID {
+			return seed, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown mode: %s", modeID)
 }
 
 // ErrNoDefaultProjectPath 既没传 project_path、设置里也没有默认目录时的错误文案。

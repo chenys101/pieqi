@@ -22,6 +22,8 @@ function t(over: Partial<Task> = {}): Task {
     status: 'completed',
     agent: 'claude',
     model: '',
+    mode: '',
+    modes: [],
     sessionId: 's',
     createdAt: new Date(BASE).toISOString(),
     updatedAt: new Date(BASE).toISOString(),

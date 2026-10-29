@@ -88,6 +88,10 @@ type ModelCatalog struct {
 	Agent   string        `json:"agent"`
 	Current string        `json:"current,omitempty"` // 当前生效的选择值（会话级；未开过会话时为空）
 	Options []ModelOption `json:"options"`
+	// Modes 同一次 session/new 协商到的运行模式（可空）。
+	// 与模型清单共用探测进程：前端拉 models 时顺带拿到 ModePicker 数据，
+	// 不必再为 mode 单独 spawn。
+	Modes []ModeOption `json:"modes,omitempty"`
 }
 
 // ExtractModelCatalog 从 ACP 下发的 configOptions 里抽出模型清单。
@@ -341,6 +345,7 @@ type catalogCacheFile struct {
 	ProbedAt  time.Time     `json:"probed_at"`
 	Options   []ModelOption `json:"options"`
 	Current   string        `json:"current,omitempty"`
+	Modes     []ModeOption  `json:"modes,omitempty"`
 	AgentType string        `json:"agent_type,omitempty"` // 探测时的 agent_type，变了就作废
 }
 
@@ -383,7 +388,7 @@ func loadCatalogFromDisk(agentName string) (modelCatalogEntry, bool) {
 	if cur := acpConfigFor(agentName).AgentType; cur != "" && f.AgentType != "" && cur != f.AgentType {
 		return modelCatalogEntry{}, false
 	}
-	cat := ModelCatalog{Agent: agentName, Current: f.Current, Options: f.Options}
+	cat := ModelCatalog{Agent: agentName, Current: f.Current, Options: f.Options, Modes: f.Modes}
 	ttl := catalogTTL(cat, nil)
 	// 剩余寿命从**探测时刻**起算，与内存档一致：否则每次重启都在续命一条本应过期的缓存。
 	expires := f.ProbedAt.Add(ttl)
@@ -405,6 +410,7 @@ func saveCatalogToDisk(agentName string, cat ModelCatalog) {
 		ProbedAt:  time.Now(),
 		Options:   cat.Options,
 		Current:   cat.Current,
+		Modes:     cat.Modes,
 		AgentType: acpConfigFor(agentName).AgentType,
 	}
 	b, err := json.Marshal(f)
@@ -461,6 +467,13 @@ func probeAgentModels(ctx context.Context, agentName string) (ModelCatalog, erro
 	// 前端隐藏下拉框即可，不该把它渲染成一个失败。
 	cat = a.Models()
 	cat.Agent = agentName
+	if st := a.Modes(); len(st.Available) > 0 {
+		cat.Modes = append([]ModeOption(nil), st.Available...)
+	}
+	// 探测到的模式也写入旁路缓存，供 GET /api/agents 立刻带上（不必等前端再拉 models）。
+	if len(cat.Modes) > 0 {
+		RememberAgentModes(agentName, cat.Modes)
+	}
 	return cat, nil
 }
 
