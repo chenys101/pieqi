@@ -17,6 +17,13 @@ export const useFeedbackPanelStore = defineStore('feedbackPanel', {
     collapsed: true,
     /** Timeline 选中的 Turn（null = 无选中）。切页/切视口保持 */
     activeTurn: null as number | null,
+    /**
+     * 选中 Turn 属于哪个任务。
+     *
+     * 只存 turn 号是不够的：不同任务的 Turn #1 会撞号，面板会"自动定位"到
+     * 不相干的一轮（尤其从任务 A 切到任务 B 时）。定位前先核对任务 id。
+     */
+    activeTurnTaskId: null as string | null,
   }),
 
   actions: {
@@ -27,12 +34,14 @@ export const useFeedbackPanelStore = defineStore('feedbackPanel', {
       this.collapsed = true
     },
     /** Timeline「查看本轮变更」入口：展开面板并锁定 Turn */
-    focusTurn(turn: number) {
+    focusTurn(turn: number, taskId?: string) {
       this.activeTurn = turn
+      this.activeTurnTaskId = taskId ?? null
       this.collapsed = false
     },
     clearActiveTurn() {
       this.activeTurn = null
+      this.activeTurnTaskId = null
     },
   },
 })

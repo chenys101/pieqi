@@ -14,6 +14,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { looksLikeMarkdown, renderMarkdown } from '../markdown'
 import { degradeFailedLocalImages, rewriteLocalImageTargets } from '../markdownImages'
 import { artifactPathFromHash, rewriteLocalArtifactLinks } from '../markdownArtifactLinks'
+import { previewKind } from '@/utils/filePreview'
 import { useImageViewer } from '@/composables/useImageViewer'
 import { useArtifactsStore } from '@/stores/artifacts'
 
@@ -65,6 +66,20 @@ function onClick(e: MouseEvent) {
       e.preventDefault()
       artifactsStore.openPath(props.taskId, artPath)
       return
+    }
+    // md/code/text/pdf 的 /file 链接也走应用内查看层（不再新标签铺裸文本）；
+    // html/image 仍是真页面/图片，新标签打开。
+    if (href.startsWith('/') && href.includes('/file?')) {
+      try {
+        const p = new URL(href, window.location.origin).searchParams.get('path')
+        if (p && props.taskId && previewKind(p)) {
+          e.preventDefault()
+          artifactsStore.openPath(props.taskId, p)
+          return
+        }
+      } catch {
+        // URL 解析失败就退回新标签，不吞掉用户的点击
+      }
     }
     // html/image 已改写成 /preview 或 /file：新标签打开，避免离开 SPA
     if (href.startsWith('/preview/') || href.includes('/file?')) {

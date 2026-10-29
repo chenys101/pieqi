@@ -42,6 +42,7 @@ const {
   feedbackOpen,
   mobilePane,
   openFeedback,
+  onFocusTurn,
   turnModels,
   turnModelsLoading,
   turnModelsLoaded,
@@ -92,7 +93,11 @@ const {
             </ContentColumn>
           </div>
 
-          <SessionTimeline :task-id="task.id" :consume-force-scroll="consumeForceScroll" />
+          <SessionTimeline
+            :task-id="task.id"
+            :consume-force-scroll="consumeForceScroll"
+            @focus-turn="onFocusTurn"
+          />
 
           <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20）
                shrink-0 必需：横幅里的审批摘要展开后可能很高，不加它会被 flex 压缩

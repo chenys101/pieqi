@@ -2,6 +2,9 @@
 // FilePreview：只读文件预览（markdown / pdf / code / text）。
 // html 不走这里——真页面要新标签 URL（样式/脚本/相对资源）。
 // Agent 产物不可信：markdown 经 marked + DOMPurify；code/text 仅纯文本展示，无编辑。
+//
+// `text` 可由调用方传入（ArtifactViewer 已经为"复制/搜索"取过原文）——
+// 传了就不再重复请求；不传则自己拉（保持组件可独立使用）。
 import { computed, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -9,35 +12,29 @@ import { getTaskFileText, taskFileURL } from '@/services/api/feedback'
 import { previewKind } from '@/utils/filePreview'
 import Spinner from '@/components/ui/Spinner.vue'
 
-const props = defineProps<{ taskId: string; path: string }>()
+const props = defineProps<{ taskId: string; path: string; text?: string }>()
 
 const kind = computed(() => previewKind(props.path))
 const pdfURL = computed(() => taskFileURL(props.taskId, props.path))
 
-const mdHtml = ref('')
-const plainText = ref('')
+const fetched = ref('')
 const loading = ref(false)
 const errorMsg = ref('')
 
-async function loadMarkdown() {
-  loading.value = true
-  errorMsg.value = ''
-  try {
-    const text = await getTaskFileText(props.taskId, props.path)
-    const raw = marked.parse(text, { async: false }) as string
-    mdHtml.value = DOMPurify.sanitize(raw)
-  } catch (err) {
-    errorMsg.value = err instanceof Error ? err.message : '加载失败'
-  } finally {
-    loading.value = false
-  }
-}
+/** 有外部文本就用外部的；没有才用自己拉的那份 */
+const source = computed(() => (props.text !== undefined ? props.text : fetched.value))
+const mdHtml = computed(() => {
+  if (kind.value !== 'markdown' || !source.value) return ''
+  const raw = marked.parse(source.value, { async: false }) as string
+  return DOMPurify.sanitize(raw)
+})
 
-async function loadPlain() {
+async function loadText() {
+  if (props.text !== undefined) return
   loading.value = true
   errorMsg.value = ''
   try {
-    plainText.value = await getTaskFileText(props.taskId, props.path)
+    fetched.value = await getTaskFileText(props.taskId, props.path)
   } catch (err) {
     errorMsg.value = err instanceof Error ? err.message : '加载失败'
   } finally {
@@ -46,10 +43,12 @@ async function loadPlain() {
 }
 
 watch(
-  () => [props.taskId, props.path, kind.value] as const,
-  ([, , k]) => {
-    if (k === 'markdown') loadMarkdown()
-    else if (k === 'code' || k === 'text') loadPlain()
+  () => [props.taskId, props.path, props.text] as const,
+  () => {
+    fetched.value = ''
+    errorMsg.value = ''
+    if (props.text !== undefined) return
+    if (kind.value === 'markdown' || kind.value === 'code' || kind.value === 'text') loadText()
   },
   { immediate: true },
 )
@@ -74,7 +73,7 @@ watch(
         v-else
         class="max-h-[70vh] overflow-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-[11px] leading-relaxed text-text"
         data-testid="file-preview-plain"
-      >{{ plainText }}</pre>
+      >{{ source }}</pre>
     </template>
 
     <iframe

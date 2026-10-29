@@ -27,18 +27,22 @@ import { isTerminalStatus } from '@/types/task'
 import { groupEventsByTurn, countUserMessages } from '../groupTurns'
 import type { TurnGroup, TurnRailItem } from '../groupTurns'
 import type { AgentEvent, AgentEventType } from '@/types/event'
-import type { ArtifactDto } from '@/types/api'
 import TimelineEventView from '@/features/timeline/components/TimelineEventView.vue'
 import ThinkingBadge from '@/features/timeline/components/ThinkingBadge.vue'
 import TextBubble from '@/features/timeline/components/TextBubble.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import TurnRail from './TurnRail.vue'
-import ArtifactList from '@/components/artifacts/ArtifactList.vue'
+import TurnSummary from './TurnSummary.vue'
 
 const props = defineProps<{
   taskId: string
   /** 强制滚动标记消费函数（由 useSession 提供） */
   consumeForceScroll: () => boolean
+}>()
+
+const emit = defineEmits<{
+  /** 每轮总结的「查看本轮变更」：由页面决定三档落点（宽屏/平板/移动端） */
+  'focus-turn': [turn: number]
 }>()
 
 const sessionStore = useSessionStore()
@@ -50,12 +54,15 @@ const fb = useFeedbackPanelStore()
 const events = computed(() => sessionStore.events(props.taskId))
 const task = computed(() => taskStore.byId(props.taskId))
 const bundle = computed(() => bundleStore.bundle(props.taskId))
-function turnArtifacts(turn: number): ArtifactDto[] {
-  return artifactsStore.forTurn(props.taskId, turn)
-}
 
-function onArtifactOpen(a: ArtifactDto) {
-  artifactsStore.openArtifact(props.taskId, a)
+/**
+ * 每轮总结的按钮：先把面板 store 的 activeTurn 设好（宽屏展开由页面负责），
+ * 再把"要定位到哪一轮"抛给页面 —— 三档落点不同（宽屏常驻 / 平板抽屉 / 移动端整屏），
+ * 只有页面知道该切哪个 pane。
+ */
+function onTurnSummaryFocus(turn: number) {
+  fb.focusTurn(turn, props.taskId)
+  emit('focus-turn', turn)
 }
 
 /** 思考占位：提交后标记 / 冷启动（运行中且无事件无输出）兜底 */
@@ -523,8 +530,9 @@ function jumpToLatest() {
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col">
-    <!-- 产物不再在会话顶单列一条「全部产物」（ADR-0018 修订）：清单唯一入口是「变更」Tab
-         的文件行，这里只保留**每轮的「本轮产物」**（它描述的是这一轮改了什么，不是另一份清单）。 -->
+    <!-- 文件清单的**唯一入口是反馈面板**（ADR-0018 修订 + 2026-10 精简）：
+         时间线每轮只留一条「本轮完成 · N 个文件」总结 + 「查看本轮变更」按钮，
+         不再重复列一遍文件（那是同一份数据的第二个入口）。 -->
     <div class="flex min-h-0 flex-1">
     <!-- 左侧快速跳转：≥2 个 Turn 才出现（移动端由 TurnRail 自身隐藏） -->
     <TurnRail
@@ -606,14 +614,6 @@ function jumpToLatest() {
                          这里说「5 条已收起」会让人以为整轮都没了 -->
                     <span v-if="folded.has(g.turn)" class="shrink-0">{{ processCount(g) }} 条过程已收起</span>
                   </button>
-                  <button
-                    v-if="g.info"
-                    class="mt-1 text-xs text-accent hover:underline"
-                    data-testid="turn-link"
-                    @click="fb.focusTurn(g.turn)"
-                  >
-                    查看本轮变更
-                  </button>
                 </div>
                 <!--
                   折叠只作用在"过程"事件上（需求 1）：该轮的 user_message（提示词）与
@@ -630,14 +630,15 @@ function jumpToLatest() {
                     <TimelineEventView :event="event" />
                   </div>
                 </template>
-                <!-- 本轮产物：时间线主入口（不依赖反馈面板） -->
-                <ArtifactList
-                  v-if="g.turn > 0 && turnArtifacts(g.turn).length"
+                <!-- 每轮总结：唯一入口是这条总结条上的按钮（跳到反馈面板对应轮次）。
+                     运行中的轮次也显示（文案变「本轮进行中」），数字来自同一份 TurnInfo.summary。 -->
+                <TurnSummary
+                  v-if="g.turn > 0 && g.info && g.info.summary.files > 0"
                   class="mt-1"
-                  title="本轮产物"
-                  :items="turnArtifacts(g.turn)"
-                  @open="onArtifactOpen"
-                  @view="onArtifactOpen"
+                  :turn="g.turn"
+                  :summary="g.info.summary"
+                  :done="hasProduced(g)"
+                  @focus="onTurnSummaryFocus"
                 />
               </section>
             </template>

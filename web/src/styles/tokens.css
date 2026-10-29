@@ -45,6 +45,14 @@
   --color-error: 180 35 24;            /* #B42318 */
   --color-info: 23 92 211;             /* #175CD3 */
 
+  /* ---- 代码高亮（只读文件查看器；只影响观感，不参与语义） ---- */
+  --color-code-keyword: 124 58 237;    /* #7C3AED */
+  --color-code-string: 21 128 61;      /* #15803D */
+  --color-code-number: 180 83 9;       /* #B45309 */
+  --color-code-comment: 130 138 151;   /* #828A97 */
+  --color-code-tag: 190 24 93;         /* #BE185D */
+  --color-code-fn: 37 99 235;          /* #2563EB */
+
   /* ---- 圆角（SPEC §3.4）：4px 基准网格；与主题无关，只在 :root 定义一次 ----
      ⚠️ 命名与 Tailwind 默认**错位一格**：SPEC --radius-sm(6px) == Tailwind rounded-md(6px)。
      form 组件请显式写 rounded-[var(--radius-sm)]，别用 rounded-*，
@@ -95,6 +103,14 @@ html[data-theme="dark"] {
   --color-warning: 232 163 61;         /* #E8A33D */
   --color-error: 249 112 102;          /* #F97066 */
   --color-info: 91 155 239;            /* #5B9BEF */
+
+  /* ---- 代码高亮（深色下提高明度，保持与底色对比） ---- */
+  --color-code-keyword: 167 139 250;   /* #A78BFA */
+  --color-code-string: 134 239 172;    /* #86EFAC */
+  --color-code-number: 252 211 77;     /* #FCD34D */
+  --color-code-comment: 122 132 148;   /* #7A8494 */
+  --color-code-tag: 244 114 182;       /* #F472B6 */
+  --color-code-fn: 96 165 250;         /* #60A5FA */
 
   /* ---- 阴影：一律 none（层次交给边框） ---- */
   --shadow-xs: none;

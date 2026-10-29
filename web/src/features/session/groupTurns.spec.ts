@@ -274,10 +274,10 @@ describe('SessionTimeline 分组渲染', () => {
     expect(host.querySelector('[data-testid="turn-rail"]')).toBeNull()
   })
 
-  it('点「查看本轮变更」→ 面板 store activeTurn 同 Turn 且展开（AC-R3-06）', async () => {
+  it('点每轮总结的「查看本轮变更」→ 面板 store activeTurn 同 Turn 且展开（AC-R3-06）', async () => {
     const { host, fb } = mountTimeline()
     await nextTick()
-    const link = host.querySelector<HTMLButtonElement>('[data-testid="turn-link"]')!
+    const link = host.querySelector<HTMLButtonElement>('[data-testid="turn-summary-link"]')!
     link.click()
     await nextTick()
     expect(fb.activeTurn).toBe(1)

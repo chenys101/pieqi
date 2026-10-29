@@ -1,7 +1,10 @@
-// Artifacts 共享 store：Timeline「本轮/全部产物」与 FeedbackPanel 行内打开入口的**同一份**清单。
+// Artifacts 共享 store：反馈面板的「查看」入口 + 正文产物链接的同一份清单。
 //
 // 事实源只有 `GET /api/tasks/:id/artifacts`（ADR-0018）。两处各拉一次就会出现
-// 「面板有打开按钮、时间线还没有 / 条数对不上」——用户分不清是功能坏了还是还在加载。
+// 「面板有打开按钮、正文还没有 / 条数对不上」——用户分不清是功能坏了还是还在加载。
+//
+// 2026-10：时间线的「本轮产物」列表已删除（与反馈面板重复），因此不再需要 forTurn；
+// 清单只服务于"这个路径能不能点开 / 用什么方式打开"。
 import { defineStore } from 'pinia'
 import { getTaskArtifacts } from '@/services/api/feedback'
 import type { ArtifactDto } from '@/types/api'
@@ -30,10 +33,6 @@ export const useArtifactsStore = defineStore('artifacts', {
         for (const a of state.byTask[taskId] ?? []) map.set(a.path, a)
         return map
       },
-    forTurn:
-      (state) =>
-      (taskId: string, turn: number): ArtifactDto[] =>
-        (state.byTask[taskId] ?? []).filter((a) => a.turn === turn),
   },
 
   actions: {

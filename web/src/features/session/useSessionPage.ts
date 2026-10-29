@@ -188,6 +188,20 @@ export function useSessionPage(taskId: ComputedRef<string>) {
     feedbackOpen.value = true
   }
 
+  /**
+   * 时间线每轮总结的「查看本轮变更」→ 反馈面板对应轮次。
+   *
+   * 和 openFeedback 的区别：这里是**定向跳转**，移动端必须直接把 pane 置为 feedback，
+   * 不能复用那个开关（当前已经在 feedback 时会被切回时间线，等于点了没反应）。
+   * 三档的落点与 openFeedback 一致：宽屏展开右栏、平板开抽屉、移动端切整屏。
+   */
+  function onFocusTurn(turn: number) {
+    if (isWide.value) fbPanel.expand()
+    else if (isMobile.value) mobilePane.value = 'feedback'
+    else feedbackOpen.value = true
+    fbPanel.focusTurn(turn, taskId.value)
+  }
+
   // 详情加载：WS 快照 / 列表只给**轻量视图**（不含 events），所以进入详情页时
   // 必须按 id 拉一次完整详情来填充时间线。
   //
@@ -203,6 +217,8 @@ export function useSessionPage(taskId: ComputedRef<string>) {
       probed.value = false
       // 换任务回到时间线：停在「变更反馈」里换到一个新任务，看到的是上一任务的语境残留
       mobilePane.value = 'timeline'
+      // 上一任务的 Turn 选中不能带进新任务：Turn 号会撞上，面板会"自动定位"到不相干的一轮
+      if (fbPanel.activeTurnTaskId && fbPanel.activeTurnTaskId !== id) fbPanel.clearActiveTurn()
       if (!id) return
       if (taskStore.byId(id) && sessionStore.eventsKnown(id)) {
         probed.value = true
@@ -317,6 +333,7 @@ export function useSessionPage(taskId: ComputedRef<string>) {
     feedbackOpen,
     mobilePane,
     openFeedback,
+    onFocusTurn,
     turnModels,
     turnModelsLoading,
     turnModelsLoaded,

@@ -1,6 +1,6 @@
 {
   "agents@desktop": {
-    "domNodes": 209,
+    "domNodes": 211,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -30,7 +30,7 @@
     }
   },
   "agents@mobile": {
-    "domNodes": 187,
+    "domNodes": 189,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -54,7 +54,7 @@
     }
   },
   "agents@tablet": {
-    "domNodes": 209,
+    "domNodes": 211,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -84,7 +84,7 @@
     }
   },
   "approval@desktop": {
-    "domNodes": 101,
+    "domNodes": 103,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -117,7 +117,7 @@
     }
   },
   "approval@mobile": {
-    "domNodes": 79,
+    "domNodes": 81,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -144,7 +144,7 @@
     }
   },
   "approval@tablet": {
-    "domNodes": 101,
+    "domNodes": 103,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -177,7 +177,7 @@
     }
   },
   "dashboard@desktop": {
-    "domNodes": 143,
+    "domNodes": 145,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -207,7 +207,7 @@
     }
   },
   "dashboard@mobile": {
-    "domNodes": 121,
+    "domNodes": 123,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -231,7 +231,7 @@
     }
   },
   "dashboard@tablet": {
-    "domNodes": 143,
+    "domNodes": 145,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -261,7 +261,7 @@
     }
   },
   "detail@desktop": {
-    "domNodes": 202,
+    "domNodes": 213,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -301,11 +301,11 @@
       },
       "contentColumn": {
         "w": 1077,
-        "h": 614
+        "h": 623
       },
       "contentInner": {
         "w": 1077,
-        "h": 614
+        "h": 623
       },
       "main": {
         "w": 1149,
@@ -315,7 +315,7 @@
     }
   },
   "detail@mobile": {
-    "domNodes": 174,
+    "domNodes": 185,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -349,11 +349,11 @@
       "feedbackRail": null,
       "contentColumn": {
         "w": 341,
-        "h": 614
+        "h": 623
       },
       "contentInner": {
         "w": 341,
-        "h": 614
+        "h": 623
       },
       "main": {
         "w": 365,
@@ -363,7 +363,7 @@
     }
   },
   "detail@tablet": {
-    "domNodes": 196,
+    "domNodes": 207,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -403,11 +403,11 @@
       },
       "contentColumn": {
         "w": 471,
-        "h": 614
+        "h": 623
       },
       "contentInner": {
         "w": 471,
-        "h": 614
+        "h": 623
       },
       "main": {
         "w": 543,
@@ -417,7 +417,7 @@
     }
   },
   "newtask@desktop": {
-    "domNodes": 133,
+    "domNodes": 135,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -465,7 +465,7 @@
     }
   },
   "newtask@mobile": {
-    "domNodes": 105,
+    "domNodes": 107,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -507,7 +507,7 @@
     }
   },
   "newtask@tablet": {
-    "domNodes": 127,
+    "domNodes": 129,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -555,7 +555,7 @@
     }
   },
   "settings@desktop": {
-    "domNodes": 242,
+    "domNodes": 244,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -585,7 +585,7 @@
     }
   },
   "settings@mobile": {
-    "domNodes": 220,
+    "domNodes": 222,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -609,7 +609,7 @@
     }
   },
   "settings@tablet": {
-    "domNodes": 242,
+    "domNodes": 244,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
