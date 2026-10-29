@@ -19,6 +19,86 @@ async function openSession(page: Page): Promise<void> {
 test.describe('详情页 C 头部 · 状态 / 任务 / 反馈 / Agent', () => {
   test.use({ viewport: { width: 375, height: 667 } })
 
+  /**
+   * 回归：「点状态弹层展示不全」（2026-10-29 用户反馈）。
+   *
+   * 根因是**布局**而不是内容：状态详情浮层原先以 28px 触发按钮为中心
+   * （`left-1/2 -translate-x-1/2`）且宽度固定 224px。「其他任务」按钮在
+   * `otherCount === 0` 时不渲染（用户手上只有一个在途任务就是这种常见形态），
+   * 状态按钮于是成为右簇最左那个 ⇒ 面板右缘 = 按钮中心 + 112 越出视口。
+   * 375 宽实测 [173, 397]：右缘 22px 被外层 `overflow-hidden` 裁掉，
+   * 右对齐的 Agent / 项目 值只剩开头几个字（dsh→d、pieqi→pie）。
+   *
+   * 判据必须是**几何**的：jsdom 里 rect 全是 0，内容断言（"agent 存在"）
+   * 在旧实现下同样是绿的 —— 这正是这个 bug 躲过既有用例的原因。
+   */
+  test.describe('只有一个任务时（otherCount === 0，头部右簇剩三个按钮）', () => {
+    // mock 服务端的 /api/tasks 只回当前这一条。
+    //
+    // 为什么必须落在**服务端**：应用启动时 `setupProviders()` 会自己 loadTasks()，
+    // 把夹具页在 beforeEnter 里灌的 store 覆盖成全量清单 —— 只在夹具页 seed 一条任务，
+    // 「其他任务」按钮过一帧又出现，用例测的就不是出问题的布局了（静默假绿）。
+    test.use({ extraHTTPHeaders: { 'x-e2e-solo': '1' } })
+
+    for (const width of [320, 375, 430]) {
+      test(`只有一个任务时（无「其他任务」按钮）状态浮层完整落在视口内 @${width}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 667 })
+        await page.goto(SESSION_PAGE, { waitUntil: 'commit' })
+        await page.waitForLoadState('load')
+        await expect(page.locator('[data-testid="session-timeline"]')).toBeVisible({ timeout: 15_000 })
+        // 前置条件必须成立，否则这条用例测的不是出问题的布局（静默假绿的入口）
+        await expect(page.locator('[data-testid="session-tasks"]'), '「其他任务」按钮不该渲染').toHaveCount(0)
+
+        await page.locator('[data-testid="session-status"]').click()
+        const pop = page.locator('[data-testid="session-status-pop"]')
+        await expect(pop).toBeVisible()
+
+        const report = await pop.evaluate((el) => {
+          const pr = el.getBoundingClientRect()
+          // 逐个溢出祖先核对：面板必须完全落在它的 padding box 内，否则就是被裁
+          const clippedBy: Array<{
+            el: string
+            clipRight: number
+            popRight: number
+          }> = []
+          for (let a = el.parentElement; a; a = a.parentElement) {
+            const s = getComputedStyle(a)
+            if (s.overflow === 'visible' && s.overflowX === 'visible' && s.overflowY === 'visible') continue
+            const ar = a.getBoundingClientRect()
+            if (pr.right > ar.right + 0.5 || pr.left < ar.left - 0.5) {
+              clippedBy.push({
+                el: `${a.tagName}.${String(a.className)}`,
+                clipRight: ar.right,
+                popRight: pr.right,
+              })
+            }
+          }
+          return {
+            vw: document.documentElement.clientWidth,
+            pop: { left: pr.left, right: pr.right, width: pr.width },
+            clippedBy,
+          }
+        })
+        expect(report.clippedBy, `状态浮层被祖先裁剪：${JSON.stringify(report.clippedBy)}`).toEqual([])
+        expect(report.pop.left, '左缘越界').toBeGreaterThanOrEqual(0)
+        expect(report.pop.right, '右缘越界').toBeLessThanOrEqual(report.vw + 0.5)
+
+        // 值本身也不能被 CSS 截断（夹具里的 agent / 项目 都是短名，应完整可读）
+        for (const id of ['session-status-agent', 'session-status-project']) {
+          const val = page.locator(`[data-testid="${id}"] span`).last()
+          const overflow = await val.evaluate((el) => ({
+            scroll: el.scrollWidth,
+            client: el.clientWidth,
+          }))
+          expect(overflow.scroll, `${id} 的值被截断`).toBeLessThanOrEqual(overflow.client)
+        }
+
+        await page.keyboard.press('Escape')
+        await expect(pop).toHaveCount(0)
+      })
+    }
+  })
+
   test('状态点与任务列表是两个独立入口，各自打开自己的浮层', async ({ page }) => {
     await openSession(page)
 

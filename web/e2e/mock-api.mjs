@@ -23,6 +23,7 @@ import {
   botsResponse,
   feedbackResponse,
   larkRegStatusResponse,
+  LONG_TASK_ID,
   settingsResponse,
   tasks,
   tasksResponse,
@@ -46,11 +47,16 @@ function json(res, body, status = 200) {
   res.end(buf)
 }
 
-/** /api/tasks/:id/... —— 路径分段匹配，不做正则大杂烩（漏一条就是打到真后端） */
-function route(url) {
+/**
+ * /api/tasks/:id/... —— 路径分段匹配，不做正则大杂烩（漏一条就是打到真后端）
+ *
+ * `soloId`（来自请求头 `x-e2e-solo: 1`，见 server 里那处注释）：任务清单只回这一条，
+ * 用来复现"只有一个在途任务 ⇒ 头部不渲染「其他任务」按钮"的生产形态。
+ */
+function route(url, soloId = '') {
   const p = url.pathname.replace(/\/+$/, '')
 
-  if (p === '/api/tasks') return { body: tasksResponse() }
+  if (p === '/api/tasks') return { body: tasksResponse(soloId) }
   if (p === '/api/agents') return { body: agentsResponse }
   // 模型清单：对**每个** agent 都下发夹具目录里那份（查不到就给空清单）。
   //
@@ -235,9 +241,17 @@ const server = createServer((req, res) => {
   // 故障/时序开关（见 faults 的注释）：只对**读**生效，且不改数据
   const failFor = faults.fail.has(url.pathname)
   const delayMs = faults.delay[url.pathname] || 0
+  /**
+   * `x-e2e-solo: 1` —— 让 `GET /api/tasks` 只回当前这一条任务。
+   *
+   * 为什么必须从**服务端**这一层收窄：应用启动时 `setupProviders()` 会自己
+   * `loadTasks()` 覆盖夹具在 beforeEnter 里灌的 store。只在夹具页 seed 一条任务，
+   * 会被这次请求换回全量清单，「其他任务」按钮又出现了 —— 用例测的就不是出问题的布局。
+   */
+  const soloId = req.headers['x-e2e-solo'] === '1' ? LONG_TASK_ID : ''
   const send = () => {
     if (failFor) return json(res, { error: 'e2e mock: fault injected' }, 500)
-    const { status, body } = route(url)
+    const { status, body } = route(url, soloId)
     json(res, body, status)
   }
   if (delayMs > 0) setTimeout(send, delayMs)

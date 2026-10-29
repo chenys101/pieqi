@@ -181,8 +181,8 @@ function goBack() {
 
         <!-- ── 移动端：状态 / 任务列表 / 新建 / 反馈，四个独立入口 ─────────── -->
         <template v-if="compact">
-          <!-- 当前状态：裸圆点；点开是这个任务的状态详情 -->
-          <div class="relative shrink-0">
+          <!-- 当前状态：裸圆点；点开是这个任务的状态详情（浮层本体挂在 header 上，见后） -->
+          <div class="shrink-0">
             <button
               class="grid h-7 w-7 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-text"
               :class="task.status === 'waiting_input' ? 'bg-warning/5' : ''"
@@ -195,33 +195,6 @@ function goBack() {
             >
               <span class="block h-2 w-2 rounded-full" :class="[statusDotClass, statusDotRing]" />
             </button>
-
-            <div
-              v-if="openPopover === 'status'"
-              class="absolute left-1/2 top-full z-50 mt-2 w-56 -translate-x-1/2 rounded-lg border border-border bg-surface p-3 shadow-md"
-              data-testid="session-status-pop"
-              @click.stop
-            >
-              <div class="flex items-center gap-2 text-xs font-semibold">
-                <span class="block h-2 w-2 rounded-full" :class="[statusDotClass, statusDotRing]" />
-                {{ statusLabel }}
-              </div>
-              <div class="mt-0.5 pl-4 text-[10px] text-text-tertiary">
-                {{ timeAgo(task.updatedAt || task.createdAt) }}前
-              </div>
-              <div
-                v-if="agentLabel"
-                class="mt-2 flex items-center justify-between gap-3 border-t border-border-subtle pt-1.5 text-[10px]"
-                data-testid="session-status-agent"
-              >
-                <span class="shrink-0 text-text-tertiary">Agent</span>
-                <span class="min-w-0 truncate text-text" :title="agentTitle">{{ agentLabel }}</span>
-              </div>
-              <div v-if="task.project" class="mt-1 flex items-center justify-between gap-3 text-[10px]">
-                <span class="shrink-0 text-text-tertiary">项目</span>
-                <span class="min-w-0 truncate text-text">{{ task.project }}</span>
-              </div>
-            </div>
           </div>
 
           <!-- 其他任务：描边圆 + 堆叠图标 + 数量；下拉只列任务，不混状态详情 -->
@@ -312,6 +285,48 @@ function goBack() {
         <span v-if="task.error" class="min-w-0 truncate text-error" :title="task.error">{{ task.error }}</span>
       </div>
     </ContentColumn>
+
+    <!-- 状态详情：同样**挂在 header 上、右对齐**（与下面的「其他任务」下拉同一条判据）。
+         ⚠️ 不要改回挂在 28px 触发按钮上做 `left-1/2 -translate-x-1/2` 居中：
+         「其他任务」按钮在 otherCount === 0 时**不渲染**（见上面那个 v-if），
+         状态点于是成了右簇最左的那个，面板中心 = 按钮中心 ⇒ 面板右缘越出视口。
+         375 宽实测：面板 [173, 397] vs 视口 375 —— 右缘 22px 被外层 overflow-hidden 裁掉，
+         右对齐的「Agent / 项目」值只剩开头几个字（用户反馈的「点状态展示不全」就是它，
+         截图里 dsh→d、pieqi→pie）。
+         现在面板右缘固定对齐 header 的 12px 内边距，任何宽度都不会越界；
+         max-w 兜住极窄屏（< 248px），宽度不足时先缩面板而不是让它被裁。 -->
+    <div
+      v-if="compact && openPopover === 'status'"
+      class="absolute right-3 top-full z-50 mt-1.5 w-56 max-w-[calc(100vw-24px)] rounded-lg border border-border bg-surface p-3 shadow-md"
+      data-testid="session-status-pop"
+      @click.stop
+    >
+      <div class="flex items-center gap-2 text-xs font-semibold">
+        <span class="block h-2 w-2 rounded-full" :class="[statusDotClass, statusDotRing]" />
+        {{ statusLabel }}
+      </div>
+      <div class="mt-0.5 pl-4 text-[10px] text-text-tertiary">
+        {{ timeAgo(task.updatedAt || task.createdAt) }}前
+      </div>
+      <div
+        v-if="agentLabel"
+        class="mt-2 flex items-center justify-between gap-3 border-t border-border-subtle pt-1.5 text-[10px]"
+        data-testid="session-status-agent"
+      >
+        <span class="shrink-0 text-text-tertiary">Agent</span>
+        <span class="min-w-0 truncate text-text" :title="agentTitle">{{ agentLabel }}</span>
+      </div>
+      <!-- 项目名可能是长路径的最后一段：截断时给出完整值（移动端没有 hover，
+           但 PWA/桌面仍能看全；截断只是最后手段，不再是"被外侧裁掉"） -->
+      <div
+        v-if="task.project"
+        class="mt-1 flex items-center justify-between gap-3 text-[10px]"
+        data-testid="session-status-project"
+      >
+        <span class="shrink-0 text-text-tertiary">项目</span>
+        <span class="min-w-0 truncate text-text" :title="task.projectPath || task.project">{{ task.project }}</span>
+      </div>
+    </div>
 
     <!-- 其他任务下拉：挂在 header 上、右对齐（不是挂在 28px 的按钮上，
          否则 320 宽时 300px 的面板会从左边溢出）。只有 compact 才有。 -->

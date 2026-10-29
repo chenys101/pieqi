@@ -262,10 +262,17 @@ export function toSummary(t) {
   return s
 }
 
-/** GET /api/tasks 响应：按 project_path 分组 */
-export function tasksResponse() {
+/**
+ * GET /api/tasks 响应：按 project_path 分组。
+ *
+ * `onlyId`：只回这一条任务。用于复现生产里"用户手上只有一个在途任务"的形态 ——
+ * 那时详情页头部 `otherCount === 0`，「其他任务」按钮整枚不渲染，右簇只剩
+ * 状态/新建/反馈三个。状态浮层曾在这个布局下越出视口右缘被裁掉（见 c-header.spec.ts）。
+ */
+export function tasksResponse(onlyId = '') {
+  const list = onlyId ? tasks.filter((t) => t.id === onlyId) : tasks
   const byProject = new Map()
-  for (const t of tasks) {
+  for (const t of list) {
     const key = t.project_path
     if (!byProject.has(key)) {
       byProject.set(key, {
