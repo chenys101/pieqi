@@ -99,6 +99,10 @@ function route(url) {
     // 新建任务页也订阅它，所以夹具必须回一个**形状正确**的响应，否则控制台会冒 404。
     if (rest === '/history') return { body: { events: [] } }
     if (rest === '/checks') return { body: { checks: [] } }
+    // 产物清单（ADR-0018）：前端「变更」Tab 的文件行会打开它。
+    // 夹具里没有产物 ⇒ 空数组；**必须实现**，否则 404 会被 layout 用例的
+    // 「控制台不得有错误」判据抓成整片红（看起来像页面回归，实际是夹具缺口）。
+    if (rest === '/artifacts') return { body: { artifacts: [] } }
     if (rest === '/evidence') return { body: { scope: 'task', at: t.updated_at } }
     if (rest === '/outcome')
       return {
