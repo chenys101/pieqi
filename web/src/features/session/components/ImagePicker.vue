@@ -155,7 +155,7 @@ defineExpose({ open })
 </script>
 
 <template>
-  <div class="flex flex-col gap-1.5">
+  <div class="flex min-w-0 flex-col gap-1.5">
     <!-- 缩略图条：只在有图时出现，避免空占位 -->
     <div v-if="modelValue.length > 0" class="flex flex-wrap items-center gap-1.5" data-testid="composer-images">
       <div
@@ -184,21 +184,41 @@ defineExpose({ open })
 
     <!-- 「+」按钮：与模型选择器同在 #lead 行。
          `@mousedown.prevent` 与 ModelPicker 同一个理由：选完图回来接着写，
-         焦点不该被这个按钮抢走（抢走之后敲的字不会进输入框）。 -->
-    <button
-      type="button"
-      class="pointer-events-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-muted transition-colors hover:bg-elevated hover:text-text focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
-      :disabled="disabled || full || loading"
-      :title="full ? `最多 ${MAX_IMAGES} 张` : '添加图片'"
-      aria-label="添加图片"
-      data-testid="composer-add-image"
-      @click="openFileDialog"
-      @mousedown.prevent
-    >
-      <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-        <path d="M12 5v14M5 12h14" />
-      </svg>
-    </button>
+         焦点不该被这个按钮抢走（抢走之后敲的字不会进输入框）。
+
+         粘贴提示与按钮**同一行**（不再竖排到按钮下面）：
+         竖排会把整个动作行撑高 16px 以上，并把右侧的模型选择器顶得与 + 不对齐
+         （PC 详情页实测是一行高矮错位、提示还被输入条下沿裁掉）。 -->
+    <div class="flex min-w-0 items-center gap-2">
+      <button
+        type="button"
+        class="pointer-events-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-muted transition-colors hover:bg-elevated hover:text-text focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
+        :disabled="disabled || full || loading"
+        :title="full ? `最多 ${MAX_IMAGES} 张` : '添加图片'"
+        aria-label="添加图片"
+        data-testid="composer-add-image"
+        @click="openFileDialog"
+        @mousedown.prevent
+      >
+        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      </button>
+
+      <!-- 粘贴截图的可发现性提示。
+           功能做在输入框的 paste 上（零点击、直接可用），但**零点击等于零发现**：
+           没有这行字，用户不会知道这里能贴图，只会去找"上传"。
+           只在桌面端出现（判据与理由见 showPasteHint），且不可点、不占位。
+           宽度不够时截断而不是换行 —— 它是一句辅助说明，不该改变动作行高度。 -->
+      <p
+        v-if="showPasteHint && modelValue.length === 0 && !error && !pasteError"
+        class="hidden min-w-0 truncate text-[11px] leading-none text-text-tertiary md:block"
+        title="截图后按 Ctrl+V 直接粘贴到输入框"
+        data-testid="composer-paste-hint"
+      >
+        Ctrl+V 可粘贴截图
+      </p>
+    </div>
 
     <!-- 隐藏的 file input：accept 与后端白名单一致，让系统选择器先过滤一道 -->
     <input
@@ -212,18 +232,6 @@ defineExpose({ open })
     />
 
     <p v-if="error" class="text-[11px] text-error" data-testid="composer-image-error">{{ error }}</p>
-
-    <!-- 粘贴截图的可发现性提示。
-         功能做在输入框的 paste 上（零点击、直接可用），但**零点击等于零发现**：
-         没有这行字，用户不会知道这里能贴图，只会去找"上传"。
-         只在桌面端出现（判据与理由见 showPasteHint），且不可点、不占位。 -->
-    <p
-      v-if="showPasteHint && modelValue.length === 0 && !error && !pasteError"
-      class="text-[11px] leading-tight text-muted"
-      data-testid="composer-paste-hint"
-    >
-      截图后按 Ctrl+V 直接粘贴到输入框
-    </p>
 
     <!-- 粘贴失败（类型不支持 / 超限）与选图失败共用一套文案样式，但**各自独立**：
          混成一个 ref 时，先报错的来源会被后到的成功操作顶掉或错误地复活（见 pasteError 注释）。 -->

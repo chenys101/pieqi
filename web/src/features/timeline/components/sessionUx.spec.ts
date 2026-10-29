@@ -222,6 +222,27 @@ describe('需求 2：中止入口唯一', () => {
     expect(badge!.getAttribute('title')).toContain('claude')
   })
 
+  it('桌面元信息：身份线索靠左成组，用量贴右（不再挤在标题下方一小段）', () => {
+    const header = mount(SessionHeader, {
+      task: {
+        ...baseTask,
+        agent: 'claude',
+        usage: { used: 42_000, size: 200_000, costUsd: 0.42, hasCost: true },
+      } as unknown as Task,
+      canCancel: true,
+    })
+    const meta = header.host.querySelector('[data-testid="session-meta"]')!
+    expect(meta, '缺少桌面元信息左组').not.toBeNull()
+    expect(meta.className).toContain('flex-1')
+    expect(meta.textContent).toContain('#t1')
+    expect(meta.textContent).toContain('Claude Code')
+    // 用量是左组的**兄弟**，并且自己贴右；顺序反了会变成"用量跟在项目名后面"
+    const usage = meta.nextElementSibling as HTMLElement | null
+    expect(usage, '用量没有渲染在元信息行').not.toBeNull()
+    expect(usage!.className).toContain('ml-auto')
+    expect(usage!.textContent).toContain('42.0k/200k')
+  })
+
   it('移动端：agent 不再占头部行，改为状态浮层里可见（输入条上另见 composer-agent）', async () => {
     const header = mount(SessionHeader, {
       task: { ...baseTask, agent: 'claude', status: 'running' } as unknown as Task,

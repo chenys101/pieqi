@@ -1,6 +1,6 @@
 {
   "agents@desktop": {
-    "domNodes": 208,
+    "domNodes": 209,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -30,7 +30,7 @@
     }
   },
   "agents@mobile": {
-    "domNodes": 186,
+    "domNodes": 187,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -54,7 +54,7 @@
     }
   },
   "agents@tablet": {
-    "domNodes": 208,
+    "domNodes": 209,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -84,7 +84,7 @@
     }
   },
   "approval@desktop": {
-    "domNodes": 100,
+    "domNodes": 101,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -117,7 +117,7 @@
     }
   },
   "approval@mobile": {
-    "domNodes": 78,
+    "domNodes": 79,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -144,7 +144,7 @@
     }
   },
   "approval@tablet": {
-    "domNodes": 100,
+    "domNodes": 101,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -177,7 +177,7 @@
     }
   },
   "dashboard@desktop": {
-    "domNodes": 142,
+    "domNodes": 143,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -207,7 +207,7 @@
     }
   },
   "dashboard@mobile": {
-    "domNodes": 120,
+    "domNodes": 121,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -231,7 +231,7 @@
     }
   },
   "dashboard@tablet": {
-    "domNodes": 142,
+    "domNodes": 143,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -261,7 +261,7 @@
     }
   },
   "detail@desktop": {
-    "domNodes": 198,
+    "domNodes": 202,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -315,7 +315,7 @@
     }
   },
   "detail@mobile": {
-    "domNodes": 170,
+    "domNodes": 174,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -363,7 +363,7 @@
     }
   },
   "detail@tablet": {
-    "domNodes": 192,
+    "domNodes": 196,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -417,7 +417,7 @@
     }
   },
   "newtask@desktop": {
-    "domNodes": 131,
+    "domNodes": 133,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -425,19 +425,19 @@
       "sessionTimeline": null,
       "composerBar": {
         "w": 1149,
-        "h": 188
+        "h": 176
       },
       "composerActions": {
         "w": 1115,
-        "h": 62
+        "h": 50
       },
       "composerInner": {
         "w": 1117,
-        "h": 167
+        "h": 155
       },
       "composerFrame": {
         "w": 1117,
-        "h": 147
+        "h": 135
       },
       "jumpLatest": null,
       "loadOlderTurns": null,
@@ -465,7 +465,7 @@
     }
   },
   "newtask@mobile": {
-    "domNodes": 103,
+    "domNodes": 105,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -473,19 +473,19 @@
       "sessionTimeline": null,
       "composerBar": {
         "w": 365,
-        "h": 230
+        "h": 176
       },
       "composerActions": {
         "w": 339,
-        "h": 104
+        "h": 50
       },
       "composerInner": {
         "w": 341,
-        "h": 209
+        "h": 155
       },
       "composerFrame": {
         "w": 341,
-        "h": 189
+        "h": 135
       },
       "jumpLatest": null,
       "loadOlderTurns": null,
@@ -507,7 +507,7 @@
     }
   },
   "newtask@tablet": {
-    "domNodes": 125,
+    "domNodes": 127,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -515,19 +515,19 @@
       "sessionTimeline": null,
       "composerBar": {
         "w": 543,
-        "h": 188
+        "h": 176
       },
       "composerActions": {
         "w": 509,
-        "h": 62
+        "h": 50
       },
       "composerInner": {
         "w": 511,
-        "h": 167
+        "h": 155
       },
       "composerFrame": {
         "w": 511,
-        "h": 147
+        "h": 135
       },
       "jumpLatest": null,
       "loadOlderTurns": null,
@@ -555,7 +555,7 @@
     }
   },
   "settings@desktop": {
-    "domNodes": 234,
+    "domNodes": 242,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -585,7 +585,7 @@
     }
   },
   "settings@mobile": {
-    "domNodes": 212,
+    "domNodes": 220,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,
@@ -609,7 +609,7 @@
     }
   },
   "settings@tablet": {
-    "domNodes": 234,
+    "domNodes": 242,
     "lcpMs": null,
     "cls": 0,
     "hOverflow": 0,

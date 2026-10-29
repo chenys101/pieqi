@@ -71,6 +71,8 @@ const agentLabel = computed(() => {
   if (!id) return ''
   return agentStore.byId(id)?.name || id
 })
+/** agent 徽标里的首字母：与输入条上的 agent 胶囊同一套识别方式 */
+const agentInitial = computed(() => (agentLabel.value || '').slice(0, 1).toUpperCase())
 /** 悬停说明：业务名 + 传输层，用来区分"显示名相同但通道不同"的情形 */
 const agentTitle = computed(() => {
   const id = props.task.agent
@@ -175,7 +177,7 @@ function goBack() {
           </svg>
         </button>
 
-        <h1 class="min-w-0 flex-1 truncate text-sm font-semibold" :title="task.prompt">
+        <h1 class="min-w-0 flex-1 truncate text-sm font-semibold leading-6 md:text-[15px]" :title="task.prompt">
           {{ task.title }}
         </h1>
 
@@ -253,36 +255,64 @@ function goBack() {
           </button>
         </template>
 
-        <!-- ── 桌面 / 平板：原头部（状态徽章 + 反馈/删除） ─────────────────── -->
+        <!-- ── 桌面 / 平板：原头部（状态徽章 + 反馈/删除） ───────────────────
+             状态与操作分成两组：状态是你正在看的「事实」，按钮是「动作」。
+             中间一像素竖线只是分组，不加粗、不抢标题的层级。 -->
         <template v-else>
-          <StatusBadge :status="task.status" />
-          <Button v-if="showFeedback" variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
-          <Button variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
+          <div class="flex shrink-0 items-center gap-2">
+            <StatusBadge :status="task.status" />
+            <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
+            <Button v-if="showFeedback" variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
+            <Button variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
+          </div>
         </template>
       </div>
 
       <!-- 移动端不再有 agent 行：agent 已下移到输入条（见 InterveneInput #lead） -->
 
-      <!-- 元信息行：移动端只在有 error 时出现；桌面展示 #id / agent / 项目 / 时间 / 用量 -->
-      <div v-if="!compact || task.error" class="mt-1 flex items-center gap-2 pl-8 text-xs text-muted">
+      <!-- 元信息行：移动端只在有 error 时出现；桌面展示 #id / agent / 项目 / 时间 / 用量。
+           桌面这一行**两端有落点**：身份线索靠左，用量贴右 —— 否则在 1440/1920 宽的
+           详情页上，整行信息挤在标题下方一小段、右侧留出大片空白（实测的观感就是
+           "元信息和标题各说各话"）。用量与左侧信息之间用一条极弱竖线分组。 -->
+      <div v-if="!compact || task.error" class="mt-1 flex min-w-0 items-center gap-2 pl-8 text-xs text-muted">
         <template v-if="!compact">
-          <span class="font-mono">#{{ shortId(task.id) }}</span>
-          <!-- agent：本任务跑在哪个 agent 上（与项目名同级、同一行）。
-               放在项目名**之前**：换了 agent 往往比换了项目更能解释"行为为什么不一样"。 -->
-          <span
-            v-if="agentLabel"
-            class="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[11px] font-medium text-text"
-            :title="agentTitle"
-            data-testid="session-agent"
-          >
-            {{ agentLabel }}
-          </span>
-          <span class="truncate" :title="task.projectPath">{{ task.project }}</span>
-          <span>{{ timeAgo(task.updatedAt || task.createdAt) }}前</span>
+          <div class="flex min-w-0 flex-1 items-center gap-1.5" data-testid="session-meta">
+            <span
+              class="shrink-0 font-mono text-[11px] text-text-tertiary"
+              :title="`任务 ID：${task.id}`"
+            >#{{ shortId(task.id) }}</span>
+            <span class="shrink-0 text-[10px] text-text-tertiary/50" aria-hidden="true">·</span>
+            <!-- agent：本任务跑在哪个 agent 上（与项目名同级、同一行）。
+                 放在项目名**之前**：换了 agent 往往比换了项目更能解释"行为为什么不一样"。 -->
+            <span
+              v-if="agentLabel"
+              class="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-xs)] border border-border/70 bg-surface px-1.5 py-0.5 text-[10.5px] font-medium text-text-secondary"
+              :title="agentTitle"
+              data-testid="session-agent"
+            >
+              <span
+                class="grid h-3 w-3 place-items-center rounded-[2px] bg-accent/10 text-[7px] font-bold text-accent"
+                aria-hidden="true"
+              >{{ agentInitial }}</span>
+              {{ agentLabel }}
+            </span>
+            <span v-if="agentLabel" class="shrink-0 text-[10px] text-text-tertiary/50" aria-hidden="true">·</span>
+            <span class="min-w-0 truncate" :title="task.projectPath">{{ task.project }}</span>
+            <span class="shrink-0 text-[10px] text-text-tertiary/50" aria-hidden="true">·</span>
+            <span class="shrink-0 tabular-nums">{{ timeAgo(task.updatedAt || task.createdAt) }}前</span>
+          </div>
+          <!-- 桌面：用量贴右，与左侧身份信息形成一条完整的信息带 -->
+          <UsageBadge
+            v-if="task.usage"
+            :usage="task.usage"
+            class="ml-auto shrink-0 border-l border-border/70 pl-3"
+          />
         </template>
-        <!-- 桌面：用量跟在时间后面（同一行，同一层级的信息） -->
-        <UsageBadge v-if="!compact && task.usage" :usage="task.usage" />
-        <span v-if="task.error" class="min-w-0 truncate text-error" :title="task.error">{{ task.error }}</span>
+        <span
+          v-if="task.error"
+          class="min-w-0 flex-1 truncate text-error md:max-w-[42%] md:flex-none"
+          :title="task.error"
+        >{{ task.error }}</span>
       </div>
     </ContentColumn>
 

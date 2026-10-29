@@ -5,6 +5,7 @@
 // 而不是只断言字符串里出现了 taskId。
 import { describe, expect, it } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
+import { createPinia } from 'pinia'
 import MarkdownBody from './components/MarkdownBody.vue'
 import { useImageViewer } from '@/composables/useImageViewer'
 import {
@@ -119,6 +120,9 @@ describe('MarkdownBody：结论正文里的本地图片', () => {
     const host = document.createElement('div')
     document.body.appendChild(host)
     const app = createApp({ render: () => h(MarkdownBody, props) })
+    // MarkdownBody 现在还要读 artifactsStore（本地产物链接）——
+    // 不装 pinia 的话 setup 会直接抛 getActivePinia，整棵正文都渲染不出来。
+    app.use(createPinia())
     app.mount(host)
     return { host, app }
   }

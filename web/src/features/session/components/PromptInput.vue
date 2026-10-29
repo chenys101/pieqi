@@ -285,14 +285,22 @@ watch(matches, (m) => {
                · 右沿 = 行的 px-3(12px)，行宽 = 框宽。
                · 下沿 = 行的 pb-3(12px)（行在流里，不再有"溢出被吃掉"的问题）。
              改行内边距或按钮尺寸后仍要**重新量**（同 ui-change-verification 的纪律）。 -->
+      <!-- 动作行分两组，而不是把插槽内容平铺后 `justify-between`。
+           ⚠️ 插槽渲染出来的是**多个兄弟节点**：`#lead` 里有「加图 / 模型」两个根节点，
+           直接平铺时 justify-between 会把它们当成三个独立端点，模型选择器被推到
+           整行中间、与加图按钮之间空出几百像素（PC 详情页实测就是这样）。
+           分组后只有「左组 / 右组」两个端点：左组内部按控件自然排列，右组固定贴右。 -->
       <div
         v-if="hasFooter"
-        class="flex w-full min-w-0 flex-wrap items-center gap-1.5 px-3 pb-3 pt-0.5"
-        :class="hasLead ? 'justify-between' : 'justify-end'"
+        class="flex w-full min-w-0 items-center gap-2 px-3 pb-3 pt-0.5"
         data-testid="composer-actions"
       >
-        <slot name="lead" />
-        <slot name="actions" />
+        <div class="flex min-w-0 flex-1 items-center gap-1.5" data-testid="composer-actions-lead">
+          <slot name="lead" />
+        </div>
+        <div v-if="hasActions" class="ml-auto flex shrink-0 items-center gap-1.5" data-testid="composer-actions-end">
+          <slot name="actions" />
+        </div>
       </div>
     </div>
     <!-- 斜杠补全菜单（贴输入框上方） -->

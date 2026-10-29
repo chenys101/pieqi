@@ -372,52 +372,6 @@ async function primeStores(to: { query: Record<string, unknown> }): Promise<void
  */
 export const fixtureRouter = createRouter({
   history: createWebHistory(),
-  /**
-   * `?project=<绝对路径>` 归一化为 `<path>?project=<encodeURIComponent(路径)>`
-   * —— 与生产 `src/app/router.ts` 的 `/tasks/new` 完全一致（那边也是路由用
-   * `encodeURIComponent` 生成链接、再用 `route.query.project` 原样传给组件）。
-   *
-   * 为什么夹具要自己归一化：夹具 Shell 的 div 包在 RouterView 外面，路由级 props
-   * 传不到它；于是 `initialProjectPath` 由 Shell 从 `location` 读 `project` 查询参数
-   * （见 newtask 分支）。若不归一化，直接手动打开
-   * `/tasks/new?project=D:\code\go\pieqi` 时浏览器只会把 `\` 当字符，
-   * Shell 读到的值与页面的 `route.query` 形态就分叉了 —— 夹具于是不再 equals 生产。
-   */
-  beforeEach: (to) => {
-    const raw = location.search
-    // `/__fixture?to=<路径>` 服务端 302 到 `<路径>`（见 mock-api 的同名分支）。
-    // 为什么要有它：夹具路由表**故意没有** `/tasks/new` 这样的"真实页面路径"
-    // （见上面的说明），可"从详情页点入口 → 落到新建页"这条链必须**真的导航**才测得出来。
-    // mock 的 `to=` 查询参数会被浏览器 url 编码成一个值，起点是 `/` —— 在这里还原成
-    // 夹具页要的 `mode=` 查询参数。`to` 里可能带 `&`，所以整段取出、不再按 & 拆。
-    if (location.pathname === '/__fixture') {
-      const i = raw.indexOf('to=')
-      if (i >= 0) return `/__e2e/detail${raw.slice(i + 2)}`
-      return '/__e2e/detail'
-    }
-    // 直接打开（或 e2e 入口的兜底）根路径：落到夹具页
-    if (location.pathname === '/') return `/__e2e/detail${raw}`
-    // `?mode=sessionpage` → 带 id 的独立路由（见路由表里那条的说明），
-    // 这样 SessionPage 的 `route.params.id` 才是真值。
-    // ⚠️ 正在去那条路由的路上（pathname 已经是 `/__e2e/detail/<id>/sessionpage`）时**不要**再改写，
-    // 否则每一轮都重定向一次、永远到不了（实测：页面停在"任务不存在"，请求打到了
-    // 一个不存在的 id）。
-    const onSessionPage = /^\/__e2e\/detail\/[^/]+\/sessionpage$/.test(location.pathname)
-    if (!onSessionPage && location.pathname === '/__e2e/detail' && /(^|&)mode=sessionpage(&|$)/.test(raw.slice(1))) {
-      // 去掉 mode=sessionpage 这个 URLSearchParams（保留其余参数，如 project）
-      const rest = new URLSearchParams(raw)
-      rest.delete('mode')
-      const qs = rest.toString()
-      return `/__e2e/detail/${LONG_.id}/sessionpage${qs ? `?${qs}` : ''}`
-    }
-    const i = raw.indexOf('project=')
-    if (i < 0) return true
-    const v = decodeURIComponent(raw.slice(i + 'project='.length).split('&')[0])
-    const canonical = `${to.path}?project=${encodeURIComponent(v)}`
-    // 已经是规范形态（raw 就是规范化后的查询串）→ 放行，避免无限重定向
-    if (raw === `?${canonical.slice(canonical.indexOf('?') + 1)}`) return true
-    return canonical
-  },
   routes: [
     /**
      * **整页会话详情**的专用入口：`/__e2e/detail/<id>/sessionpage`。
@@ -470,6 +424,64 @@ export const fixtureRouter = createRouter({
     // 详情页的"删除后回仪表盘"靠它落到一个能渲染的页面
     { path: '/dashboard', component: Shell, beforeEnter: () => true },
   ],
+})
+
+/**
+ * `?project=<绝对路径>` 归一化为 `<path>?project=<encodeURIComponent(路径)>`
+ * —— 与生产 `src/app/router.ts` 的 `/tasks/new` 完全一致（那边也是路由用
+ * `encodeURIComponent` 生成链接、再用 `route.query.project` 原样传给组件）。
+ *
+ * 为什么夹具要自己归一化：夹具 Shell 的 div 包在 RouterView 外面，路由级 props
+ * 传不到它；于是 `initialProjectPath` 由 Shell 从 `location` 读 `project` 查询参数
+ * （见 newtask 分支）。若不归一化，直接手动打开
+ * `/tasks/new?project=D:\code\go\pieqi` 时浏览器只会把 `\` 当字符，
+ * Shell 读到的值与页面的 `route.query` 形态就分叉了 —— 夹具于是不再 equals 生产。
+ *
+ * ⚠️ 必须用 `fixtureRouter.beforeEach(...)` 注册，不能写成 `createRouter({ beforeEach })`：
+ * 后者不是 RouterOptions 的字段，运行期会被静默忽略、类型检查才报错。它被忽略时
+ * `/__e2e/detail?mode=sessionpage` 不会改写成带 id 的路径，SessionPage 拿不到
+ * `route.params.id`，页面停在"任务不存在"—— 而且**一条错都不报**。
+ */
+fixtureRouter.beforeEach((to) => {
+  const raw = location.search
+  // `/__fixture?to=<路径>` 服务端 302 到 `<路径>`（见 mock-api 的同名分支）。
+  // 为什么要有它：夹具路由表**故意没有** `/tasks/new` 这样的"真实页面路径"
+  // （见上面的说明），可"从详情页点入口 → 落到新建页"这条链必须**真的导航**才测得出来。
+  // mock 的 `to=` 查询参数会被浏览器 url 编码成一个值，起点是 `/` —— 在这里还原成
+  // 夹具页要的 `mode=` 查询参数。`to` 里可能带 `&`，所以整段取出、不再按 & 拆。
+  if (location.pathname === '/__fixture') {
+    const i = raw.indexOf('to=')
+    if (i >= 0) return `/__e2e/detail${raw.slice(i + 2)}`
+    return '/__e2e/detail'
+  }
+  // 直接打开（或 e2e 入口的兜底）根路径：落到夹具页
+  if (location.pathname === '/') return `/__e2e/detail${raw}`
+  // `?mode=sessionpage` → 带 id 的独立路由（见路由表里那条的说明），
+  // 这样 SessionPage 的 `route.params.id` 才是真值。
+  // ⚠️ 正在去那条路由的路上（pathname 已经是 `/__e2e/detail/<id>/sessionpage`）时**不要**再改写，
+  // 否则每一轮都重定向一次、永远到不了（实测：页面停在"任务不存在"，请求打到了
+  // 一个不存在的 id）。
+  const onSessionPage = /^\/__e2e\/detail\/[^/]+\/sessionpage$/.test(location.pathname)
+  if (!onSessionPage && location.pathname === '/__e2e/detail' && /(^|&)mode=sessionpage(&|$)/.test(raw.slice(1))) {
+    // 去掉 mode=sessionpage 这个 URLSearchParams（保留其余参数，如 project）
+    const rest = new URLSearchParams(raw)
+    rest.delete('mode')
+    const qs = rest.toString()
+    return `/__e2e/detail/${LONG_.id}/sessionpage${qs ? `?${qs}` : ''}`
+  }
+  const params = new URLSearchParams(raw)
+  if (!params.has('project')) return true
+  // ⚠️ 必须保留其余查询参数（例如 `mode=newtask`）。早先这里用字符串拼出
+  // `${to.path}?project=…`，会把 `mode` 一起丢掉 —— 直接打开
+  // `/__e2e/detail?mode=newtask&project=…` 会被改写成缺失 mode 的地址，
+  // 页面掉回默认的 session 模式（表现为「来自当前任务」徽标不出现）。
+  // URLSearchParams 负责一次解码 + 一次编码，正好等于生产路由的规范化口径。
+  const v = params.get('project') ?? ''
+  params.set('project', v)
+  const qs = params.toString()
+  // 已经是规范形态 → 放行，避免无限重定向
+  if (raw.slice(1) === qs) return true
+  return `${to.path}?${qs}`
 })
 
 /**

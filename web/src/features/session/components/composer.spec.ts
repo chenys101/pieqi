@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type Component } from 'vue'
+import { createApp, defineComponent, h, nextTick, type App, type Component } from 'vue'
 import { createPinia } from 'pinia'
 import PromptInput from './PromptInput.vue'
 import InterveneInput from './InterveneInput.vue'
@@ -19,6 +19,17 @@ vi.mock('@/stores/app', () => ({
   }),
 }))
 
+/**
+ * 已挂载的 app：afterEach 必须 **unmount** 再清 DOM。
+ *
+ * 只把 body.innerHTML 清空的话，Vue 实例仍然活着；ModelPicker 的 Teleport
+ * 弹层随后的异步更新会去 patch 已经不在文档里的节点，抛
+ * `Cannot read properties of null (reading 'insertBefore')`。
+ * 它不会让断言变红（用例本身已跑完），但 vitest 会把它记成 unhandled error，
+ * 整个文件最终仍以 exit 1 结束 —— 绿色结果被一条不报错来源的噪声拖红。
+ */
+const mounted: App[] = []
+
 /** 每个挂载实例一份独立 pinia：跨用例共享会让 toast 断言互相污染 */
 function mount(comp: Component, props: Record<string, unknown> = {}) {
   const host = document.createElement('div')
@@ -30,10 +41,12 @@ function mount(comp: Component, props: Record<string, unknown> = {}) {
   const pinia = createPinia()
   app.use(pinia)
   app.mount(host)
+  mounted.push(app)
   return { host, app, pinia }
 }
 
 afterEach(() => {
+  for (const app of mounted.splice(0)) app.unmount()
   document.body.innerHTML = ''
 })
 
@@ -245,9 +258,15 @@ describe('InterveneInput', () => {
   })
 
   it('选择器在框内动作行、与发送按钮同一行（#lead 插槽），且在 textarea **下方**', async () => {
-  const { host } = mount(InterveneInput, { canCancel: false, canSend: true, models: MODELS })
+  const { host } = mount(InterveneInput, {
+    canCancel: false,
+    canSend: true,
+    canAttachImages: true,
+    models: MODELS,
+  })
   const trigger = host.querySelector('[data-testid="model-picker-trigger"]')!
   const send = host.querySelector('button[aria-label="发送"]')!
+  const add = host.querySelector('[data-testid="composer-add-image"]')!
   // 结构判据：与发送按钮共用 PromptInput 的动作行
   expect(trigger.closest('[data-testid="composer-actions"]')).toBe(send.closest('[data-testid="composer-actions"]'))
   // ★ "文字被压住"的结构性免疫：动作行与 textarea 是同一框里的**兄弟节点**（后者在前），
@@ -257,8 +276,20 @@ describe('InterveneInput', () => {
   expect(row.className).not.toContain('absolute')
   const kids = [...row.parentElement!.children]
   expect(kids.indexOf(ta(host))).toBeLessThan(kids.indexOf(row))
-  // 有 lead 时该行必须两端对齐，否则模型选择器会被 justify-end 推到右边和发送按钮挤一起
-  expect(row.className).toContain('justify-between')
+  /**
+   * 动作行必须分成「左组 / 右组」两段，而不是把插槽里的多个根节点平铺后
+   * `justify-between` —— 后者会给每个节点都分配等分空隙，模型选择器被顶到
+   * 整行中间（PC 详情页实测：+ 在最左、选择器在中线、发送在最右）。
+   */
+  const lead = row.querySelector('[data-testid="composer-actions-lead"]')!
+  const end = row.querySelector('[data-testid="composer-actions-end"]')!
+  expect(row.className).not.toContain('justify-between')
+  expect(lead.contains(add), '加图按钮不在左侧控件组里').toBe(true)
+  expect(lead.contains(trigger), '模型选择器不在左侧控件组里').toBe(true)
+  expect(end.contains(send), '发送按钮不在右侧动作组里').toBe(true)
+  // 左组吃剩余宽度、右组固定贴右：模型选择器才会紧跟在 + 后面，而不是漂到中间
+  expect(lead.className).toContain('flex-1')
+  expect(end.className).toContain('shrink-0')
   // 触发器要自己把事件打开（动作行本身不铺满，但插槽内容必须可点）
   expect(trigger.closest('[data-testid="model-picker"]')!.className).toContain('pointer-events-auto')
 })
@@ -526,23 +557,34 @@ describe('动作行在框内、textarea 下方（PC 与移动端同一套 DOM）
     expect(row.className).toContain('px-3')
     expect(row.className).toContain('pb-3')
     expect(row.className).toContain('w-full')
-    // 行内换行而不是压缩：窄屏下宁可让控件换到下一行，也不许把模型名挤没
-    expect(row.className).toContain('flex-wrap')
+    // 左组吃剩余宽度、右组只占内容宽：控件靠左自然排列，发送贴右。
+    // 不再靠 flex-wrap 兜底 —— 换行会让动作行变高、模型选择器与发送错位。
+    expect(row.className).not.toContain('flex-wrap')
+    const lead = host.querySelector('[data-testid="composer-actions-lead"]')!
+    const end = host.querySelector('[data-testid="composer-actions-end"]')!
+    expect(lead.className).toContain('flex-1')
+    expect(end.className).toContain('shrink-0')
   })
 
-  it('只有 #lead（模型选择器）时同样两端对齐，且与动作按钮同处一行', () => {
+  it('只有 #lead（模型选择器）时也分成左右两组，且与动作按钮同处一行', () => {
     const { host } = mount(WithLead)
     const row = host.querySelector('[data-testid="composer-actions"]')!
-    expect(row.className).toContain('justify-between')
+    const leadGroup = host.querySelector('[data-testid="composer-actions-lead"]')!
+    const endGroup = host.querySelector('[data-testid="composer-actions-end"]')!
     const lead = host.querySelector('[data-testid="lead-btn"]')!
-    expect(lead.parentElement).toBe(row)
+    const send = host.querySelector('button[aria-label="发送"]')!
+    expect(lead.parentElement).toBe(leadGroup)
+    expect(send.parentElement).toBe(endGroup)
     expect(row.children.length).toBe(2)
+    expect(leadGroup.contains(lead)).toBe(true)
+    expect(endGroup.contains(send)).toBe(true)
   })
 
   it('详情页发送按钮同样在框内动作行（与新建任务页一致，不按断点分两套）', () => {
     const { host } = mount(InterveneInput, { canCancel: false, canSend: true })
     const send = host.querySelector('button[aria-label="发送"]')!
-    expect(send.parentElement!.getAttribute('data-testid')).toBe('composer-actions')
+    expect(send.closest('[data-testid="composer-actions-end"]')).not.toBeNull()
+    expect(send.closest('[data-testid="composer-actions"]')).not.toBeNull()
     expect(send.querySelector('svg')).not.toBeNull()
   })
 })
@@ -713,6 +755,17 @@ describe('粘贴提示的可发现性', () => {
     stubPointer(true)
     const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
     expect(host.querySelector('[data-testid="composer-paste-hint"]')).not.toBeNull()
+  })
+
+  it('提示与「+」同一行：不竖排到按钮下面（会撑高动作行、把模型选择器顶歪）', () => {
+    stubPointer(true)
+    const { host } = mount(InterveneInput, { canCancel: false, canSend: true, canAttachImages: true })
+    const add = host.querySelector('[data-testid="composer-add-image"]')!
+    const hint = host.querySelector('[data-testid="composer-paste-hint"]')!
+    expect(hint.parentElement).toBe(add.parentElement)
+    // 宽度不够时截断而不是换行 —— 辅助说明不该改变整行高度
+    expect(hint.className).toContain('truncate')
+    expect(hint.className).toContain('md:block')
   })
 
   it('触屏端不显示该提示（手机上没有这条路，提示只是噪音）', () => {
