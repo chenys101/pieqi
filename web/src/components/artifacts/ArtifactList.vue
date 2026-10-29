@@ -2,8 +2,8 @@
 // ArtifactList：本轮 / 全部产物的文件行（文件名 + 打开/查看；长路径不进主文案）。
 import { computed, ref } from 'vue'
 import type { ArtifactDto } from '@/types/api'
-import { baseNameOf, groupByFolder, tailDirLabel } from '../fileGroups'
-import { artifactOpenLabel, artifactOpensInApp } from '../filePreview'
+import { baseNameOf, groupByFolder, tailDirLabel } from '@/utils/fileGroups'
+import { artifactOpenLabel, artifactOpensInApp } from '@/utils/filePreview'
 
 const props = defineProps<{
   items: ArtifactDto[]

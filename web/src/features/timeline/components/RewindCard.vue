@@ -1,6 +1,9 @@
 <script setup lang="ts">
 // RewindCard：时间线里的 rewind 事件卡片（Timeline 永不删除，回退以事件留痕）。
 // 展示「回退到 Turn #N 之前」+ 恢复的文件数；可展开查看恢复路径清单。
+//
+// 它只渲染**事件**、不触发回退动作（那是 Feedback 面板的事），所以属于 timeline 域：
+// 原先放在 features/feedback 里，被 TimelineEventView 反向 import，是 features 互引的一处。
 import { computed, ref } from 'vue'
 import type { AgentEvent } from '@/types/event'
 

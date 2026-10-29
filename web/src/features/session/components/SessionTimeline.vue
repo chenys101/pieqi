@@ -33,7 +33,7 @@ import ThinkingBadge from '@/features/timeline/components/ThinkingBadge.vue'
 import TextBubble from '@/features/timeline/components/TextBubble.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import TurnRail from './TurnRail.vue'
-import { ArtifactsBar, ArtifactList } from '@/features/feedback'
+import ArtifactList from '@/components/artifacts/ArtifactList.vue'
 
 const props = defineProps<{
   taskId: string
@@ -50,8 +50,6 @@ const fb = useFeedbackPanelStore()
 const events = computed(() => sessionStore.events(props.taskId))
 const task = computed(() => taskStore.byId(props.taskId))
 const bundle = computed(() => bundleStore.bundle(props.taskId))
-const allArtifacts = computed(() => artifactsStore.list(props.taskId))
-
 function turnArtifacts(turn: number): ArtifactDto[] {
   return artifactsStore.forTurn(props.taskId, turn)
 }
@@ -525,12 +523,8 @@ function jumpToLatest() {
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col">
-    <!-- 全部产物：会话顶折叠条（默认收起，不占路径宽度） -->
-    <ArtifactsBar
-      :items="allArtifacts"
-      @open="onArtifactOpen"
-      @view="onArtifactOpen"
-    />
+    <!-- 产物不再在会话顶单列一条「全部产物」（ADR-0018 修订）：清单唯一入口是「变更」Tab
+         的文件行，这里只保留**每轮的「本轮产物」**（它描述的是这一轮改了什么，不是另一份清单）。 -->
     <div class="flex min-h-0 flex-1">
     <!-- 左侧快速跳转：≥2 个 Turn 才出现（移动端由 TurnRail 自身隐藏） -->
     <TurnRail

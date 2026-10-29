@@ -10,7 +10,7 @@ import Input from '@/components/ui/Input.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useNotificationStore } from '@/stores/notification'
 import { useArtifactsStore } from '@/stores/artifacts'
-import { artifactOpenLabel, artifactOpensInApp } from '../filePreview'
+import { artifactOpenLabel, artifactOpensInApp } from '@/utils/filePreview'
 
 const props = defineProps<{
   taskId: string

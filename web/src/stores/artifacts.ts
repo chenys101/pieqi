@@ -5,7 +5,7 @@
 import { defineStore } from 'pinia'
 import { getTaskArtifacts } from '@/services/api/feedback'
 import type { ArtifactDto } from '@/types/api'
-import { artifactOpensInApp } from '@/features/feedback/filePreview'
+import { artifactOpensInApp } from '@/utils/filePreview'
 
 export interface ArtifactViewing {
   taskId: string

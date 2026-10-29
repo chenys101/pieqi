@@ -4,7 +4,7 @@
 // html/image → 改成服务端算好的 open URL；md/code/text/pdf → `#pieqi-artifact=<path>`，
 // 由 MarkdownBody 点击委托打开只读 viewer（不做编辑）。
 import type { ArtifactDto } from '@/types/api'
-import { artifactOpensInApp } from '@/features/feedback/filePreview'
+import { artifactOpensInApp } from '@/utils/filePreview'
 import { localImageTarget } from './markdownImages'
 
 const FENCE_RE = /^\s{0,3}(```|~~~)/

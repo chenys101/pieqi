@@ -6,7 +6,7 @@ import { computed, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { getTaskFileText, taskFileURL } from '@/services/api/feedback'
-import { previewKind } from '../filePreview'
+import { previewKind } from '@/utils/filePreview'
 import Spinner from '@/components/ui/Spinner.vue'
 
 const props = defineProps<{ taskId: string; path: string }>()

@@ -3,8 +3,9 @@
 - 状态：**已采纳**（2026-10-24，前端呈现于 2026-10-25 修订）
 - 影响面：`internal/api/artifacts.go`（新端点）、`internal/core/preview.go`（`EnsureStatic`）、
   `internal/api/file_preview.go`（CSP sandbox）、
-  `web/src/features/feedback/{FeedbackPanel,TurnCard}.vue` + `fileGroups.ts`（产物入口与分组，
-  取代原先 `PreviewSection.vue` 里的独立产物列表）
+  `web/src/features/feedback/{FeedbackPanel,TurnCard}.vue`（产物入口与分组，
+  取代原先 `PreviewSection.vue` 里的独立产物列表）、
+  `web/src/utils/{filePreview,fileGroups}.ts` + `web/src/components/artifacts/`（跨域共用，2026-10-29 下沉）
 
 ## 背景
 
@@ -63,6 +64,14 @@ ADR-0017 让静态产物可以**零进程**被 serve，但入口仍是 "preview"
 动辄几十个文件，平铺在手机上就是一条瀑布；用户要的是先看"改了哪几个目录"，再决定展开
 哪个。分组头带文件数与 +/- 合计，收起态因此自带"值不值得展开"的判据（与贴边条同一原则）。
 只有一个目录时不套分组头 —— 分组是为了收掉长列表，一组还能收起等于多点一次才看到内容。
+
+**第二处「不单列」**（2026-10-29）：会话时间线顶部曾有一条「全部产物 · N」折叠条，
+展开后又是一份完整清单 —— 与上面的判据冲突（同一批文件在时间线一份、变更 Tab 一份，
+条数/路径迟早对不上）。已删除；时间线只保留**每轮的「本轮产物」**（它回答"这一轮改了什么"，
+归属 Turn，不是全局清单的第二份）。全局清单的唯一入口仍是「变更」Tab 的文件行。
+
+配套的代码落点按"谁都要用"下沉，避免 `features` 互相 import：纯判定与分组在
+`web/src/utils/{filePreview,fileGroups}.ts`，列表组件在 `web/src/components/artifacts/`。
 
 ## 为什么"默认给访问权限"必须配 sandbox
 

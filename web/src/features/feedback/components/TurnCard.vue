@@ -7,8 +7,8 @@ import type { ArtifactDto, FileChangeDto, TurnInfoDto } from '@/types/api'
 import Button from '@/components/ui/Button.vue'
 import DiffView from './DiffView.vue'
 import FilePreview from './FilePreview.vue'
-import { previewKind } from '../filePreview'
-import { baseNameOf, groupByFolder } from '../fileGroups'
+import { previewKind } from '@/utils/filePreview'
+import { baseNameOf, groupByFolder } from '@/utils/fileGroups'
 
 const props = withDefaults(
   defineProps<{

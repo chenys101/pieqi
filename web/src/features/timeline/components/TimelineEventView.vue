@@ -10,7 +10,7 @@ import ThinkingBlock from './ThinkingBlock.vue'
 import ToolCard from './ToolCard.vue'
 import ToolResultCard from './ToolResultCard.vue'
 import EventImages from './EventImages.vue'
-import RewindCard from '@/features/feedback/components/RewindCard.vue'
+import RewindCard from './RewindCard.vue'
 import ModelSwitchNote from './ModelSwitchNote.vue'
 
 const props = defineProps<{ event: AgentEvent }>()

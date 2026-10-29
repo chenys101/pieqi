@@ -5,8 +5,8 @@
 import { computed } from 'vue'
 import Drawer from '@/components/ui/Drawer.vue'
 import FilePreview from './FilePreview.vue'
-import { baseNameOf } from '../fileGroups'
-import { previewKind } from '../filePreview'
+import { baseNameOf } from '@/utils/fileGroups'
+import { previewKind } from '@/utils/filePreview'
 
 const props = defineProps<{
   open: boolean
