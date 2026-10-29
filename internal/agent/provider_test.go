@@ -87,6 +87,24 @@ func TestOpenCodebuddyProviderRouting(t *testing.T) {
 	}
 }
 
+// TestOpenCursorProviderRouting 同 codebuddy：cursor 必须路由到 ACP，不能落到 ErrUnknownAgent。
+func TestOpenCursorProviderRouting(t *testing.T) {
+	setACPProvidersForTest(t, ACPProviderConfig{Agents: map[string]config.ACPConfig{
+		AgentCursor: {AgentType: "agent", SpawnCommand: []string{"no-such-cursor-agent-binary-xyz", "acp"}},
+	}})
+
+	_, err := Open(context.Background(), OpenParams{Agent: "cursor", Cwd: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected spawn error from cursor provider")
+	}
+	if errors.Is(err, ErrUnknownAgent) {
+		t.Fatal("Open(cursor) should route to ACP provider, got ErrUnknownAgent")
+	}
+	if !strings.Contains(err.Error(), "no-such-cursor-agent-binary-xyz") {
+		t.Fatalf("error should mention spawn command, got: %v", err)
+	}
+}
+
 // TestACPConfigForPerAgentDefault 钉住「兜底按 agent 区分」：provider 表里没有这个名字时，
 // qoder 落到 qodercli、dsh 落到 dsh、codebuddy 落到 codebuddy。曾经共用的一个兜底会让
 // 选了 dsh 的会话静默起 qodercli。
@@ -100,6 +118,12 @@ func TestACPConfigForPerAgentDefault(t *testing.T) {
 	}
 	if got := acpConfigFor(AgentCodebuddy).AgentType; got != "codebuddy" {
 		t.Fatalf("codebuddy 兜底 agent_type=%q want codebuddy", got)
+	}
+	if got := acpConfigFor(AgentCursor).AgentType; got != "agent" {
+		t.Fatalf("cursor 兜底 agent_type=%q want agent", got)
+	}
+	if got := acpConfigFor(AgentCursor).SpawnCommand; len(got) != 2 || got[0] != "agent" || got[1] != "acp" {
+		t.Fatalf("cursor DefaultSpawn = %v, want [agent acp]", got)
 	}
 
 	// 显式配置优先于兜底。
@@ -156,12 +180,15 @@ func TestACPProviderConfigFromRuntime(t *testing.T) {
 		t.Fatalf("默认缺 qoder: %+v", got.Agents)
 	}
 
-	// 显式启用三个 ACP agent。
+	// 显式启用四个 ACP agent。
 	got = ACPProviderConfigFromRuntime(AgentRuntimeConfig{
-		Enabled: []string{AgentClaude, AgentQoder, AgentDsh, AgentCodebuddy},
+		Enabled: []string{AgentClaude, AgentQoder, AgentDsh, AgentCodebuddy, AgentCursor},
 	})
-	if len(got.Agents) != 3 {
-		t.Fatalf("agents=%+v, want qoder + dsh + codebuddy", got.Agents)
+	if len(got.Agents) != 4 {
+		t.Fatalf("agents=%+v, want qoder + dsh + codebuddy + cursor", got.Agents)
+	}
+	if _, ok := got.Agents[AgentCursor]; !ok {
+		t.Fatalf("缺 cursor: %+v", got.Agents)
 	}
 	// claude 不是 ACP，绝不能被注册成 ACP provider。
 	if _, ok := got.Agents[AgentClaude]; ok {
@@ -335,6 +362,42 @@ func TestAvailableAgents(t *testing.T) {
 		for _, a := range AvailableAgents(AgentRuntimeConfig{}) {
 			if a.Name == AgentCodebuddy {
 				t.Fatalf("OptIn 的 codebuddy 出现在默认目录里")
+			}
+		}
+	})
+
+	t.Run("cursor 需显式启用", func(t *testing.T) {
+		got := AvailableAgents(AgentRuntimeConfig{
+			Enabled: []string{AgentClaude, AgentQoder, AgentCursor},
+		})
+		if len(got) != 3 {
+			t.Fatalf("agents=%+v, want 3 个", got)
+		}
+		cur := got[2]
+		if cur.Name != AgentCursor || cur.DisplayName != "Cursor Agent" {
+			t.Fatalf("末位 = %+v, want cursor / Cursor Agent", cur)
+		}
+		if cur.Transport != "ACP" {
+			t.Fatalf("cursor transport = %q, want ACP", cur.Transport)
+		}
+		if !cur.ImagePrompt {
+			t.Error("cursor ImagePrompt=false：initialize 已声明 image=true")
+		}
+		if !cur.SessionAlways {
+			t.Error("cursor SessionAlways=false：loadSession=true")
+		}
+		if !cur.ModelSelectable {
+			t.Error("cursor ModelSelectable=false：session/new 下发 configOptions")
+		}
+		if cur.GoalMode != "" || cur.GoalStateVisible {
+			t.Errorf("cursor goal=(%q,%v)，无实测证据时应留空/false", cur.GoalMode, cur.GoalStateVisible)
+		}
+	})
+
+	t.Run("cursor 默认不启用", func(t *testing.T) {
+		for _, a := range AvailableAgents(AgentRuntimeConfig{}) {
+			if a.Name == AgentCursor {
+				t.Fatalf("OptIn 的 cursor 出现在默认目录里")
 			}
 		}
 	})

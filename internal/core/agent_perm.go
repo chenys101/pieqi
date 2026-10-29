@@ -1034,33 +1034,14 @@ func permLabel(toolTitle, toolKind string) string {
 }
 
 // pickAllowOption 选首个 allow 选项（allow_once 优先，次 allow_always），返回其 optionId。
+// Kind 归一与 OptionId 模糊匹配见 agent.PickAllowOptionID（Cursor 等 hyphen/空 Kind 兼容）。
 func pickAllowOption(opts []agent.PermissionOption) (string, bool) {
-	for _, o := range opts {
-		if o.Kind == agent.PermissionOptionAllowOnce {
-			return o.ID, true
-		}
-	}
-	for _, o := range opts {
-		if o.Kind == agent.PermissionOptionAllowAlways {
-			return o.ID, true
-		}
-	}
-	return "", false
+	return agent.PickAllowOptionID(opts)
 }
 
 // pickRejectOption 选首个 reject 选项（reject_once 优先，次 reject_always），返回其 optionId。
 func pickRejectOption(opts []agent.PermissionOption) (string, bool) {
-	for _, o := range opts {
-		if o.Kind == agent.PermissionOptionRejectOnce {
-			return o.ID, true
-		}
-	}
-	for _, o := range opts {
-		if o.Kind == agent.PermissionOptionRejectAlways {
-			return o.ID, true
-		}
-	}
-	return "", false
+	return agent.PickRejectOptionID(opts)
 }
 
 // shortID 取任务 ID 的前 8 字符用于 IM 文案（与 notifyWaitingInput/notifyFinished 一致）。

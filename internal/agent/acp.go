@@ -389,6 +389,12 @@ func spawnFallbackPaths(name string) []string {
 
 	var files []string
 	seen := make(map[string]bool)
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			files = append(files, p)
+		}
+	}
 	for _, r := range roots {
 		for _, p := range []string{
 			// Windows 安装器的典型落点：<root>/bin/<name>/<name>.exe
@@ -397,11 +403,12 @@ func spawnFallbackPaths(name string) []string {
 			filepath.Join(r, "bin", exe),
 			filepath.Join(r, exe),
 		} {
-			if !seen[p] {
-				seen[p] = true
-				files = append(files, p)
-			}
+			add(p)
 		}
+	}
+	// Cursor Agent CLI：落在 %LOCALAPPDATA%\cursor-agent\，包装是 .cmd/.ps1。
+	for _, p := range cursorLocalAppDataFallbacks(name) {
+		add(p)
 	}
 	return files
 }
@@ -497,9 +504,16 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 	// shell 正是靠读它才能在自己发起的 HTTP 请求里带上 taskId（当前唯一消费者
 	// 是 POST /api/admin/restart —— 服务要据此知道该把哪个会话接回来）。
 	// 见 SessionConfig.TaskID 的完整理由。空值不注入，保持环境干净。
+	env := os.Environ()
 	if a.taskID != "" {
-		cmd.Env = append(os.Environ(), "PIEQI_TASK_ID="+a.taskID)
+		env = append(env, "PIEQI_TASK_ID="+a.taskID)
 	}
+	// Cursor：把本机已有的 CURSOR_API_KEY / CURSOR_AUTH_TOKEN 传给子进程
+	// （有才注入）。不要依赖交互式浏览器登录在 pieqi 子进程里完成。
+	if isCursorACP(a.cfg) {
+		env = appendCursorEnv(env)
+	}
+	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -526,8 +540,19 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 	a.stdin = stdin
 	a.stdout = stdout
 
+	// Cursor 的扩展方法是无 `_` 前缀的 `cursor/*`，SDK ExtensionMethodHandler 接不住。
+	// 用桥拦截这些请求并立刻 L0 应答，再把其余流量交给 SDK。stdin 写锁与桥共享，
+	// 避免回包与 SDK 出站交叉写烂一行 JSON-RPC。
+	peerIn := io.Writer(stdin)
+	peerOut := io.Reader(stdout)
+	if isCursorACP(a.cfg) {
+		var writeMu sync.Mutex
+		peerIn = &lockedWriter{mu: &writeMu, w: stdin}
+		peerOut = newCursorExtBridge(stdout, stdin, &writeMu, a)
+	}
+
 	// 用本结构作为 acp.Client 实现：SessionUpdate/RequestPermission 等回调落到下面的方法。
-	a.conn = acp.NewClientSideConnection(a, stdin, stdout)
+	a.conn = acp.NewClientSideConnection(a, peerIn, peerOut)
 	a.conn.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil))) // 静音 SDK 自带日志；后续可桥接 zap
 
 	// 合并进程退出与连接断开到 a.done（对应 Phase 1 liveProc.done）。
@@ -568,6 +593,12 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 		// 能否发图完全由对端声明决定，且**不影响**文本链路 —— 必须打在日志里：
 		// 用户报"发图没反应"时，第一件事就是分清"agent 说它不收图"与"我们没发出去"。
 		zap.Bool("prompt_image", agentSupportsImagePrompt(a.agentCaps)))
+
+	// Cursor：authMethods 非空时调 Authenticate；失败用固定文案，任务应 failed 而非挂起。
+	if err := a.authenticateAfterInit(initCtx, initResp); err != nil {
+		a.Close(ctx)
+		return err
+	}
 	return nil
 }
 
@@ -1859,10 +1890,15 @@ func toACPMcpServers(in []MCPServer) []acp.McpServer {
 }
 
 // toPermissionOptions 把 acp.PermissionOption 列表转为本适配器 DTO。
+// Kind 在入口处归一（allow-once → allow_once），后续 pick / 免审只认规范值。
 func toPermissionOptions(in []acp.PermissionOption) []PermissionOption {
 	out := make([]PermissionOption, 0, len(in))
 	for _, o := range in {
-		out = append(out, PermissionOption{ID: string(o.OptionId), Name: o.Name, Kind: string(o.Kind)})
+		out = append(out, PermissionOption{
+			ID:   string(o.OptionId),
+			Name: o.Name,
+			Kind: NormalizePermissionKind(string(o.Kind)),
+		})
 	}
 	return out
 }
@@ -1877,25 +1913,12 @@ func formatPermissionOptions(opts []PermissionOption) string {
 	return strings.Join(parts, ",")
 }
 
-// autoApproveOutcome 无回调时的自动放行：选首个 allow_once，次选 allow_always，
-// 再次选首个选项，都没有则 Cancelled（等价 example/claude-code 的 --yolo）。
+// autoApproveOutcome 无回调时的自动放行：选首个 allow_once，次选 allow_always；
+// Kind 全空时按 OptionId 模糊匹配 allow。都选不出则 Cancelled（宁可不干，不错选 reject）。
+// （有回调的路径走 core.pickAllowOption，同一套归一。）
 func autoApproveOutcome(opts []PermissionOption) acp.RequestPermissionOutcome {
-	pick := func(kind string) (string, bool) {
-		for _, o := range opts {
-			if o.Kind == kind {
-				return o.ID, true
-			}
-		}
-		return "", false
-	}
-	if id, ok := pick(PermissionOptionAllowOnce); ok {
+	if id, ok := PickAllowOptionID(opts); ok {
 		return acp.NewRequestPermissionOutcomeSelected(acp.PermissionOptionId(id))
-	}
-	if id, ok := pick(PermissionOptionAllowAlways); ok {
-		return acp.NewRequestPermissionOutcomeSelected(acp.PermissionOptionId(id))
-	}
-	if len(opts) > 0 {
-		return acp.NewRequestPermissionOutcomeSelected(acp.PermissionOptionId(opts[0].ID))
 	}
 	return acp.NewRequestPermissionOutcomeCancelled()
 }

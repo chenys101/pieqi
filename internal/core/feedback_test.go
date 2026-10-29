@@ -168,6 +168,38 @@ func TestSummarizeDedupesRepeatedPath(t *testing.T) {
 	}
 }
 
+// TestDeriveFileChanges_GenerateImage 回归：Cursor 生图经门禁合成的工具名
+// 必须能派生 FileChange；入参认 file_path / filePath / filename。
+func TestDeriveFileChanges_GenerateImage(t *testing.T) {
+	mk := func(tool string, id string, raw map[string]string) model.TaskEvent {
+		in, _ := json.Marshal(raw)
+		return model.TaskEvent{Type: model.EventToolUse, ToolName: tool, ToolUseID: id, Input: in}
+	}
+	events := []model.TaskEvent{
+		{Type: model.EventUser, Text: "画月亮", Seq: 1},
+		mk("GenerateImage", "g1", map[string]string{"file_path": "assets/moon.png"}),
+		{Type: model.EventToolResult, ToolUseID: "g1", ToolName: "GenerateImage"},
+		mk("generate_image", "g2", map[string]string{"filePath": "assets/b.png"}),
+		{Type: model.EventToolResult, ToolUseID: "g2"},
+		mk("generateImage", "g3", map[string]string{"filename": "c.webp"}),
+		{Type: model.EventToolResult, ToolUseID: "g3"},
+	}
+	changes := DeriveFileChanges(events, "", nil)
+	byPath := map[string]FileChange{}
+	for _, c := range changes {
+		byPath[c.Path] = c
+	}
+	for _, p := range []string{"assets/moon.png", "assets/b.png", "c.webp"} {
+		c, ok := byPath[p]
+		if !ok {
+			t.Fatalf("missing %s in %+v", p, changes)
+		}
+		if c.Operation != "create" || c.Status != "success" {
+			t.Errorf("%s wrong: %+v", p, c)
+		}
+	}
+}
+
 // TestDeriveFileChanges_DshLowercaseToolNames 回归（2026-10-21）：
 // dsh 的工具名是**全小写** `edit` / `write`，而派生表原先只有大写的 claude 名字。
 //

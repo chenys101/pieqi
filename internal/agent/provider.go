@@ -276,12 +276,13 @@ const (
 	GoalModeCommand = "command"
 )
 
-// AgentClaude / AgentQoder / AgentDsh / AgentCodebuddy 可用 agent 的常量名（避免散落的裸串拼错）。
+// AgentClaude / AgentQoder / AgentDsh / AgentCodebuddy / AgentCursor 可用 agent 的常量名（避免散落的裸串拼错）。
 const (
 	AgentClaude    = "claude"
 	AgentQoder     = "qoder"
 	AgentDsh       = "dsh"
 	AgentCodebuddy = "codebuddy"
+	AgentCursor    = "cursor"
 )
 
 // AvailableAgents 按配置算出可被任务选择的 agent 列表（顺序即前端展示顺序，claude 在前）。

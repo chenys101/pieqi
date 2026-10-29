@@ -467,8 +467,9 @@ func TestRequestPermission_AutoApproveNoCallback(t *testing.T) {
 	}
 }
 
-// TestRequestPermission_AutoApproveFallbackToFirst 无 allow 选项时退而选首个选项。
-func TestRequestPermission_AutoApproveFallbackToFirst(t *testing.T) {
+// TestRequestPermission_AutoApproveNoAllowIsCancelled 只有 reject、没有 allow 时必须 Cancelled。
+// 旧行为曾退而选「首个任意选项」，会在 Cursor 等 agent 上错选成 reject；归一层改为宁可不干。
+func TestRequestPermission_AutoApproveNoAllowIsCancelled(t *testing.T) {
 	a := NewACPAgent(config.ACPConfig{AgentType: "claude-code"}, nil)
 	resp, err := a.RequestPermission(context.Background(), acp.RequestPermissionRequest{
 		SessionId: "sess-1",
@@ -480,8 +481,8 @@ func TestRequestPermission_AutoApproveFallbackToFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestPermission: %v", err)
 	}
-	if resp.Outcome.Selected == nil || string(resp.Outcome.Selected.OptionId) != "opt-only" {
-		t.Fatalf("selected=%+v want opt-only", resp.Outcome.Selected)
+	if resp.Outcome.Cancelled == nil {
+		t.Fatalf("want Cancelled when no allow option, got selected=%+v", resp.Outcome.Selected)
 	}
 }
 

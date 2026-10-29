@@ -45,7 +45,7 @@ type AgentManifest struct {
 
 	// Kind 传输族。决定走哪条 provider 注册路径：
 	//   TransportClaudeBridge —— sdk-bridge / print（claude）
-	//   TransportACP          —— ACP 协议（qoder / dsh / codebuddy / codex）
+	//   TransportACP          —— ACP 协议（qoder / dsh / codebuddy / cursor / codex）
 	Kind TransportKind
 
 	// ACPType manifest 里声明的 agent_type（ACP 族才有意义）。
@@ -166,6 +166,26 @@ var agentManifests = []AgentManifest{
 		InitTimeout:     30 * time.Second,
 		IdleTimeout:     15 * time.Minute,
 		OptIn:           true, // 需要先登录或提供 CODEBUDDY_API_KEY
+	},
+	{
+		Name:        AgentCursor,
+		DisplayName: "Cursor Agent",
+		Description: "Cursor Agent CLI（ACP：agent acp）。需本机执行 agent login，或设置 CURSOR_API_KEY",
+		Transport:   "ACP",
+		Kind:        TransportACP,
+		// ACPType 即二进制裸名；Cursor 的 ACP 入口是子命令 `acp` 而非 `--acp`，
+		// 所以 DefaultSpawn 必须显式给出（见 docs/notes/cursor-acp-p0.md）。
+		ACPType:      "agent",
+		DefaultSpawn: []string{"agent", "acp"},
+		GoalMode:         "",
+		GoalStateVisible: false,
+		ImagePrompt:      true, // initialize promptCapabilities.image=true
+		SessionAlways:    true, // loadSession=true
+		ModelSelectable:  true, // session/new 下发标准 configOptions
+		ColdStartCold:    false,
+		InitTimeout:      30 * time.Second,
+		IdleTimeout:      15 * time.Minute,
+		OptIn:            true, // 需要登录或 CURSOR_API_KEY
 	},
 }
 
