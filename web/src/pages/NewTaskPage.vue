@@ -274,6 +274,22 @@ const canSubmit = computed(() => {
 })
 
 /**
+ * 「真的没有工作目录」—— 只回答这一件事，**不要**复用它上面的 `canSubmit`。
+ *
+ * 2026-10-29 线上截图：项目选的是 `D:\code\go\pieqi`、下拉框也显示 `pieqi`，页面却
+ * 弹出「还没有工作目录」。成因就是当时这条提示写成 `!canSubmit && canSubmitContent`，
+ * 而 `canSubmit` 里带 `creating`（正在提交）—— 点下创建到响应回来那几百毫秒里 canSubmit
+ * 变 false，提示便把"正在提交"误报成"没有目录"。措辞与事实相反，用户会以为刚才的选择没生效
+ * （实测同一个页面提交中、按钮已转圈，红字还在说"没目录"）。
+ *
+ * 判据只有两条：没有生效路径，且服务端也没配默认目录 —— 只有两者皆无才真的发不出去。
+ * 之所以仍要求"有内容"，是因为空输入框时这条提示只是噪音（此时点击按钮本来也不会发生任何事）。
+ */
+const missingWorkdir = computed(
+  () => !effectiveProjectPath.value && !defaultProjectPath.value && canSubmitContent.value,
+)
+
+/**
  * 加图入口的显隐依据。
  *
  * 判据来自**服务端目录**（GET /api/agents 的 image_prompt，见 selectedAgent）——
@@ -453,8 +469,10 @@ async function submit() {
                     </Button>
                   </template>
                 </div>
-                <!-- 兜底提示：既没默认目录也没选任何东西时，必须把"为什么发不出去"说出来 -->
-                <p v-if="!canSubmit && canSubmitContent" class="text-[11px] text-warning" data-testid="project-missing">
+                <!-- 兜底提示：既没默认目录也没选任何东西时，必须把"为什么发不出去"说出来。
+                     判据用 missingWorkdir 而不是 canSubmit —— 后者含 creating，会在提交中
+                     误报（见 missingWorkdir 的注释）。 -->
+                <p v-if="missingWorkdir" class="text-[11px] text-warning" data-testid="project-missing">
                   还没有工作目录：请选择一个项目或填写路径（也可以到设置里配置默认目录）。
                 </p>
               </div>
