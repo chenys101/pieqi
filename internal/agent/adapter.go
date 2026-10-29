@@ -140,7 +140,7 @@ type GoalReporter interface {
 //   - 带前缀会让对端把前缀也当数据解码，得到的字节数对不上、图片损坏。
 //
 // MimeType 必须是 image/png | image/jpeg | image/webp | image/gif（对端 agent
-// 只认这四个，见 acp.go 的 imageMimeWhitelist 与 agent 侧的 IMAGE_MEDIA_TYPES）。
+// 只认这四个，白名单在 internal/mediatype，另见 agent 侧的 IMAGE_MEDIA_TYPES）。
 // 传别的会在 agent 侧报错。
 type ImageInput struct {
 	// Data 标准 base64 编码的图片字节。

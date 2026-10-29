@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"pieqi/internal/mediatype"
 	"pieqi/internal/model"
 
 	"github.com/gin-gonic/gin"
@@ -32,19 +33,9 @@ import (
 // 32MiB 覆盖 1024~4096 的 PNG 绰绰有余，同时把"误指到某个巨大文件"挡在内存之外。
 const maxLocalImageBytes = 32 << 20
 
-// localImageTypes 扩展名白名单 → Content-Type。
-//
-// 刻意**不含 .svg**：SVG 是 XML，可以内嵌 <script>。虽然 <img> 上下文不执行脚本，
+// 扩展名白名单与 Content-Type 的唯一真相在 internal/mediatype（与附件落盘共用）。
+// 其中**不含 .svg**：SVG 是 XML，可以内嵌 <script>。虽然 <img> 上下文不执行脚本，
 // 但同源直接打开这个 URL 就会执行 —— 那是我们在面板上开的一个 XSS 口子。
-var localImageTypes = map[string]string{
-	".png":  "image/png",
-	".jpg":  "image/jpeg",
-	".jpeg": "image/jpeg",
-	".gif":  "image/gif",
-	".webp": "image/webp",
-	".bmp":  "image/bmp",
-	".avif": "image/avif",
-}
 
 // getTaskLocalImage GET /api/tasks/:id/local-image?path=...：返回任务目录内某张图片的字节。
 func (s *Server) getTaskLocalImage(c *gin.Context) {
@@ -70,7 +61,7 @@ func (s *Server) getTaskLocalImage(c *gin.Context) {
 	}
 
 	// 扩展名先于 stat 判断：非图片路径不必走到文件系统，也就不暴露"这个文件存不存在"。
-	ct, isImage := localImageTypes[strings.ToLower(filepath.Ext(abs))]
+	ct, isImage := mediatype.MimeByExt[strings.ToLower(filepath.Ext(abs))]
 	if !isImage {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only image files can be previewed"})
 		return

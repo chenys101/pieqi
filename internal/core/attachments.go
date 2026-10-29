@@ -23,6 +23,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"pieqi/internal/mediatype"
 )
 
 // AttachmentStore 图片附件存储。零值不可用，用 NewAttachmentStore 构造。
@@ -47,16 +49,9 @@ func (s *AttachmentStore) Root() string { return s.root }
 // HTTP 层要回 400 而不是 404 —— 两者混在一起会让"有人在探测路径"看起来像"图没了"。
 var ErrInvalidAttachmentHash = errors.New("invalid attachment hash")
 
-// attachmentExtByMime 允许落盘的图片类型 → 扩展名。
-//
-// 与 agent.imageMimeWhitelist（出站图片）保持一致：能发给 agent 的类型
-// 就是能展示的类型，多一种或少一种都会形成"发得出去但看不回来"的落差。
-var attachmentExtByMime = map[string]string{
-	"image/png":  ".png",
-	"image/jpeg": ".jpg",
-	"image/webp": ".webp",
-	"image/gif":  ".gif",
-}
+// 允许落盘的图片类型 → 扩展名的唯一真相在 internal/mediatype（与 agent 出站白名单、
+// 本地图片服务共用）：能发给 agent 的类型就是能展示的类型，多一种或少一种都会形成
+// "发得出去但看不回来"的落差（ADR-0010）。
 
 // Save 写入一张 base64 图片，返回元数据（Hash 必然非空且 Stored=true）。
 //
@@ -66,7 +61,7 @@ var attachmentExtByMime = map[string]string{
 // 只看得到"图坏了"，没有任何线索指向磁盘 —— 这类故障最难排查。
 func (s *AttachmentStore) Save(dataB64, mimeType, name string) (hash string, bytes int, err error) {
 	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
-	ext, ok := attachmentExtByMime[mimeType]
+	ext, ok := mediatype.ExtForMime(mimeType)
 	if !ok {
 		return "", 0, fmt.Errorf("unsupported attachment mime %q", mimeType)
 	}
@@ -139,14 +134,8 @@ func (s *AttachmentStore) Read(hash string) ([]byte, string, error) {
 			continue
 		}
 		ext := strings.ToLower(filepath.Ext(n))
-		mime := ""
-		for m, x := range attachmentExtByMime {
-			if x == ext {
-				mime = m
-				break
-			}
-		}
-		if mime == "" {
+		mime, ok := mediatype.MimeForAttachmentExt(ext)
+		if !ok {
 			continue
 		}
 		raw, readErr := os.ReadFile(filepath.Join(s.root, n))

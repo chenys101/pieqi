@@ -18,6 +18,7 @@ import (
 
 	"pieqi/internal/config"
 	"pieqi/internal/exechide"
+	"pieqi/internal/mediatype"
 
 	"github.com/coder/acp-go-sdk"
 	"github.com/google/uuid"
@@ -944,17 +945,9 @@ func buildPromptBlocks(text string, images []ImageInput) ([]acp.ContentBlock, er
 	return blocks, nil
 }
 
-// imageMimeWhitelist 允许的图片 MIME 类型。
-//
-// 与对端 agent 的图片类型白名单（dsh-acp 的 IMAGE_MEDIA_TYPES）保持一致 ——
-// 那里是**唯一**的最终把关，这里提前拦只是为了给出更清楚的错误。
+// 图片类型白名单的唯一真相在 internal/mediatype（与附件落盘、本地图片服务共用，
+// 见 ADR-0010）。这里提前拦只是为了给出更清楚的错误 —— 最终把关仍在 agent 侧。
 // 多一种这里放行而 agent 拒收的类型，表现就是一句语焉不详的协议错误。
-var imageMimeWhitelist = map[string]bool{
-	"image/png":  true,
-	"image/jpeg": true,
-	"image/webp": true,
-	"image/gif":  true,
-}
 
 // maxImageBytes 单张图片解码后的字节上限（5 MiB）。
 //
@@ -1072,7 +1065,7 @@ func ValidateImages(images []ImageInput) error {
 
 // validateImageRules 单张图片的规则本体（validateImage / ValidateImages 共用）。
 func validateImageRules(img ImageInput) error {
-	if !imageMimeWhitelist[img.MimeType] {
+	if !mediatype.IsImageMime(img.MimeType) {
 		return fmt.Errorf("不支持的图片类型 %q（仅支持 image/png、image/jpeg、image/webp、image/gif）", img.MimeType)
 	}
 	if img.Data == "" {
