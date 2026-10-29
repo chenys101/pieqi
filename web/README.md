@@ -39,17 +39,20 @@ web/
 │   ├── stores/        # Pinia：task / session / approval / agent / app / notification / feedback*
 │   ├── services/      # api/（按域拆的 REST 客户端）、websocket/（重连、序号、归一化、分发）
 │   ├── composables/   # useWebSocket / useSession / useTheme / useResponsive / usePwa / useContentWidth
-│   ├── components/    # ui/（Button/Input/Modal/Drawer…）与 layout/
+│   ├── components/    # ui/（Button/Input/Modal/Drawer…）、layout/、task/（StatusBadge）、artifacts/（跨域复用的产物清单）
 │   ├── types/         # 后端协议的 TS 类型（task / event / session / approval / agent）
 │   ├── styles/        # tokens.css（设计变量）/ components.css / index.css
-│   └── utils/
+│   └── utils/         # 纯函数：format / date / event / filePreview / fileGroups …
 ├── e2e/               # Playwright（见下）
 ├── public/            # PWA 资源：manifest / sw.js / 图标
 └── index.html
 ```
 
 **结构约定**：`pages/` 只做路由与布局拼装，业务逻辑放 `features/<域>`；`features` 之间不互相 import 组件，
-共享的东西下沉到 `components/ui`、`composables`、`stores`。
+共享的东西下沉到 `components/`（`ui/`、`layout/`、`task/`、`artifacts/`）、`composables/`、`stores/`、`utils/`。
+跨域复用的**纯函数**一律放 `utils/`，不要留在某个 feature 里让别的 feature 反向依赖
+（例：`artifactOpensInApp` 曾住在 `features/feedback/filePreview.ts`，被 timeline 与 stores 引用 ——
+已下沉到 `utils/filePreview.ts`）。
 
 ## e2e（Playwright 四层）
 

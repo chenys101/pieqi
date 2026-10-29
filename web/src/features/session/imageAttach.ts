@@ -9,8 +9,13 @@
 //   3. **压缩在客户端做**：后端上限是解码后 5MB，而手机原图动辄 4~8MB。
 //      不压缩的话"选了张照片就发不出去"，而用户完全不知道为什么。
 
-/** 后端认可的图片类型（与 agent.imageMimeWhitelist 一一对应）。 */
+import type { PendingImage } from '@/types/image'
+
+/** 后端认可的图片类型（唯一真相在 internal/mediatype，见 ADR-0010）。 */
 export const ALLOWED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
+
+/** 一张待发图片的形状在 @/types/image（跨域共用，避免 features 互相 import）。 */
+export type { PendingImage }
 
 /** 一轮最多几张（与后端 maxPromptImages 一致）。 */
 export const MAX_IMAGES = 8
@@ -31,22 +36,6 @@ const COMPRESS_MAX_EDGE = 1536
 
 /** 压缩后的 JPEG 质量。0.85 在肉眼与体积之间比较平衡。 */
 const COMPRESS_QUALITY = 0.85
-
-/** 一张待发图片：预览用 dataUrl（本地），发送用 base64（不含前缀）。 */
-export interface PendingImage {
-  /** 本地唯一 id（列表 key 与删除用；不用文件名，重名会串） */
-  id: string
-  /** 预览用（data URL，仅存在于浏览器内存，绝不发给后端） */
-  previewUrl: string
-  /** 发送用：**纯 base64** */
-  data: string
-  /** MIME 类型 */
-  mimeType: string
-  /** 解码后字节数（展示与上限判定） */
-  bytes: number
-  /** 原始文件名（仅供展示） */
-  name: string
-}
 
 /** 选图/压缩的结果：成功给图片，失败给可读原因（给用户看，不是给日志看）。 */
 export type ImageLoadResult = { ok: true; image: PendingImage } | { ok: false; error: string }

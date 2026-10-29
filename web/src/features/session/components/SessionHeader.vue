@@ -28,6 +28,8 @@ import StatusBadge from '@/components/task/StatusBadge.vue'
 import Button from '@/components/ui/Button.vue'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import UsageBadge from './UsageBadge.vue'
+import SessionStatusPopover from './SessionStatusPopover.vue'
+import SessionOtherTasksPopover from './SessionOtherTasksPopover.vue'
 import { otherRunningTasks } from '../otherTasks'
 import type { Task } from '@/types/task'
 import { STATUS_DOT, STATUS_LABELS, shortId } from '@/utils/format'
@@ -325,93 +327,22 @@ function goBack() {
          截图里 dsh→d、pieqi→pie）。
          现在面板右缘固定对齐 header 的 12px 内边距，任何宽度都不会越界；
          max-w 兜住极窄屏（< 248px），宽度不足时先缩面板而不是让它被裁。 -->
-    <div
+    <SessionStatusPopover
       v-if="compact && openPopover === 'status'"
-      class="absolute right-3 top-full z-50 mt-1.5 w-56 max-w-[calc(100vw-24px)] rounded-lg border border-border bg-surface p-3 shadow-md"
-      data-testid="session-status-pop"
-      @click.stop
-    >
-      <div class="flex items-center gap-2 text-xs font-semibold">
-        <span class="block h-2 w-2 rounded-full" :class="[statusDotClass, statusDotRing]" />
-        {{ statusLabel }}
-      </div>
-      <div class="mt-0.5 pl-4 text-[10px] text-text-tertiary">
-        {{ timeAgo(task.updatedAt || task.createdAt) }}前
-      </div>
-      <div
-        v-if="agentLabel"
-        class="mt-2 flex items-center justify-between gap-3 border-t border-border-subtle pt-1.5 text-[10px]"
-        data-testid="session-status-agent"
-      >
-        <span class="shrink-0 text-text-tertiary">Agent</span>
-        <span class="min-w-0 truncate text-text" :title="agentTitle">{{ agentLabel }}</span>
-      </div>
-      <!-- 项目名可能是长路径的最后一段：截断时给出完整值（移动端没有 hover，
-           但 PWA/桌面仍能看全；截断只是最后手段，不再是"被外侧裁掉"） -->
-      <div
-        v-if="task.project"
-        class="mt-1 flex items-center justify-between gap-3 text-[10px]"
-        data-testid="session-status-project"
-      >
-        <span class="shrink-0 text-text-tertiary">项目</span>
-        <span class="min-w-0 truncate text-text" :title="task.projectPath || task.project">{{ task.project }}</span>
-      </div>
-    </div>
+      :task="task"
+      :agent-label="agentLabel"
+      :agent-title="agentTitle"
+    />
 
     <!-- 其他任务下拉：挂在 header 上、右对齐（不是挂在 28px 的按钮上，
          否则 320 宽时 300px 的面板会从左边溢出）。只有 compact 才有。 -->
-    <div
+    <SessionOtherTasksPopover
       v-if="compact && openPopover === 'tasks'"
-      class="absolute right-3 top-full z-50 mt-1.5 w-[300px] max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border border-border bg-surface shadow-md"
-      data-testid="session-tasks-pop"
-      @click.stop
-    >
-      <div class="flex items-center gap-2 px-3 pb-1.5 pt-2.5">
-        <span class="flex-1 text-xs font-semibold">其他运行中任务</span>
-        <span class="grid h-4 min-w-4 place-items-center rounded-full bg-elevated px-1 text-[9px] font-bold text-muted">
-          {{ otherCount }}
-        </span>
-        <button
-          type="button"
-          class="grid h-6 w-6 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-text"
-          aria-label="关闭"
-          @click="closePopovers"
-        >
-          ×
-        </button>
-      </div>
-      <div class="px-3 pb-1.5 text-[9px] text-text-tertiary">待决策优先 · 最多显示 3 个</div>
-      <div class="max-h-[60vh] overflow-y-auto px-2 pb-2">
-        <button
-          v-for="t in visibleOtherTasks"
-          :key="t.id"
-          type="button"
-          class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs transition-colors hover:bg-elevated"
-          :class="t.status === 'waiting_input' ? 'border border-warning/25 bg-warning/5' : 'border border-transparent'"
-          :data-testid="`session-other-task-${t.id}`"
-          @click="goTask(t.id)"
-        >
-          <span class="block h-1.5 w-1.5 shrink-0 rounded-full" :class="STATUS_DOT[t.status]" />
-          <span class="min-w-0 flex-1">
-            <span class="block truncate">{{ t.title }}</span>
-            <span class="block truncate text-[9px] text-text-tertiary">
-              {{ t.project }} · {{ timeAgo(t.updatedAt) }}前
-            </span>
-          </span>
-          <span class="shrink-0 text-[10px] text-text-tertiary">{{ STATUS_LABELS[t.status] }}</span>
-          <span class="shrink-0 text-text-tertiary" aria-hidden="true">›</span>
-        </button>
-
-        <button
-          v-if="otherCount > 3"
-          type="button"
-          class="mt-1 flex h-9 w-full items-center justify-center rounded-md border border-dashed border-border-strong text-[11px] text-accent transition-colors hover:bg-accent/5"
-          data-testid="session-all-tasks"
-          @click="goAllTasks"
-        >
-          查看全部 {{ otherCount }} 个运行中任务 →
-        </button>
-      </div>
-    </div>
+      :tasks="visibleOtherTasks"
+      :count="otherCount"
+      @close="closePopovers"
+      @select="goTask"
+      @all="goAllTasks"
+    />
   </header>
 </template>

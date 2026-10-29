@@ -19,7 +19,7 @@ import ContentColumn from '@/components/layout/ContentColumn.vue'
 import { useNotificationStore } from '@/stores/notification'
 import type { AgentModelDto } from '@/types/api'
 import type { TaskUsage } from '@/types/task'
-import type { PendingImage } from '../imageAttach'
+import type { PendingImage } from '@/types/image'
 
 const props = defineProps<{
   canCancel: boolean

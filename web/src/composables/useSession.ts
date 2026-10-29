@@ -7,7 +7,7 @@ import { useApprovalStore } from '@/stores/approval'
 import { useNotificationStore } from '@/stores/notification'
 import { isTerminalStatus } from '@/types/task'
 import * as tasksApi from '@/services/api/tasks'
-import type { PendingImage } from '@/features/session/imageAttach'
+import type { PendingImage } from '@/types/image'
 
 export function useSession(taskId: Ref<string>) {
   const sessionStore = useSessionStore()

@@ -13,8 +13,8 @@ import {
   loadClipboardImages,
   formatBytes,
   MAX_IMAGES,
-  type PendingImage,
 } from '../imageAttach'
+import type { PendingImage } from '@/types/image'
 
 const props = withDefaults(
   defineProps<{
