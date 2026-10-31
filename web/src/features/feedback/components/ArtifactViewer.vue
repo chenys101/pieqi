@@ -7,12 +7,17 @@
 //   查看层**不参与任何布局**，从机制上杜绝这类事故。
 //
 // 分工：
-//   code/text → CodeView（行号 / 着色 / 搜索 / 换行 / 复制）
+//   code/text → CodeView（行号 / 着色 / 搜索 / 换行 / 复制；虚拟列表）
 //   markdown  → FilePreview（marked + DOMPurify；文本由本组件统一取，避免重复请求）
 //   pdf       → iframe（浏览器内嵌）
 //   html/image 不进来 —— 它们是"真页面"，由调用方新标签打开（CSP sandbox 见后端）。
 //
 // Agent 产出不可信：所有文本走文本节点/转义渲染，markdown 经 DOMPurify，不用 v-html 展示代码。
+//
+// 性能（2026-10）：
+//   · 服务端 /file 文本最多 2MiB，超限截断（X-Pieqi-Truncated）；
+//   · 前端不再「显示全部」把上万行挂进 DOM —— CodeView 虚拟滚动；
+//   · 禁止用 TextEncoder 扫全文算字节数，用响应头 size。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { getTaskFileText, taskFileURL } from '@/services/api/feedback'
 import { useResponsive } from '@/composables/useResponsive'
@@ -33,16 +38,14 @@ const props = defineProps<{
 
 const emit = defineEmits<{ close: [] }>()
 
-/** 大文件只先渲染前 N 行：行号 + 着色是"每行一个节点"，比一个 <pre> 贵得多 */
-const MAX_LINES = 3000
-
 const { isMobile } = useResponsive()
 
 const text = ref('')
+const fileSize = ref(0)
+const truncated = ref(false)
 const loading = ref(false)
 const errorMsg = ref('')
 const wrap = ref(false)
-const showAll = ref(false)
 const findOpen = ref(false)
 const query = ref('')
 const hitIndex = ref(-1)
@@ -66,11 +69,8 @@ const currentPath = computed(() => props.path ?? '')
 const lang = computed(() => (props.path ? langOfPath(props.path) : ''))
 const langLabel = computed(() => (props.path ? langLabelOf(props.path) : ''))
 const lines = computed(() => text.value.replace(/\r\n/g, '\n').split('\n'))
-const renderedLines = computed(() => (showAll.value ? lines.value : lines.value.slice(0, MAX_LINES)))
-const truncated = computed(() => mode.value === 'code' && lines.value.length > renderedLines.value.length)
-const byteSize = computed(() => (text.value ? new TextEncoder().encode(text.value).length : 0))
 
-/** 搜索：命中行号（0-based），跨全部行（即使只渲染了前 N 行） */
+/** 搜索：命中行号（0-based），跨全部已加载行 */
 const hits = computed<number[]>(() => {
   const needle = query.value.trim().toLowerCase()
   if (!needle || mode.value !== 'code') return []
@@ -88,7 +88,6 @@ async function load() {
   const path = props.path
   if (!path) return
   const seq = ++reqSeq
-  showAll.value = false
   wrap.value = isMobile.value
   findOpen.value = false
   query.value = ''
@@ -96,13 +95,17 @@ async function load() {
   copied.value = false
   copiedPath.value = false
   text.value = ''
+  fileSize.value = 0
+  truncated.value = false
   errorMsg.value = ''
   if (mode.value === 'pdf') return
   loading.value = true
   try {
     const body = await getTaskFileText(props.taskId, path)
     if (seq !== reqSeq) return
-    text.value = body
+    text.value = body.text
+    fileSize.value = body.size
+    truncated.value = body.truncated
   } catch (err) {
     if (seq !== reqSeq) return
     errorMsg.value = err instanceof Error ? err.message : '加载失败'
@@ -125,11 +128,6 @@ watch(
   },
   { immediate: true },
 )
-
-/** 命中行可能在"只渲染前 N 行"之外：跳到它时自动放开全部 */
-watch(currentLine, (line) => {
-  if (line >= renderedLines.value.length) showAll.value = true
-})
 
 function openFind() {
   if (mode.value !== 'code') return
@@ -357,6 +355,14 @@ function formatBytes(n: number): string {
               <button type="button" class="av-mini" title="下一处" @click="stepHit(1)">↓</button>
               <button type="button" class="av-mini" title="关闭查找" @click="closeFind">×</button>
             </div>
+
+            <div
+              v-if="truncated && !loading && !errorMsg"
+              class="border-t border-warning/30 bg-warning/10 px-3 py-1.5 text-[11px] text-warning"
+              data-testid="artifact-viewer-truncated"
+            >
+              文件过大（{{ formatBytes(fileSize) }}），仅加载前段；完整内容请用「在新标签打开原文」。
+            </div>
           </header>
 
           <div ref="bodyEl" class="min-h-0 flex-1 overflow-auto" data-testid="artifact-viewer-body">
@@ -373,7 +379,7 @@ function formatBytes(n: number): string {
             </div>
             <CodeView
               v-else-if="mode === 'code'"
-              :lines="renderedLines"
+              :lines="lines"
               :lang="lang"
               :wrap="wrap"
               :query="query"
@@ -400,14 +406,9 @@ function formatBytes(n: number): string {
               只读 · 来自本任务 worktree
             </span>
             <span v-if="mode === 'code'" class="font-mono">
-              {{ truncated ? `已渲染前 ${renderedLines.length} / ${lines.length} 行` : `${lines.length} 行` }}
-              <span v-if="text" class="ml-1">· {{ formatBytes(byteSize) }}</span>
-              <button
-                v-if="truncated"
-                type="button"
-                class="ml-1 text-accent hover:underline"
-                @click="showAll = true"
-              >显示全部</button>
+              {{ lines.length }} 行
+              <span v-if="fileSize" class="ml-1">· {{ formatBytes(fileSize) }}</span>
+              <span v-if="truncated" class="ml-1 text-warning">（已截断）</span>
             </span>
             <span class="ml-auto hidden items-center gap-1 md:inline-flex">
               <kbd v-if="mode === 'code'" class="rounded border border-border px-1 py-0.5 font-mono text-[9.5px]">Ctrl</kbd>

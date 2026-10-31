@@ -4,17 +4,20 @@
 // 与 ArtifactViewer 的分工：查看器管"取哪份文本、工具条、滚动容器"，
 // 这里只管"把 N 行渲染成可读的代码"。着色 token 全部是文本节点，
 // **不用 v-html** —— Agent 产出不可信，渲染层不碰 HTML 字符串。
-import { computed, nextTick, ref, watch } from 'vue'
+//
+// 虚拟列表（换行关闭时）：行高固定 21px，只挂载视口 ± overscan。
+// 换行开启时行高不定，退回有上限的整段渲染（WRAP_MAX），避免错位滚动。
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { tokenizeLine, type CodeToken, type CodeTokenKind } from '@/utils/highlight'
 
 const props = defineProps<{
-  /** 已渲染的行（可能是大文件的前 N 行） */
+  /** 全部行（可能是服务端截断后的全文） */
   lines: string[]
   lang: string
   wrap: boolean
   /** 搜索词（空 = 不标） */
   query: string
-  /** 命中的行号（0-based，可能包含未渲染的行） */
+  /** 命中的行号（0-based） */
   hits: number[]
   /** 当前命中的行号（0-based；-1 = 无） */
   current: number
@@ -26,17 +29,43 @@ interface DisplayToken {
   hit: boolean
 }
 
-const root = ref<HTMLElement | null>(null)
+const LINE_H = 21
+const OVERSCAN = 24
+/** 换行模式下最多挂载的行数（行高不定，不能虚拟滚） */
+const WRAP_MAX = 1500
 
-/** 着色只跟"文件内容 + 语言"有关：搜索词变化时复用，不重新分词 */
+const root = ref<HTMLElement | null>(null)
+const start = ref(0)
+const end = ref(80)
+
+const useVirtual = computed(() => !props.wrap)
+const renderLines = computed(() =>
+  useVirtual.value ? props.lines : props.lines.slice(0, WRAP_MAX),
+)
+const wrapTruncated = computed(() => props.wrap && props.lines.length > WRAP_MAX)
+
+const totalHeight = computed(() =>
+  useVirtual.value ? props.lines.length * LINE_H : undefined,
+)
+const offsetY = computed(() => (useVirtual.value ? start.value * LINE_H : 0))
+
+const windowLines = computed(() =>
+  useVirtual.value ? props.lines.slice(start.value, end.value) : renderLines.value,
+)
+const windowOffset = computed(() => (useVirtual.value ? start.value : 0))
+
 const tokenLines = computed<CodeToken[][]>(() => {
   const state = { inBlockComment: false }
-  return props.lines.map((line) => tokenizeLine(line, props.lang, state))
+  if (useVirtual.value) {
+    for (let i = 0; i < start.value; i++) {
+      tokenizeLine(props.lines[i] ?? '', props.lang, state)
+    }
+  }
+  return windowLines.value.map((line) => tokenizeLine(line, props.lang, state))
 })
 
 const hitSet = computed(() => new Set(props.hits))
 
-/** 把命中片段从 token 里切出来：token 文本拼起来必须仍是原行 */
 function markTokens(tokens: CodeToken[], needle: string): DisplayToken[] {
   if (!needle) return tokens.map((t) => ({ ...t, hit: false }))
   const lower = needle.toLowerCase()
@@ -63,12 +92,66 @@ const display = computed<DisplayToken[][]>(() => {
   return tokenLines.value.map((tokens) => markTokens(tokens, needle))
 })
 
-/** 跳到当前命中行：滚动交给最近的滚动祖先（查看器正文），本组件不持有滚动条 */
+function scrollerOf(): HTMLElement | null {
+  return root.value?.closest('[data-testid="artifact-viewer-body"]') as HTMLElement | null
+}
+
+function syncWindow() {
+  if (!useVirtual.value) {
+    start.value = 0
+    end.value = renderLines.value.length
+    return
+  }
+  const sc = scrollerOf()
+  if (!sc) {
+    start.value = 0
+    end.value = Math.min(props.lines.length, 80)
+    return
+  }
+  const top = sc.scrollTop
+  const viewH = sc.clientHeight || 600
+  const first = Math.max(0, Math.floor(top / LINE_H) - OVERSCAN)
+  const last = Math.min(props.lines.length, Math.ceil((top + viewH) / LINE_H) + OVERSCAN)
+  start.value = first
+  end.value = Math.max(first + 1, last)
+}
+
+let scroller: HTMLElement | null = null
+function onScroll() {
+  syncWindow()
+}
+
+onMounted(() => {
+  scroller = scrollerOf()
+  scroller?.addEventListener('scroll', onScroll, { passive: true })
+  syncWindow()
+})
+
+onBeforeUnmount(() => {
+  scroller?.removeEventListener('scroll', onScroll)
+  scroller = null
+})
+
+watch(
+  () => [props.lines.length, props.wrap] as const,
+  () => {
+    void nextTick(syncWindow)
+  },
+)
+
 watch(
   () => props.current,
   async (line) => {
     if (line < 0) return
     await nextTick()
+    const sc = scrollerOf()
+    if (!sc) return
+    if (useVirtual.value) {
+      const target = line * LINE_H - sc.clientHeight / 2 + LINE_H / 2
+      sc.scrollTop = Math.max(0, target)
+      syncWindow()
+      return
+    }
     root.value
       ?.querySelector<HTMLElement>(`.line[data-line="${line + 1}"]`)
       ?.scrollIntoView({ block: 'center', behavior: 'smooth' })
@@ -77,21 +160,36 @@ watch(
 </script>
 
 <template>
-  <div ref="root" class="code" :data-wrap="wrap ? 'on' : 'off'" data-testid="code-view">
+  <div
+    ref="root"
+    class="code"
+    :data-wrap="wrap ? 'on' : 'off'"
+    data-testid="code-view"
+    :style="useVirtual ? { height: `${totalHeight}px`, position: 'relative' } : undefined"
+  >
+    <div :style="useVirtual ? { transform: `translateY(${offsetY}px)` } : undefined">
+      <div
+        v-for="(tokens, i) in display"
+        :key="windowOffset + i"
+        class="line"
+        :class="{ hit: hitSet.has(windowOffset + i), cur: windowOffset + i === current }"
+        :data-line="windowOffset + i + 1"
+      >
+        <span class="ln" aria-hidden="true">{{ windowOffset + i + 1 }}</span>
+        <span class="lc">
+          <template v-for="(t, j) in tokens" :key="j">
+            <mark v-if="t.hit" class="hit-mark">{{ t.text }}</mark>
+            <span v-else :class="`t-${t.kind}`">{{ t.text }}</span>
+          </template>
+        </span>
+      </div>
+    </div>
     <div
-      v-for="(tokens, i) in display"
-      :key="i"
-      class="line"
-      :class="{ hit: hitSet.has(i), cur: i === current }"
-      :data-line="i + 1"
+      v-if="wrapTruncated"
+      class="px-3 py-2 text-[11px] text-text-tertiary"
+      data-testid="code-view-wrap-cap"
     >
-      <span class="ln" aria-hidden="true">{{ i + 1 }}</span>
-      <span class="lc">
-        <template v-for="(t, j) in tokens" :key="j">
-          <mark v-if="t.hit" class="hit-mark">{{ t.text }}</mark>
-          <span v-else :class="`t-${t.kind}`">{{ t.text }}</span>
-        </template>
-      </span>
+      换行模式下仅渲染前 {{ WRAP_MAX }} 行；关闭换行可浏览全部已加载内容。
     </div>
   </div>
 </template>
@@ -105,11 +203,13 @@ watch(
   font-size: 12px;
   line-height: 21px;
   tab-size: 2;
+  box-sizing: content-box;
 }
 .line {
   display: flex;
   align-items: flex-start;
   min-width: 100%;
+  height: 21px;
   min-height: 21px;
 }
 .line:hover {
@@ -139,6 +239,8 @@ watch(
 }
 .code[data-wrap="on"] .line {
   min-width: 0;
+  height: auto;
+  min-height: 21px;
 }
 .code[data-wrap="on"] .lc {
   white-space: pre-wrap;

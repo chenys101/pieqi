@@ -50,6 +50,7 @@ function mountCard(extra: Record<string, unknown> = {}) {
   setActivePinia(pinia)
   const store = useArtifactsStore()
   store.byTask[TID] = artifacts
+  store.pathIndex[TID] = new Map(artifacts.map((a) => [a.path, a]))
 
   host = document.createElement('div')
   document.body.appendChild(host)

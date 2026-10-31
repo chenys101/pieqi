@@ -116,6 +116,16 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
 
 /** 原始文本请求（markdown 等非 JSON 内容：不走 JSON 解析，直接返回文本）。 */
 export async function requestText(path: string): Promise<string> {
+  const { text } = await requestTextMeta(path)
+  return text
+}
+
+/** 文本请求 + 响应头元信息（/file 的截断与尺寸头）。 */
+export async function requestTextMeta(path: string): Promise<{
+  text: string
+  size: number
+  truncated: boolean
+}> {
   let res: Response
   try {
     res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() })
@@ -124,8 +134,20 @@ export async function requestText(path: string): Promise<string> {
   }
   if (res.status === 401) unauthorizedHandler?.()
   const text = await res.text()
-  if (!res.ok) throw new ApiError(`请求失败: ${path}`, res.status)
-  return text
+  if (!res.ok) {
+    let msg = `请求失败: ${path}`
+    try {
+      const j = JSON.parse(text) as { error?: string }
+      if (j?.error) msg = j.error
+    } catch {
+      /* 非 JSON */
+    }
+    throw new ApiError(msg, res.status)
+  }
+  const sizeRaw = res.headers.get('X-Pieqi-File-Size')
+  const size = sizeRaw ? Number(sizeRaw) : text.length
+  const truncated = res.headers.get('X-Pieqi-Truncated') === '1'
+  return { text, size: Number.isFinite(size) ? size : text.length, truncated }
 }
 
 /**

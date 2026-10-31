@@ -16,9 +16,17 @@ export interface ArtifactViewing {
   kind: string
 }
 
+function indexByPath(list: ArtifactDto[]): Map<string, ArtifactDto> {
+  const map = new Map<string, ArtifactDto>()
+  for (const a of list) map.set(a.path, a)
+  return map
+}
+
 export const useArtifactsStore = defineStore('artifacts', {
   state: () => ({
     byTask: {} as Record<string, ArtifactDto[]>,
+    /** path 索引：随 byTask 同步重建，避免 getter 每次 new Map */
+    pathIndex: {} as Record<string, Map<string, ArtifactDto>>,
     inflight: {} as Record<string, Promise<void>>,
     /** 应用内只读 viewer 当前打开的文件（html 不进这里） */
     viewing: null as ArtifactViewing | null,
@@ -28,11 +36,8 @@ export const useArtifactsStore = defineStore('artifacts', {
     list: (state) => (taskId: string): ArtifactDto[] => state.byTask[taskId] ?? [],
     byPath:
       (state) =>
-      (taskId: string): Map<string, ArtifactDto> => {
-        const map = new Map<string, ArtifactDto>()
-        for (const a of state.byTask[taskId] ?? []) map.set(a.path, a)
-        return map
-      },
+      (taskId: string): Map<string, ArtifactDto> =>
+        state.pathIndex[taskId] ?? new Map(),
   },
 
   actions: {
@@ -45,6 +50,7 @@ export const useArtifactsStore = defineStore('artifacts', {
       const p = getTaskArtifacts(taskId)
         .then((list) => {
           this.byTask[taskId] = list
+          this.pathIndex[taskId] = indexByPath(list)
         })
         .catch(() => {
           // 与 feedbackBundle 同口径：失败不写空清单（避免"暂无产物"掩盖故障），也不上抛。

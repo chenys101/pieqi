@@ -5,12 +5,18 @@
 //
 // `text` 可由调用方传入（ArtifactViewer 已经为"复制/搜索"取过原文）——
 // 传了就不再重复请求；不传则自己拉（保持组件可独立使用）。
+//
+// 大 markdown（> MD_RICH_MAX）降级为纯文本 <pre>：marked + DOMPurify 同步扫
+// 整份再进 DOM，手机上会明显卡顿；降级后仍可读，完整渲染请新标签打开。
 import { computed, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { getTaskFileText, taskFileURL } from '@/services/api/feedback'
 import { previewKind } from '@/utils/filePreview'
 import Spinner from '@/components/ui/Spinner.vue'
+
+/** 超过此字符数不再走 rich markdown（约 200KB 量级） */
+const MD_RICH_MAX = 200_000
 
 const props = defineProps<{ taskId: string; path: string; text?: string }>()
 
@@ -23,8 +29,9 @@ const errorMsg = ref('')
 
 /** 有外部文本就用外部的；没有才用自己拉的那份 */
 const source = computed(() => (props.text !== undefined ? props.text : fetched.value))
+const richMd = computed(() => kind.value === 'markdown' && source.value.length <= MD_RICH_MAX)
 const mdHtml = computed(() => {
-  if (kind.value !== 'markdown' || !source.value) return ''
+  if (!richMd.value || !source.value) return ''
   const raw = marked.parse(source.value, { async: false }) as string
   return DOMPurify.sanitize(raw)
 })
@@ -34,7 +41,8 @@ async function loadText() {
   loading.value = true
   errorMsg.value = ''
   try {
-    fetched.value = await getTaskFileText(props.taskId, props.path)
+    const body = await getTaskFileText(props.taskId, props.path)
+    fetched.value = body.text
   } catch (err) {
     errorMsg.value = err instanceof Error ? err.message : '加载失败'
   } finally {
@@ -61,7 +69,17 @@ watch(
         <Spinner class="h-3 w-3" /> 加载预览…
       </div>
       <div v-else-if="errorMsg" class="px-3 py-2 text-xs text-error">{{ errorMsg }}</div>
-      <div v-else class="md-body px-3 py-2 text-xs" v-html="mdHtml" />
+      <template v-else-if="richMd">
+        <div class="md-body px-3 py-2 text-xs" v-html="mdHtml" />
+      </template>
+      <template v-else>
+        <p class="px-3 pt-2 text-[11px] text-text-tertiary" data-testid="file-preview-md-plain">
+          文档较大，已降级为纯文本预览；需要排版请用「在新标签打开原文」。
+        </p>
+        <pre
+          class="max-h-[70vh] overflow-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-[11px] leading-relaxed text-text"
+        >{{ source }}</pre>
+      </template>
     </template>
 
     <template v-else-if="kind === 'code' || kind === 'text'">

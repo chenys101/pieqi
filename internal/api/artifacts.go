@@ -55,7 +55,7 @@ func (s *Server) collectArtifacts(task *model.Task) []artifactDTO {
 	if task == nil || task.WorktreePath == "" {
 		return nil
 	}
-	changes := core.DeriveFileChanges(task.Events, task.WorktreePath, nil)
+	changes := s.cachedFileChanges(task)
 	staticDir := ""
 	if s.preview != nil {
 		// 走 EnsureStatic 而不是 StaticDir：产物清单可能在"面板还没拉过 status"时被请求，

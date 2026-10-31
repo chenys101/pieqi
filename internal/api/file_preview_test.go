@@ -3,11 +3,13 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"pieqi/internal/config"
@@ -118,5 +120,53 @@ func TestGetTaskFile(t *testing.T) {
 		if w := get(p); w.Code != http.StatusBadRequest {
 			t.Errorf("traversal path %q status = %d, want 400", p, w.Code)
 		}
+	}
+
+	// 小文件：完整返回 + 尺寸头 + 未截断
+	w = get("README.md")
+	if got := w.Header().Get("X-Pieqi-File-Size"); got != "8" { // "# Title\n"
+		t.Errorf("X-Pieqi-File-Size = %q, want 8", got)
+	}
+	if got := w.Header().Get("X-Pieqi-Truncated"); got != "0" {
+		t.Errorf("X-Pieqi-Truncated = %q, want 0", got)
+	}
+}
+
+// TestGetTaskFile_TextTruncated 文本超过 maxFileTextBytes 时截断返回，不 413。
+func TestGetTaskFile_TextTruncated(t *testing.T) {
+	r, store, task := setupFilePreviewTest(t)
+	wt := task.WorktreePath
+	big := filepath.Join(wt, "big.go")
+	// 比上限多 1KB，内容可辨识
+	payload := append(bytes.Repeat([]byte("a"), maxFileTextBytes), []byte("TAIL")...)
+	if err := os.WriteFile(big, payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = store.Update(task.ID, func(tk *model.Task) bool {
+		tk.Events = append(tk.Events,
+			model.TaskEvent{Seq: 3, Type: model.EventToolUse, ToolName: "Write", ToolUseID: "w2",
+				Input: json.RawMessage(`{"file_path":"big.go","content":"x"}`)},
+		)
+		return true
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/"+task.ID+"/file?path=big.go", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w.Body.Len() != maxFileTextBytes {
+		t.Errorf("body len=%d, want %d", w.Body.Len(), maxFileTextBytes)
+	}
+	if w.Header().Get("X-Pieqi-Truncated") != "1" {
+		t.Errorf("truncated header = %q", w.Header().Get("X-Pieqi-Truncated"))
+	}
+	wantSize := strconv.Itoa(maxFileTextBytes + 4)
+	if got := w.Header().Get("X-Pieqi-File-Size"); got != wantSize {
+		t.Errorf("file size header = %q, want %s", got, wantSize)
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("TAIL")) {
+		t.Error("truncated body must not contain the tail past the limit")
 	}
 }

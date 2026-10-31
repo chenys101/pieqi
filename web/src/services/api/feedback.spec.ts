@@ -9,10 +9,17 @@
 // 类型说了是数组，适配层就有责任让它真的是数组。
 import { describe, expect, it, vi } from 'vitest'
 
-const { request } = vi.hoisted(() => ({ request: vi.fn() }))
-vi.mock('@/services/api/client', () => ({ request, requestText: vi.fn() }))
+const { request, requestTextMeta } = vi.hoisted(() => ({
+  request: vi.fn(),
+  requestTextMeta: vi.fn(),
+}))
+vi.mock('@/services/api/client', () => ({
+  request,
+  requestText: vi.fn(),
+  requestTextMeta,
+}))
 
-import { getEvidence, getOutcome } from './feedback'
+import { getEvidence, getOutcome, getTaskFileText } from './feedback'
 
 describe('getOutcome：null 数组合一为 []', () => {
   it('后端返回 null 时给出空数组', async () => {
@@ -69,5 +76,20 @@ describe('getEvidence：null 数组合一为 []', () => {
     expect(e.checks).toEqual([])
     expect(e.diff_brief).toEqual([])
     expect(e.diff_brief.length).toBe(0)
+  })
+})
+
+describe('getTaskFileText：透传截断元信息', () => {
+  it('返回 text/size/truncated', async () => {
+    requestTextMeta.mockResolvedValueOnce({
+      text: 'package main\n',
+      size: 2_000_100,
+      truncated: true,
+    })
+    const r = await getTaskFileText('t1', 'main.go')
+    expect(r.text).toBe('package main\n')
+    expect(r.size).toBe(2_000_100)
+    expect(r.truncated).toBe(true)
+    expect(requestTextMeta).toHaveBeenCalledWith('/tasks/t1/file?path=main.go')
   })
 })

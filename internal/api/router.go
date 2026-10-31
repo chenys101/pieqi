@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"pieqi/internal/agent"
@@ -23,6 +24,10 @@ type Server struct {
 	commands *core.CommandScanner
 	auth     *auth.Service       // wired by SetAuth; nil-safe for legacy tests
 	tunnel   *auth.TunnelManager // wired by SetAuth; nil-safe for legacy tests
+
+	// FileChange 派生短缓存（/file + /artifacts 共用；见 file_changes_cache.go）。
+	fcMu    sync.Mutex
+	fcCache map[string]fileChangesEntry
 
 	// Feedback（p0-design.md §5）：Checkpoint/Rewind 与 Preview；
 	// wired by SetFeedback; nil-safe（未接线时端点返回降级响应）。

@@ -1,6 +1,8 @@
 package core
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -67,6 +69,33 @@ func TestIsBinaryContent(t *testing.T) {
 	}
 	if !IsBinaryContent([]byte("a\x00b")) {
 		t.Error("NUL content should be binary")
+	}
+}
+
+func TestReadWorktreeFileLimited(t *testing.T) {
+	dir := t.TempDir()
+	path := "a.txt"
+	full := filepath.Join(dir, path)
+	body := []byte("hello-world-payload")
+	if err := os.WriteFile(full, body, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 不截断
+	data, size, trunc, ok := ReadWorktreeFileLimited(dir, path, 0)
+	if !ok || trunc || size != int64(len(body)) || string(data) != string(body) {
+		t.Fatalf("unlimited: ok=%v trunc=%v size=%d data=%q", ok, trunc, size, data)
+	}
+
+	// 截断
+	data, size, trunc, ok = ReadWorktreeFileLimited(dir, path, 5)
+	if !ok || !trunc || size != int64(len(body)) || string(data) != "hello" {
+		t.Fatalf("limited: ok=%v trunc=%v size=%d data=%q", ok, trunc, size, data)
+	}
+
+	// 缺失
+	if _, _, _, ok = ReadWorktreeFileLimited(dir, "missing.txt", 10); ok {
+		t.Fatal("missing should be !ok")
 	}
 }
 

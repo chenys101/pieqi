@@ -15,7 +15,7 @@
 //	POST /api/tasks/:id/rewind（scope:file）  文件级回退（P2）
 //	POST /api/tasks/:id/push              Evidence Push（P2）
 
-import { request, requestText } from './client'
+import { request, requestTextMeta } from './client'
 import type {
   ApprovalDiffDto,
   ArtifactDto,
@@ -82,9 +82,18 @@ export function taskLocalImageURL(taskId: string, path: string): string {
   return `/api/tasks/${encodeURIComponent(taskId)}/local-image?${qs}`
 }
 
-/** GET /api/tasks/:id/file 的原始文本（markdown 渲染前拉取）。 */export async function getTaskFileText(taskId: string, path: string): Promise<string> {
+/** /file 文本载荷：正文 + 磁盘真尺寸 + 是否被服务端截断。 */
+export interface TaskFileText {
+  text: string
+  /** 磁盘上的完整字节数（截断前后都报告真值） */
+  size: number
+  truncated: boolean
+}
+
+/** GET /api/tasks/:id/file 的原始文本（markdown / code 渲染前拉取）。 */
+export async function getTaskFileText(taskId: string, path: string): Promise<TaskFileText> {
   const qs = new URLSearchParams({ path })
-  return requestText(`/tasks/${encodeURIComponent(taskId)}/file?${qs}`)
+  return requestTextMeta(`/tasks/${encodeURIComponent(taskId)}/file?${qs}`)
 }
 
 /**

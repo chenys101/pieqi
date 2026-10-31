@@ -360,15 +360,21 @@ const baselineLine = computed(() => {
   return sha ? `baseline ${sha.slice(0, 7)}` : ''
 })
 
-async function refresh() {
+/**
+ * 拉反馈数据。
+ * force=false：有缓存就跳过（面板初次可见 / Timeline 已拉过）；
+ * force=true：回退、手动刷新后必须看到新数字。
+ *
+ * artifacts 仅在面板主体可见时拉 —— dock 贴边条只需要 bundle 的 fileCount，
+ * 不必为一条计数多打 /artifacts。
+ */
+async function refresh(force = true) {
   if (!props.taskId) return
   loading.value = true
   try {
-    // force：回退 / 重跑后必须看到新数字，本地有缓存也要重拉
-    await Promise.all([
-      bundleStore.load(props.taskId, true),
-      artifactsStore.load(props.taskId, true),
-    ])
+    const jobs: Promise<void>[] = [bundleStore.load(props.taskId, force)]
+    if (bodyOn.value) jobs.push(artifactsStore.load(props.taskId, force))
+    await Promise.all(jobs)
   } catch (err) {
     notify.error(err instanceof Error ? err.message : '加载反馈数据失败')
   } finally {
@@ -423,13 +429,22 @@ function verifyLine(v: RewindVerificationDto): string {
   return parts.join(' · ')
 }
 
-// 可见（或需要贴边条计数）时拉取；taskId 变化时重拉
+// 可见（或需要贴边条计数）时拉取；taskId 变化时重拉。
+// 初载 force=false：吃 Timeline / 上次面板的缓存，避免每次展开都双打接口。
 watch(
   () => [shouldLoad.value, props.taskId] as const,
   ([on]) => {
-    if (on) refresh()
+    if (on) void refresh(false)
   },
   { immediate: true },
+)
+
+// dock：从贴边条展开后补拉 artifacts（初载只拉了 bundle）
+watch(
+  () => bodyOn.value,
+  (on) => {
+    if (on && props.taskId) void artifactsStore.load(props.taskId, false)
+  },
 )
 
 /**
@@ -536,7 +551,7 @@ watch([tab, view], () => {
           type="button"
           class="shrink-0 cursor-pointer rounded px-1.5 py-0.5 text-[13px] leading-none text-text-tertiary transition-colors hover:bg-surface-muted hover:text-text"
           title="刷新"
-          @click="refresh"
+          @click="() => refresh(true)"
         >↻</button>
         <button
           v-if="mode === 'dock'"

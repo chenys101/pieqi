@@ -217,6 +217,9 @@ func DeriveFileChanges(events []model.TaskEvent, worktree string, seenBefore fun
 		firstSeen int // 首次出现下标（同 Turn 内合并时保留最早）
 	}
 	byTurnPath := map[int]map[string]*agg{}
+	// toolUseID → agg：EventToolResult 用 O(1) 反查，避免「每个 result × 全表扫描」
+	// （长会话事件上千时，旧三重循环会把反馈面板打开拖成秒级）。
+	byToolUseID := map[string]*agg{}
 	turn := 0
 	idx := 0
 
@@ -241,26 +244,29 @@ func DeriveFileChanges(events []model.TaskEvent, worktree string, seenBefore fun
 			}
 			if existing, exists := m[path]; exists {
 				existing.fc.ToolUseIDs = append(existing.fc.ToolUseIDs, ev.ToolUseID)
+				if ev.ToolUseID != "" {
+					byToolUseID[ev.ToolUseID] = existing
+				}
 				continue
 			}
-			m[path] = &agg{fc: FileChange{
+			a := &agg{fc: FileChange{
 				Path: path, Operation: op, Turn: turn,
 				ToolUseIDs: []string{ev.ToolUseID}, Status: "pending",
 			}, firstSeen: idx}
+			m[path] = a
+			if ev.ToolUseID != "" {
+				byToolUseID[ev.ToolUseID] = a
+			}
 		case model.EventToolResult:
-			// 按 ToolUseID 反查归属（只更新 status，找不到就忽略——跨 Turn 的 result 不会出现）
-			for _, m := range byTurnPath {
-				for _, a := range m {
-					for _, id := range a.fc.ToolUseIDs {
-						if id == ev.ToolUseID {
-							if ev.IsError {
-								a.fc.Status = "failed"
-							} else {
-								a.fc.Status = "success"
-							}
-						}
-					}
-				}
+			// 找不到就忽略——跨 Turn 的 result 不会出现
+			a, ok := byToolUseID[ev.ToolUseID]
+			if !ok {
+				continue
+			}
+			if ev.IsError {
+				a.fc.Status = "failed"
+			} else {
+				a.fc.Status = "success"
 			}
 		}
 		idx++

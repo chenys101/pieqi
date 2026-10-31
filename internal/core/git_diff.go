@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -349,4 +350,40 @@ func ReadWorktreeFile(worktree, path string) ([]byte, bool) {
 		return nil, false
 	}
 	return data, true
+}
+
+// ReadWorktreeFileLimited 读取 worktree 文件，最多 maxBytes 字节。
+//
+//	size      —— 磁盘上的完整大小（截断前后都报告真值，供前端提示）
+//	truncated —— 返回内容是否被截断
+//	maxBytes <= 0 时不截断（行为同 ReadWorktreeFile，仍返回 size）
+//
+// 用 Stat + 有限读代替无条件 os.ReadFile：避免大文件（生成的 log / 大 JSON）
+// 一次塞进进程内存再整包吐给客户端。
+func ReadWorktreeFileLimited(worktree, path string, maxBytes int64) (data []byte, size int64, truncated bool, ok bool) {
+	full := filepath.Join(worktree, filepath.FromSlash(path))
+	fi, err := os.Stat(full)
+	if err != nil || fi.IsDir() {
+		return nil, 0, false, false
+	}
+	size = fi.Size()
+	if maxBytes <= 0 || size <= maxBytes {
+		data, err = os.ReadFile(full)
+		if err != nil {
+			return nil, size, false, false
+		}
+		return data, size, false, true
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return nil, size, false, false
+	}
+	defer f.Close()
+	buf := make([]byte, maxBytes)
+	n, err := io.ReadFull(f, buf)
+	// size > maxBytes 时 ReadFull 应读满；短读也把已读部分当截断结果返回。
+	if n == 0 && err != nil {
+		return nil, size, false, false
+	}
+	return buf[:n], size, true, true
 }
