@@ -51,6 +51,7 @@ func TestHandleCursorExtension_AskQuestionSkipped(t *testing.T) {
 
 func TestHandleCursorExtension_CreatePlanAcceptedAndEmitsPlan(t *testing.T) {
 	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
+	// 无 OnPermissionRequest：非 plan 也直通采纳（与 RequestPermission 无回调同口径）。
 	var got PlanUpdate
 	a.OnPlanUpdate(func(u PlanUpdate) { got = u })
 	raw := []byte(`{"toolCallId":"c1","name":"Demo","overview":"ov","plan":"do x","todos":[{"id":"1","content":"Inspect","status":"completed"},{"id":"2","content":"Edit","status":"pending"}]}`)
@@ -65,6 +66,99 @@ func TestHandleCursorExtension_CreatePlanAcceptedAndEmitsPlan(t *testing.T) {
 	}
 	if len(got.Entries) != 2 || got.Entries[0].Content != "Inspect" || got.Entries[0].Status != "completed" {
 		t.Fatalf("plan entries=%+v", got.Entries)
+	}
+}
+
+func TestHandleCursorExtension_CreatePlanInPlanModeAutoAccepts(t *testing.T) {
+	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
+	a.modeMu.Lock()
+	a.modeState.CurrentID = "plan"
+	a.modeMu.Unlock()
+	var got PlanUpdate
+	a.OnPlanUpdate(func(u PlanUpdate) { got = u })
+	// 挂上 onPerm 也不该弹卡（已在 plan）。
+	a.OnPermissionRequest(func(PermissionRequest) {
+		t.Error("plan mode must not ask to enter plan")
+	})
+	raw := []byte(`{"toolCallId":"c2","name":"InPlan","todos":[{"id":"1","content":"A","status":"pending"}]}`)
+	resp, err := a.handleCursorExtension(context.Background(), "cursor/create_plan", raw, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := resp.(map[string]any)
+	inner, _ := m["outcome"].(map[string]any)
+	if inner["outcome"] != "accepted" {
+		t.Fatalf("want accepted, got %v", resp)
+	}
+	if len(got.Entries) != 1 || got.Entries[0].Content != "A" {
+		t.Fatalf("entries=%+v", got.Entries)
+	}
+}
+
+func TestHandleCursorExtension_CreatePlanOutsidePlanAsksConfirm(t *testing.T) {
+	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
+	a.modeMu.Lock()
+	a.modeState.CurrentID = "agent"
+	a.modeMu.Unlock()
+	a.lastSessionID = "s1"
+
+	var asked PermissionRequest
+	a.OnPermissionRequest(func(req PermissionRequest) {
+		asked = req
+		go func() { _ = a.Approve(context.Background(), req.ReqID, "allow-once") }()
+	})
+	var got PlanUpdate
+	a.OnPlanUpdate(func(u PlanUpdate) { got = u })
+
+	raw := []byte(`{"toolCallId":"c3","name":"NeedConfirm","overview":"why","todos":[{"id":"1","content":"Step","status":"pending"}]}`)
+	resp, err := a.handleCursorExtension(context.Background(), "cursor/create_plan", raw, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := resp.(map[string]any)
+	inner, _ := m["outcome"].(map[string]any)
+	if inner["outcome"] != "accepted" {
+		t.Fatalf("want accepted after confirm, got %v", resp)
+	}
+	if asked.ToolKind != "switch_mode" || !strings.Contains(asked.ToolTitle, "进入计划模式") {
+		t.Fatalf("asked=%+v", asked)
+	}
+	if len(got.Entries) != 1 {
+		t.Fatalf("entries=%+v", got.Entries)
+	}
+}
+
+func TestHandleCursorExtension_CreatePlanOutsidePlanDeclineClears(t *testing.T) {
+	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
+	a.modeMu.Lock()
+	a.modeState.CurrentID = "agent"
+	a.modeMu.Unlock()
+
+	a.OnPermissionRequest(func(req PermissionRequest) {
+		go func() { _ = a.Deny(context.Background(), req.ReqID) }()
+	})
+	var last PlanUpdate
+	n := 0
+	a.OnPlanUpdate(func(u PlanUpdate) {
+		n++
+		last = u
+	})
+
+	raw := []byte(`{"toolCallId":"c4","name":"Nope","todos":[{"id":"1","content":"X","status":"pending"}]}`)
+	resp, err := a.handleCursorExtension(context.Background(), "cursor/create_plan", raw, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := resp.(map[string]any)
+	inner, _ := m["outcome"].(map[string]any)
+	if inner["outcome"] != "cancelled" {
+		t.Fatalf("want cancelled, got %v", resp)
+	}
+	if n < 2 {
+		t.Fatalf("expect preview then clear, n=%d", n)
+	}
+	if len(last.Entries) != 0 {
+		t.Fatalf("clear should emit empty, got %+v", last.Entries)
 	}
 }
 

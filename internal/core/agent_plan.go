@@ -67,6 +67,25 @@ func (w *planWire) onPlan(u agent.PlanUpdate) {
 			Status:   model.PlanEntryStatus(e.Status),
 		})
 	}
+	// 空 entries = 清空快照（用户拒绝进入 plan 时的预览回收）；不追加 EventPlan，
+	// 避免时间线多一张「计划已清空」噪点。
+	if len(entries) == 0 {
+		updated, err := w.store.Update(w.taskID, func(t *model.Task) bool {
+			if t.Plan == nil {
+				return false
+			}
+			t.Plan = nil
+			return true
+		})
+		if err != nil {
+			w.logger.Warn("plan clear failed", zap.String("task", w.taskID), zap.Error(err))
+			return
+		}
+		if updated != nil {
+			w.bus.Publish(Event{Type: "task_updated", TaskID: w.taskID, Task: updated})
+		}
+		return
+	}
 	payload := model.PlanPayload{Entries: entries}
 	raw, err := json.Marshal(payload)
 	if err != nil {

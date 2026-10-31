@@ -1507,8 +1507,13 @@ func (tr *TaskRunner) handleLine(taskID, line string, pending map[string]string)
 				if pending != nil {
 					pending[b.ID] = b.Name
 				}
-				tr.appendEvent(taskID, model.TaskEvent{
-					Type: model.EventToolUse, ToolName: b.Name, ToolUseID: b.ID, Input: b.Input,
+				// Claude TodoWrite 等不走 ACP PlanReporter：同一 mutation 里抬升 Task.Plan，
+				// 供 composer 上方 sticky（不另插 EventPlan，时间线已有 tool 卡）。
+				tr.transition(taskID, "", func(t *model.Task) {
+					tr.store.AppendEvent(t, model.TaskEvent{
+						Type: model.EventToolUse, ToolName: b.Name, ToolUseID: b.ID, Input: b.Input, At: time.Now(),
+					})
+					_ = ApplyTodoToolAsPlan(t, b.Name, b.Input)
 				})
 			case "thinking":
 				// thinking 块内容在 b.Thinking（不在 b.Text），空串则跳过

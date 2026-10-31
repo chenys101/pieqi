@@ -73,6 +73,13 @@ func (s *Server) setTaskMode(c *gin.Context) {
 		return
 	}
 
+	// ApplyLiveMode → SetMode → applyMode 在 CurrentID 真变时会经 WireMode
+	// 已写 Task.Mode + mode_switch；这里再写会双份事件。已对齐则直接成功。
+	if t2, ok := s.store.Get(id); ok && t2 != nil && t2.Mode == target {
+		c.JSON(http.StatusOK, gin.H{"ok": true, "mode": target, "changed": true})
+		return
+	}
+
 	summary := modeSwitchSummaryAPI(t.Modes, from, target)
 	payload, err := json.Marshal(model.ModeSwitchPayload{From: from, To: target})
 	if err != nil {

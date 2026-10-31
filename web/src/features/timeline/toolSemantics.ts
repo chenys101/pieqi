@@ -35,9 +35,10 @@ export const TOOL_SEMANTICS: Record<string, ToolSemantic> = {
   update_goal: 'goal',
   get_goal: 'goal',
   clear_goal: 'goal',
-  // 计划清单
+  // 计划清单（dsh todo_write / Claude TodoWrite / 个别 write_todos）
   todo_write: 'todo',
   todowrite: 'todo',
+  write_todos: 'todo',
   // 方案（dsh 的 exit_plan_mode；claude 侧是 permissionMode）
   exit_plan_mode: 'plan',
   enter_plan_mode: 'plan',

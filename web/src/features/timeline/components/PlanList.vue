@@ -1,14 +1,16 @@
 <script setup lang="ts">
-// PlanList：ACP / Cursor 计划条目清单（时间线 PlanCard 与会话 sticky 快照共用）。
+// PlanList：ACP / Cursor / todo_write 计划条目清单。
+// 时间线 PlanCard、会话 sticky、todo 语义卡展开共用。
+// UI 对齐 dsh TodoPanel：默认折叠、分状态进度、aria-expanded。
 import { computed, ref, watch } from 'vue'
 import type { PlanEntryDto } from '@/types/api'
 
 const props = withDefaults(
   defineProps<{
     entries: PlanEntryDto[]
-    /** 折叠态标题；空则用「N 项 · M 完成」 */
+    /** 折叠态标题；空则用分状态进度 */
     headline?: string
-    /** 受控折叠；不传则组件内自管 */
+    /** 受控折叠；不传则组件内自管，默认折叠（对齐 dsh） */
     folded?: boolean
   }>(),
   { headline: '' },
@@ -16,7 +18,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{ 'update:folded': [value: boolean] }>()
 
-const localFolded = ref(props.folded ?? false)
+const localFolded = ref(props.folded ?? true)
 watch(
   () => props.folded,
   (v) => {
@@ -25,11 +27,19 @@ watch(
 )
 
 const done = computed(() => props.entries.filter((e) => e.status === 'completed').length)
-const title = computed(
-  () =>
-    props.headline ||
-    (props.entries.length ? `${props.entries.length} 项 · ${done.value} 完成` : '计划'),
-)
+const active = computed(() => props.entries.filter((e) => e.status === 'in_progress').length)
+const pending = computed(() => props.entries.length - done.value - active.value)
+
+/** 分状态进度：「N 完成 · M 进行中 · K 待办」，零段省略（对齐 dsh progressLabel） */
+const progress = computed(() => {
+  const parts: string[] = []
+  if (done.value > 0) parts.push(`${done.value} 完成`)
+  if (active.value > 0) parts.push(`${active.value} 进行中`)
+  if (pending.value > 0) parts.push(`${pending.value} 待办`)
+  return parts.join(' · ') || (props.entries.length ? `${props.entries.length} 项` : '计划')
+})
+
+const title = computed(() => props.headline || progress.value)
 
 const STATUS_MARK: Record<string, string> = {
   pending: '○',
@@ -57,6 +67,7 @@ function toggle() {
     <button
       type="button"
       class="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:text-text"
+      :aria-expanded="!localFolded"
       @click="toggle"
     >
       <span class="text-warning" aria-hidden="true">▤</span>
@@ -65,6 +76,7 @@ function toggle() {
       <span
         class="ml-auto shrink-0 text-muted transition-transform"
         :class="localFolded ? '-rotate-90' : ''"
+        aria-hidden="true"
       >▾</span>
     </button>
     <ul v-show="!localFolded" class="border-t border-border/40 px-3 py-2">

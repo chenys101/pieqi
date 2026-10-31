@@ -18,6 +18,8 @@ describe('semanticOf：能认出语义的工具', () => {
 
   it('todo / plan / subagent / jobs', () => {
     expect(semanticOf('todo_write')).toBe('todo')
+    expect(semanticOf('write_todos')).toBe('todo')
+    expect(semanticOf('TodoWrite')).toBe('todo')
     expect(semanticOf('exit_plan_mode')).toBe('plan')
     expect(semanticOf('Task')).toBe('subagent') // claude 的子代理工具就叫 Task
     expect(semanticOf('subagent')).toBe('subagent')

@@ -727,6 +727,9 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 		if err := a.applyMode(sessCtx, string(sid), cfg.Mode); err != nil {
 			return "", err
 		}
+		if err := a.requireAppliedMode(cfg.Mode); err != nil {
+			return "", err
+		}
 		a.modeMu.Lock()
 		a.lastSessionID = string(sid)
 		a.modeMu.Unlock()
@@ -762,6 +765,9 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 		return "", err
 	}
 	if err := a.applyMode(sessCtx, string(resp.SessionId), cfg.Mode); err != nil {
+		return "", err
+	}
+	if err := a.requireAppliedMode(cfg.Mode); err != nil {
 		return "", err
 	}
 	a.modeMu.Lock()
@@ -909,9 +915,14 @@ func (a *ACPAgent) rememberModes(modes *acp.SessionModeState) {
 // modeID 为空：若协商清单非空且当前 id 已在清单里，不动；否则设为清单首项
 // （与 fallbackModel 同判据——agent 声明过的才可信）。无清单则静默跳过。
 // modeID 非空但不在清单里：报错（前端只该提交清单内值；越界比静默失败更响）。
+//
+// CurrentID 真变时回调 onMode（→ WireMode 写 Task.Mode + mode_switch）。
+// 与 current_mode_update 共用同一条下游，避免 create_plan / SetMode 只改
+// adapter 内存、任务落盘仍停在旧 mode（会话 f0a5021b：库里 plan、实际在改文件）。
 func (a *ACPAgent) applyMode(ctx context.Context, sessionID, modeID string) error {
 	a.modeMu.RLock()
 	st := a.modeState
+	old := st.CurrentID
 	a.modeMu.RUnlock()
 	if len(st.Available) == 0 {
 		return nil // 该 agent 不暴露 mode
@@ -949,6 +960,36 @@ func (a *ACPAgent) applyMode(ctx context.Context, sessionID, modeID string) erro
 	a.modeMu.Lock()
 	a.modeState.CurrentID = modeID
 	a.modeMu.Unlock()
+	if old != modeID {
+		a.emitModeUpdate(sessionID, modeID)
+	}
+	return nil
+}
+
+// emitModeUpdate 通知 ModeReporter（WireMode）。modeID 空则忽略。
+func (a *ACPAgent) emitModeUpdate(sessionID, modeID string) {
+	if modeID == "" {
+		return
+	}
+	a.cbMu.RLock()
+	mfn := a.onMode
+	a.cbMu.RUnlock()
+	if mfn != nil {
+		mfn(ModeUpdate{SessionID: sessionID, ModeID: modeID})
+	}
+}
+
+// requireAppliedMode 开局/续会话后核对用户指定的 mode 是否真落在 CurrentID 上。
+// want 空 = 未指定，不校验。对不上就失败，禁止「界面写 plan、agent 仍在别的 mode」。
+func (a *ACPAgent) requireAppliedMode(want string) error {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return nil
+	}
+	got := a.Modes().CurrentID
+	if got != want {
+		return fmt.Errorf("acp: mode not applied: want %q, got %q", want, got)
+	}
 	return nil
 }
 
@@ -1576,6 +1617,8 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		// 注意类型差异：ToolCall.Title 是 string，而 ToolCallUpdate.Title 是
 		// *string（SDK 两处不一致），故取值写法不同，别照抄。
 		title := u.ToolCall.Title
+		kind := string(u.ToolCall.Kind)
+		title, rawIn = enrichSwitchModePresentation(title, kind, rawIn, toolCallContentText(u.ToolCall.Content))
 		// 记下**工具名 + 入参**供审批时补齐（见 toolInputs 注释）。
 		a.rememberToolInput(toolCallID, title, rawIn)
 		// 「收到了什么」必须可观测：审批回填失败时，靠这条日志能立刻区分
@@ -1593,13 +1636,13 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		if fn != nil {
 			fn(ToolCallUpdateInfo{
 				SessionID: sid, ToolCallID: toolCallID,
-				Title: u.ToolCall.Title, Status: string(u.ToolCall.Status),
-				Kind: string(u.ToolCall.Kind), IsNew: true,
+				Title: title, Status: string(u.ToolCall.Status),
+				Kind: kind, IsNew: true,
 				// 工具入参/输出（RawOutput 在开始事件里通常为空，留 nil 即可）。
 				RawInput:  rawIn,
 				RawOutput: rawAnyToJSON(u.ToolCall.RawOutput),
 				// 结果里的图片（read_image 才有）；见 toolCallImages 的判据。
-				Images: toolCallImages(u.ToolCall.Title, u.ToolCall.Content),
+				Images: toolCallImages(title, u.ToolCall.Content),
 			})
 		}
 	case u.ToolCallUpdate != nil:
@@ -1611,6 +1654,11 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		if u.ToolCallUpdate.Title != nil {
 			updTitle = *u.ToolCallUpdate.Title
 		}
+		updKind := ""
+		if u.ToolCallUpdate.Kind != nil {
+			updKind = string(*u.ToolCallUpdate.Kind)
+		}
+		updTitle, rawIn = enrichSwitchModePresentation(updTitle, updKind, rawIn, toolCallContentText(u.ToolCallUpdate.Content))
 		// 状态变更里也常带 RawInput/Title（部分 agent 只在 update 里给，如 dsh 的
 		// pwsh 调用）；同样记下。空值不覆盖已有记录，见 rememberToolInput。
 		//
@@ -1630,14 +1678,14 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 				SessionID: sid, ToolCallID: toolCallID,
 				IsNew: false,
 			}
-			if u.ToolCallUpdate.Title != nil {
-				info.Title = *u.ToolCallUpdate.Title
+			if updTitle != "" {
+				info.Title = updTitle
 			}
 			if u.ToolCallUpdate.Status != nil {
 				info.Status = string(*u.ToolCallUpdate.Status)
 			}
-			if u.ToolCallUpdate.Kind != nil {
-				info.Kind = string(*u.ToolCallUpdate.Kind)
+			if updKind != "" {
+				info.Kind = updKind
 			}
 			// 工具入参/输出（RawOutput 在 completed/failed 时承载结果，→ EventToolResult.Result）。
 			info.RawInput = rawIn
@@ -1724,12 +1772,7 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		a.modeMu.Lock()
 		a.modeState.CurrentID = modeID
 		a.modeMu.Unlock()
-		a.cbMu.RLock()
-		mfn := a.onMode
-		a.cbMu.RUnlock()
-		if mfn != nil {
-			mfn(ModeUpdate{SessionID: sid, ModeID: modeID})
-		}
+		a.emitModeUpdate(sid, modeID)
 	}
 	// UserMessageChunk / AvailableCommands 等暂不处理。
 	return nil

@@ -2,11 +2,22 @@ package agent
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	acp "github.com/coder/acp-go-sdk"
 	"pieqi/internal/config"
 )
+
+// testSessionCwd 已存在的目录即可（假 conn 不读盘；沙箱下 TempDir/Mkdir 常拒写）。
+func testSessionCwd(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
+}
 
 func TestSessionUpdate_PlanEmitsCallback(t *testing.T) {
 	a := NewACPAgent(config.ACPConfig{AgentType: "agent", InitTimeout: 5}, nil)
@@ -69,7 +80,7 @@ func TestRememberModesAndApplyMode(t *testing.T) {
 		},
 	}
 	a := newModelAgent(t, conn, acp.AgentCapabilities{})
-	sid, err := a.NewSession(context.Background(), SessionConfig{Cwd: t.TempDir()})
+	sid, err := a.NewSession(context.Background(), SessionConfig{Cwd: testSessionCwd(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +105,78 @@ func TestRememberModesAndApplyMode(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected set_mode:agent in order=%v", conn.order)
+	}
+}
+
+func TestApplyMode_EmitsOnModeWhenChanged(t *testing.T) {
+	conn := &fakeModelConn{
+		newSessionResp: acp.NewSessionResponse{
+			SessionId: "sess",
+			Modes: &acp.SessionModeState{
+				CurrentModeId: "plan",
+				AvailableModes: []acp.SessionMode{
+					{Id: "plan", Name: "Plan"},
+					{Id: "agent", Name: "Agent"},
+				},
+			},
+		},
+	}
+	a := newModelAgent(t, conn, acp.AgentCapabilities{})
+	var got ModeUpdate
+	a.OnModeUpdate(func(u ModeUpdate) { got = u })
+	if _, err := a.NewSession(context.Background(), SessionConfig{Cwd: testSessionCwd(t), Mode: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	// 开局已经是 plan，再 set plan 不应回调（CurrentID 未变）。
+	got = ModeUpdate{}
+	if err := a.SetMode(context.Background(), "plan"); err != nil {
+		t.Fatal(err)
+	}
+	if got.ModeID != "" {
+		t.Fatalf("same mode should not emit, got=%+v", got)
+	}
+	if err := a.SetMode(context.Background(), "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if got.ModeID != "agent" || got.SessionID != "sess" {
+		t.Fatalf("want onMode agent, got=%+v", got)
+	}
+}
+
+func TestNewSession_RequireAppliedMode(t *testing.T) {
+	conn := &fakeModelConn{
+		newSessionResp: acp.NewSessionResponse{
+			SessionId: "sess",
+			// agent 协商默认 agent；用户指定 plan → applyMode 必须落下。
+			Modes: &acp.SessionModeState{
+				CurrentModeId: "agent",
+				AvailableModes: []acp.SessionMode{
+					{Id: "plan", Name: "Plan"},
+					{Id: "agent", Name: "Agent"},
+				},
+			},
+		},
+	}
+	a := newModelAgent(t, conn, acp.AgentCapabilities{})
+	if _, err := a.NewSession(context.Background(), SessionConfig{Cwd: testSessionCwd(t), Mode: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if a.Modes().CurrentID != "plan" {
+		t.Fatalf("CurrentID=%q want plan", a.Modes().CurrentID)
+	}
+}
+
+func TestNewSession_RequireAppliedModeFailsWithoutModes(t *testing.T) {
+	conn := &fakeModelConn{
+		newSessionResp: acp.NewSessionResponse{
+			SessionId: "sess",
+			Modes:     nil, // 不暴露 mode
+		},
+	}
+	a := newModelAgent(t, conn, acp.AgentCapabilities{})
+	_, err := a.NewSession(context.Background(), SessionConfig{Cwd: testSessionCwd(t), Mode: "plan"})
+	if err == nil {
+		t.Fatal("expected error when mode requested but agent has no modes")
 	}
 }
 

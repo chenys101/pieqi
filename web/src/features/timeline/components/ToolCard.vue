@@ -14,6 +14,7 @@
 import { computed, ref } from 'vue'
 import { formatToolInput } from '@/utils/format'
 import { semanticOf, headlineOf, SEMANTIC_LABEL, type ToolSemantic } from '../toolSemantics'
+import type { PlanEntryDto } from '@/types/api'
 
 const props = defineProps<{ toolName: string; input?: unknown }>()
 const collapsed = ref(true)
@@ -23,6 +24,33 @@ const rows = computed(() => formatToolInput(props.input))
 const semantic = computed<ToolSemantic | undefined>(() => semanticOf(props.toolName))
 /** 语义卡顶部那句人读摘要（取不到为空串，退回显示工具名） */
 const headline = computed(() => (semantic.value ? headlineOf(semantic.value, props.input) : ''))
+
+/** todo 展开：清单条目（与 sticky PlanList 同字形），取不到则退回原始 JSON 行 */
+const todoEntries = computed<PlanEntryDto[]>(() => {
+  if (semantic.value !== 'todo') return []
+  const o = (props.input ?? {}) as Record<string, unknown>
+  const raw = o.todos ?? o.items
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((item) => {
+      const t = (item ?? {}) as Record<string, unknown>
+      const content = typeof t.content === 'string' ? t.content : typeof t.id === 'string' ? t.id : ''
+      const status = typeof t.status === 'string' ? t.status : 'pending'
+      return { content, status, priority: 'medium' } satisfies PlanEntryDto
+    })
+    .filter((e) => e.content.trim() !== '')
+})
+
+const STATUS_MARK: Record<string, string> = {
+  pending: '○',
+  in_progress: '◉',
+  completed: '●',
+}
+const STATUS_CLS: Record<string, string> = {
+  pending: 'text-muted',
+  in_progress: 'text-warning',
+  completed: 'text-success',
+}
 
 /** 每类语义的图标 + 配色。只用 token（tailwind.config 里定义过），不写任意色值。 */
 const MARK: Record<ToolSemantic, { icon: string; cls: string }> = {
@@ -43,6 +71,7 @@ const MARK: Record<ToolSemantic, { icon: string; cls: string }> = {
   >
     <button
       class="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:text-text"
+      :aria-expanded="!collapsed"
       @click="collapsed = !collapsed"
     >
       <span :class="MARK[semantic].cls" aria-hidden="true">{{ MARK[semantic].icon }}</span>
@@ -53,11 +82,32 @@ const MARK: Record<ToolSemantic, { icon: string; cls: string }> = {
       <span class="ml-auto shrink-0 text-muted transition-transform" :class="collapsed ? '-rotate-90' : ''">▾</span>
     </button>
     <div v-show="!collapsed" class="border-t border-border/40 px-3 py-2">
-      <div v-for="(row, i) in rows" :key="i" class="flex gap-2 py-0.5 text-xs">
-        <span class="shrink-0 font-mono text-muted">{{ row.key }}:</span>
-        <span class="min-w-0 break-all font-mono">{{ row.value }}</span>
-      </div>
-      <div v-if="!rows.length" class="text-xs text-muted">（无参数）</div>
+      <!-- todo：展开为清单（与 sticky 同字形），不要摊原始 JSON -->
+      <ul v-if="semantic === 'todo' && todoEntries.length">
+        <li
+          v-for="(e, i) in todoEntries"
+          :key="i"
+          class="flex gap-2 py-1 text-xs"
+          :data-status="e.status"
+        >
+          <span
+            class="mt-px shrink-0"
+            :class="STATUS_CLS[e.status] || 'text-muted'"
+            aria-hidden="true"
+          >{{ STATUS_MARK[e.status] || '○' }}</span>
+          <span
+            class="min-w-0 flex-1 break-words"
+            :class="e.status === 'completed' ? 'text-muted line-through' : 'text-text'"
+          >{{ e.content }}</span>
+        </li>
+      </ul>
+      <template v-else>
+        <div v-for="(row, i) in rows" :key="i" class="flex gap-2 py-0.5 text-xs">
+          <span class="shrink-0 font-mono text-muted">{{ row.key }}:</span>
+          <span class="min-w-0 break-all font-mono">{{ row.value }}</span>
+        </div>
+        <div v-if="!rows.length" class="text-xs text-muted">（无参数）</div>
+      </template>
     </div>
   </div>
 
@@ -65,9 +115,10 @@ const MARK: Record<ToolSemantic, { icon: string; cls: string }> = {
   <div v-else class="event-enter rounded-lg border border-border/60 bg-surface/60">
     <button
       class="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:text-text"
+      :aria-expanded="!collapsed"
       @click="collapsed = !collapsed"
     >
-      <span>🔧</span>
+    <span>🔧</span>
       <!-- 工具名可截断：ACP 把整条命令当作 tool_name（可达数百字符），
            flex 项默认 min-width:auto 不允许缩到内容宽度以下，会把整行顶出视口 → 详情页横向滚动条 -->
       <span class="min-w-0 truncate font-mono font-semibold uppercase" :title="toolName">{{ toolName }}</span>

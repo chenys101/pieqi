@@ -98,18 +98,6 @@ const {
             </ContentColumn>
           </div>
 
-          <!-- 当前计划快照（Task.plan）：Cursor create_plan / ACP session/update(plan)
-               写入；刷新后仍在。时间线里另有逐次 EventPlan 卡片保留历史。 -->
-          <div
-            v-if="task.plan?.entries?.length"
-            class="shrink-0 px-3 pb-2 md:px-4"
-            data-testid="session-plan-sticky"
-          >
-            <ContentColumn :resizable="false">
-              <PlanList :entries="task.plan.entries" />
-            </ContentColumn>
-          </div>
-
           <SessionTimeline
             :task-id="task.id"
             :consume-force-scroll="consumeForceScroll"
@@ -131,6 +119,19 @@ const {
                   @deny="onDeny"
                 />
               </div>
+            </ContentColumn>
+          </div>
+
+          <!-- 当前计划快照（Task.plan）：挂在 composer 上方（对齐 dsh TodoPanel dock）。
+               来源：ACP session/update(plan) / Cursor create_plan·update_todos /
+               todo_write·TodoWrite 工具抬升。刷新后仍在；时间线另有 EventPlan / 语义卡。 -->
+          <div
+            v-if="task.plan?.entries?.length"
+            class="shrink-0 px-3 pb-2 md:px-4"
+            data-testid="session-plan-sticky"
+          >
+            <ContentColumn :resizable="false">
+              <PlanList :entries="task.plan.entries" />
             </ContentColumn>
           </div>
 
