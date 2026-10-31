@@ -200,6 +200,38 @@ func TestDeriveFileChanges_GenerateImage(t *testing.T) {
 	}
 }
 
+// TestDeriveFileChanges_CursorEditFile 回归（2026-10-31）：
+// Cursor ACP 工具名是带空格的 "Edit File"，路径经 locations 合成进 file_path。
+// 旧表只认 Edit/Write ⇒ 反馈面板「本轮变化」恒空（会话 dfb4722a：29 次全丢）。
+func TestDeriveFileChanges_CursorEditFile(t *testing.T) {
+	events := []model.TaskEvent{
+		{Type: model.EventUser, Text: "改面板", Seq: 1},
+		toolUseEvent("Edit File", "c1", "web/src/a.vue"),
+		{Type: model.EventToolResult, ToolUseID: "c1", ToolName: "Edit File"},
+		toolUseEvent("Write File", "c2", "web/src/b.ts"),
+		{Type: model.EventToolResult, ToolUseID: "c2", ToolName: "Write File"},
+		toolUseEvent("Delete File", "c3", "web/src/old.ts"),
+		{Type: model.EventToolResult, ToolUseID: "c3", ToolName: "Delete File"},
+	}
+	changes := DeriveFileChanges(events, "", nil)
+	if len(changes) != 3 {
+		t.Fatalf("Cursor Edit/Write/Delete File 必须被派生, got %d: %+v", len(changes), changes)
+	}
+	byPath := map[string]FileChange{}
+	for _, c := range changes {
+		byPath[c.Path] = c
+	}
+	if c := byPath["web/src/a.vue"]; c.Operation != "modify" || c.Status != "success" {
+		t.Fatalf("Edit File → %+v", c)
+	}
+	if c := byPath["web/src/b.ts"]; c.Operation != "create" {
+		t.Fatalf("Write File → %+v, want create", c)
+	}
+	if c := byPath["web/src/old.ts"]; c.Operation != "delete" {
+		t.Fatalf("Delete File → %+v", c)
+	}
+}
+
 // TestDeriveFileChanges_DshLowercaseToolNames 回归（2026-10-21）：
 // dsh 的工具名是**全小写** `edit` / `write`，而派生表原先只有大写的 claude 名字。
 //

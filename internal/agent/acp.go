@@ -1570,6 +1570,9 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		// 新工具调用开始（M3 映射 EventToolUse）
 		toolCallID := string(u.ToolCall.ToolCallId)
 		rawIn := rawAnyToJSON(u.ToolCall.RawInput)
+		// Cursor 等 agent 把路径放在 locations、rawInput 常为 {} —— 不合成则
+		// DeriveFileChanges 认不出改了哪个文件（反馈面板「本轮变化」恒空）。
+		rawIn = enrichRawInputWithLocations(rawIn, u.ToolCall.Locations)
 		// 注意类型差异：ToolCall.Title 是 string，而 ToolCallUpdate.Title 是
 		// *string（SDK 两处不一致），故取值写法不同，别照抄。
 		title := u.ToolCall.Title
@@ -1603,6 +1606,7 @@ func (a *ACPAgent) SessionUpdate(ctx context.Context, params acp.SessionNotifica
 		// 工具调用状态变更（M3 映射 EventToolResult）
 		toolCallID := string(u.ToolCallUpdate.ToolCallId)
 		rawIn := rawAnyToJSON(u.ToolCallUpdate.RawInput)
+		rawIn = enrichRawInputWithLocations(rawIn, u.ToolCallUpdate.Locations)
 		updTitle := ""
 		if u.ToolCallUpdate.Title != nil {
 			updTitle = *u.ToolCallUpdate.Title
@@ -1769,8 +1773,8 @@ func (a *ACPAgent) rememberToolInputFresh(toolCallID, title string, raw json.Raw
 		return false
 	}
 	title = strings.TrimSpace(title)
-	if title == "" && len(raw) == 0 {
-		return false // 两样都空：没什么可记的，也别无谓地唤醒等待方
+	if title == "" && rawInputEffectivelyEmpty(raw) {
+		return false // 两样都空（含 `{}`）：没什么可记的，也别无谓地唤醒等待方
 	}
 	a.toolInputsMu.Lock()
 	defer a.toolInputsMu.Unlock()
@@ -1783,7 +1787,9 @@ func (a *ACPAgent) rememberToolInputFresh(toolCallID, title string, raw json.Raw
 		memo.Title = title
 		fresh = true
 	}
-	if len(raw) > 0 && string(memo.RawInput) != string(raw) {
+	// `{}` / null 视作空：Cursor 的 status-only update 常带空对象，
+	// 若覆盖已合成的 file_path，反馈派生会再次丢路径。
+	if !rawInputEffectivelyEmpty(raw) && string(memo.RawInput) != string(raw) {
 		memo.RawInput = raw
 		fresh = true
 	}
@@ -2139,6 +2145,69 @@ func toolCallStatusString(s *acp.ToolCallStatus) string {
 		return ""
 	}
 	return string(*s)
+}
+
+// enrichRawInputWithLocations 把 ACP locations[].path 合成进工具入参。
+//
+// Cursor Agent CLI 的 Edit File / Write File：title 有工具名，locations 有路径，
+// rawInput 却经常是 `{}`。不合成时 EventToolUse.Input 无路径 ⇒ DeriveFileChanges
+// 跳过 ⇒ 反馈面板「本轮变化」恒空（会话 dfb4722a 实测 29 次 Edit File 全丢）。
+//
+// 规则：raw 里已有可识别路径字段则不动；否则写入 file_path（与 claude/dsh 同口径）。
+func enrichRawInputWithLocations(raw json.RawMessage, locs []acp.ToolCallLocation) json.RawMessage {
+	path := ""
+	for _, loc := range locs {
+		if p := strings.TrimSpace(loc.Path); p != "" {
+			path = p
+			break
+		}
+	}
+	if path == "" {
+		return raw
+	}
+	if rawInputHasFilePath(raw) {
+		return raw
+	}
+	obj := map[string]any{}
+	s := strings.TrimSpace(string(raw))
+	if s != "" && s != "null" && s != "{}" {
+		_ = json.Unmarshal(raw, &obj) // 解析失败就从空 map 起步
+		if obj == nil {
+			obj = map[string]any{}
+		}
+	}
+	obj["file_path"] = path
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return b
+}
+
+// rawInputHasFilePath 入参里是否已有派生层能认的路径字段。
+func rawInputHasFilePath(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var in struct {
+		FilePath    string `json:"file_path"`
+		FilePathAlt string `json:"filePath"`
+		Path        string `json:"path"`
+		Filename    string `json:"filename"`
+		Notebook    string `json:"notebook_path"`
+		OldPath     string `json:"old_path"`
+	}
+	if json.Unmarshal(raw, &in) != nil {
+		return false
+	}
+	return in.FilePath != "" || in.FilePathAlt != "" || in.Path != "" ||
+		in.Filename != "" || in.Notebook != "" || in.OldPath != ""
+}
+
+// rawInputEffectivelyEmpty nil / null / {} 都算空（Cursor 常用 {} 当"没入参"）。
+func rawInputEffectivelyEmpty(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s == "" || s == "null" || s == "{}"
 }
 
 // rawAnyToJSON 把 any 序列化为 json.RawMessage，供 EventToolUse.Input / 审批 RawInput 等使用。

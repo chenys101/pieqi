@@ -112,6 +112,11 @@ var toolFileOperations = map[string]string{
 	"GenerateImage":  "write",
 	"generate_image": "write",
 	"generateImage":  "write",
+	// Cursor Agent CLI（ACP title 带空格；路径常在 locations 而非 rawInput，
+	// 由 acp.enrichRawInputWithLocations 合成 file_path 后再进本表）
+	"Edit File":   "modify",
+	"Write File":  "write",
+	"Delete File": "delete",
 }
 
 // dshFileToolNames 是 dsh 的**文件写入口**集合（全小写）。
@@ -141,8 +146,9 @@ func toolInputPath(raw json.RawMessage) string {
 	}
 	var in struct {
 		FilePath     string `json:"file_path"`
-		FilePathAlt  string `json:"filePath"`  // Cursor generate_image 通知
-		Filename     string `json:"filename"`  // Cursor 入参备用字段
+		FilePathAlt  string `json:"filePath"` // Cursor generate_image 通知
+		Path         string `json:"path"`     // ACP locations / 部分 agent 原始字段
+		Filename     string `json:"filename"` // Cursor 入参备用字段
 		NotebookPath string `json:"notebook_path"`
 		OldPath      string `json:"old_path"` // Rename 变体
 		NewPath      string `json:"new_path"`
@@ -155,6 +161,9 @@ func toolInputPath(raw json.RawMessage) string {
 	}
 	if in.FilePathAlt != "" {
 		return normalizeRepoPath(in.FilePathAlt)
+	}
+	if in.Path != "" {
+		return normalizeRepoPath(in.Path)
 	}
 	if in.Filename != "" {
 		return normalizeRepoPath(in.Filename)

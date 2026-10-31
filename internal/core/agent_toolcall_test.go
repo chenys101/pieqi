@@ -389,3 +389,21 @@ func TestWireToolCall_BatchesIntoOnePersist(t *testing.T) {
 		t.Fatalf("flushCount=%d，want 1（%d 条更新必须合并成 1 次落盘）", got, N*2)
 	}
 }
+
+// TestMergeToolUseIntoTask_EmptyObjectGetsPath Cursor 先落 {} 再补 file_path。
+func TestMergeToolUseIntoTask_EmptyObjectGetsPath(t *testing.T) {
+	tt := &model.Task{
+		Events: []model.TaskEvent{
+			{Type: model.EventToolUse, ToolName: "Edit File", ToolUseID: "c1", Input: json.RawMessage(`{}`)},
+		},
+	}
+	pathIn, _ := json.Marshal(map[string]string{"file_path": "web/src/a.vue"})
+	if !mergeToolUseIntoTask(tt, agent.ToolCallUpdateInfo{
+		ToolCallID: "c1", Title: "Edit File", RawInput: pathIn, IsNew: true,
+	}) {
+		t.Fatal("merge should succeed")
+	}
+	if got := toolInputPath(tt.Events[0].Input); got != "web/src/a.vue" {
+		t.Fatalf("path=%q, want web/src/a.vue (input=%s)", got, tt.Events[0].Input)
+	}
+}

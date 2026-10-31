@@ -225,6 +225,15 @@ func applyToolCallUpdate(store *TaskStore, sink imageSink, t *model.Task, info a
 	if attachToolDescription(t, info) {
 		changed = true
 	}
+	// 入参后到时也要抬升 todo → Task.Plan（dsh 常先空壳再补 RawInput）。
+	if ApplyTodoToolAsPlan(t, info.Title, info.RawInput) {
+		changed = true
+	} else if name := lookupToolName(t.Events, info.ToolCallID); name != "" {
+		// Title 空时用已落盘的工具名再试一次。
+		if ApplyTodoToolAsPlan(t, name, info.RawInput) {
+			changed = true
+		}
+	}
 
 	// ② 映射为事件。非完成态的中间状态更新不产生事件。
 	ev, ok := mapToolCallEvent(info)
@@ -263,6 +272,9 @@ func applyToolCallUpdate(store *TaskStore, sink imageSink, t *model.Task, info a
 		ev.Images = sink.saveImages(info.Images)
 	}
 	store.AppendEvent(t, ev)
+	if ev.Type == model.EventToolUse {
+		_ = ApplyTodoToolAsPlan(t, ev.ToolName, ev.Input)
+	}
 	return true
 }
 
@@ -379,7 +391,13 @@ func mergeToolUseIntoTask(t *model.Task, info agent.ToolCallUpdateInfo) bool {
 			continue
 		}
 		changed := false
-		if len(ev.Input) == 0 && len(info.RawInput) > 0 {
+		// 入参补全：空壳（nil / {}）或尚无路径字段时，用后来带路径的入参覆盖。
+		// Cursor 常先发 rawInput={} 再在 update 的 locations 里给路径（合成后才有 file_path）；
+		// 旧判据 `len(ev.Input)==0` 会把 `{}` 当成"已有入参"拒绝合并。
+		if len(info.RawInput) > 0 && toolUseInputNeedsPath(ev.Input) && !toolUseInputNeedsPath(info.RawInput) {
+			ev.Input = info.RawInput
+			changed = true
+		} else if len(ev.Input) == 0 && len(info.RawInput) > 0 {
 			ev.Input = info.RawInput
 			changed = true
 		}
@@ -393,6 +411,18 @@ func mergeToolUseIntoTask(t *model.Task, info agent.ToolCallUpdateInfo) bool {
 		return true
 	}
 	return false
+}
+
+// toolUseInputNeedsPath 事件入参是否还缺派生层要的路径（空 / {} / 无 path 字段）。
+func toolUseInputNeedsPath(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" || s == "{}" {
+		return true
+	}
+	return toolInputPath(raw) == ""
 }
 
 // attachToolDescription 给已有 tool_use 补上"这条调用是干什么的"（description）。
