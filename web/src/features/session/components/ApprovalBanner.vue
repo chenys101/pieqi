@@ -7,6 +7,7 @@ import { ApprovalDiffCard } from '@/features/feedback'
 // 直接引组件文件而非 feature 出口：barrel 会把同目录的 ApprovalCard（含 router/store 依赖）
 // 一起拖进会话页的 chunk —— 这里只需要摘要块。
 import ApprovalSummary from '@/features/approval/components/ApprovalSummary.vue'
+import ApprovalSegments from '@/features/approval/components/ApprovalSegments.vue'
 import type { ApprovalRequest } from '@/types/approval'
 
 const props = defineProps<{ decision: ApprovalRequest; loading?: boolean }>()
@@ -28,6 +29,7 @@ const canApproveSession = computed(() => props.decision.options.includes('approv
     <template v-if="decision.kind === 'approval'">
       <div class="text-sm font-medium text-warning">⚠ 需决策：{{ decision.tool }}</div>
       <ApprovalSummary :text="decision.summary" />
+      <ApprovalSegments :segments="decision.segments" />
 
       <!-- P1：展开前瞻性 Diff（决策前看将发生什么） -->
       <ApprovalDiffCard v-if="showDiff" :task-id="decision.taskId" :decision-id="decision.id" />

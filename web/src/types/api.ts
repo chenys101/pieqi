@@ -82,6 +82,13 @@ export interface TaskImageDto {
   stored?: boolean
 }
 
+export interface DecisionSegmentDto {
+  text: string
+  kind: string
+  /** 风险分级；缺省由前端按 kind/riskOf 兜底 */
+  risk?: RiskLevelDto
+}
+
 export interface DecisionDto {
   id: string
   kind?: DecisionKindDto
@@ -89,6 +96,8 @@ export interface DecisionDto {
   /** 风险分级 L0–L3；**缺省 = 未知**（旧任务 / choice 类决策），前端按 L2 兜底 */
   risk?: RiskLevelDto
   summary: string
+  /** 复合 shell 分段风险；单段/非 shell 不下发 */
+  segments?: DecisionSegmentDto[]
   options: string[]
   created_at: string
 }

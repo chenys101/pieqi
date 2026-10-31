@@ -586,6 +586,10 @@ func segmentKind(seg string) string {
 	if kind, ok := packageRunnerKindFor(words[i:]); ok {
 		return kind
 	}
+	// Go 工具链（go test / go build …）见 go_runner.go。
+	if kind, ok := goKindFor(words[i:]); ok {
+		return kind
+	}
 	// 解释器 + 内联代码（`node -e "…"` / `python -c "…"`）：段里的代码已被引号剥离
 	// 吃空，**在这里证明不了任何东西** ⇒ 落 execute。它的只读判定只在
 	// DowngradeReadonlyPermission 的原文扫描里做（ADR-0015）。

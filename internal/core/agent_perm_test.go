@@ -164,6 +164,14 @@ func permReq(reqID, title, kind string, opts []agent.PermissionOption) agent.Per
 	}
 }
 
+// permReqCmd 带 shell 命令原文（RawInput.command），供配方级会话免审用例使用。
+func permReqCmd(reqID, title, kind, command string, opts []agent.PermissionOption) agent.PermissionRequest {
+	req := permReq(reqID, title, kind, opts)
+	raw, _ := json.Marshal(map[string]any{"command": command})
+	req.RawInput = raw
+	return req
+}
+
 // waitForStatus 轮询 store 直到 task 进入期望状态或超时。
 func waitForStatus(t *testing.T, store *TaskStore, taskID string, want model.TaskStatus, wait time.Duration) {
 	t.Helper()
@@ -847,13 +855,13 @@ func TestPermLabel(t *testing.T) {
 	}
 }
 
-// TestWirePermission_ApproveSessionPassesSameKindLater 用户点"同类免审"后：
-// 本次照常放行（回给 agent 的是 allow_once），之后同 kind 不再弹卡；不同 kind 仍弹。
-func TestWirePermission_ApproveSessionPassesSameKindLater(t *testing.T) {
+// TestWirePermission_ApproveSessionPassesSameRecipeLater 用户点「同类免审」后：
+// 按命令配方（而非整档 execute）记住；同配方免审，不同配方 / 删除类仍弹卡。
+func TestWirePermission_ApproveSessionPassesSameRecipeLater(t *testing.T) {
 	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
 	defer pw.Unwire()
 
-	fa.emitPerm(permReq("req-1", "rm -rf build", "execute", standardOptions()))
+	fa.emitPerm(permReqCmd("req-1", "pwsh", "execute", "curl -s http://127.0.0.1:3000/api/tasks", standardOptions()))
 	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
 
 	if err := pw.Resolve("req-1", "approve_session"); err != nil {
@@ -869,20 +877,130 @@ func TestWirePermission_ApproveSessionPassesSameKindLater(t *testing.T) {
 		t.Fatalf("approveCount=%d, want 1", fa.approveCount())
 	}
 
-	// 同 kind 第二次：不再弹卡，直接自动放行（emitPerm 同步走完回调，无需等待）。
-	fa.emitPerm(permReq("req-2", "ls", "execute", standardOptions()))
+	// 同配方（curl，参数不同）第二次：不再弹卡。
+	fa.emitPerm(permReqCmd("req-2", "pwsh", "execute", "curl -s -o NUL http://127.0.0.1:3000/ready", standardOptions()))
 	if fa.approveCount() != 2 {
-		t.Fatalf("approveCount=%d, want 2（同类应免审）", fa.approveCount())
+		t.Fatalf("approveCount=%d, want 2（同配方应免审）", fa.approveCount())
 	}
 	if tt, _ := store.Get(taskID); tt.Status != model.TaskRunning {
-		t.Fatalf("status=%q, want running（同类不该再弹卡）", tt.Status)
+		t.Fatalf("status=%q, want running（同配方不该再弹卡）", tt.Status)
 	}
 
-	// 不同 kind（delete = L3）仍要人批。
-	fa.emitPerm(permReq("req-3", "drop table", "delete", standardOptions()))
+	// 不同配方（仍是 execute）仍要人批 —— 证明没有把整档 execute 放行。
+	fa.emitPerm(permReqCmd("req-3", "pwsh", "execute", "netstat -ano", standardOptions()))
 	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
 	if tt, _ := store.Get(taskID); tt.CurrentDecision == nil || tt.CurrentDecision.ID != "req-3" {
 		t.Fatalf("decision=%+v, want req-3 展示", tt.CurrentDecision)
+	}
+	if err := pw.Resolve("req-3", "deny"); err != nil {
+		t.Fatalf("deny req-3: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+
+	// 不同 kind（delete = L3）仍要人批。
+	fa.emitPerm(permReq("req-4", "drop table", "delete", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if tt, _ := store.Get(taskID); tt.CurrentDecision == nil || tt.CurrentDecision.ID != "req-4" {
+		t.Fatalf("decision=%+v, want req-4 展示", tt.CurrentDecision)
+	}
+}
+
+// TestWirePermission_ApproveSessionDoesNotRememberExecuteKind
+// 对 execute 点「同类免审」但命令是删除类：配方不可记，且不得把 execute 整档放行。
+func TestWirePermission_ApproveSessionDoesNotRememberExecuteKind(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReqCmd("req-rm", "pwsh", "execute", "Remove-Item -Recurse -Force build", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-rm", "approve_session"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+
+	fa.emitPerm(permReqCmd("req-curl", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if fa.approveCount() != 1 {
+		t.Fatalf("approveCount=%d, want 1（删除类同类免审不得放行其它 execute）", fa.approveCount())
+	}
+}
+
+// TestWirePermission_ApproveSessionRemembersEditKind 非宽泛 kind（edit）仍按 ToolKind 记。
+func TestWirePermission_ApproveSessionRemembersEditKind(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-e1", "Write", "edit", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-e1", "approve_session"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+
+	fa.emitPerm(permReq("req-e2", "Write", "edit", standardOptions()))
+	if fa.approveCount() != 2 {
+		t.Fatalf("approveCount=%d, want 2（edit 同类免审）", fa.approveCount())
+	}
+}
+
+// TestWirePermission_LocalExecuteAutoApproves 打开本机回环开关后，curl localhost 免审。
+func TestWirePermission_LocalExecuteAutoApproves(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+	pw.SetLocalExecuteAutoApprove(true)
+
+	fa.emitPerm(permReqCmd("req-local", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
+	if fa.approveCount() != 1 {
+		t.Fatalf("approveCount=%d, want 1（回环探活应免审）", fa.approveCount())
+	}
+	if tt, _ := store.Get(taskID); tt.Status == model.TaskWaitingInput {
+		t.Fatal("local execute must not enter waiting_input")
+	}
+
+	fa.emitPerm(permReqCmd("req-ext", "pwsh", "execute", "curl -s https://example.com/", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+}
+
+// TestWirePermission_TrustedRecipeAutoApproves 设置页可信配方跨会话免审同配方命令。
+func TestWirePermission_TrustedRecipeAutoApproves(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+	pw.SetTrustedRecipes([]string{"curl"})
+
+	fa.emitPerm(permReqCmd("req-t1", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
+	if fa.approveCount() != 1 {
+		t.Fatalf("approveCount=%d, want 1（可信配方应免审）", fa.approveCount())
+	}
+	if tt, _ := store.Get(taskID); tt.Status == model.TaskWaitingInput {
+		t.Fatal("trusted recipe must not enter waiting_input")
+	}
+
+	// 未信任的配方仍弹卡
+	fa.emitPerm(permReqCmd("req-t2", "pwsh", "execute", "netstat -ano", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+}
+
+// TestWirePermission_CompoundCommandCarriesSegments 复合 shell 审批卡带分段风险。
+func TestWirePermission_CompoundCommandCarriesSegments(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	cmd := `Remove-Item -Recurse -Force build; npx vitest run`
+	fa.emitPerm(permReqCmd("req-seg", "pwsh", "execute", cmd, standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	tt, _ := store.Get(taskID)
+	if tt.CurrentDecision == nil {
+		t.Fatal("CurrentDecision nil")
+	}
+	segs := tt.CurrentDecision.Segments
+	if len(segs) < 2 {
+		t.Fatalf("segments=%d want >=2: %+v", len(segs), segs)
+	}
+	if segs[0].Kind != "delete" || segs[0].Risk != model.RiskL3 {
+		t.Errorf("seg0 = %+v, want delete/L3", segs[0])
+	}
+	if segs[1].Kind != "read" || segs[1].Risk != model.RiskL0 {
+		t.Errorf("seg1 = %+v, want read/L0", segs[1])
 	}
 }
 
@@ -911,7 +1029,7 @@ func TestWirePermission_ApproveSessionEmptyKindNotRemembered(t *testing.T) {
 func TestWirePermission_ApproveSessionNotSharedAcrossWires(t *testing.T) {
 	fa1, _, _, store1, id1, pw1, _ := setupPermWire(t, time.Minute)
 	defer pw1.Unwire()
-	fa1.emitPerm(permReq("r1", "ls", "execute", standardOptions()))
+	fa1.emitPerm(permReqCmd("r1", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
 	waitForStatus(t, store1, id1, model.TaskWaitingInput, time.Second)
 	if err := pw1.Resolve("r1", "approve_session"); err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -919,7 +1037,7 @@ func TestWirePermission_ApproveSessionNotSharedAcrossWires(t *testing.T) {
 
 	fa2, _, _, store2, id2, pw2, _ := setupPermWire(t, time.Minute)
 	defer pw2.Unwire()
-	fa2.emitPerm(permReq("r2", "ls", "execute", standardOptions()))
+	fa2.emitPerm(permReqCmd("r2", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
 	waitForStatus(t, store2, id2, model.TaskWaitingInput, time.Second)
 	if fa2.approveCount() != 0 {
 		t.Fatalf("第二个任务的 approveCount=%d, want 0（记账不跨任务）", fa2.approveCount())
@@ -1169,16 +1287,16 @@ func TestWirePermission_RepeatedApproveIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestWirePermission_ApproveSameAfterSettledMakesKindAutoPermitted
-// 「已批过」的卡被改投 approve_same：不再报错，且该工具类别在本会话内免审。
+// TestWirePermission_ApproveSameAfterSettledMakesRecipeAutoPermitted
+// 「已批过」的卡被改投 approve_same：不再报错，且该命令配方在本会话内免审。
 //
 // 这条是前端 2026-10-23 的补偿动作的服务端契约：审批请求一旦返回就没有载体，
 // 用户"再批一次"能兑现的唯一效果就是"以后同类直接过"。
-func TestWirePermission_ApproveSameAfterSettledMakesKindAutoPermitted(t *testing.T) {
+func TestWirePermission_ApproveSameAfterSettledMakesRecipeAutoPermitted(t *testing.T) {
 	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
 	defer pw.Unwire()
 
-	fa.emitPerm(permReq("req-a", "pwsh", "execute", standardOptions()))
+	fa.emitPerm(permReqCmd("req-a", "pwsh", "execute", "curl -s http://127.0.0.1:3000/api/tasks", standardOptions()))
 	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
 	if err := pw.Resolve("req-a", "approve"); err != nil {
 		t.Fatalf("first resolve: %v", err)
@@ -1187,13 +1305,13 @@ func TestWirePermission_ApproveSameAfterSettledMakesKindAutoPermitted(t *testing
 	if _, err := pw.ResolveRepeated("req-a", "approve_same"); err != nil {
 		t.Fatalf("approve_same 应当幂等成功，实际: %v", err)
 	}
-	// 之后同 kind 的请求不再弹卡，直接放行
-	fa.emitPerm(permReq("req-b", "pwsh", "execute", standardOptions()))
+	// 之后同配方的请求不再弹卡，直接放行
+	fa.emitPerm(permReqCmd("req-b", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
 	if reqID, optionID, ok := fa.lastApprove(); !ok || reqID != "req-b" || optionID != "o1" {
-		t.Fatalf("approveCount = %d，want 2（同类应免审）", fa.approveCount())
+		t.Fatalf("approveCount = %d，want 2（同配方应免审）", fa.approveCount())
 	}
 	if tt, _ := store.Get(taskID); tt.Status != model.TaskRunning {
-		t.Fatalf("status = %q, want running（同类不该再弹卡）", tt.Status)
+		t.Fatalf("status = %q, want running（同配方不该再弹卡）", tt.Status)
 	}
 }
 

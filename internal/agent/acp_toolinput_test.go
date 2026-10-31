@@ -131,7 +131,8 @@ func TestPermission_BackfillDrivesReadonlyDowngrade(t *testing.T) {
 		{"测试脚本降级为 read", "npm run test", "read"},
 		{"构建脚本归 edit(L1)", "npm run build", "edit"},
 		{"认不出的 npm 脚本维持 execute", "npm run something-custom", "execute"},
-		{"外部命令维持 execute", "go build ./...", "execute"},
+		{"go build 归 edit(L1)", "go build ./...", "edit"},
+		{"go run 维持 execute", "go run ./cmd/pieqi", "execute"},
 		{"复合命令含写操作则不降级", "ls -la; rm -rf build/", "execute"},
 		// git 分档（本步新增）
 		{"git 只读子命令降级为 read", "git status --porcelain", "read"},

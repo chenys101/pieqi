@@ -1,14 +1,16 @@
 // Approval 模型（方案 §9.4）。
 // 动作集由**后端在 Decision.options 里声明**（见下），前端不猜路径：
 //   approve / deny                —— 两条审批路径（ACP 与 claude PreToolUse hook）都有
-//   approve_session               —— 仅 ACP 路径：本会话内同类 ToolKind 免审
+//   approve_session               —— 仅 ACP 路径：本会话内同类免审
+//     · shell / execute：按命令配方（go test、curl…）记，不放行整档 execute
+//     · edit/move/read 等细粒度 kind：仍按 ToolKind 记
 // ACP 的 allow_always **刻意不透传**：那会把"以后都不用问"写进 agent 自己的配置，
 // 之后 agent 不再发 RequestPermission，后端的 L2/L3 硬边界就失去拦截点。
-// 会话级免审由后端记账（不落盘、随会话销毁），见 internal/core/agent_perm.go 的 sessionAlways。
+// 会话级免审由后端记账（不落盘、随会话销毁），见 sessionAlways + sessionRecipes。
 
 //   approve_same                  —— 后端的**补偿动作**：这张卡的审批请求已经有结论
 //     （已批准/已拒绝/已被新卡顶掉），再投"批"没有载体。approve_same 的语义是
-//     "这条本来就应该放行，把工具类别记成本会话免审"，让 agent 之后同类请求直接通过。
+//     "这条本来就应该放行，把命令配方/细粒度 kind 记成本会话免审"。
 //     它**不出现在按钮上**，只在"用户点允许、后端回报已结算"时由 approve() 自动改投。
 //     为什么要这个动作：ACP 的 RequestPermission 一旦返回就无法再被放行，用户看到的是
 //     "我批了，但那条命令没跑" —— 补偿到"同类免审"才有可兑现的效果。
@@ -54,6 +56,13 @@ export function riskWeight(risk: string | undefined | null): number {
   }
 }
 
+/** 复合 shell 单段风险（后端 Decision.segments） */
+export interface ApprovalSegment {
+  text: string
+  kind: string
+  risk?: RiskLevel
+}
+
 export interface ApprovalRequest {
   id: string
   taskId: string
@@ -63,6 +72,8 @@ export interface ApprovalRequest {
   /** 风险分级；缺省（旧任务 / choice）由 riskOf() 兜底为 L2 */
   risk?: RiskLevel
   summary: string
+  /** 复合命令分段；缺省/单段 = 不展示分段条 */
+  segments?: ApprovalSegment[]
   options: string[]
   createdAt: string
 }

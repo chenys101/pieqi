@@ -104,7 +104,7 @@ const rows = computed<Row[]>(() => [
     level: props.info.sessionAlways ? 'yes' : 'no',
     value: props.info.sessionAlways ? '支持' : '不支持',
     hint: props.info.sessionAlways
-      ? '审批卡上会出现「同类免审」：本任务会话内同一 ToolKind 不再弹卡（pieqi 侧记账，不写 agent 配置、不落盘、随会话销毁）。'
+      ? '审批卡上会出现「同类免审」：本任务内相同命令配方（如 go test）或细粒度 ToolKind（如 edit）不再弹卡；不会放行整档 execute。pieqi 侧记账，不写 agent 配置、不落盘、随会话销毁。'
       : '该路径的审批没有 approve_session 选项（claude 走 PreToolUse hook），只能逐次批准。',
   },
   {

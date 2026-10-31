@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"pieqi/internal/agent"
 	"pieqi/internal/model"
 )
 
@@ -119,11 +120,22 @@ func RiskOfKind(kind string) RiskLevel {
 type Settings struct {
 	// ---------- ① 审批与自动化 ----------
 
-	// AutoApproveL0 / AutoApproveL1 是**仅有的两个**可配置的自动放行开关。
-	// L2 / L3 没有对应字段 —— 它们的不可配置性由"字段不存在"承载，
-	// 比"字段存在但永远读作 false"更难被误改回来。
+	// AutoApproveL0 / AutoApproveL1 是按**风险档**可配的自动放行开关。
+	// L2 / L3 没有对应开关 —— 整档不可配；L2 里个别命令走 TrustedRecipes。
 	AutoApproveL0 bool `json:"auto_approve_l0"`
 	AutoApproveL1 bool `json:"auto_approve_l1"`
+
+	// TrustedRecipes 跨会话可信命令配方（如 `go test`、`curl`）。
+	//
+	// 与 sessionRecipes（单任务「同类免审」）同形，但落盘、跨任务。
+	// 只认「族+动词」配方；硬边界（删除 / push / install / go run…）写入时拒绝。
+	// 空 = 不额外放行任何 L2 命令。规范化见 agent.NormalizeTrustedRecipes。
+	TrustedRecipes []string `json:"trusted_recipes,omitempty"`
+
+	// AutoApproveLocalExecute 本机回环 HTTP 探活免审（ADR-0020）。
+	// 默认 false；打开后仅放行能证明只打 127.0.0.1/localhost 的 curl/wget 等，
+	// 不是整档 L2。与 TrustedRecipes 并存。
+	AutoApproveLocalExecute bool `json:"auto_approve_local_execute"`
 
 	// 免打扰时段：此时段内审批**只排队、不推送**，打开界面时集中呈现。
 	// 它留在「审批与自动化」而不是"通知"里：它管的是**要不要打断你**，
@@ -272,12 +284,16 @@ func parseClock(v string) (int, bool) {
 // SettingsPatch 补丁语义：nil = 不修改。
 // 与 BotPatch 同一套理由 —— 要能区分「显式改成 false」与「没传」。
 type SettingsPatch struct {
-	AutoApproveL0  *bool
-	AutoApproveL1  *bool
-	DNDEnabled     *bool
-	DNDStart       *string
-	DNDEnd         *string
-	EventRetention *int
+	AutoApproveL0           *bool
+	AutoApproveL1           *bool
+	AutoApproveLocalExecute *bool
+	DNDEnabled              *bool
+	DNDStart                *string
+	DNDEnd                  *string
+	EventRetention          *int
+	// TrustedRecipes 整体替换可信配方（nil = 不修改；空切片 = 清空）。
+	// 与 Agents 同理用整体替换，避免并发加减互相覆盖。
+	TrustedRecipes *[]string
 	// DefaultProjectPath 新建任务的缺省工作目录（nil = 不修改）。
 	//
 	// 补丁语义而不是"整体替换"：它是一台机器上一个固定目录，本身就是单值，
@@ -400,6 +416,17 @@ func (s *SettingsStore) Patch(p SettingsPatch) (Settings, error) {
 	}
 	if p.AutoApproveL1 != nil {
 		next.AutoApproveL1 = *p.AutoApproveL1
+	}
+	if p.TrustedRecipes != nil {
+		norm, err := agent.NormalizeTrustedRecipes(*p.TrustedRecipes)
+		if err != nil {
+			s.mu.Unlock()
+			return prev, err
+		}
+		next.TrustedRecipes = norm
+	}
+	if p.AutoApproveLocalExecute != nil {
+		next.AutoApproveLocalExecute = *p.AutoApproveLocalExecute
 	}
 	if p.DNDEnabled != nil {
 		next.DNDEnabled = *p.DNDEnabled

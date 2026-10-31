@@ -80,8 +80,18 @@ type Decision struct {
 	Risk      RiskLevel `json:"risk,omitempty"`
 	ToolName  string    `json:"tool_name,omitempty"` // 路径 A: Bash/Edit/...；路径 B: 空
 	Summary   string    `json:"summary"`             // 路径 A: 工具摘要；路径 B: 问题文本
-	Options   []string  `json:"options"`             // approval: ["approve","deny"]；choice: 候选项
-	CreatedAt time.Time `json:"created_at"`
+	// Segments 复合 shell 命令的逐段风险（仅路径 A；len<2 时不下发）。
+	// 整卡 Risk 仍是最严段；本字段只帮人定位「哪一段在拖后腿」，不参与放行。
+	Segments  []DecisionSegment `json:"segments,omitempty"`
+	Options   []string          `json:"options"` // approval: ["approve","deny"]；choice: 候选项
+	CreatedAt time.Time         `json:"created_at"`
+}
+
+// DecisionSegment 审批卡上的单段命令风险。
+type DecisionSegment struct {
+	Text string    `json:"text"`           // 段原文（可截断）
+	Kind string    `json:"kind"`           // ACP ToolKind：read/edit/execute/delete
+	Risk RiskLevel `json:"risk,omitempty"` // 由 Kind 派生，与 RiskOfKind 同表
 }
 
 // Intervention 用户对 waiting_input 任务的一次干预。

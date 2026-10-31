@@ -89,6 +89,29 @@ async function apply(patch: Partial<AppSettings>) {
   }
 }
 
+/** 可信配方输入草稿；回车/按钮提交整表替换 */
+const recipeDraft = ref('')
+const RECIPE_SUGGESTIONS = ['go test', 'go build', 'curl', 'npm run test', 'npx vitest'] as const
+
+async function addTrustedRecipe(raw?: string) {
+  if (!settings.value) return
+  const text = (raw ?? recipeDraft.value).trim()
+  if (!text) return
+  const cur = settings.value.trusted_recipes ?? []
+  if (cur.includes(text)) {
+    recipeDraft.value = ''
+    return
+  }
+  await apply({ trusted_recipes: [...cur, text] })
+  recipeDraft.value = ''
+}
+
+async function removeTrustedRecipe(r: string) {
+  if (!settings.value) return
+  const next = (settings.value.trusted_recipes ?? []).filter((x) => x !== r)
+  await apply({ trusted_recipes: next })
+}
+
 // ---------- 默认工作目录（新建任务的缺省值） ----------
 
 /**
@@ -208,11 +231,23 @@ const appVersion = __APP_VERSION__
              locked 让背景下沉、标题降级，但不压透明度：压透明度会把
              "为什么不能改"这行字一起淡化，而它恰恰是最该读清的。 -->
         <SettingRow
-          desc="装依赖、跑脚本 —— 影响会溢出到工作区之外。必须你确认。"
+          desc="装依赖、跑脚本 —— 影响会溢出到工作区之外。必须你确认。整档不可开；下面两条是窄口例外。"
           locked
         >
           <template #label>L2 执行命令 <Badge tone="neutral">不可配置</Badge></template>
           <Switch :model-value="false" disabled label="L2 执行命令，不可配置" />
+        </SettingRow>
+
+        <SettingRow
+          label="本机回环探活"
+          desc="仅放行 curl/wget 等到 127.0.0.1 / localhost 的请求（ADR-0020）。默认关；外网 URL 仍弹卡。只影响之后新建的会话。"
+        >
+          <Switch
+            :model-value="settings?.auto_approve_local_execute ?? false"
+            :disabled="!settings"
+            label="本机回环探活自动放行"
+            @update:model-value="(v) => apply({ auto_approve_local_execute: v })"
+          />
         </SettingRow>
 
         <SettingRow
@@ -221,6 +256,66 @@ const appVersion = __APP_VERSION__
         >
           <template #label>L3 破坏性操作 <Badge tone="neutral">不可配置</Badge></template>
           <Switch :model-value="false" disabled label="L3 破坏性操作，不可配置" />
+        </SettingRow>
+
+        <SettingRow
+          label="可信命令配方"
+          desc="跨任务免审个别 L2 命令（如 go test），不开放整档「执行命令」。删除 / 推送 / 装依赖等硬边界无法加入。只影响之后新建的会话。"
+          stack
+        >
+          <div class="flex flex-wrap gap-1.5">
+            <span
+              v-for="r in settings?.trusted_recipes ?? []"
+              :key="r"
+              class="inline-flex items-center gap-1 rounded border border-border bg-elevated px-2 py-0.5 font-mono text-[11.5px]"
+            >
+              {{ r }}
+              <button
+                type="button"
+                class="text-muted hover:text-error"
+                :disabled="!settings"
+                :aria-label="`移除 ${r}`"
+                @click="removeTrustedRecipe(r)"
+              >
+                ×
+              </button>
+            </span>
+            <span
+              v-if="!(settings?.trusted_recipes?.length)"
+              class="text-[11.5px] text-muted"
+            >
+              尚未添加
+            </span>
+          </div>
+          <div class="mt-2 flex flex-wrap gap-1.5">
+            <button
+              v-for="s in RECIPE_SUGGESTIONS"
+              :key="s"
+              type="button"
+              class="rounded border border-dashed border-border px-2 py-0.5 text-[11px] text-muted hover:border-info hover:text-info disabled:opacity-40"
+              :disabled="!settings || (settings.trusted_recipes ?? []).includes(s)"
+              @click="addTrustedRecipe(s)"
+            >
+              + {{ s }}
+            </button>
+          </div>
+          <div class="mt-2 flex gap-2">
+            <Input
+              v-model="recipeDraft"
+              class="flex-1"
+              placeholder="go test 或 curl -s …"
+              :disabled="!settings"
+              @keydown.enter.prevent="addTrustedRecipe()"
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              :disabled="!settings || !recipeDraft.trim()"
+              @click="addTrustedRecipe()"
+            >
+              添加
+            </Button>
+          </div>
         </SettingRow>
 
         <SettingRow

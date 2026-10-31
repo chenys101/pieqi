@@ -1,10 +1,8 @@
 // Settings API：全局偏好（跨任务 / 跨项目 / 跨 agent）。
 //
-// 只有两项"属于全局"的自动化开关与一项数据上限：
-//   ① 审批自动放行：**只有 L0 / L1 可配**，L2 / L3 在后端根本不接受字段
-//      （能把自己配进坑里的选项，不要做成选项）。
-//   ④ 事件保留上限。
-// 免打扰时段是审批自动放行的另一面（它管"要不要打断你"），故同属 ①。
+// ① 审批自动放行：L0 / L1 按档可配；整档 L2/L3 不可配。
+//    L2 仅两处窄口：trusted_recipes（枚举）与 auto_approve_local_execute（回环探活，ADR-0020）。
+// ④ 事件保留上限。免打扰同属 ①。
 
 import { request, requestBlob } from './client'
 
@@ -13,6 +11,11 @@ export interface AppSettings {
   auto_approve_l0: boolean
   /** L1 写入自动放行 */
   auto_approve_l1: boolean
+  /**
+   * 本机回环 HTTP 探活免审（curl/wget → 127.0.0.1/localhost）。
+   * 默认关；不是整档 L2。见 ADR-0020。
+   */
+  auto_approve_local_execute: boolean
   dnd_enabled: boolean
   /** "HH:MM" */
   dnd_start: string
@@ -20,6 +23,11 @@ export interface AppSettings {
   dnd_end: string
   /** 事件保留上限；0 = 全部保留 */
   event_retention: number
+  /**
+   * 跨会话可信命令配方（如 `go test`、`curl`）。
+   * 不开放整档 L2；硬边界（删除/push/install）服务端拒绝写入。
+   */
+  trusted_recipes: string[]
   /**
    * 新建任务的缺省工作目录（绝对路径）。
    *

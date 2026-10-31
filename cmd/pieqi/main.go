@@ -224,16 +224,22 @@ func main() {
 	// 免审名单由全局偏好推导（L0/L1 可配、L2/L3 永不放行）；
 	// 设置页改动后经 OnChange 即刻推给 runner（只影响之后创建的会话）。
 	runner.SetAutoApproveTools(settingsStore.Get().AutoApproveTools())
+	runner.SetTrustedRecipes(settingsStore.Get().TrustedRecipes)
+	runner.SetLocalExecuteAutoApprove(settingsStore.Get().AutoApproveLocalExecute)
 	runner.SetDNDChecker(func() bool { return settingsStore.Get().InDND(time.Now()) })
 	// 事件保留上限（切片 5）：超出后从最旧的开始丢弃，避免长任务把内存吃掉。
 	// 与免审名单同源（settings.json），改动同样即时生效。
 	store.SetEventRetention(settingsStore.Get().EventRetention)
 	settingsStore.OnChange(func(s core.Settings) {
 		runner.SetAutoApproveTools(s.AutoApproveTools())
+		runner.SetTrustedRecipes(s.TrustedRecipes)
+		runner.SetLocalExecuteAutoApprove(s.AutoApproveLocalExecute)
 		store.SetEventRetention(s.EventRetention)
 		logger.Info("settings changed",
 			zap.Bool("auto_approve_l0", s.AutoApproveL0),
 			zap.Bool("auto_approve_l1", s.AutoApproveL1),
+			zap.Bool("auto_approve_local_execute", s.AutoApproveLocalExecute),
+			zap.Int("trusted_recipes", len(s.TrustedRecipes)),
 			zap.Bool("dnd", s.DNDEnabled),
 			zap.Int("event_retention", s.EventRetention))
 	})

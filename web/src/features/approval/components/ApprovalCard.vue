@@ -6,6 +6,7 @@ import { useRouter } from 'vue-router'
 import Button from '@/components/ui/Button.vue'
 import { ApprovalDiffCard } from '@/features/feedback'
 import ApprovalSummary from './ApprovalSummary.vue'
+import ApprovalSegments from './ApprovalSegments.vue'
 import { useApprovalStore } from '@/stores/approval'
 import { useNotificationStore } from '@/stores/notification'
 import { useTaskStore } from '@/stores/task'
@@ -121,6 +122,7 @@ async function act(kind: ButtonChoice) {
     <div class="mt-1">
       <ApprovalSummary :text="approval.summary" />
     </div>
+    <ApprovalSegments :segments="approval.segments" />
 
     <!-- P1：展开前瞻性 Diff（决策前看将发生什么） -->
     <ApprovalDiffCard v-if="showDiff" :task-id="approval.taskId" :decision-id="approval.id" />
@@ -132,11 +134,11 @@ async function act(kind: ButtonChoice) {
       class="mt-3 rounded border border-error/40 bg-error/5 px-3 py-2"
     >
       <div class="text-xs font-medium text-error">
-        {{ pending === 'approve_session' ? '确认允许，并让同类操作本会话免审？' : '此操作不可逆，确认允许？' }}
+        {{ pending === 'approve_session' ? '确认允许，并让同类命令本会话免审？' : '此操作不可逆，确认允许？' }}
       </div>
       <div class="mt-0.5 text-[11.5px] text-muted">
         <template v-if="pending === 'approve_session'">
-          批准后立即执行，且本任务内同类操作不再询问。
+          批准后立即执行；本任务内相同命令配方（如 go test / curl）不再询问。删除、推送、装依赖等硬边界仍会弹卡。
         </template>
         <template v-else>
           批准后立即执行，无法撤回。
@@ -161,13 +163,14 @@ async function act(kind: ButtonChoice) {
         允许一次
       </Button>
       <!-- 同类免审排在"允许一次"之后、拒绝之前：它是**更大的授权**，
-           视觉上不能比单次批准更抢眼，但必须摸得到 -->
+           视觉上不能比单次批准更抢眼，但必须摸得到。
+           shell 按命令配方记（非整档 execute）；edit 等细粒度 kind 仍按 ToolKind。 -->
       <Button
         v-if="canApproveSession"
         variant="secondary"
         size="sm"
         :disabled="!!loading"
-        title="本任务剩余时间内，同一类操作（ToolKind）不再弹卡；不落盘、不跨任务、不改 agent 权限配置"
+        title="本任务内相同命令配方免审（如 go test）；不把整档「执行命令」放行。不落盘、不跨任务、不改 agent 配置"
         @click="act('approve_session')"
       >
         同类免审

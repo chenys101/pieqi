@@ -79,6 +79,13 @@ type TaskRunner struct {
 	autoApproveMu sync.RWMutex
 	autoApprove   []string
 
+	// trustedRecipes 跨会话可信命令配方（Settings.TrustedRecipes）。
+	// 与 autoApprove 同锁、同"只影响之后会话"语义。
+	trustedRecipes []string
+
+	// localExecuteOK 本机回环探活免审（Settings.AutoApproveLocalExecute，ADR-0020）。
+	localExecuteOK bool
+
 	// dnd 免打扰判定（main.go 传 settings.InDND）。nil = 不启用。
 	// 命中时审批**只排队、不推送** —— 决定本身照常产生，只是不打断你。
 	dnd func() bool
@@ -300,11 +307,37 @@ func (tr *TaskRunner) SetAutoApproveTools(tools []string) {
 	tr.autoApproveMu.Unlock()
 }
 
+// SetTrustedRecipes 配置跨会话可信命令配方。nil/空 = 不额外放行 L2。
+func (tr *TaskRunner) SetTrustedRecipes(recipes []string) {
+	tr.autoApproveMu.Lock()
+	tr.trustedRecipes = append([]string(nil), recipes...)
+	tr.autoApproveMu.Unlock()
+}
+
+// SetLocalExecuteAutoApprove 配置本机回环 HTTP 探活免审（ADR-0020）。
+func (tr *TaskRunner) SetLocalExecuteAutoApprove(ok bool) {
+	tr.autoApproveMu.Lock()
+	tr.localExecuteOK = ok
+	tr.autoApproveMu.Unlock()
+}
+
 // autoApproveList 读免审名单的副本（建会话时调用）。
 func (tr *TaskRunner) autoApproveList() []string {
 	tr.autoApproveMu.RLock()
 	defer tr.autoApproveMu.RUnlock()
-	return tr.autoApprove
+	return append([]string(nil), tr.autoApprove...)
+}
+
+func (tr *TaskRunner) trustedRecipesList() []string {
+	tr.autoApproveMu.RLock()
+	defer tr.autoApproveMu.RUnlock()
+	return append([]string(nil), tr.trustedRecipes...)
+}
+
+func (tr *TaskRunner) localExecuteAutoApprove() bool {
+	tr.autoApproveMu.RLock()
+	defer tr.autoApproveMu.RUnlock()
+	return tr.localExecuteOK
 }
 
 // SetDNDChecker 注入免打扰判定（main.go 传 SettingsStore.InDND 的闭包）。
@@ -1055,6 +1088,8 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 	// 注册 wires（跨轮保活：轮末不 unwire，由会话关闭回调 onAgentSessionClosed 统一清理）。
 	dh := WireContentDelta(adapter, tr.bus, tr.store, task.ID)
 	ph := WirePermission(adapter, tr.bus, tr.store, task.ID, tr.notify, tr.permTimeout, tr.autoApproveList(), tr.logger)
+	ph.SetTrustedRecipes(tr.trustedRecipesList())
+	ph.SetLocalExecuteAutoApprove(tr.localExecuteAutoApprove())
 	th := WireToolCall(adapter, tr.bus, tr.store, task.ID)
 	// 用量可能为 nil（agent 不上报），setWires/Unwire 均容忍 nil。
 	uh := WireUsage(adapter, tr.bus, tr.store, task.ID)

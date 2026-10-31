@@ -28,7 +28,7 @@ func TestClassifyShellCommand_TakesWorstSegment(t *testing.T) {
 		{"npm test", "read"},
 		{"npm run build", "edit"},
 		{"npm run some-unknown-script", "execute"}, // 不认识的脚本名：保守
-		{"go build ./...", "execute"},              // 非 git 且非白名单
+		{"go build ./...", "edit"},                 // go 工具链分档（go_runner.go）
 		{"cat /etc/hosts; git status", "read"},
 	}
 	for _, tc := range cases {

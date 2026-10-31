@@ -70,6 +70,8 @@ func TestDowngradeReadonlyToolKind(t *testing.T) {
 		// 只读地跑：`npm run typecheck` / 无内联脚本的 node 仍是保守侧
 		{"node 无内联代码", "execute", "node script.js", "execute"},
 		// ---- 不应降级：白名单之外的命令（可能有构建/网络副作用）----
+		// go test 的分档在 ClassifyShellCommand / DowngradeReadonlyPermission，
+		// 本函数仍是二值只读白名单 —— go 不在表里 ⇒ 维持 execute。
 		{"go test", "execute", "go test ./internal/...", "execute"},
 		{"curl", "execute", "curl -s http://127.0.0.1:3000/ready", "execute"},
 		{"cp 有写副作用", "execute", "cp a.txt b.txt", "execute"},
@@ -144,6 +146,17 @@ func TestDowngradeReadonlyPermission(t *testing.T) {
 	got := DowngradeReadonlyPermission(mk("execute", `{"command":"ls -la"}`))
 	if got.ToolKind != "read" {
 		t.Errorf("ToolKind = %q, want read", got.ToolKind)
+	}
+
+	// go 工具链经 ClassifyShellCommand 分档（go_runner.go）
+	if got = DowngradeReadonlyPermission(mk("execute", `{"command":"go test ./internal/..."}`)); got.ToolKind != "read" {
+		t.Errorf("go test: ToolKind = %q, want read", got.ToolKind)
+	}
+	if got = DowngradeReadonlyPermission(mk("execute", `{"command":"go build ./..."}`)); got.ToolKind != "edit" {
+		t.Errorf("go build: ToolKind = %q, want edit", got.ToolKind)
+	}
+	if got = DowngradeReadonlyPermission(mk("execute", `{"command":"go run ./cmd/pieqi"}`)); got.ToolKind != "execute" {
+		t.Errorf("go run: ToolKind = %q, want execute", got.ToolKind)
 	}
 
 	// execute + 写命令 → 原样

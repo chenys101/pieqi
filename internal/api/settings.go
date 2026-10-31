@@ -14,14 +14,19 @@ import (
 //
 // 它是**显式**的一层，不是直接序列化 core.Settings：这样"哪些字段可以下发"
 // 是一个可以读出来的决定，而不是"结构体改了什么就自动漏出去什么"。
-// L2 / L3 **没有对应字段** —— 它们的不可配置性由"字段不存在"承载。
+// 整档 L2 / L3 **没有**对应开关；L2 里仅「本机回环探活」可选用
+// auto_approve_local_execute（ADR-0020），外加 trusted_recipes 枚举。
 type settingsDto struct {
-	AutoApproveL0  bool   `json:"auto_approve_l0"`
-	AutoApproveL1  bool   `json:"auto_approve_l1"`
-	DNDEnabled     bool   `json:"dnd_enabled"`
-	DNDStart       string `json:"dnd_start"`
-	DNDEnd         string `json:"dnd_end"`
-	EventRetention int    `json:"event_retention"`
+	AutoApproveL0           bool   `json:"auto_approve_l0"`
+	AutoApproveL1           bool   `json:"auto_approve_l1"`
+	AutoApproveLocalExecute bool   `json:"auto_approve_local_execute"`
+	DNDEnabled              bool   `json:"dnd_enabled"`
+	DNDStart                string `json:"dnd_start"`
+	DNDEnd                  string `json:"dnd_end"`
+	EventRetention          int    `json:"event_retention"`
+	// TrustedRecipes 跨会话可信命令配方（如 go test）；空数组 = 未配。
+	// 始终下发数组（不用 omitempty），方便前端直接 v-for。
+	TrustedRecipes []string `json:"trusted_recipes"`
 	// DefaultProjectPath 新建任务的缺省工作目录（绝对路径）。空 = 未配置，
 	// 此时建任务必须显式带 project_path（见 api.resolveTaskPath）。
 	DefaultProjectPath string `json:"default_project_path"`
@@ -32,13 +37,19 @@ type settingsDto struct {
 }
 
 func toSettingsDTO(s core.Settings) settingsDto {
+	recipes := s.TrustedRecipes
+	if recipes == nil {
+		recipes = []string{}
+	}
 	return settingsDto{
-		AutoApproveL0:  s.AutoApproveL0,
-		AutoApproveL1:  s.AutoApproveL1,
-		DNDEnabled:     s.DNDEnabled,
-		DNDStart:       s.DNDStart,
-		DNDEnd:         s.DNDEnd,
-		EventRetention: s.EventRetention,
+		AutoApproveL0:           s.AutoApproveL0,
+		AutoApproveL1:           s.AutoApproveL1,
+		AutoApproveLocalExecute: s.AutoApproveLocalExecute,
+		DNDEnabled:              s.DNDEnabled,
+		DNDStart:                s.DNDStart,
+		DNDEnd:                  s.DNDEnd,
+		EventRetention:          s.EventRetention,
+		TrustedRecipes:          recipes,
 		// 空串也必须下发（不能 omitempty）：前端要用它区分"没配"与"配了"，
 		// 决定新建任务页项目选择器的默认形态。
 		DefaultProjectPath: s.DefaultProjectPath,
@@ -106,12 +117,15 @@ func (s *Server) patchSettings(c *gin.Context) {
 		return
 	}
 	var body struct {
-		AutoApproveL0  *bool   `json:"auto_approve_l0"`
-		AutoApproveL1  *bool   `json:"auto_approve_l1"`
-		DNDEnabled     *bool   `json:"dnd_enabled"`
-		DNDStart       *string `json:"dnd_start"`
-		DNDEnd         *string `json:"dnd_end"`
-		EventRetention *int    `json:"event_retention"`
+		AutoApproveL0           *bool   `json:"auto_approve_l0"`
+		AutoApproveL1           *bool   `json:"auto_approve_l1"`
+		AutoApproveLocalExecute *bool   `json:"auto_approve_local_execute"`
+		DNDEnabled              *bool   `json:"dnd_enabled"`
+		DNDStart                *string `json:"dnd_start"`
+		DNDEnd                  *string `json:"dnd_end"`
+		EventRetention          *int    `json:"event_retention"`
+		// TrustedRecipes nil = 不修改；非 nil（含空数组）= 整体替换。
+		TrustedRecipes *[]string `json:"trusted_recipes"`
 		// DefaultProjectPath 新建任务的缺省工作目录（nil = 不修改）。
 		// 传空串 = 显式清空（此后新建任务必须带路径），与"没传"是两件事。
 		DefaultProjectPath *string `json:"default_project_path"`
@@ -131,14 +145,16 @@ func (s *Server) patchSettings(c *gin.Context) {
 		}
 	}
 	next, err := s.settings.Patch(core.SettingsPatch{
-		AutoApproveL0:  body.AutoApproveL0,
-		AutoApproveL1:  body.AutoApproveL1,
-		DNDEnabled:     body.DNDEnabled,
-		DNDStart:       body.DNDStart,
-		DNDEnd:         body.DNDEnd,
-		EventRetention:     body.EventRetention,
-		DefaultProjectPath: body.DefaultProjectPath,
-		Agents:             body.Agents,
+		AutoApproveL0:           body.AutoApproveL0,
+		AutoApproveL1:           body.AutoApproveL1,
+		AutoApproveLocalExecute: body.AutoApproveLocalExecute,
+		DNDEnabled:              body.DNDEnabled,
+		DNDStart:                body.DNDStart,
+		DNDEnd:                  body.DNDEnd,
+		EventRetention:          body.EventRetention,
+		TrustedRecipes:          body.TrustedRecipes,
+		DefaultProjectPath:      body.DefaultProjectPath,
+		Agents:                  body.Agents,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

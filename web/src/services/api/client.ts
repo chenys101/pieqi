@@ -217,6 +217,13 @@ export function adaptTask(dto: TaskDto | TaskSummaryDto): Task {
           tool: dto.current_decision.tool_name,
           risk: dto.current_decision.risk,
           summary: dto.current_decision.summary,
+          segments: Array.isArray(dto.current_decision.segments)
+            ? dto.current_decision.segments.map((s) => ({
+                text: s.text,
+                kind: s.kind,
+                risk: s.risk,
+              }))
+            : undefined,
           options: dto.current_decision.options ?? [],
           createdAt: dto.current_decision.created_at,
         }

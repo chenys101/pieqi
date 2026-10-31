@@ -85,7 +85,24 @@ type PermissionWire struct {
 	//
 	// 所以这份记账留在 wire 里：受 pw.mu 保护、不落盘、随 wire.Unwire/会话销毁而消失。
 	// 语义是"这个任务这一轮会话内，同类操作我认了"。
+	//
+	// ⚠️ 2026-10-31：`execute` / `other` / `delete` / `switch_mode` **不再**进这个集合
+	// （见 kindSessionRememberable）。shell 的"同类"改记 sessionRecipes（命令配方），
+	// 否则一次对 `rm -rf` 的「同类免审」会把本会话所有 shell 全放行。
 	sessionAlways map[string]struct{}
+
+	// sessionRecipes 是用户本会话点过「同类免审」的 shell 命令配方集合。
+	// 配方由 agent.ShellRecipes 归一（如 `go test`、`npx vitest`），见 shell_recipe.go。
+	// 与 sessionAlways 同生命周期：不落盘、随 Unwire 消失。
+	sessionRecipes map[string]struct{}
+
+	// trustedRecipes 来自 Settings.TrustedRecipes（跨任务、落盘）。
+	// 建会话时拷入；改设置只影响之后新建的会话（与 autoApprove 同纪律）。
+	trustedRecipes map[string]struct{}
+
+	// localExecuteOK 来自 Settings.AutoApproveLocalExecute（ADR-0020）。
+	// true 时对本机回环 curl/wget 探活免审；建会话时拷入。
+	localExecuteOK bool
 
 	// mu 守护 pending 与 closed。每个 pending entry 自带 done 标志，
 	// 保证 Resolve 与超时定时器之间只有一个能真正驱动 adapter（先到先得）。
@@ -121,9 +138,10 @@ const settledMax = 256
 // settledPerm 一个已结算请求的结论。
 type settledPerm struct {
 	toolTitle string
-	toolKind  string // ACP ToolKind；"已拒绝后又要批"时用它补一次同类免审
-	kind      string // PermResolveApproved / PermResolveDenied
-	timed     bool   // 超时（仅 denied 有意义）
+	toolKind  string   // ACP ToolKind；"已拒绝后又要批"时用它补一次同类免审
+	recipes   []string // shell 配方；approve_same 补偿时优先按配方记账
+	kind      string   // PermResolveApproved / PermResolveDenied
+	timed     bool     // 超时（仅 denied 有意义）
 }
 
 // permPending 一个待审批请求的本地状态。
@@ -131,6 +149,8 @@ type permPending struct {
 	reqID     string
 	toolTitle string                   // 工具名（展示卡标题），排队提升时复用
 	toolKind  string                   // ACP ToolKind，排队提升时复用（决定 risk，见 RiskOfKind）
+	recipes   []string                 // 从 RawInput 抽出的 shell 配方（可空）
+	segments  []model.DecisionSegment  // 复合命令分段风险（len<2 时为空）
 	summary   string                   // 决策摘要（buildPermSummary 结果），排队提升时复用
 	options   []agent.PermissionOption // 记录的 ACP 选项，供 Resolve 映射 approve/deny
 	timer     *time.Timer              // 超时定时器；到期调 adapter.Deny
@@ -166,20 +186,45 @@ func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore,
 		logger = zap.NewNop()
 	}
 	pw := &PermissionWire{
-		adapter:       adapter,
-		bus:           bus,
-		store:         store,
-		taskID:        taskID,
-		notify:        notify,
-		timeout:       timeout,
-		logger:        logger,
-		pending:       make(map[string]*permPending),
-		sessionAlways: make(map[string]struct{}),
-		settled:       make(map[string]*settledPerm),
+		adapter:        adapter,
+		bus:            bus,
+		store:          store,
+		taskID:         taskID,
+		notify:         notify,
+		timeout:        timeout,
+		logger:         logger,
+		pending:        make(map[string]*permPending),
+		sessionAlways:  make(map[string]struct{}),
+		sessionRecipes: make(map[string]struct{}),
+		trustedRecipes: make(map[string]struct{}),
+		settled:        make(map[string]*settledPerm),
 	}
 	pw.setAutoApprove(autoApprove)
 	adapter.OnPermissionRequest(pw.onPermissionRequest)
 	return pw
+}
+
+// SetTrustedRecipes 写入跨会话可信配方（建会话时由 TaskRunner 调用）。
+// 空/nil = 不额外放行任何 L2 命令配方。硬边界配方静默丢弃（防御性，设置页已拦）。
+func (pw *PermissionWire) SetTrustedRecipes(recipes []string) {
+	set := make(map[string]struct{}, len(recipes))
+	for _, r := range recipes {
+		r = strings.TrimSpace(r)
+		if r == "" || !agent.RecipeRememberable(r) {
+			continue
+		}
+		set[r] = struct{}{}
+	}
+	pw.mu.Lock()
+	pw.trustedRecipes = set
+	pw.mu.Unlock()
+}
+
+// SetLocalExecuteAutoApprove 打开/关闭本机回环探活免审（ADR-0020）。
+func (pw *PermissionWire) SetLocalExecuteAutoApprove(ok bool) {
+	pw.mu.Lock()
+	pw.localExecuteOK = ok
+	pw.mu.Unlock()
 }
 
 // setAutoApprove 把免审名单转成 map 供 O(1) 命中判定；空/nil = 关闭免审。
@@ -215,6 +260,8 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 		reqID:     req.ReqID,
 		toolTitle: req.ToolTitle,
 		toolKind:  req.ToolKind,
+		recipes:   recipesFromPermission(req),
+		segments:  decisionSegmentsFromPermission(req),
 		summary:   buildPermSummary(req),
 		options:   req.Options,
 	}
@@ -230,7 +277,7 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 	pw.displayed = req.ReqID
 	pw.mu.Unlock()
 
-	if !pw.show(req.ReqID, entry.toolTitle, entry.toolKind, entry.summary) {
+	if !pw.show(req.ReqID, entry.toolTitle, entry.toolKind, entry.summary, entry.segments) {
 		// task 不存在或已终态：清掉 pending 并 Deny，避免 agent 永久阻塞。
 		pw.mu.Lock()
 		delete(pw.pending, req.ReqID)
@@ -242,16 +289,19 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 	}
 }
 
-// tryAutoApprove 免审名单命中判定与放行：ToolKind 在 autoApprove 中且请求带 allow 选项时，
-// 选首个 allow 选项（allow_once 优先，次 allow_always）直接调 adapter.Approve 放行。
+// tryAutoApprove 免审名单命中判定与放行：ToolKind 在 autoApprove / sessionAlways 中，
+// 或本会话已记住的命令配方覆盖本请求全部段时，选首个 allow 选项直接 Approve。
 //
 // 返回 true 表示已处理（不再走人工审批）；以下情况返回 false，调用方回退到正常人工审批：
-//   - 免审名单为空 / ToolKind 未命中；
+//   - 免审名单未命中且配方未覆盖；
 //   - 请求只有 reject 选项（无 allow 选项可放行）；
 //   - adapter.Approve 失败（如请求已被另一路径解决）——回退走人工审批，由 30min 超时兜底，
 //     不会永久卡死。
 func (pw *PermissionWire) tryAutoApprove(req agent.PermissionRequest) bool {
-	if !pw.autoApproves(req.ToolKind) {
+	byKind := pw.autoApproves(req.ToolKind)
+	byRecipe := !byKind && pw.sessionRecipesCover(req)
+	byLocal := !byKind && !byRecipe && pw.localExecuteCovers(req)
+	if !byKind && !byRecipe && !byLocal {
 		return false
 	}
 	optionID, ok := pickAllowOption(req.Options)
@@ -272,32 +322,55 @@ func (pw *PermissionWire) tryAutoApprove(req agent.PermissionRequest) bool {
 	}
 	pw.logger.Debug("auto-approved permission (no review)",
 		zap.String("task", pw.taskID), zap.String("req", req.ReqID),
-		zap.String("tool_kind", req.ToolKind), zap.String("option", optionID))
+		zap.String("tool_kind", req.ToolKind), zap.String("option", optionID),
+		zap.Bool("by_recipe", byRecipe),
+		zap.Bool("by_local_execute", byLocal))
 	// 免审也要留痕：否则"这条 id 怎么查不到"里会混进一批其实已经被自动放行的请求。
-	pw.rememberSettled(req.ReqID, req.ToolTitle, req.ToolKind, PermResolveApproved, false)
+	pw.rememberSettled(req.ReqID, req.ToolTitle, req.ToolKind, recipesFromPermission(req), PermResolveApproved, false)
 	return true
+}
+
+// localExecuteCovers Settings 打开本机回环免审，且整条命令通过 LocalExecuteCommand。
+func (pw *PermissionWire) localExecuteCovers(req agent.PermissionRequest) bool {
+	pw.mu.Lock()
+	ok := pw.localExecuteOK
+	pw.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cmd := commandFromPermRawInput(req.RawInput)
+	if cmd == "" {
+		return false
+	}
+	return agent.LocalExecuteCommand(cmd)
 }
 
 // rememberSettled 记下一条审批的最终结论（有界 FIFO）。调用方不持 pw.mu 或自行持锁 ——
 // 本函数自己加锁，内部调用点都在释放 pw.mu 之后。
-func (pw *PermissionWire) rememberSettled(reqID, toolTitle, toolKind, conclusion string, timed bool) {
+func (pw *PermissionWire) rememberSettled(reqID, toolTitle, toolKind string, recipes []string, conclusion string, timed bool) {
 	if reqID == "" {
 		return
 	}
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
-	pw.rememberSettledLocked(reqID, toolTitle, toolKind, conclusion, timed)
+	pw.rememberSettledLocked(reqID, toolTitle, toolKind, recipes, conclusion, timed)
 }
 
 // rememberSettledLocked 同 rememberSettled，但要求调用方已持 pw.mu。
-func (pw *PermissionWire) rememberSettledLocked(reqID, toolTitle, toolKind, conclusion string, timed bool) {
+func (pw *PermissionWire) rememberSettledLocked(reqID, toolTitle, toolKind string, recipes []string, conclusion string, timed bool) {
 	if pw.settled == nil {
 		pw.settled = make(map[string]*settledPerm)
 	}
 	if _, exists := pw.settled[reqID]; !exists {
 		pw.order = append(pw.order, reqID)
 	}
-	pw.settled[reqID] = &settledPerm{toolTitle: toolTitle, toolKind: toolKind, kind: conclusion, timed: timed}
+	pw.settled[reqID] = &settledPerm{
+		toolTitle: toolTitle,
+		toolKind:  toolKind,
+		recipes:   append([]string(nil), recipes...),
+		kind:      conclusion,
+		timed:     timed,
+	}
 	for len(pw.order) > settledMax {
 		old := pw.order[0]
 		pw.order = pw.order[1:]
@@ -306,7 +379,7 @@ func (pw *PermissionWire) rememberSettledLocked(reqID, toolTitle, toolKind, conc
 }
 
 // autoApproves 该 ToolKind 是否免审：配置名单（由 L0/L1 推导）命中，或用户本次会话点过
-// "同类免审"。两个集合都在 pw.mu 下读，但**不持锁调 adapter**（那是一次网络往返）。
+// "同类免审"（仅非宽泛 kind，见 kindSessionRememberable）。
 func (pw *PermissionWire) autoApproves(kind string) bool {
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
@@ -317,25 +390,137 @@ func (pw *PermissionWire) autoApproves(kind string) bool {
 	return ok
 }
 
-// rememberKind 记下"本会话同类免审"的 ToolKind。
+// sessionRecipesCover 本请求的全部 shell 配方是否已被会话记住 / 全局可信，
+// 或单段本身已是 L0/L1 可免审。
 //
-// 空 kind 不记：它的意思是"我们不认识这个操作"（RiskOfKind 把它算作 L2 就是这个理由）。
-// 记下空 kind 等于给以后所有叫不出名字的操作发通行证 —— 白名单会悄悄变成通配符。
-func (pw *PermissionWire) rememberKind(kind string) {
-	if kind == "" {
-		return
+// 复合命令取「每一段都覆盖」：用户只批过 `go test` 时，`Remove-Item x; go test` 仍弹卡。
+func (pw *PermissionWire) sessionRecipesCover(req agent.PermissionRequest) bool {
+	recipes := recipesFromPermission(req)
+	if len(recipes) == 0 {
+		return false
 	}
 	pw.mu.Lock()
-	pw.sessionAlways[kind] = struct{}{}
+	defer pw.mu.Unlock()
+	for _, r := range recipes {
+		if _, ok := pw.sessionRecipes[r]; ok {
+			continue
+		}
+		if _, ok := pw.trustedRecipes[r]; ok {
+			continue
+		}
+		// 段本身能被分档到 settings 免审 kind（如 `cd`/`ls` → read）也算覆盖，
+		// 否则 `cd web; curl …` 在只记了 curl 后仍过不了。
+		if kind, ok := agent.ClassifyShellCommand(r); ok {
+			if _, hit := pw.autoApprove[kind]; hit {
+				continue
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// kindSessionRememberable 哪些 ToolKind 还能按「整类」记进 sessionAlways。
+//
+// execute/other/delete/switch_mode 太宽：一次点击等于本会话任意 shell/未知操作通行证。
+// 它们改走配方记忆。read/search/fetch/think/edit/move 粒度够细，保持原语义。
+func kindSessionRememberable(kind string) bool {
+	switch kind {
+	case "", "execute", "other", "delete", "switch_mode":
+		return false
+	default:
+		return true
+	}
+}
+
+// rememberSessionApproval 把「同类免审」落到配方集合，必要时再落到 ToolKind。
+//
+// 优先记可记住的配方；宽泛 kind（execute 等）即使没有配方也不进 sessionAlways。
+func (pw *PermissionWire) rememberSessionApproval(kind string, recipes []string) {
+	var kept []string
+	for _, r := range recipes {
+		if agent.RecipeRememberable(r) {
+			kept = append(kept, r)
+		}
+	}
+	pw.mu.Lock()
+	if pw.sessionRecipes == nil {
+		pw.sessionRecipes = make(map[string]struct{})
+	}
+	for _, r := range kept {
+		pw.sessionRecipes[r] = struct{}{}
+	}
+	kindKept := false
+	if kindSessionRememberable(kind) {
+		if pw.sessionAlways == nil {
+			pw.sessionAlways = make(map[string]struct{})
+		}
+		pw.sessionAlways[kind] = struct{}{}
+		kindKept = true
+	}
 	pw.mu.Unlock()
-	pw.logger.Info("same-kind approvals auto-passed for the rest of this session",
-		zap.String("task", pw.taskID), zap.String("tool_kind", kind))
+	if len(kept) > 0 || kindKept {
+		pw.logger.Info("session auto-pass remembered",
+			zap.String("task", pw.taskID),
+			zap.String("tool_kind", kind),
+			zap.Bool("kind_kept", kindKept),
+			zap.Strings("recipes", kept))
+	}
+}
+
+// recipesFromPermission 从权限请求的 RawInput 抽 shell 配方；无命令文本 → nil。
+func recipesFromPermission(req agent.PermissionRequest) []string {
+	cmd := commandFromPermRawInput(req.RawInput)
+	if cmd == "" {
+		return nil
+	}
+	return agent.ShellRecipes(cmd)
+}
+
+// decisionSegmentsFromPermission 复合 shell 的分段风险；单段或非 shell → nil（UI 不渲染）。
+func decisionSegmentsFromPermission(req agent.PermissionRequest) []model.DecisionSegment {
+	cmd := commandFromPermRawInput(req.RawInput)
+	if cmd == "" {
+		return nil
+	}
+	segs := agent.ClassifyShellSegments(cmd)
+	if len(segs) < 2 {
+		return nil
+	}
+	out := make([]model.DecisionSegment, 0, len(segs))
+	for _, s := range segs {
+		out = append(out, model.DecisionSegment{
+			Text: s.Text,
+			Kind: s.Kind,
+			Risk: RiskOfKind(s.Kind),
+		})
+	}
+	return out
+}
+
+// commandFromPermRawInput 与 agent 侧 commandFromRawInputThenAny 对齐的轻量取命令。
+// 放在 core 避免为了一行导出去改 agent API 表面；字段表与 agent.rawInputCommandKeys 同步。
+func commandFromPermRawInput(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ""
+	}
+	for _, k := range []string{"command", "cmd", "code", "script", "input", "shell"} {
+		s, _ := m[k].(string)
+		if s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // show 把 reqID 展示为当前决策：置 waiting_input(approval) + Publish + IM 通知 + 启动超时定时器。
 // 返回是否成功应用（task 不存在或已终态时为 false，调用方负责 Deny 并清理展示状态）。
-func (pw *PermissionWire) show(reqID, toolTitle, toolKind, summary string) bool {
-	updated, applied := pw.setWaitingApproval(reqID, toolTitle, toolKind, summary)
+func (pw *PermissionWire) show(reqID, toolTitle, toolKind, summary string, segments []model.DecisionSegment) bool {
+	updated, applied := pw.setWaitingApproval(reqID, toolTitle, toolKind, summary, segments)
 	if !applied {
 		return false
 	}
@@ -394,7 +579,7 @@ func decisionIDOf(t *model.Task) string {
 
 // setWaitingApproval 把 task 置 waiting_input(approval) 并建 CurrentDecision。
 // 返回更新后的 task 副本与是否应用（task 不存在或已终态时 applied=false）。
-func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary string) (*model.Task, bool) {
+func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary string, segments []model.DecisionSegment) (*model.Task, bool) {
 	applied := false
 	updated, err := pw.store.Update(pw.taskID, func(t *model.Task) bool {
 		// 终态任务不再暂停（与 TaskRunner.transition 语义一致）。
@@ -412,8 +597,9 @@ func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary
 			// 风险分级在这里落定：**和自动放行判据共用同一张表**（riskLevelKinds）。
 			// 两者必须是同一个真相 —— 若卡片按一张表显示"L3 破坏性"、
 			// 而放行逻辑按另一张表认为它可以自动通过，用户看到的强度就是谎言。
-			Risk:    RiskOfKind(toolKind),
-			Summary: summary,
+			Risk:     RiskOfKind(toolKind),
+			Summary:  summary,
+			Segments: append([]model.DecisionSegment(nil), segments...),
 			// approve_session 只在这里出现 = 只有 ACP 路径支持"同类免审"。
 			// hook 路径（claude PreToolUse）的 Resolve 不认这个值，前端按这份列表决定
 			// 长第三个按钮 —— 用 Options 当能力声明，而不是让前端去猜"这是哪条路径"。
@@ -573,6 +759,7 @@ func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResul
 	}
 	options := entry.options
 	toolKind := entry.toolKind
+	recipes := append([]string(nil), entry.recipes...)
 	pw.mu.Unlock()
 
 	var adapterErr error
@@ -586,7 +773,7 @@ func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResul
 		// 一个是重放补偿。
 		optionID, ok := pickAllowOption(options)
 		if !ok {
-			pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, PermResolveDenied, false)
+			pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, recipes, PermResolveDenied, false)
 			return resolveResult{reqID: decisionID, status: PermResolveDenied},
 				fmt.Errorf("no allow option to approve for decision %q", decisionID)
 		}
@@ -595,8 +782,9 @@ func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResul
 		// 记下去会让以后同类静默通过。
 		// 注意回给 agent 的仍是 allow_once —— 会话内的免审由 pieqi 自己判，
 		// agent 侧那份"始终允许"不会被写（理由见 PermissionWire.sessionAlways）。
+		// shell / 宽泛 kind 优先记配方，绝不把 execute 记进 sessionAlways。
 		if adapterErr == nil && choice != "approve" {
-			pw.rememberKind(toolKind)
+			pw.rememberSessionApproval(toolKind, recipes)
 		}
 	case "deny":
 		status = PermResolveDenied
@@ -623,12 +811,12 @@ func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResul
 	if adapterErr != nil {
 		// adapter 拒绝（请求已被另一路解决 / 会话已关）：按已结算处理，让重复点击
 		// 不再落到 no pending 上；结论取"未批准"，因为它确实没被放行。
-		pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, PermResolveDenied, false)
+		pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, recipes, PermResolveDenied, false)
 		return resolveResult{reqID: decisionID, status: PermResolveDenied},
 			fmt.Errorf("adapter: %w", adapterErr)
 	}
 
-	pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, status, false)
+	pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, recipes, status, false)
 
 	pw.logger.Info("approval settled",
 		zap.String("task", pw.taskID),
@@ -661,14 +849,14 @@ func (pw *PermissionWire) redeliverSettled(decisionID, choice string, settled *s
 		// 可兑现效果就是"以后同类直接过"（那条 RequestPermission 早已返回，没有载体）。
 		// 这一步不能省成"什么都不做"：省掉它，用户点两次批准后得到的只有一张消失的卡，
 		// 而 agent 下一次同类操作照样弹卡 —— 从用户视角看，就是"批了没用"。
-		pw.rememberKind(settled.toolKind)
+		pw.rememberSessionApproval(settled.toolKind, settled.recipes)
 		return resolveResult{reqID: decisionID, status: PermResolveApproved}, nil
 	case settled.kind == PermResolveApproved && wantApprove:
 		// 已批准：重复投递不会再驱动一次执行，直接回"已经批过了"。
 		return resolveResult{reqID: decisionID, status: PermResolveApproved}, nil
 	case settled.kind == PermResolveDenied && wantApprove:
 		// 已拒绝：没有载体可补，改记同类免审（下一次同类请求自动通过）。
-		pw.rememberKind(settled.toolKind)
+		pw.rememberSessionApproval(settled.toolKind, settled.recipes)
 		return resolveResult{reqID: decisionID, status: PermResolveDenied}, nil
 	default:
 		return resolveResult{reqID: decisionID, status: settled.kind}, nil
@@ -689,7 +877,7 @@ func (pw *PermissionWire) handleTimeout(reqID string) {
 	// 超时即"已拒绝"：记进 settled，这样用户**事后**点那张卡（它还在屏幕上，
 	// 应用也还没收到 task_updated）时，得到的是"这一条已经超时被拒了"，
 	// 而不是 2026-10-23 那次会话里刷屏的 no pending。
-	pw.rememberSettledLocked(reqID, entry.toolTitle, entry.toolKind, PermResolveDenied, true)
+	pw.rememberSettledLocked(reqID, entry.toolTitle, entry.toolKind, entry.recipes, PermResolveDenied, true)
 	shownAt := entry.shownAt
 	pw.mu.Unlock()
 
@@ -746,12 +934,14 @@ func (pw *PermissionWire) advance(reqID string) (*model.Task, bool) {
 	pw.queue = pw.queue[1:]
 	pw.displayed = next
 	toolTitle, toolKind, summary := "", "", ""
+	var segments []model.DecisionSegment
 	if e, ok := pw.pending[next]; ok {
 		toolTitle, toolKind, summary = e.toolTitle, e.toolKind, e.summary
+		segments = e.segments
 	}
 	pw.mu.Unlock()
 
-	if pw.show(next, toolTitle, toolKind, summary) {
+	if pw.show(next, toolTitle, toolKind, summary, segments) {
 		t, _ := pw.store.Get(pw.taskID)
 		return t, true
 	}

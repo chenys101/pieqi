@@ -59,8 +59,17 @@ func TestClassifyShellCommand_RunnerAndPowerShell(t *testing.T) {
 		{`npx playwright test --update-snapshots`, "execute"},
 		{`npx vitest run -u`, "execute"},
 		{`npm run lint:fix`, "execute"},
-		{`go build ./...`, "execute"},
-		{`go test ./internal/...`, "execute"},
+		// Go 工具链（go_runner.go）：test/vet → read；build → edit；run/get/install → execute
+		{`go build ./...`, "edit"},
+		{`go test ./internal/...`, "read"},
+		{`go vet ./internal/...`, "read"},
+		{`go -C web test ./...`, "read"},
+		{`go mod graph`, "read"},
+		{`go run ./cmd/pieqi`, "execute"},
+		{`go get golang.org/x/sys`, "execute"},
+		{`go install ./cmd/pieqi`, "execute"},
+		{`go test -exec evil ./...`, "execute"},
+		{`go mod tidy`, "execute"},
 		{`curl -s http://127.0.0.1:3000/api/tasks`, "execute"},
 
 		// ---------- 必须弹卡：写形态 ----------
