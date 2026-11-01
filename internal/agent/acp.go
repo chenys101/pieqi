@@ -141,6 +141,13 @@ type ACPAgent struct {
 	// SetMode 需要它（ModeSetter 接口不带 session 参数）；一任务一 adapter，至多一个。
 	lastSessionID string
 
+	// pendingModeAfterExt：cursor/* 扩展应答写回前排队的 set_mode。
+	// create_plan 若在 cursorExtBridge.Read/tryIntercept 栈内同步 SetSessionMode，
+	// 会占用 stdout 读路径等 set_mode 回包 → 死锁（会话 384e5205 卡在 Create Plan）。
+	// 流程：扩展处理只 queue → tryIntercept 写完 JSON-RPC result 再 flush（异步 applyMode）。
+	pendingModeMu       sync.Mutex
+	pendingModeAfterExt *pendingModeSwitch
+
 	// cursorTodos / cursorTodoMu：Cursor cursor/update_todos 的 merge 基线。
 	// 标准 ACP Plan 是整表替换；Cursor 的 merge=true 要靠客户端记得上一份。
 	cursorTodoMu sync.Mutex

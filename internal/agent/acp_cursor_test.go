@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"pieqi/internal/config"
 
@@ -92,6 +93,59 @@ func TestHandleCursorExtension_CreatePlanInPlanModeAutoAccepts(t *testing.T) {
 	}
 	if len(got.Entries) != 1 || got.Entries[0].Content != "A" {
 		t.Fatalf("entries=%+v", got.Entries)
+	}
+}
+
+// TestCreatePlan_DefersSetModeUntilFlush 回归 384e5205：
+// plan 下 create_plan 不得在扩展处理栈内同步 set_mode（会与 cursorExtBridge 死锁）。
+func TestCreatePlan_DefersSetModeUntilFlush(t *testing.T) {
+	conn := &fakeModelConn{}
+	a := NewACPAgent(config.ACPConfig{AgentType: "agent", InitTimeout: 5 * time.Second}, nil)
+	a.conn = conn
+	a.started = true
+	a.lastSessionID = "sess"
+	a.modeMu.Lock()
+	a.modeState = ModeState{
+		CurrentID: "plan",
+		Available: []ModeOption{{ID: "plan", Name: "Plan"}, {ID: "agent", Name: "Agent"}},
+	}
+	a.modeMu.Unlock()
+
+	raw := []byte(`{"toolCallId":"c-defer","name":"Defer","todos":[{"id":"1","content":"A","status":"pending"}]}`)
+	if _, err := a.handleCursorExtension(context.Background(), "cursor/create_plan", raw, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range conn.order {
+		if strings.HasPrefix(s, "set_mode:") {
+			t.Fatalf("set_mode must not run before flush, order=%v", conn.order)
+		}
+	}
+	a.pendingModeMu.Lock()
+	pending := a.pendingModeAfterExt
+	a.pendingModeMu.Unlock()
+	if pending == nil || pending.modeID != "agent" {
+		t.Fatalf("pending=%+v want agent", pending)
+	}
+
+	a.flushPendingModeAfterExtReply()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		found := false
+		for _, s := range conn.order {
+			if s == "set_mode:agent" {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("deferred set_mode:agent not observed, order=%v", conn.order)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if a.Modes().CurrentID != "agent" {
+		t.Fatalf("CurrentID=%q want agent", a.Modes().CurrentID)
 	}
 }
 

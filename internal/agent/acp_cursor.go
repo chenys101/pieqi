@@ -444,6 +444,9 @@ func (b *cursorExtBridge) tryIntercept(line []byte) bool {
 	b.replyMu.Lock()
 	_, _ = b.reply.Write(payload)
 	b.replyMu.Unlock()
+	// create_plan 等扩展可能 queue 了 set_mode：必须在 result 写回之后再跑，
+	// 否则 tryIntercept 栈内同步 SetSessionMode 会与本桥抢 stdout → 死锁。
+	b.agent.flushPendingModeAfterExtReply()
 	return true
 }
 

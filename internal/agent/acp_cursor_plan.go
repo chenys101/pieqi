@@ -5,9 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
+
+// pendingModeSwitch 是扩展 RPC 应答之后再执行的 session/set_mode。
+type pendingModeSwitch struct {
+	sessionID string
+	modeID    string
+}
 
 // Cursor 扩展方法的应答必须是**嵌套** outcome（官方 docs/cli/acp）：
 //
@@ -91,13 +98,8 @@ func (a *ACPAgent) handleCursorCreatePlan(ctx context.Context, params json.RawMe
 		return cursorNestedOutcome(map[string]any{"outcome": "cancelled"}), nil
 	}
 
-	sid := a.lastSessionID
-	if sid != "" {
-		if err := a.applyMode(ctx, sid, "plan"); err != nil {
-			a.logger.Debug("acp cursor create_plan: enter plan mode failed",
-				zap.String("from", cur), zap.Error(err))
-		}
-	}
+	// 先回 accepted，set_mode(plan) 排队到扩展应答写完后再跑（见 queueModeAfterExtReply）。
+	a.queueModeAfterExtReply(a.lastSessionID, "plan")
 
 	a.logger.Debug("acp extension default reply",
 		zap.String("method", "cursor/create_plan"),
@@ -110,18 +112,14 @@ func (a *ACPAgent) handleCursorCreatePlan(ctx context.Context, params json.RawMe
 	return cursorNestedOutcome(map[string]any{"outcome": "accepted"}), nil
 }
 
-// acceptCursorCreatePlan plan 模式直通：emit → accepted → 切 agent。
-func (a *ACPAgent) acceptCursorCreatePlan(ctx context.Context, p cursorCreatePlanParams, entries []PlanEntry, fromMode string) (any, error) {
+// acceptCursorCreatePlan plan 模式直通：emit → 回 accepted；切 agent 延后到扩展应答写完。
+//
+// ⚠️ 禁止在此同步 applyMode：本函数跑在 cursorExtBridge.tryIntercept 栈上，
+// 同步 SetSessionMode 会等 stdout 回包，而 stdout 正被本桥占用 → 死锁。
+func (a *ACPAgent) acceptCursorCreatePlan(_ context.Context, p cursorCreatePlanParams, entries []PlanEntry, fromMode string) (any, error) {
 	a.emitPlan(entries)
 	a.rememberCursorTodos(p.Todos)
-
-	sid := a.lastSessionID
-	if sid != "" {
-		if err := a.applyMode(ctx, sid, "agent"); err != nil {
-			a.logger.Debug("acp cursor create_plan: switch to agent after accept failed",
-				zap.String("from", fromMode), zap.Error(err))
-		}
-	}
+	a.queueModeAfterExtReply(a.lastSessionID, "agent")
 
 	a.logger.Debug("acp extension default reply",
 		zap.String("method", "cursor/create_plan"),
@@ -132,6 +130,47 @@ func (a *ACPAgent) acceptCursorCreatePlan(ctx context.Context, p cursorCreatePla
 		zap.String("path", "already_plan"),
 	)
 	return cursorNestedOutcome(map[string]any{"outcome": "accepted"}), nil
+}
+
+// queueModeAfterExtReply 登记「扩展 JSON-RPC 结果写回后再 set_mode」。
+func (a *ACPAgent) queueModeAfterExtReply(sessionID, modeID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	modeID = strings.TrimSpace(modeID)
+	if a == nil || sessionID == "" || modeID == "" {
+		return
+	}
+	a.pendingModeMu.Lock()
+	a.pendingModeAfterExt = &pendingModeSwitch{sessionID: sessionID, modeID: modeID}
+	a.pendingModeMu.Unlock()
+}
+
+// flushPendingModeAfterExtReply 在扩展应答已写入 agent stdin 之后调用。
+// 异步 applyMode，让 bridge Read 循环能继续泵 stdout（含 set_mode 回包）。
+func (a *ACPAgent) flushPendingModeAfterExtReply() {
+	if a == nil {
+		return
+	}
+	a.pendingModeMu.Lock()
+	p := a.pendingModeAfterExt
+	a.pendingModeAfterExt = nil
+	a.pendingModeMu.Unlock()
+	if p == nil {
+		return
+	}
+	go func() {
+		timeout := a.cfg.InitTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := a.applyMode(ctx, p.sessionID, p.modeID); err != nil {
+			a.logger.Debug("acp deferred set_mode failed",
+				zap.String("mode", p.modeID),
+				zap.String("session", p.sessionID),
+				zap.Error(err))
+		}
+	}()
 }
 
 // awaitEnterPlanMode 弹出「是否进入计划模式」审批卡，阻塞到用户决策。
