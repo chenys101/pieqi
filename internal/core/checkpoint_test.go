@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"pieqi/internal/model"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // testTempBase 返回一个**可写、且在 pieqi 仓库之外**的临时目录根。
@@ -439,5 +442,63 @@ func TestCaptureBaseline_NonGitWorktree(t *testing.T) {
 	_, add, del := UnifiedDiff("src/App.vue", string(before), "v1 line\nCHANGED\n", 3)
 	if add != 1 || del != 1 {
 		t.Errorf("diff = +%d/-%d, want +1/-1", add, del)
+	}
+}
+
+// TestSkipBaselineCopy_PieqiAndDirs 回归一周日志：git dirty 含 `.pieqi/` 时
+// Windows ReadFile 目录报 Incorrect function，不得进拷贝、不得刷 WARN。
+func TestSkipBaselineCopy_PieqiAndDirs(t *testing.T) {
+	root, err := os.MkdirTemp(testTempBase(t), "skip-pieqi-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	pieqiDir := filepath.Join(root, ".pieqi")
+	if err := os.MkdirAll(filepath.Join(pieqiDir, "preview"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(root, "ok.txt"), []byte("x\n"), 0644)
+
+	if !skipBaselineCopy(pieqiDir, ".pieqi") {
+		t.Fatal("want skip .pieqi dir")
+	}
+	if !skipBaselineCopy(filepath.Join(pieqiDir, "preview"), ".pieqi/preview") {
+		t.Fatal("want skip under .pieqi/")
+	}
+	if skipBaselineCopy(filepath.Join(root, "ok.txt"), "ok.txt") {
+		t.Fatal("must not skip normal file")
+	}
+}
+
+func TestCaptureBaseline_PieqiDirNoWarn(t *testing.T) {
+	coreLog, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(coreLog)
+
+	wt := newGitRepo(t)
+	if err := os.MkdirAll(filepath.Join(wt, ".pieqi", "x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(wt, "b.txt"), []byte("b\n"), 0644)
+
+	cpRoot, err := os.MkdirTemp(testTempBase(t), "cp-pieqi-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := NewFeedbackStore(logger, cpRoot)
+
+	task := fsTask(t, wt, "task-pieqi", nil, nil)
+	baseline := fs.CaptureBaseline(task)
+	if baseline == nil {
+		t.Fatal("baseline nil")
+	}
+	_ = baseline // DirtyPaths 可含 .pieqi（git status 事实）；跳过只作用于拷贝
+	for _, e := range logs.FilterMessage("feedback: snapshot dirty file").All() {
+		t.Fatalf("unexpected WARN: %s fields=%v", e.Message, e.ContextMap())
+	}
+	if _, err := os.Stat(filepath.Join(cpRoot, "task-pieqi", "pre", "b.txt")); err != nil {
+		t.Fatalf("expected b.txt in pre/: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cpRoot, "task-pieqi", "pre", ".pieqi")); !os.IsNotExist(err) {
+		t.Fatalf(".pieqi must not be copied into pre/: err=%v", err)
 	}
 }

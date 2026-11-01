@@ -113,7 +113,13 @@ func (fs *FeedbackStore) CaptureBaseline(task *model.Task) *model.TaskBaseline {
 	}
 	if !truncated {
 		for _, p := range dirty {
-			if err := copyFileInto(filepath.Join(task.WorktreePath, filepath.FromSlash(p)), preDir, p); err != nil {
+			src := filepath.Join(task.WorktreePath, filepath.FromSlash(p))
+			// git status 会把目录（含 junction / .pieqi/）也列出来；Windows 上对目录
+			// ReadFile 会报 Incorrect function，刷成噪音 WARN 还不进快照。
+			if skipBaselineCopy(src, p) {
+				continue
+			}
+			if err := copyFileInto(src, preDir, p); err != nil {
 				fs.logger.Warn("feedback: snapshot dirty file",
 					zap.String("task", task.ID), zap.String("path", p), zap.Error(err))
 			}
@@ -123,10 +129,26 @@ func (fs *FeedbackStore) CaptureBaseline(task *model.Task) *model.TaskBaseline {
 }
 
 // baselineNoiseDirs 全量基线快照时跳过的目录（非 git 项目兜底：不把依赖/产物拷进 pre/）。
+// 也用于 git dirty 拷贝：路径段命中则跳过（避免 .pieqi/ 目录触发 Incorrect function）。
 var baselineNoiseDirs = map[string]bool{
-	".git": true, "node_modules": true, "dist": true, "build": true,
+	".git": true, ".pieqi": true, "node_modules": true, "dist": true, "build": true,
 	"coverage": true, ".next": true, ".nuxt": true, ".cache": true,
 	"__pycache__": true, ".venv": true, "venv": true, "target": true,
+}
+
+// skipBaselineCopy 基线拷贝是否应跳过该 dirty 路径。
+// 目录、或相对路径任一段落在 baselineNoiseDirs 里 → 跳过（不告警）。
+func skipBaselineCopy(abs, rel string) bool {
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		if seg != "" && baselineNoiseDirs[seg] {
+			return true
+		}
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return false // 交给 copyFileInto 报真实错误
+	}
+	return fi.IsDir()
 }
 
 // walkWorktreeFiles 递归列出 worktree 下全部文件（repo 相对路径、/ 分隔、字母序），

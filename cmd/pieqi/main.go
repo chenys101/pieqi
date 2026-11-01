@@ -89,9 +89,13 @@ func main() {
 	}
 	defer closeLog()
 
-	// P5：pieqi.acp.* 旧字段迁移告警（仅显式配置时触发，旧语义仍生效）
+	// P5：pieqi.acp.* 旧字段迁移告警（仅显式配置时触发，旧语义仍生效）。
+	// 同 hint 进程内只打一次：Load 若被热路径重复调用，或同一 key 被拼进多次，
+	// 不要每次重启式刷屏（一周日志里这类 WARN 占比很高）。
 	for _, d := range cfg.Deprecations {
-		logger.Warn("config deprecated field", zap.String("hint", d))
+		if config.WarnDeprecationOnce(d) {
+			logger.Warn("config deprecated field", zap.String("hint", d))
+		}
 	}
 
 	// 启动时剔除了宿主注入的 shim 才告警：正常情况下没有（干净启动不打扰），

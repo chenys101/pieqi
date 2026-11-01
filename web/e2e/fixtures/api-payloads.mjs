@@ -123,6 +123,21 @@ export const tasks = [
     id: LONG_TASK_ID,
     source: 'web',
     agent: 'claude',
+    // 计划 sticky（SessionPage composer 上方）依赖 Task.plan；此前夹具无此字段 ⇒
+    // session-plan-sticky 零覆盖（create_plan 修好后 UI 仍无人验）。
+    mode: 'plan',
+    modes: [
+      { id: 'agent', name: '执行', description: '完整工具能力' },
+      { id: 'plan', name: '计划', description: '只读规划' },
+      { id: 'ask', name: '问答', description: '只读问答' },
+    ],
+    plan: {
+      entries: [
+        { content: '跳过 .pieqi 脏文件复制', priority: 'high', status: 'completed' },
+        { content: '审批超时强制清 CurrentDecision', priority: 'high', status: 'in_progress' },
+        { content: '配置弃用告警改为单次', priority: 'medium', status: 'pending' },
+      ],
+    },
     project_id: 'pieqi',
     project_path: 'D:/code/go/pieqi',
     worktree_path: 'D:/code/go/pieqi',

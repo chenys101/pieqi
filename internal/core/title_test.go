@@ -39,6 +39,35 @@ func TestTitleFromReply(t *testing.T) {
 	}
 }
 
+// TestScrubNonClaudeModelEnv 标题兜底路径不得把 deepseek-flash 等非 Claude 模型名
+// 传进 `claude -p`（一周日志 unrecognized_model 回归）。
+func TestScrubNonClaudeModelEnv(t *testing.T) {
+	in := []string{
+		"PATH=C:\\bin",
+		"ANTHROPIC_MODEL=deepseek-flash",
+		"CLAUDE_CODE_MODEL=claude-sonnet-4",
+		"CLAUDE_MODEL=magpie",
+		"ANTHROPIC_API_KEY=sk-test",
+	}
+	got := scrubNonClaudeModelEnv(in)
+	joined := strings.Join(got, "\n")
+	if strings.Contains(joined, "deepseek-flash") || strings.Contains(joined, "magpie") {
+		t.Fatalf("non-claude models must be scrubbed: %v", got)
+	}
+	if !strings.Contains(joined, "claude-sonnet-4") {
+		t.Fatalf("valid claude model must keep: %v", got)
+	}
+	if !strings.Contains(joined, "PATH=") || !strings.Contains(joined, "ANTHROPIC_API_KEY=") {
+		t.Fatalf("unrelated env must keep: %v", got)
+	}
+	if looksLikeClaudeModel("deepseek-flash") || looksLikeClaudeModel("qwen3") {
+		t.Fatal("looksLikeClaudeModel must reject non-claude names")
+	}
+	if !looksLikeClaudeModel("claude-3-5-sonnet") || !looksLikeClaudeModel("") {
+		t.Fatal("looksLikeClaudeModel must accept claude / empty")
+	}
+}
+
 // TestTitleFromClaudeStdout 跳掉 claude 的诊断行。
 //
 // 实测过：claude 2.1.248 在 stdout 里会先吐

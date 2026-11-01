@@ -349,6 +349,22 @@ func TestConfig_NoDeprecationWithoutLegacy(t *testing.T) {
 	}
 }
 
+// TestWarnDeprecationOnce 同 hint 进程内只告警一次（一周日志刷屏回归）。
+func TestWarnDeprecationOnce(t *testing.T) {
+	ResetDeprecationWarnings()
+	t.Cleanup(ResetDeprecationWarnings)
+	hint := "pieqi.acp.use_acp 已弃用（test-unique-" + t.Name() + ")"
+	if !WarnDeprecationOnce(hint) {
+		t.Fatal("first warn want true")
+	}
+	if WarnDeprecationOnce(hint) {
+		t.Fatal("second warn want false")
+	}
+	if !WarnDeprecationOnce(hint + "-other") {
+		t.Fatal("different hint want true")
+	}
+}
+
 
 // TestConfig_TunnelModeAndTokenFileDefaults verifies the named-tunnel knobs:
 // mode defaults to quick (临时域名), the token file defaults to a path OUTSIDE

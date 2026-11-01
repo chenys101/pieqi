@@ -837,3 +837,36 @@ for (const sc of SCENES) {
     })
   }
 }
+
+/**
+ * SessionPage 计划 sticky（独立于 SCENES 基线循环）。
+ * 夹具 LONG 任务带 Task.plan；必须走 mode=sessionpage 才挂 sticky 槽。
+ */
+test.describe('session plan sticky layout', () => {
+  for (const vp of VIEWPORTS) {
+    test(`sticky 在输入框上方 @ ${vp.name}`, async ({ page }, testInfo) => {
+      testInfo.annotations.push({ type: 'viewport', description: vp.name })
+      await page.setViewportSize({ width: vp.width, height: vp.height })
+      await page.goto('/__e2e/detail/e2e-long-12/sessionpage', { waitUntil: 'domcontentloaded' })
+      await stabilize(page)
+
+      const sticky = page.locator('[data-testid="session-plan-sticky"]')
+      await expect(sticky, 'session-plan-sticky 未出现').toBeVisible()
+      await expect(sticky.locator('[data-testid="plan-list"]')).toContainText('审批超时强制清 CurrentDecision')
+
+      const geo = await page.evaluate(() => {
+        const s = document.querySelector('[data-testid="session-plan-sticky"]')!.getBoundingClientRect()
+        const ta = document.querySelector('textarea[aria-label="补充指令"]')!.getBoundingClientRect()
+        return {
+          stickyBottom: Math.round(s.bottom),
+          taTop: Math.round(ta.top),
+          overflowX: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+        }
+      })
+      expect(geo.stickyBottom, `sticky 底 ${geo.stickyBottom} 应在输入框顶 ${geo.taTop} 之上`).toBeLessThanOrEqual(
+        geo.taTop + 2,
+      )
+      expect(geo.overflowX, '计划 sticky 导致横向溢出').toBe(false)
+    })
+  }
+})

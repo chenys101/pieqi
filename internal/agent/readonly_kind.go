@@ -229,9 +229,10 @@ func splitSegments(cmd string) []string {
 
 // stripDataLiterals 把 here-string 与引号串的内容替换成占位符，只留命令骨架。
 //
-// 处理三种形态（PowerShell 为 dsh 的主要 shell，Bash 亦覆盖）：
+// 处理四种形态（PowerShell 为 dsh 的主要 shell，Bash 亦覆盖）：
 //   - PowerShell here-string：@'…'@ 与 @"…"@（**必须整体跨行匹配**，否则内容会被当命令）；
 //   - 单/双引号串：'…' 与 "…"（同样跨行）；
+//   - PowerShell scriptblock：{ … }（ForEach-Object / Where-Object 管道尾里的 `;` 不是命令边界）；
 //   - 反引号串：`…`（**不剥** —— 它是命令替换，剥掉会把"执行另一条命令"藏起来，
 //     那正是 hasUnsafeRedirection 要拦的）。
 //
@@ -256,6 +257,10 @@ func stripDataLiterals(cmd string) string {
 	// 这一版仍是逐对替换，拆出的残段会被 hasUnsafeRedirection 按"引号内数据"
 	// 放过，但残段本身只是一两个字符，切段后不足以凑成任何白名单命令 ⇒ 判 execute。
 	out = singleQuotedRe.ReplaceAllString(out, "''")
+	// ③ PowerShell scriptblock：`ForEach-Object { $_.Line; … }` 里的 `;` 不是命令边界。
+	// 一周日志里 Select-String|ForEach-Object {…;…} 因此被切成 execute 弹卡。
+	// 只剥一层非嵌套块；嵌套/未闭合保持原样 → 保守落 L2。
+	out = scriptBlockRe.ReplaceAllString(out, "{}")
 	return out
 }
 
@@ -271,6 +276,9 @@ var (
 	hereStringRe   = regexp.MustCompile(`(?s)@'.*?'@|@".*?"@`)
 	doubleQuotedRe = regexp.MustCompile(`(?s)"[^"]*"`)
 	singleQuotedRe = regexp.MustCompile(`(?s)'[^']*'`)
+	// scriptBlockRe 只匹配一层无嵌套的 `{…}`（`{` 后到最近 `}`）。
+	// 嵌套块会留下外层残段 → 保守侧不降级，符合"证明不了就弹卡"。
+	scriptBlockRe = regexp.MustCompile(`(?s)\{[^{}]*\}`)
 )
 
 // backtickEscapeRe 匹配 PowerShell 的反引号转义（n、t、$、" 等单字符转义，以及 `u{XXXX}）。

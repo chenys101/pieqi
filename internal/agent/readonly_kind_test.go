@@ -197,3 +197,51 @@ func TestDowngradeReadonlyPermission(t *testing.T) {
 		t.Errorf("original mutated to %q, want execute (must return a copy)", orig.ToolKind)
 	}
 }
+
+// TestDowngradeReadonly_WeekLogRegression 本周日志里超时弹卡的真实 PS/python 读命令。
+//
+// 取自 2026-11-01 审批超时连锁：Select-String|ForEach-Object 脚本块内的 `;` 曾被
+// 误当命令边界 → 整条落 execute；python -c 读 JSON 任务文件应降 read。
+func TestDowngradeReadonly_WeekLogRegression(t *testing.T) {
+	mk := func(cmd string) PermissionRequest {
+		raw, _ := json.Marshal(map[string]string{"command": cmd})
+		return PermissionRequest{ReqID: "r", ToolKind: "execute", RawInput: raw}
+	}
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{
+			"select-string foreach scriptblock",
+			`Select-String -Path "$env:USERPROFILE\.pieqi\tasks\x.json" -Pattern "Update TODOs" -Context 0,15 | Select-Object -First 3 | ForEach-Object { $_.Line; $_.Context.PostContext; "----" }`,
+			"read",
+		},
+		{
+			"test-path get-childitem",
+			`Test-Path "$env:USERPROFILE\.pieqi\tasks\x.json"; Get-ChildItem "$env:USERPROFILE\.pieqi\tasks" -Filter "f0a*" | Select-Object Name,Length`,
+			"read",
+		},
+		{
+			"python open json readonly",
+			"python -c \"import json\np=r'C:\\\\Users\\\\x\\\\.pieqi\\\\tasks\\\\x.json'\nj=json.load(open(p,encoding='utf-8'))\nprint(j.get('status'))\"",
+			"read",
+		},
+		{
+			"assignment plus get-content stays execute",
+			`$p = "x.json"; Get-Content $p -Raw | ConvertFrom-Json`,
+			"execute",
+		},
+		{
+			"remove-item hard boundary",
+			`Remove-Item "$env:USERPROFILE\.pieqi\tasks\x.json" -Force`,
+			"execute",
+		},
+	}
+	for _, c := range cases {
+		got := DowngradeReadonlyPermission(mk(c.cmd))
+		if got.ToolKind != c.want {
+			t.Errorf("%s: ToolKind=%q want %q\ncmd=%s", c.name, got.ToolKind, c.want, c.cmd)
+		}
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -129,7 +130,14 @@ type PermissionWire struct {
 	// 不是"再批一次"（重放一次 allow 的意义在 approve_same 分支里单独论证）。
 	settled map[string]*settledPerm
 	order   []string // settled 的插入顺序（FIFO 淘汰用）
+
+	// timeoutCooldown 超时后的同指纹短冷却：指纹 → 冷却截止时刻。
+	// 打断"超时 deny → agent 立刻再挂同类 execute → 再等 30m"的连锁（一周日志主痛点）。
+	timeoutCooldown map[string]time.Time
 }
+
+// permissionTimeoutCooldown 超时后同指纹冷却窗口。
+const permissionTimeoutCooldown = 60 * time.Second
 
 // settledMax settled 表上限。审批是低频动作（一场会话几十到上百次），256 足够覆盖
 // "用户还在看那一屏卡"的窗口；再往上加只是让内存随会话长度无界增长。
@@ -197,7 +205,8 @@ func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore,
 		sessionAlways:  make(map[string]struct{}),
 		sessionRecipes: make(map[string]struct{}),
 		trustedRecipes: make(map[string]struct{}),
-		settled:        make(map[string]*settledPerm),
+		settled:         make(map[string]*settledPerm),
+		timeoutCooldown: make(map[string]time.Time),
 	}
 	pw.setAutoApprove(autoApprove)
 	adapter.OnPermissionRequest(pw.onPermissionRequest)
@@ -248,6 +257,10 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 	// 免审名单命中（如 edit/delete/move 等文件改动类）：直接自动放行——
 	// 不置 waiting_input、不弹卡、不推 IM、不启动超时，任务全程不中断。
 	if pw.tryAutoApprove(req) {
+		return
+	}
+	// 超时冷却：同指纹在窗口内再来 → 直接 deny + settled，打断连锁弹卡。
+	if pw.denyIfTimeoutCooldown(req) {
 		return
 	}
 	pw.mu.Lock()
@@ -879,6 +892,8 @@ func (pw *PermissionWire) handleTimeout(reqID string) {
 	// 而不是 2026-10-23 那次会话里刷屏的 no pending。
 	pw.rememberSettledLocked(reqID, entry.toolTitle, entry.toolKind, entry.recipes, PermResolveDenied, true)
 	shownAt := entry.shownAt
+	fpRecipes := append([]string(nil), entry.recipes...)
+	toolKind, summary := entry.toolKind, entry.summary
 	pw.mu.Unlock()
 
 	// ── 审批生命周期日志③（失败）：超时 ─────────────────────────────────────
@@ -900,15 +915,21 @@ func (pw *PermissionWire) handleTimeout(reqID string) {
 		// best-effort：即便 Deny 失败也继续推进本地状态，避免 task 永久卡住。
 	}
 
+	// 记入超时冷却：同指纹短时再来直接 deny（打断连锁）。
+	pw.armTimeoutCooldown(fpRecipes, toolKind, summary)
+
 	// 推进：有排队审批则提升下一个继续展示，否则 task 回 running。
 	updated, applied := pw.advance(reqID)
 	if applied {
 		pw.notifyTimeout(updated)
 	} else {
 		// 推进失败 = CurrentDecision 可能残留（卡片还在但 pending 已空）。
-		// 这正是"死按钮"的成因，必须留证而不是静默。
-		pw.logger.Warn("approval timeout could not advance; decision may be left stale",
+		// 强制清掉死卡，再留证 —— 一周日志里 "could not advance" 后前端仍显示旧卡。
+		pw.logger.Warn("approval timeout could not advance; forcing clear of CurrentDecision",
 			zap.String("task", pw.taskID), zap.String("req", reqID))
+		if cleared, ok := pw.forceClearDecision(reqID); ok {
+			pw.notifyTimeout(cleared)
+		}
 	}
 }
 
@@ -966,6 +987,94 @@ func (pw *PermissionWire) denyRequests(reqIDs []string) {
 		_ = pw.adapter.Deny(ctx, rid)
 		cancel()
 	}
+}
+
+// forceClearDecision 超时 advance 失败时强制清掉 CurrentDecision（及 waiting_input）。
+// 与 backToRunning 的差别：不要求 displayed 仍指向该 req —— advance 已失败时 displayed
+// 可能已空，但 store 里的卡还在。
+func (pw *PermissionWire) forceClearDecision(decisionID string) (*model.Task, bool) {
+	applied := false
+	updated, err := pw.store.Update(pw.taskID, func(t *model.Task) bool {
+		if t.CurrentDecision == nil {
+			return false
+		}
+		if decisionID != "" && t.CurrentDecision.ID != decisionID {
+			return false
+		}
+		t.CurrentDecision = nil
+		if t.Status == model.TaskWaitingInput {
+			t.Status = model.TaskRunning
+		}
+		applied = true
+		return true
+	})
+	if !applied || updated == nil {
+		return nil, false
+	}
+	if err != nil {
+		pw.logger.Warn("persist force-clear decision failed (publishing anyway)",
+			zap.String("task", pw.taskID), zap.String("decision", decisionID), zap.Error(err))
+	}
+	pw.bus.Publish(Event{Type: "task_updated", TaskID: pw.taskID, Task: updated})
+	return updated, true
+}
+
+// permissionFingerprint 超时冷却用的指纹：优先 shell 配方，否则 toolKind+摘要。
+func permissionFingerprint(recipes []string, toolKind, summary string) string {
+	if len(recipes) > 0 {
+		cp := append([]string(nil), recipes...)
+		sort.Strings(cp) // 配方本身已归一；排序后拼接，顺序无关
+		return "recipe:" + strings.Join(cp, "|")
+	}
+	sum := strings.ToLower(strings.TrimSpace(summary))
+	if len(sum) > 160 {
+		sum = sum[:160]
+	}
+	return "kind:" + strings.ToLower(strings.TrimSpace(toolKind)) + ":" + sum
+}
+
+// armTimeoutCooldown 超时后为该指纹开启冷却窗。
+func (pw *PermissionWire) armTimeoutCooldown(recipes []string, toolKind, summary string) {
+	fp := permissionFingerprint(recipes, toolKind, summary)
+	if fp == "kind::" || fp == "kind:" {
+		return
+	}
+	until := time.Now().Add(permissionTimeoutCooldown)
+	pw.mu.Lock()
+	pw.timeoutCooldown[fp] = until
+	pw.mu.Unlock()
+	pw.logger.Info("approval timeout cooldown armed",
+		zap.String("task", pw.taskID),
+		zap.String("fingerprint", fp),
+		zap.Duration("cooldown", permissionTimeoutCooldown),
+	)
+}
+
+// denyIfTimeoutCooldown 若命中超时冷却则 Deny + settled，返回 true 表示已处理。
+func (pw *PermissionWire) denyIfTimeoutCooldown(req agent.PermissionRequest) bool {
+	recipes := recipesFromPermission(req)
+	fp := permissionFingerprint(recipes, req.ToolKind, buildPermSummary(req))
+	pw.mu.Lock()
+	until, ok := pw.timeoutCooldown[fp]
+	if ok && time.Now().After(until) {
+		delete(pw.timeoutCooldown, fp)
+		ok = false
+	}
+	pw.mu.Unlock()
+	if !ok {
+		return false
+	}
+	pw.logger.Info("approval denied by timeout cooldown (same fingerprint)",
+		zap.String("task", pw.taskID),
+		zap.String("req", req.ReqID),
+		zap.String("fingerprint", fp),
+		zap.Time("cooldown_until", until),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = pw.adapter.Deny(ctx, req.ReqID)
+	cancel()
+	pw.rememberSettled(req.ReqID, req.ToolTitle, req.ToolKind, recipes, PermResolveDenied, true)
+	return true
 }
 
 // backToRunning 把 task 从 waiting_input 置回 running（清 CurrentDecision），并 Publish task_updated。

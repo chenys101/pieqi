@@ -19,7 +19,9 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,6 +304,43 @@ func TestACPAgent_MetaChannelKeepsWorking(t *testing.T) {
 	if len(conn.setCalls) != 0 {
 		t.Fatalf("对 _meta 通道的 agent 发了 set_config_option（%+v）——"+
 			"该通道的 agent 隐藏了 configOptions，调它会抛错", conn.setCalls)
+	}
+}
+
+// TestCatalogHasModel_AndPeerDisconnected 设模型前校验 + peer 断开识别。
+func TestCatalogHasModel_AndPeerDisconnected(t *testing.T) {
+	cat := ModelCatalog{Options: []ModelOption{{Value: "a"}, {Value: "b"}}}
+	if !catalogHasModel(cat, "a") || catalogHasModel(cat, "missing") || catalogHasModel(cat, "") {
+		t.Fatalf("catalogHasModel mismatch: %+v", cat)
+	}
+	if !isPeerDisconnected(fmt.Errorf(`acp: prompt: {"error":"peer disconnected before response"}`)) {
+		t.Fatal("want peer disconnected true")
+	}
+	if isPeerDisconnected(fmt.Errorf("context deadline exceeded")) || isPeerDisconnected(nil) {
+		t.Fatal("want peer disconnected false for unrelated / nil")
+	}
+}
+
+// TestACPAgent_UnknownModelRefusedBeforeSet 清单已知时未知模型立即失败，不发 set_config_option。
+func TestACPAgent_UnknownModelRefusedBeforeSet(t *testing.T) {
+	conn := &fakeModelConn{
+		newSessionResp: acp.NewSessionResponse{
+			SessionId: "s-unknown",
+			ConfigOptions: []acp.SessionConfigOption{
+				modelSelect("real-model", opt("real-model", "Real", "")),
+			},
+		},
+	}
+	a := newModelAgent(t, conn, acp.AgentCapabilities{})
+	// Cwd 用 "."：本用例只校验 catalog 拒绝，不真正 spawn；t.TempDir 在沙箱下可能 Access denied。
+	_, err := a.NewSession(context.Background(), SessionConfig{
+		Cwd: ".", Model: "default[]",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not in") {
+		t.Fatalf("want catalog refuse error, got %v", err)
+	}
+	if len(conn.setCalls) != 0 {
+		t.Fatalf("unknown model must not call set_config_option: %+v", conn.setCalls)
 	}
 }
 

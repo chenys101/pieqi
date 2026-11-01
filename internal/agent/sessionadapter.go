@@ -36,7 +36,10 @@ var sessionPermOptions = []PermissionOption{
 }
 
 // sessionBackedAdapter 把 AgentSession 桥接成 AgentAdapter。
-var _ AgentAdapter = (*sessionBackedAdapter)(nil)
+var (
+	_ AgentAdapter = (*sessionBackedAdapter)(nil)
+	_ PlanReporter = (*sessionBackedAdapter)(nil)
+)
 
 type sessionBackedAdapter struct {
 	name   string
@@ -57,6 +60,10 @@ type sessionBackedAdapter struct {
 	// onGoal goal 状态回调（当前仅 claude 桥有该事件）。
 	// 与 onUsage 同一条纪律：WireGoal 靠类型断言找 GoalReporter，这里不实现就静默丢。
 	onGoal GoalUpdateFunc
+	// onPlan Agent Plan 回调（cursor/create_plan、ACP session/update plan）。
+	// 与 onUsage 同一条纪律：WirePlan 靠类型断言找 PlanReporter；这里不实现时
+	// create_plan 日志仍显示 accepted，但 Task.Plan 永不落库、前端 sticky 空白。
+	onPlan PlanUpdateFunc
 
 	done     chan struct{}
 	doneOnce sync.Once
@@ -235,6 +242,17 @@ func (a *sessionBackedAdapter) OnGoalUpdate(fn GoalUpdateFunc) {
 	a.mu.Unlock()
 }
 
+// OnPlanUpdate 实现 PlanReporter：转发 plan 回调。
+//
+// 与 OnUsageUpdate / OnGoalUpdate 同一纪律：WirePlan 对 sessionBackedAdapter 做
+// PlanReporter 断言；漏实现 ⇒ WirePlan 返回 nil ⇒ cursor/create_plan 只写扩展应答日志、
+// Task.Plan 永不落库（2026-11-01 任务 384e5205 复现）。
+func (a *sessionBackedAdapter) OnPlanUpdate(fn PlanUpdateFunc) {
+	a.mu.Lock()
+	a.onPlan = fn
+	a.mu.Unlock()
+}
+
 func (a *sessionBackedAdapter) Approve(ctx context.Context, reqID, optionID string) error {
 	a.mu.Lock()
 	sess := a.sess
@@ -355,6 +373,13 @@ func (a *sessionBackedAdapter) onEvent(ev Event) {
 	case EventGoalChanged:
 		// ev.Goal 为 nil = goal 被清除，**照样要转发**（那是"goal 结束"的唯一信号）。
 		a.emitGoal(ev.Goal)
+	case EventPlanChanged:
+		// 空 PlanEntries = 清空快照，必须转发（与 clearEmittedPlan / WirePlan 同口径）。
+		sid := ev.SessionID
+		if sid == "" {
+			sid = a.sid
+		}
+		a.emitPlan(PlanUpdate{SessionID: sid, Entries: ev.PlanEntries})
 	case EventError:
 		a.markDone()
 	}
@@ -402,6 +427,15 @@ func (a *sessionBackedAdapter) emitGoal(g *GoalSnapshot) {
 	a.mu.Unlock()
 	if fn != nil {
 		fn(g)
+	}
+}
+
+func (a *sessionBackedAdapter) emitPlan(u PlanUpdate) {
+	a.mu.Lock()
+	fn := a.onPlan
+	a.mu.Unlock()
+	if fn != nil {
+		fn(u)
 	}
 }
 

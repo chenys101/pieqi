@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -456,6 +457,7 @@ func (tr *TaskRunner) titleFromClaudePrint(ctx context.Context, t *model.Task) (
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = dir
+	cmd.Env = scrubNonClaudeModelEnv(os.Environ())
 	exechide.Command(cmd)            // Windows：不弹 cmd 黑窗（标题补齐是后台活）
 	out, err := cmd.CombinedOutput() // CombinedOutput 而非 Output：stderr 是唯一的失败线索
 	if err != nil {
@@ -469,6 +471,51 @@ func (tr *TaskRunner) titleFromClaudePrint(ctx context.Context, t *model.Task) (
 		return title, nil
 	}
 	return "", errTitleEmpty
+}
+
+// titleModelEnvKeys 会把"当前会话模型"塞进 claude -p 子进程的环境变量名。
+// 本机若把 ANTHROPIC_MODEL=deepseek-flash（兼容端点）写进环境，标题兜底路径
+// 会继承它 → claude 报 unrecognized_model 并 exit 1（一周日志 10/25–10/29 主因）。
+var titleModelEnvKeys = []string{
+	"ANTHROPIC_MODEL",
+	"CLAUDE_CODE_MODEL",
+	"CLAUDE_MODEL",
+}
+
+// scrubNonClaudeModelEnv 去掉会把非 Claude 模型名传给 `claude -p` 的环境变量。
+// 只动模型相关键；其余原样保留（凭据、代理等仍需继承）。
+func scrubNonClaudeModelEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, e := range environ {
+		drop := false
+		for _, k := range titleModelEnvKeys {
+			if len(e) >= len(k)+1 && strings.EqualFold(e[:len(k)], k) && e[len(k)] == '=' {
+				val := e[len(k)+1:]
+				if !looksLikeClaudeModel(val) {
+					drop = true
+				}
+				break
+			}
+		}
+		if !drop {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// looksLikeClaudeModel 标题路径只允许 Claude 侧能认的模型名；空串视为"未指定"=允许。
+func looksLikeClaudeModel(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if n == "" {
+		return true
+	}
+	if strings.Contains(n, "deepseek") || strings.Contains(n, "qwen") ||
+		strings.Contains(n, "magpie") || strings.Contains(n, "gpt-") ||
+		strings.Contains(n, "o1") || strings.Contains(n, "gemini") {
+		return false
+	}
+	return strings.Contains(n, "claude") || n == "sonnet" || n == "opus" || n == "haiku"
 }
 
 // BackfillTitles 补齐所有"有 prompt 但没标题"的任务。

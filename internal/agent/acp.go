@@ -821,6 +821,12 @@ func (a *ACPAgent) applyModel(ctx context.Context, sessionID, model string) erro
 	} else if src != catalogStandard {
 		return nil // _meta 通道已在请求里带过；无清单则无处可设
 	}
+	// 清单非空时先本地校验：未知模型立刻失败，禁止空转到 set_config_option deadline
+	// （一周日志：unknown model option / set model "default[]" context deadline）。
+	if len(cat.Options) > 0 && !catalogHasModel(cat, model) {
+		return fmt.Errorf("acp: model %q not in %s catalog (%d options); refuse set_config_option",
+			model, a.cmdName, len(cat.Options))
+	}
 	_, err := a.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
 		ValueId: &acp.SetSessionConfigOptionValueId{
 			SessionId: acp.SessionId(sessionID),
@@ -860,6 +866,27 @@ func fallbackModel(cat ModelCatalog) string {
 		return ""
 	}
 	return cat.Options[0].Value
+}
+
+// catalogHasModel 模型值是否出现在清单选项里（精确匹配 Value）。
+func catalogHasModel(cat ModelCatalog, model string) bool {
+	if model == "" {
+		return false
+	}
+	for _, o := range cat.Options {
+		if o.Value == model {
+			return true
+		}
+	}
+	return false
+}
+
+// isPeerDisconnected ACP 对端在应答前断开（子进程崩 / stdio EOF）。
+func isPeerDisconnected(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "peer disconnected")
 }
 
 // SetTurnModel 设定下一轮 prompt 使用的模型（空串 = 不改）。实现 agent.TurnModelSetter。
@@ -1359,6 +1386,16 @@ func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, text string, block
 		req.Meta = modelMeta(turnModel)
 	}
 	if _, err := a.conn.Prompt(ctx, req); err != nil {
+		// peer disconnected：同会话再试一次 Prompt（进程偶发抖动）；仍失败则冒泡。
+		// 不在这里重开 session —— 那属于上层编排；本层只做有限次同连接重试。
+		if isPeerDisconnected(err) {
+			a.logger.Warn("acp prompt peer disconnected; retrying once",
+				zap.String("agent", a.cmdName), zap.String("session", sessionID), zap.Error(err))
+			if _, err2 := a.conn.Prompt(ctx, req); err2 != nil {
+				return fmt.Errorf("acp: prompt (after peer-disconnect retry): %w", err2)
+			}
+			return nil
+		}
 		return fmt.Errorf("acp: prompt: %w", err)
 	}
 	return nil

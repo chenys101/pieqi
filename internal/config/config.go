@@ -5,10 +5,32 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
 )
+
+// deprecationWarned 进程内已打过的弃用 hint。WarnDeprecationOnce 用它去重。
+var deprecationWarned sync.Map
+
+// WarnDeprecationOnce 同一 hint 在本进程内只返回 true 一次（供 main 打 WARN）。
+// 第二次及以后返回 false，调用方应跳过日志。测试可清表：ResetDeprecationWarnings。
+func WarnDeprecationOnce(hint string) bool {
+	if hint == "" {
+		return false
+	}
+	_, loaded := deprecationWarned.LoadOrStore(hint, struct{}{})
+	return !loaded
+}
+
+// ResetDeprecationWarnings 清空去重表（仅测试）。
+func ResetDeprecationWarnings() {
+	deprecationWarned.Range(func(k, _ any) bool {
+		deprecationWarned.Delete(k)
+		return true
+	})
+}
 
 // DefaultDataRoot 返回运行时数据根目录：$PIEQI_HOME 优先，否则 ~/.pieqi。
 // tasks/worktrees 等运行时数据统一存这里，不入仓库。取不到 home 时退回 "."。

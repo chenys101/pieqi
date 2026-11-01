@@ -56,6 +56,10 @@ const (
 	// 不是 dsh/qoder 的「目标 + 轮次上限」。三者不能共用一套文案 ——
 	// 见 docs/agents-goal-and-capabilities.md。
 	EventGoalChanged EventKind = "goal_changed"
+	// EventPlanChanged ACP / Cursor Agent Plan 整表替换（含 cursor/create_plan、session/update plan）。
+	//
+	// 空 PlanEntries = 清空快照（用户拒绝进入 plan 时的预览回收），与 core.WirePlan 同口径。
+	EventPlanChanged EventKind = "plan_changed"
 )
 
 // GoalSnapshot goal 状态快照（EventGoalChanged 载荷）。
@@ -107,6 +111,8 @@ type Event struct {
 	Usage *UsageInfo
 	// Goal EventGoalChanged 载荷；nil = goal 已被清除（**不是**"没有数据"）。
 	Goal *GoalSnapshot
+	// PlanEntries EventPlanChanged 载荷：完整 entries 替换；空切片 = 清空 Task.Plan。
+	PlanEntries []PlanEntry
 }
 
 // AgentSession 中性 agent 会话接口（§3.1）。
@@ -316,6 +322,14 @@ func (s *sessionAdapter) OnEvent(fn func(Event)) {
 		reporter.OnUsageUpdate(func(u UsageInfo) {
 			uu := u
 			s.fire(Event{Kind: EventUsage, SessionID: u.SessionID, Usage: &uu})
+		})
+	}
+	// Plan：cursor/create_plan 与 ACP session/update(plan) 走 PlanReporter。
+	// 漏掉这一环时：扩展应答日志仍显示 accepted，但 Task.Plan 永不落库
+	// （sessionBackedAdapter 拿不到事件 → WirePlan 形同虚设）。
+	if reporter, ok := s.adapter.(PlanReporter); ok {
+		reporter.OnPlanUpdate(func(u PlanUpdate) {
+			s.fire(Event{Kind: EventPlanChanged, SessionID: u.SessionID, PlanEntries: u.Entries})
 		})
 	}
 }

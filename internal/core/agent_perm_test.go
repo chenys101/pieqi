@@ -1362,3 +1362,55 @@ func TestWirePermission_AutoApprovedIsRemembered(t *testing.T) {
 		t.Fatalf("approveCount = %d，want 1（不该重复驱动 adapter）", n)
 	}
 }
+
+// TestWirePermission_TimeoutCooldownDeniesSameFingerprint 超时后短冷却内同配方再请求 → 直接 deny，不弹卡。
+func TestWirePermission_TimeoutCooldownDeniesSameFingerprint(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, 40*time.Millisecond)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReqCmd("req-cd1", "Bash", "execute", "go test ./internal/core -count=1", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+	deniesAfterTimeout := fa.denyCount()
+	if deniesAfterTimeout < 1 {
+		t.Fatalf("timeout denyCount=%d, want >=1", deniesAfterTimeout)
+	}
+
+	fa.emitPerm(permReqCmd("req-cd2", "Bash", "execute", "go test ./internal/agent -run Foo", standardOptions()))
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if fa.denyCount() > deniesAfterTimeout {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if fa.denyCount() <= deniesAfterTimeout {
+		t.Fatal("同指纹再请求应被冷却 deny")
+	}
+	tt, _ := store.Get(taskID)
+	if tt.Status == model.TaskWaitingInput || tt.CurrentDecision != nil {
+		t.Fatalf("冷却 deny 不应弹卡: status=%q decision=%+v", tt.Status, tt.CurrentDecision)
+	}
+}
+
+// TestForceClearDecision_ClearsStaleCard advance 失败路径用的强制清卡。
+func TestForceClearDecision_ClearsStaleCard(t *testing.T) {
+	_, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	_, err := store.Update(taskID, func(tk *model.Task) bool {
+		tk.Status = model.TaskWaitingInput
+		tk.CurrentDecision = &model.Decision{ID: "stale-req", Kind: model.DecisionKindApproval, ToolName: "Bash"}
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleared, ok := pw.forceClearDecision("stale-req")
+	if !ok || cleared == nil {
+		t.Fatal("forceClearDecision want applied")
+	}
+	tt, _ := store.Get(taskID)
+	if tt.CurrentDecision != nil || tt.Status != model.TaskRunning {
+		t.Fatalf("after clear: status=%q decision=%+v", tt.Status, tt.CurrentDecision)
+	}
+}
