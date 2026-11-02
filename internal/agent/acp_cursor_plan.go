@@ -55,15 +55,16 @@ type cursorUpdateTodosParams struct {
 
 // handleCursorCreatePlan 处理 Cursor 的 create_plan。
 //
-// 两条路径（2026-10-31 定，对应「plan 模式中断」排查）：
+// 两条路径（2026-11-02 修订；原「plan 直通」会吞掉批准卡）：
 //
-//  1. **已在 plan**：直接采纳清单、回 accepted，再切到 agent 以便后续执行
-//     （hapi#1044：接受后停在 plan 会装死）。
+//  1. **已在 plan**：先推清单给人看，再弹「批准计划」审批卡；确认后回
+//     accepted 并切到 agent（hapi#1044：接受后停在 plan 会装死）；拒绝则
+//     cancelled、保留预览、继续停在 plan 改计划。
 //  2. **非 plan**（agent/ask/…）：agent 是在「建议进入计划模式」。先把清单
 //     推到 Task.Plan 给人预览，再经审批卡问「是否进入计划模式」；确认后
 //     set_mode(plan)+accepted；拒绝则清空预览并回 cancelled。
 //
-// 无 OnPermissionRequest 时（单测 / 未接线）非 plan 也直接采纳，避免挂死。
+// 无 OnPermissionRequest 时（单测 / 未接线）两条路径都直接采纳，避免挂死。
 func (a *ACPAgent) handleCursorCreatePlan(ctx context.Context, params json.RawMessage) (any, error) {
 	var p cursorCreatePlanParams
 	_ = json.Unmarshal(params, &p)
@@ -82,7 +83,7 @@ func (a *ACPAgent) handleCursorCreatePlan(ctx context.Context, params json.RawMe
 	a.emitPlan(entries)
 	a.rememberCursorTodos(p.Todos)
 
-	ok, err := a.awaitEnterPlanMode(ctx, p, entries)
+	ok, err := a.awaitPlanConfirm(ctx, p, entries, planConfirmEnter)
 	if err != nil {
 		a.clearEmittedPlan()
 		return cursorNestedOutcome(map[string]any{"outcome": "cancelled"}), err
@@ -112,13 +113,30 @@ func (a *ACPAgent) handleCursorCreatePlan(ctx context.Context, params json.RawMe
 	return cursorNestedOutcome(map[string]any{"outcome": "accepted"}), nil
 }
 
-// acceptCursorCreatePlan plan 模式直通：emit → 回 accepted；切 agent 延后到扩展应答写完。
+// acceptCursorCreatePlan plan 模式下等人批准计划：emit → 审批卡 → accepted + 切 agent。
 //
 // ⚠️ 禁止在此同步 applyMode：本函数跑在 cursorExtBridge.tryIntercept 栈上，
 // 同步 SetSessionMode 会等 stdout 回包，而 stdout 正被本桥占用 → 死锁。
-func (a *ACPAgent) acceptCursorCreatePlan(_ context.Context, p cursorCreatePlanParams, entries []PlanEntry, fromMode string) (any, error) {
+func (a *ACPAgent) acceptCursorCreatePlan(ctx context.Context, p cursorCreatePlanParams, entries []PlanEntry, fromMode string) (any, error) {
 	a.emitPlan(entries)
 	a.rememberCursorTodos(p.Todos)
+
+	ok, err := a.awaitPlanConfirm(ctx, p, entries, planConfirmAccept)
+	if err != nil {
+		// 清单已推给前端预览；超时/退出不强制清，方便下一轮续改。
+		return cursorNestedOutcome(map[string]any{"outcome": "cancelled"}), err
+	}
+	if !ok {
+		a.logger.Debug("acp extension default reply",
+			zap.String("method", "cursor/create_plan"),
+			zap.String("reply", "cancelled"),
+			zap.String("reason", "user_declined_plan_accept"),
+			zap.String("from_mode", fromMode),
+			zap.String("path", "confirm_accept_plan"),
+		)
+		return cursorNestedOutcome(map[string]any{"outcome": "cancelled"}), nil
+	}
+
 	a.queueModeAfterExtReply(a.lastSessionID, "agent")
 
 	a.logger.Debug("acp extension default reply",
@@ -127,7 +145,7 @@ func (a *ACPAgent) acceptCursorCreatePlan(_ context.Context, p cursorCreatePlanP
 		zap.Int("entries", len(entries)),
 		zap.String("name", p.Name),
 		zap.String("from_mode", fromMode),
-		zap.String("path", "already_plan"),
+		zap.String("path", "confirm_accept_plan"),
 	)
 	return cursorNestedOutcome(map[string]any{"outcome": "accepted"}), nil
 }
@@ -173,9 +191,17 @@ func (a *ACPAgent) flushPendingModeAfterExtReply() {
 	}()
 }
 
-// awaitEnterPlanMode 弹出「是否进入计划模式」审批卡，阻塞到用户决策。
+// planConfirmKind 区分 create_plan 两条审批文案（共用同一条等待通道）。
+type planConfirmKind int
+
+const (
+	planConfirmEnter  planConfirmKind = iota // 非 plan：是否进入计划模式
+	planConfirmAccept                        // 已在 plan：是否批准计划并执行
+)
+
+// awaitPlanConfirm 弹出 create_plan 审批卡，阻塞到用户决策。
 // 无 onPerm 时返回 true（与 RequestPermission 无回调自动放行同口径）。
-func (a *ACPAgent) awaitEnterPlanMode(ctx context.Context, p cursorCreatePlanParams, entries []PlanEntry) (bool, error) {
+func (a *ACPAgent) awaitPlanConfirm(ctx context.Context, p cursorCreatePlanParams, entries []PlanEntry, kind planConfirmKind) (bool, error) {
 	a.cbMu.RLock()
 	onPerm := a.onPerm
 	a.cbMu.RUnlock()
@@ -188,7 +214,12 @@ func (a *ACPAgent) awaitEnterPlanMode(ctx context.Context, p cursorCreatePlanPar
 		reqID = "cursor-create-plan"
 	}
 	// 与真实工具审批错开：避免盖掉同 id 的 RequestPermission。
-	reqID = "plan-mode:" + reqID
+	switch kind {
+	case planConfirmAccept:
+		reqID = "plan-accept:" + reqID
+	default:
+		reqID = "plan-mode:" + reqID
+	}
 
 	ch := make(chan PermissionResponse, 1)
 	a.permMu.Lock()
@@ -199,17 +230,18 @@ func (a *ACPAgent) awaitEnterPlanMode(ctx context.Context, p cursorCreatePlanPar
 	if title == "" {
 		title = "计划"
 	}
-	summary := buildEnterPlanSummary(p, entries)
+	toolTitle, allowName, rejectName, lead := planConfirmCopy(kind, title)
+	summary := buildPlanConfirmSummary(lead, p, entries)
 	onPerm(PermissionRequest{
 		ReqID:       reqID,
 		SessionID:   a.lastSessionID,
 		ToolCallID:  p.ToolCallID,
-		ToolTitle:   "进入计划模式：" + title,
+		ToolTitle:   toolTitle,
 		ToolKind:    "switch_mode", // L2：不会被 L0/L1 免审误放行
 		ContentText: summary,
 		Options: []PermissionOption{
-			{ID: "allow-once", Name: "进入计划模式", Kind: PermissionOptionAllowOnce},
-			{ID: "reject-once", Name: "保持当前模式", Kind: PermissionOptionRejectOnce},
+			{ID: "allow-once", Name: allowName, Kind: PermissionOptionAllowOnce},
+			{ID: "reject-once", Name: rejectName, Kind: PermissionOptionRejectOnce},
 		},
 	})
 
@@ -225,9 +257,24 @@ func (a *ACPAgent) awaitEnterPlanMode(ctx context.Context, p cursorCreatePlanPar
 	}
 }
 
-func buildEnterPlanSummary(p cursorCreatePlanParams, entries []PlanEntry) string {
+func planConfirmCopy(kind planConfirmKind, title string) (toolTitle, allowName, rejectName, lead string) {
+	switch kind {
+	case planConfirmAccept:
+		return "批准计划：" + title,
+			"批准并执行",
+			"继续改计划",
+			"计划已写完。批准后切到执行模式按此清单推进；拒绝则留在计划模式继续修改。\n\n"
+	default:
+		return "进入计划模式：" + title,
+			"进入计划模式",
+			"保持当前模式",
+			"Agent 建议进入计划模式。确认后采纳此计划；拒绝则保持当前模式。\n\n"
+	}
+}
+
+func buildPlanConfirmSummary(lead string, p cursorCreatePlanParams, entries []PlanEntry) string {
 	var b strings.Builder
-	b.WriteString("Agent 建议进入计划模式。确认后采纳此计划；拒绝则保持当前模式。\n\n")
+	b.WriteString(lead)
 	if ov := strings.TrimSpace(p.Overview); ov != "" {
 		b.WriteString(ov)
 		b.WriteString("\n\n")

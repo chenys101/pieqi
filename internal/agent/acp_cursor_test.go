@@ -70,16 +70,20 @@ func TestHandleCursorExtension_CreatePlanAcceptedAndEmitsPlan(t *testing.T) {
 	}
 }
 
-func TestHandleCursorExtension_CreatePlanInPlanModeAutoAccepts(t *testing.T) {
+// TestHandleCursorExtension_CreatePlanInPlanModeAsksAccept 回归 b7c2f14b：
+// 已在 plan 时 create_plan 必须弹「批准计划」卡，不能 already_plan 静默 accepted。
+func TestHandleCursorExtension_CreatePlanInPlanModeAsksAccept(t *testing.T) {
 	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
 	a.modeMu.Lock()
 	a.modeState.CurrentID = "plan"
 	a.modeMu.Unlock()
+	a.lastSessionID = "s-plan"
 	var got PlanUpdate
 	a.OnPlanUpdate(func(u PlanUpdate) { got = u })
-	// 挂上 onPerm 也不该弹卡（已在 plan）。
-	a.OnPermissionRequest(func(PermissionRequest) {
-		t.Error("plan mode must not ask to enter plan")
+	var asked PermissionRequest
+	a.OnPermissionRequest(func(req PermissionRequest) {
+		asked = req
+		go func() { _ = a.Approve(context.Background(), req.ReqID, "allow-once") }()
 	})
 	raw := []byte(`{"toolCallId":"c2","name":"InPlan","todos":[{"id":"1","content":"A","status":"pending"}]}`)
 	resp, err := a.handleCursorExtension(context.Background(), "cursor/create_plan", raw, true)
@@ -89,10 +93,56 @@ func TestHandleCursorExtension_CreatePlanInPlanModeAutoAccepts(t *testing.T) {
 	m, _ := resp.(map[string]any)
 	inner, _ := m["outcome"].(map[string]any)
 	if inner["outcome"] != "accepted" {
-		t.Fatalf("want accepted, got %v", resp)
+		t.Fatalf("want accepted after approve, got %v", resp)
+	}
+	if asked.ToolKind != "switch_mode" || !strings.Contains(asked.ToolTitle, "批准计划") {
+		t.Fatalf("asked=%+v", asked)
+	}
+	if !strings.HasPrefix(asked.ReqID, "plan-accept:") {
+		t.Fatalf("ReqID=%q want plan-accept: prefix", asked.ReqID)
 	}
 	if len(got.Entries) != 1 || got.Entries[0].Content != "A" {
 		t.Fatalf("entries=%+v", got.Entries)
+	}
+	a.pendingModeMu.Lock()
+	pending := a.pendingModeAfterExt
+	a.pendingModeMu.Unlock()
+	if pending == nil || pending.modeID != "agent" {
+		t.Fatalf("pending=%+v want agent after accept", pending)
+	}
+}
+
+func TestHandleCursorExtension_CreatePlanInPlanModeDeclineKeepsPlan(t *testing.T) {
+	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
+	a.modeMu.Lock()
+	a.modeState.CurrentID = "plan"
+	a.modeMu.Unlock()
+	var last PlanUpdate
+	a.OnPlanUpdate(func(u PlanUpdate) { last = u })
+	a.OnPermissionRequest(func(req PermissionRequest) {
+		go func() { _ = a.Deny(context.Background(), req.ReqID) }()
+	})
+	raw := []byte(`{"toolCallId":"c2d","name":"KeepEditing","todos":[{"id":"1","content":"Stay","status":"pending"}]}`)
+	resp, err := a.handleCursorExtension(context.Background(), "cursor/create_plan", raw, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := resp.(map[string]any)
+	inner, _ := m["outcome"].(map[string]any)
+	if inner["outcome"] != "cancelled" {
+		t.Fatalf("want cancelled, got %v", resp)
+	}
+	if len(last.Entries) != 1 || last.Entries[0].Content != "Stay" {
+		t.Fatalf("decline must keep preview, got %+v", last.Entries)
+	}
+	a.pendingModeMu.Lock()
+	pending := a.pendingModeAfterExt
+	a.pendingModeMu.Unlock()
+	if pending != nil {
+		t.Fatalf("decline must not queue set_mode, pending=%+v", pending)
+	}
+	if a.Modes().CurrentID != "plan" {
+		t.Fatalf("CurrentID=%q want plan", a.Modes().CurrentID)
 	}
 }
 
