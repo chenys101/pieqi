@@ -169,6 +169,12 @@ function clearFilter() {
             </svg>
             新建任务
           </button>
+          <button
+            class="rounded-lg border border-border px-3 py-2 text-xs text-muted hover:bg-elevated/60 hover:text-text md:flex-none"
+            @click="router.push('/requirements')"
+          >
+            需求
+          </button>
         </div>
       </div>
 

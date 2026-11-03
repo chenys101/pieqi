@@ -33,6 +33,7 @@ export function groupKey(p: string | undefined): string {
 
 /** 状态中文文案 */
 export const STATUS_LABELS: Record<TaskStatus, string> = {
+  planned: '计划中',
   pending: '待运行',
   running: '运行中',
   waiting_input: '需决策',
@@ -43,6 +44,7 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
 
 /** 状态 → 语义色（方案 §29） */
 export const STATUS_TONES: Record<TaskStatus, 'success' | 'warning' | 'error' | 'info' | 'neutral'> = {
+  planned: 'neutral',
   pending: 'info',
   running: 'success',
   waiting_input: 'warning',
@@ -57,6 +59,7 @@ export const STATUS_TONES: Record<TaskStatus, 'success' | 'warning' | 'error' | 
  * 两处各写一份色值，改一处漏一处就会出现"同一状态两个颜色"。
  */
 export const STATUS_DOT: Record<TaskStatus, string> = {
+  planned: 'bg-muted/40 border border-border/50',
   running: 'bg-success status-breathe',
   completed: 'bg-transparent border border-border/70',
   failed: 'bg-error',

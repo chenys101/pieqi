@@ -51,6 +51,14 @@ const routes: RouteRecordRaw[] = [
   { path: '/tasks/:id', redirect: (to) => `/sessions/${to.params.id}` },
   { path: '/sessions/:id', component: () => import('@/pages/SessionPage.vue') },
   { path: '/agents', component: () => import('@/pages/AgentsPage.vue') },
+  // Collaboration Plane（ADR-0021 P4）：需求列表 / 新建 / 详情；短路径仍是默认。
+  { path: '/requirements', component: () => import('@/pages/RequirementsPage.vue') },
+  {
+    path: '/requirements/new',
+    component: () => import('@/pages/NewRequirementPage.vue'),
+    props: (route) => ({ initialProjectPath: newTaskProjectOf(route.query.project) }),
+  },
+  { path: '/requirements/:id', component: () => import('@/pages/RequirementPage.vue') },
   // 没有 /approvals：SPEC §2.1 已定「无独立审批中心」。
   // 旧链接（飞书历史消息 / 浏览器书签）仍要能落到一个有意义的地方，
   // 所以是**重定向到仪表盘**（待审批组就在那里），不是 404 ——

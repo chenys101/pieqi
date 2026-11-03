@@ -200,6 +200,7 @@ export function adaptTask(dto: TaskDto | TaskSummaryDto): Task {
     prompt: dto.prompt,
     project: dto.project_id || dto.project_path,
     projectPath: dto.project_path,
+    requirementId: dto.requirement_id || undefined,
     status: dto.status,
     // 后端 agent 业务名（claude / qoder）；旧任务无该字段 → 默认 agent
     agent: dto.agent || DEFAULT_AGENT,

@@ -12,6 +12,7 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '@/composables/useWebSocket'
 import { useSessionStore } from '@/stores/session'
+import { useSidebarStore } from '@/stores/sidebar'
 import { useTaskStore } from '@/stores/task'
 import { useTaskTreeStore } from '@/stores/taskTree'
 import { useNotificationStore } from '@/stores/notification'
@@ -23,6 +24,7 @@ const route = useRoute()
 const router = useRouter()
 const { connection } = useWebSocket()
 const sessionStore = useSessionStore()
+const sidebar = useSidebarStore()
 const taskStore = useTaskStore()
 const tree = useTaskTreeStore()
 const notify = useNotificationStore()
@@ -64,6 +66,12 @@ const currentTask = computed(() => {
 const newTaskTarget = computed(() => {
   const p = (currentTask.value?.projectPath || '').trim()
   return p ? { path: '/tasks/new', query: { project: p } } : '/tasks/new'
+})
+
+/** 新建需求：与新建任务同一项目上下文（双入口，ADR-0021）。 */
+const newRequirementTarget = computed(() => {
+  const p = (currentTask.value?.projectPath || '').trim()
+  return p ? { path: '/requirements/new', query: { project: p } } : '/requirements/new'
 })
 
 /** 悬停说明：带上项目名，让"这一下会落在哪"在点之前就可读 */
@@ -122,10 +130,34 @@ async function doDelete(id: string) {
 </script>
 
 <template>
-  <aside class="flex h-full w-64 shrink-0 flex-col border-r border-border bg-surface">
-    <!-- 顶部：品牌 + 主导航 + 新建任务 -->
+  <!-- 收起用宽度动画而不是 v-if：树的展开/滚动位置得以保留；
+       pointer-events-none 避免宽度归零后仍挡住主区点击。 -->
+  <aside
+    class="h-full shrink-0 overflow-hidden border-r border-border bg-surface transition-[width,opacity,border-color] duration-200 ease-out"
+    :class="sidebar.collapsed ? 'w-0 border-transparent opacity-0 pointer-events-none' : 'w-64 opacity-100'"
+    :aria-hidden="sidebar.collapsed"
+    data-testid="app-sidebar"
+  >
+    <!-- 内层固定 256px：外层收起时只裁切，不重排树内容 -->
+    <div class="flex h-full w-64 flex-col">
+    <!-- 顶部：品牌 + 收起 + 主导航 + 新建任务 -->
     <div class="shrink-0 px-3 pb-2 pt-4">
-      <div class="px-2 pb-3 text-base font-bold tracking-tight">🥧 Pieqi</div>
+      <div class="flex items-center gap-1 px-2 pb-3">
+        <div class="min-w-0 flex-1 truncate text-base font-bold tracking-tight">🥧 Pieqi</div>
+        <button
+          type="button"
+          class="grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted transition-colors hover:bg-elevated hover:text-text"
+          title="收起侧栏"
+          aria-label="收起侧栏"
+          data-testid="sidebar-collapse"
+          @click="sidebar.collapse()"
+        >
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 6l-6 6 6 6" />
+            <path d="M4 4v16" />
+          </svg>
+        </button>
+      </div>
       <nav class="space-y-0.5">
         <RouterLink
           to="/dashboard"
@@ -133,6 +165,14 @@ async function doDelete(id: string) {
           :class="route.path.startsWith('/dashboard') ? 'bg-elevated font-medium text-text' : 'text-muted hover:bg-elevated/60 hover:text-text'"
         >
           仪表盘
+        </RouterLink>
+        <RouterLink
+          to="/requirements"
+          class="block rounded-lg px-3 py-2 text-sm transition-colors"
+          :class="route.path.startsWith('/requirements') ? 'bg-elevated font-medium text-text' : 'text-muted hover:bg-elevated/60 hover:text-text'"
+          data-testid="sidebar-requirements"
+        >
+          需求
         </RouterLink>
         <!-- 没有「审批」项：SPEC §2.1 的侧栏是 3 项 + 1 分组，且已无独立审批中心。
              审批收敛为「仪表盘待审批组 + Session 内联决策」—— 决策必须发生在它的上下文里
@@ -148,6 +188,14 @@ async function doDelete(id: string) {
         @click="router.push(newTaskTarget)"
       >
         ＋ 新建任务
+      </button>
+      <button
+        class="mt-1 w-full rounded-lg border border-border px-3 py-1.5 text-xs text-muted transition-colors hover:bg-elevated/60 hover:text-text"
+        title="长路径：多票拆分与验收"
+        data-testid="sidebar-new-requirement"
+        @click="router.push(newRequirementTarget)"
+      >
+        新建需求
       </button>
     </div>
 
@@ -281,6 +329,7 @@ async function doDelete(id: string) {
           {{ connection === 'connected' ? '连接正常' : sessionStore.connectionLabel }}
         </span>
       </RouterLink>
+    </div>
     </div>
   </aside>
 </template>

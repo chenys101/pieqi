@@ -2,6 +2,7 @@
 
 /** 任务状态（与后端枚举值一致，但归属前端命名空间） */
 export type TaskStatus =
+  | 'planned'
   | 'pending'
   | 'running'
   | 'waiting_input'
@@ -33,6 +34,8 @@ export interface Task {
   project: string
   /** 项目绝对路径 */
   projectPath: string
+  /** 所属需求；空 = 短路径 */
+  requirementId?: string
   status: TaskStatus
   /** 执行 Agent 业务名（claude / qoder，取值见 GET /api/agents） */
   agent: string

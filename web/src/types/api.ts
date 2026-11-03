@@ -3,6 +3,7 @@
 
 /** 任务状态机（后端 model.TaskStatus） */
 export type TaskStatusDto =
+  | 'planned'
   | 'pending'
   | 'running'
   | 'waiting_input'
@@ -122,6 +123,8 @@ export interface TaskDto {
   project_id: string
   project_path: string
   worktree_path: string
+  /** 所属需求；空/缺省 = 短路径 */
+  requirement_id?: string
   claude_session_id: string
   acp_session_id?: string
   status: TaskStatusDto

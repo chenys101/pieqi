@@ -25,7 +25,15 @@ export async function getTasks(): Promise<{ tasks: Task[]; groups: TaskGroup[] }
     tasks.push(...adapted)
 
     const key = groupKey(g.project_path)
-    const counts = { pending: 0, running: 0, waiting_input: 0, completed: 0, failed: 0, cancelled: 0 } as Record<TaskStatus, number>
+    const counts = {
+      planned: 0,
+      pending: 0,
+      running: 0,
+      waiting_input: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+    } as Record<TaskStatus, number>
     for (const t of adapted) counts[t.status]++
     groupMap.set(key, {
       key,

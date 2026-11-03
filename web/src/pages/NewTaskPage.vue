@@ -72,6 +72,12 @@ const {
               </svg>
             </button>
             <h1 class="min-w-0 flex-1 truncate text-sm font-semibold">新建任务</h1>
+            <RouterLink
+              class="shrink-0 text-[11px] text-muted hover:text-accent"
+              :to="props.initialProjectPath ? { path: '/requirements/new', query: { project: props.initialProjectPath } } : '/requirements/new'"
+            >
+              要拆多票？新建需求
+            </RouterLink>
           </div>
         </ContentColumn>
       </header>
