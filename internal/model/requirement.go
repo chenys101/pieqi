@@ -162,6 +162,9 @@ type ProposedTaskNode struct {
 	Role      TaskRole   `json:"role,omitempty"`
 	Skills    []string   `json:"skills,omitempty"`
 	Agent     string     `json:"agent,omitempty"`
+	// Model 本票模型（空 = agent 默认）；与 Task.Model 同口径，confirm 时写入 planned Task。
+	// planned 阶段允许 Agent/Model 皆空；启动前必须有 Agent。
+	Model     string     `json:"model,omitempty"`
 	CoversAC  []string   `json:"covers_ac,omitempty"`
 	Verify    VerifyMode `json:"verify,omitempty"`
 	DependsOn []string   `json:"depends_on,omitempty"` // 同提案 TempID

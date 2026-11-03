@@ -64,6 +64,28 @@ func TestRequirementConfirm_CreatesPlannedTasks(t *testing.T) {
 	}
 }
 
+func TestRequirementConfirm_WritesAgentModel(t *testing.T) {
+	ts := newTestTaskStore(t)
+	rs := NewRequirementStore(ts.Backend())
+	rs.SetTaskStore(ts)
+	req, _ := rs.Create(&model.Requirement{
+		Title: "x", ProjectPath: t.TempDir(),
+		Acceptance: []model.AcceptanceItem{{ID: "ac1", Text: "a", Verifiable: true}},
+	})
+	out, err := rs.Confirm(req.ID, []model.ProposedTaskNode{
+		{TempID: "n1", Prompt: "p", CoversAC: []string{"ac1"}, Agent: "qoder", Model: "Qwen3.8-Flash"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Tasks) != 1 {
+		t.Fatalf("tasks=%d", len(out.Tasks))
+	}
+	if out.Tasks[0].Agent != "qoder" || out.Tasks[0].Model != "Qwen3.8-Flash" {
+		t.Fatalf("agent/model=%q/%q", out.Tasks[0].Agent, out.Tasks[0].Model)
+	}
+}
+
 func TestRequirementConfirm_RejectsBadProposal(t *testing.T) {
 	ts := newTestTaskStore(t)
 	rs := NewRequirementStore(ts.Backend())

@@ -62,7 +62,13 @@ export interface ProposedTaskNode {
   temp_id: string
   title?: string
   prompt: string
+  /** design | frontend | backend | test | review | fix | other */
   role?: string
+  skills?: string[]
+  /** planned 可空；启动前必填 */
+  agent?: string
+  /** 空 = agent 默认模型 */
+  model?: string
   covers_ac?: string[]
   depends_on?: string[]
 }

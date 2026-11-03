@@ -464,6 +464,9 @@ func (s *Server) cancelTask(c *gin.Context) {
 }
 
 // startPlannedTask POST /api/tasks/:id/start — 依赖已满足的 planned → pending 并开跑。
+//
+// Body 可选：{"agent","model"} —— 启动前补写/覆盖（planned 阶段允许先前为空）。
+// 最终 Agent 仍为空则 400（启动门禁）。
 func (s *Server) startPlannedTask(c *gin.Context) {
 	id := c.Param("id")
 	t, ok := s.store.Get(id)
@@ -478,6 +481,42 @@ func (s *Server) startPlannedTask(c *gin.Context) {
 	if !core.DepsSatisfied(s.store, t) {
 		c.JSON(http.StatusConflict, gin.H{"error": "dependencies not satisfied"})
 		return
+	}
+	var body struct {
+		Agent string `json:"agent"`
+		Model string `json:"model"`
+	}
+	_ = c.ShouldBindJSON(&body)
+	agentName := strings.TrimSpace(t.Agent)
+	modelName := strings.TrimSpace(t.Model)
+	if a := strings.TrimSpace(body.Agent); a != "" {
+		resolved, err := s.resolveAgent(a)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		agentName = resolved
+		if body.Model != "" || a != strings.TrimSpace(t.Agent) {
+			modelName = strings.TrimSpace(body.Model)
+		}
+	} else if body.Model != "" {
+		modelName = strings.TrimSpace(body.Model)
+	}
+	if agentName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "agent required before start"})
+		return
+	}
+	if agentName != strings.TrimSpace(t.Agent) || modelName != strings.TrimSpace(t.Model) {
+		updated, err := s.store.Update(id, func(x *model.Task) bool {
+			x.Agent = agentName
+			x.Model = modelName
+			return true
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		t = updated
 	}
 	s.runner.Start(c.Request.Context(), t)
 	if updated, ok := s.store.Get(id); ok {

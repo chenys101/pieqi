@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"pieqi/internal/model"
 
@@ -65,11 +66,19 @@ func (s *TaskStore) ActivatePlanned(id string) (*model.Task, error) {
 }
 
 // StartReadyInRequirement 激活并启动某需求下所有依赖已满足的 planned（confirm/expand 后调用）。
+//
+// 缺 Agent 的 planned 跳过：planned 允许空 agent，启动前必须指定（见 startPlannedTask）。
 func (tr *TaskRunner) StartReadyInRequirement(requirementID string) {
 	if tr == nil || requirementID == "" {
 		return
 	}
 	for _, ready := range ReadyPlannedTasks(tr.store, requirementID) {
+		if strings.TrimSpace(ready.Agent) == "" {
+			tr.logger.Info("start ready planned skipped: agent unset",
+				zap.String("task", ready.ID),
+				zap.String("requirement", requirementID))
+			continue
+		}
 		act, err := tr.store.ActivatePlanned(ready.ID)
 		if err != nil {
 			tr.logger.Warn("start ready planned", zap.String("task", ready.ID), zap.Error(err))

@@ -202,8 +202,9 @@ export function adaptTask(dto: TaskDto | TaskSummaryDto): Task {
     projectPath: dto.project_path,
     requirementId: dto.requirement_id || undefined,
     status: dto.status,
-    // 后端 agent 业务名（claude / qoder）；旧任务无该字段 → 默认 agent
-    agent: dto.agent || DEFAULT_AGENT,
+    // 后端 agent 业务名（claude / qoder）。
+    // planned 允许显式空（启动前再指定）；其它状态空/缺省 → 默认 agent（旧任务兼容）。
+    agent: dto.agent || (dto.status === 'planned' ? '' : DEFAULT_AGENT),
     // 模型选择值（不透明串）；旧任务/未指定 → 空串（由 agent 默认决定）
     model: dto.model || '',
     mode: dto.mode || '',
