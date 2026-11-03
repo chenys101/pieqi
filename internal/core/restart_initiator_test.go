@@ -146,10 +146,7 @@ func TestStoreLoad_KeepsInitiatorRunning(t *testing.T) {
 	dir := t.TempDir()
 
 	// 造一个"重启前"的 store：发起者与旁观者都在 running。
-	s1, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatalf("NewTaskStore: %v", err)
-	}
+	s1 := newTestTaskStoreDir(t, dir)
 	for _, id := range []string{"initiator", "bystander"} {
 		if _, err := s1.Create(&model.Task{ID: id, Status: model.TaskRunning,
 			Prompt: "p", ProjectPath: dir}); err != nil {
@@ -162,12 +159,10 @@ func TestStoreLoad_KeepsInitiatorRunning(t *testing.T) {
 			t.Fatalf("update %s: %v", id, err)
 		}
 	}
+	_ = s1.Close()
 
 	// 模拟新进程启动：交接单说这两个都该接续。
-	s2, err := NewTaskStore(dir, "initiator", "bystander")
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
+	s2 := newTestTaskStoreDir(t, dir, "initiator", "bystander")
 	for _, id := range []string{"initiator", "bystander"} {
 		tk, ok := s2.Get(id)
 		if !ok || tk == nil {
@@ -184,10 +179,7 @@ func TestStoreLoad_KeepsInitiatorRunning(t *testing.T) {
 // 这条守住"不要把修复扩大成'所有 running 都不判失败'"，那会让真崩溃被掩盖。
 func TestStoreLoad_NonInitiatorStillFails(t *testing.T) {
 	dir := t.TempDir()
-	s1, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatalf("NewTaskStore: %v", err)
-	}
+	s1 := newTestTaskStoreDir(t, dir)
 	if _, err := s1.Create(&model.Task{ID: "crashed", Status: model.TaskRunning,
 		Prompt: "p", ProjectPath: dir}); err != nil {
 		t.Fatalf("create: %v", err)
@@ -198,12 +190,10 @@ func TestStoreLoad_NonInitiatorStillFails(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
+	_ = s1.Close()
 
 	// 只有别的任务在交接单里；crashed 不在 → 应判 failed。
-	s2, err := NewTaskStore(dir, "someone-else")
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
+	s2 := newTestTaskStoreDir(t, dir, "someone-else")
 	tk, _ := s2.Get("crashed")
 	if tk == nil {
 		t.Fatal("crashed 丢失")

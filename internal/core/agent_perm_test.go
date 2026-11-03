@@ -3,8 +3,6 @@ package core
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -115,10 +113,7 @@ func setupPermWireAuto(t *testing.T, timeout time.Duration, autoApprove []string
 	t.Helper()
 	bus := NewEventBus()
 	sub := bus.Subscribe(64)
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{
 		ProjectID:      "p",
 		Prompt:         "hi",
@@ -464,10 +459,7 @@ func TestWirePermission_UnwireIdempotent(t *testing.T) {
 // TestWirePermission_NotifySkippedForNoChannel 无 IM 渠道的任务不触发 notify（仿 notifyWaitingInput 守卫）。
 func TestWirePermission_NotifySkippedForNoChannel(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "hi", Status: model.TaskRunning})
 	if err != nil {
 		t.Fatal(err)
@@ -1201,18 +1193,13 @@ func TestWirePermission_QueueDenyPromotesNext(t *testing.T) {
 // 用户看不到审批卡、工具被静默 Deny，而且此时**内存改动其实已经生效**，
 // 留下一个永远没人能 Resolve 的 waiting_input。
 //
-// 这里的落盘失败是构造出来的：把落点占成一个同名目录，rename 到它上面必然失败。
+// 这里的落盘失败是构造出来的：关掉底层 SQLite，随后 Upsert 必然失败（ADR-0022）。
 func TestWirePermission_PersistFailureStillShowsCard(t *testing.T) {
 	fa, _, sub, store, taskID, pw, _ := setupPermWire(t, time.Hour)
 	defer pw.Unwire()
 
-	// 让落盘必然失败：把落点上的文件换成同名目录，rename 到它上面必定失败。
-	// （不能直接 MkdirAll —— 同名文件还在时 Windows 报 ERROR_PATH_NOT_FOUND。）
-	path := filepath.Join(store.tasksDir, taskID+".json")
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(path, 0o755); err != nil {
+	// 让落盘必然失败：关闭后端连接；内存索引仍在，Update 的 mutator 会生效但 persist 失败。
+	if err := store.Backend().Close(); err != nil {
 		t.Fatal(err)
 	}
 

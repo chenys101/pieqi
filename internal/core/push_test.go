@@ -94,7 +94,7 @@ func TestPushRegistry_PushOrigin(t *testing.T) {
 }
 
 func TestPushRegistry_WatchBus_AutoPushOnTerminal(t *testing.T) {
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	task, _ := store.Create(&model.Task{
 		ProjectID: "p", ProjectPath: t.TempDir(), WorktreePath: t.TempDir(),
 		Prompt: "do it", Status: model.TaskPending,

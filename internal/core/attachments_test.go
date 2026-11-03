@@ -107,10 +107,7 @@ func TestAttachmentStore_ReadRejectsBadHash(t *testing.T) {
 func TestTaskStore_SaveToolImagesPersistsMetadataOnly(t *testing.T) {
 	dir := t.TempDir()
 	att := NewAttachmentStore(filepath.Join(dir, "attachments"))
-	store, err := NewTaskStore(filepath.Join(dir, "tasks"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStoreDir(t, filepath.Join(dir, "tasks"))
 	store.SetAttachments(att, zap.NewNop())
 
 	imgs := store.imageSink().saveImages([]agent.ImageInput{{Data: attachPNG, MimeType: "image/png"}})
@@ -140,10 +137,7 @@ func TestTaskStore_SaveToolImagesPersistsMetadataOnly(t *testing.T) {
 // 解析日志 images=1、任务 JSON 里没有图、日志里一句都没有。
 func TestTaskStore_SaveToolImagesWithoutStoreIsNil(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewTaskStore(filepath.Join(dir, "tasks"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStoreDir(t, filepath.Join(dir, "tasks"))
 	// observer.New(zap.WarnLevel)：本用例只关心告警，DEBUG 进不来更干净。
 	core, observed := observer.New(zap.WarnLevel)
 	store.SetAttachments(nil, zap.New(core))
@@ -169,10 +163,7 @@ func TestTaskStore_SaveToolImagesWithoutStoreIsNil(t *testing.T) {
 // 挂在开工事件上会让时间线在调用开始时就显示一张还没跑出来的图。
 func TestApplyToolCallUpdate_AttachesImagesToToolResult(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewTaskStore(filepath.Join(dir, "tasks"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStoreDir(t, filepath.Join(dir, "tasks"))
 	store.SetAttachments(NewAttachmentStore(filepath.Join(dir, "attachments")), zap.NewNop())
 
 	task := &model.Task{ID: "t1"}

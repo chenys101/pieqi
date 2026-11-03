@@ -1,9 +1,6 @@
 package core
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,10 +11,7 @@ import (
 )
 
 func TestTaskStore_CreateGet(t *testing.T) {
-	s, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newTestTaskStore(t)
 	tt, err := s.Create(&model.Task{
 		Source:      model.SourceHTTP,
 		ProjectID:   "cb",
@@ -50,7 +44,7 @@ func TestTaskStore_CreateGet(t *testing.T) {
 }
 
 func TestTaskStore_Update(t *testing.T) {
-	s, _ := NewTaskStore(t.TempDir())
+	s := newTestTaskStore(t)
 	tt, _ := s.Create(&model.Task{ProjectID: "cb", Prompt: "p"})
 
 	updated, err := s.Update(tt.ID, func(t *model.Task) bool {
@@ -76,7 +70,7 @@ func TestTaskStore_Update(t *testing.T) {
 }
 
 func TestTaskStore_UpdateNotFound(t *testing.T) {
-	s, _ := NewTaskStore(t.TempDir())
+	s := newTestTaskStore(t)
 	_, err := s.Update("nope", func(t *model.Task) bool { return true })
 	if err == nil {
 		t.Fatal("Update on missing task should error")
@@ -84,7 +78,7 @@ func TestTaskStore_UpdateNotFound(t *testing.T) {
 }
 
 func TestTaskStore_Delete(t *testing.T) {
-	s, _ := NewTaskStore(t.TempDir())
+	s := newTestTaskStore(t)
 	tt, _ := s.Create(&model.Task{ProjectID: "cb"})
 	if err := s.Delete(tt.ID); err != nil {
 		t.Fatal(err)
@@ -98,7 +92,7 @@ func TestTaskStore_Delete(t *testing.T) {
 }
 
 func TestTaskStore_ListSortedByCreated(t *testing.T) {
-	s, _ := NewTaskStore(t.TempDir())
+	s := newTestTaskStore(t)
 	a, _ := s.Create(&model.Task{ProjectID: "cb"})
 	time.Sleep(time.Millisecond)
 	b, _ := s.Create(&model.Task{ProjectID: "cb"})
@@ -116,7 +110,7 @@ func TestTaskStore_ListSortedByCreated(t *testing.T) {
 
 func TestTaskStore_RestoreRecoversAndMarksOrphans(t *testing.T) {
 	dir := t.TempDir()
-	s1, _ := NewTaskStore(dir)
+	s1 := newTestTaskStoreDir(t, dir)
 
 	// 一个完成的、一个 running 的（模拟重启前还在跑）
 	done, _ := s1.Create(&model.Task{ProjectID: "cb", Prompt: "done"})
@@ -135,11 +129,11 @@ func TestTaskStore_RestoreRecoversAndMarksOrphans(t *testing.T) {
 		return true
 	})
 
-	// 重新打开同一个目录，模拟重启
-	s2, err := NewTaskStore(dir)
-	if err != nil {
+	// 重新打开同一个目录，模拟重启（先关旧连接：真重启时旧进程已退）
+	if err := s1.Close(); err != nil {
 		t.Fatal(err)
 	}
+	s2 := newTestTaskStoreDir(t, dir)
 	list := s2.List()
 	if len(list) != 3 {
 		t.Fatalf("recovered len = %d, want 3", len(list))
@@ -161,7 +155,7 @@ func TestTaskStore_RestoreRecoversAndMarksOrphans(t *testing.T) {
 }
 
 func TestTaskStore_CreateFillsDefaults(t *testing.T) {
-	s, _ := NewTaskStore(t.TempDir())
+	s := newTestTaskStore(t)
 	tt, err := s.Create(&model.Task{})
 	if err != nil {
 		t.Fatal(err)
@@ -190,10 +184,7 @@ func TestTaskStore_CreateFillsDefaults(t *testing.T) {
 // （agent_stream.appendTextDelta），同时权限回调（agent_perm）与用户干预
 // （RecordIntervention）也在写同一个 task。
 func TestTaskStore_ConcurrentUpdateSameTask(t *testing.T) {
-	s, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newTestTaskStore(t)
 	tt, err := s.Create(&model.Task{ProjectID: "cb", Prompt: "p"})
 	if err != nil {
 		t.Fatal(err)
@@ -240,25 +231,16 @@ func TestTaskStore_ConcurrentUpdateSameTask(t *testing.T) {
 		t.Errorf("concurrent Update failed: %v", err)
 	}
 
-	// 并发写完之后磁盘上必须是一份**可解析**的完整快照（不能是半个 tmp）。
-	data, err := os.ReadFile(filepath.Join(s.tasksDir, tt.ID+".json"))
-	if err != nil {
-		t.Fatalf("read persisted file: %v", err)
-	}
-	var onDisk model.Task
-	if err := json.Unmarshal(data, &onDisk); err != nil {
-		t.Fatalf("persisted file is not valid JSON: %v", err)
+	// 并发写完之后库里必须是一份完整快照（ADR-0022：SQLite 为真相）。
+	onDisk, ok, err := s.Backend().GetTask(tt.ID)
+	if err != nil || !ok {
+		t.Fatalf("read persisted task: ok=%v err=%v", ok, err)
 	}
 	// 不变量：**每一个已应用的变更都必须落到磁盘**（8 个初始 + applied）。
-	// 旧快照的 Rename 后落地时这里会偏少 —— 即「事件被写回退」。
+	// 旧快照后写时这里会偏少 —— 即「事件被写回退」。
 	want := 8 + int(applied.Load())
 	if got := len(onDisk.Events); got != want {
 		t.Errorf("persisted events = %d, want %d（有变更落盘丢失/回退）", got, want)
-	}
-	// tmp 不该有任何残留。
-	matches, _ := filepath.Glob(filepath.Join(s.tasksDir, tt.ID+".json.tmp*"))
-	if len(matches) != 0 {
-		t.Errorf("leftover tmp files: %v", matches)
 	}
 }
 
@@ -271,10 +253,7 @@ func TestTaskStore_ConcurrentUpdateSameTask(t *testing.T) {
 // 另一个 goroutine 改写。这里不依赖 race 检测器（本机 CGO 不可用，跑不了 -race），
 // 直接用「副本内容会不会被后续写入改掉」来判定别名是否泄漏。
 func TestTaskStore_SnapshotNotAliasedByInPlaceMutation(t *testing.T) {
-	s, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newTestTaskStore(t)
 	tt, err := s.Create(&model.Task{ProjectID: "cb"})
 	if err != nil {
 		t.Fatal(err)
@@ -339,10 +318,7 @@ func TestTaskStore_SnapshotNotAliasedByInPlaceMutation(t *testing.T) {
 // 关注的是 snapshot 的元素数组拷贝有没有把热路径拖垮 —— 流式路径每个 delta 一次
 // Update，任务文件实测最大 384KB。
 func BenchmarkTaskStore_UpdateLargeTask(b *testing.B) {
-	s, err := NewTaskStore(b.TempDir())
-	if err != nil {
-		b.Fatal(err)
-	}
+	s := newTestTaskStoreDir(b, b.TempDir())
 	tt, err := s.Create(&model.Task{ProjectID: "cb"})
 	if err != nil {
 		b.Fatal(err)

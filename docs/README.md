@@ -10,7 +10,7 @@
 
 | 目录 / 文件 | 内容 | 状态 |
 |---|---|---|
-| [`adr/`](adr) | **架构决策记录**（ADR 0001–0018），改相关代码前先读对应 ADR | 长期有效 |
+| [`adr/`](adr) | **架构决策记录**（ADR 0001–0022），改相关代码前先读对应 ADR | 长期有效 |
 | [`feedback/`](feedback/README.md) | 反馈体系（Observe→Verify→Control→Intervene）：功能点全量规划 + P0–P3 设计 | Design / Roadmap |
 | [`testing/`](testing) | UI 真机验收（Playwright 三层）、下版待办、线上复量方案 | 已落地 |
 | [`ui-design/`](ui-design) | UI 设计规范（`UI-DESIGN-SPEC.md`）、原型（`prototype/`）、落地实施方案 | Stable |
@@ -27,6 +27,8 @@
 | [`comm-arch-upgrade-evaluation.md`](comm-arch-upgrade-evaluation.md) | 对通信架构升级方案的评估意见 | 历史存档 |
 | [`security-hardening.md`](security-hardening.md) | 外网安全整改方案（named / quick 两种部署形态） | **现行，改鉴权前必读** |
 | [`agents-goal-and-capabilities.md`](agents-goal-and-capabilities.md) | claude / qoder / dsh 三家的 goal 能力证据链与结论（2026-10-18） | 结论有效 |
+| [`notes/approval-miss-and-soft-complete.md`](notes/approval-miss-and-soft-complete.md) | **提案**：审批卡未弹出 + Prompt 软完成 → 误标 completed（会话 `662450a6`） | 提案未施工 |
+| [`notes/cursor-acp-p0.md`](notes/cursor-acp-p0.md) / [`cursor-acp-p1-smoke.md`](notes/cursor-acp-p1-smoke.md) | Cursor ACP 探针结论与冒烟 | 参考 |
 | [`dsh-acp-official-verification-report.md`](dsh-acp-official-verification-report.md) | 官方 dsh-acp 兼容性验证报告（2026-10-09） | 历史存档 |
 | [`dsh-image-capability-source-verification.md`](dsh-image-capability-source-verification.md) | dsh 图片能力：上游源码复核记录 | 证据存档 |
 | [`dsh-sandbox-investigation.md`](dsh-sandbox-investigation.md) | DSH 沙箱实现机制调查报告（对端，不是 pieqi 的沙箱） | 参考资料 |
@@ -52,11 +54,15 @@
 | [0011](adr/0011-deprecate-dsh-acp-fork.md) | 弃用 dsh-acp 本地 fork，改用官方版 + 恢复 profile pin |
 | [0012](adr/0012-remove-screenshot-keep-console-network.md) | 移除截图能力，保留 console/network |
 | [0013](adr/0013-remove-visual-capture-entirely.md) | 移除 console/network，**视觉反馈层整体下线** |
-| [0014](adr/0014-requirement-closed-loop.md) | 需求开发闭环（Requirement / Task Graph / Issue）—— 提议中 |
+| [0014](adr/0014-requirement-closed-loop.md) | （已被 0021 取代）需求开发闭环历史提案——**勿按本文施工** |
 | [0015](adr/0015-approval-noise-reduction-keep-deletes.md) | 审批降噪：测试/构建/只读探查免审，**删除一律人工** |
 | [0016](adr/0016-go-build-work-dir-must-be-inside-workspace.md) | `GOTMPDIR` 必须指向工作区内，否则 go 建不出 work dir |
 | [0017](adr/0017-static-preview-served-in-process.md) | 静态产物由 pieqi 进程内直接 serve（不 spawn、无端口、终态不回收） |
 | [0018](adr/0018-artifacts-default-accessible-with-sandbox.md) | 产物默认可访问；入口并入文件清单；agent HTML 强制 CSP sandbox |
+| [0019](adr/0019-file-viewer-overlay-and-turn-summary.md) | 文件查看层与每轮总结：单一入口、默认展开、不参与布局 |
+| [0020](adr/0020-local-execute-optional-auto-approve.md) | L2 拆档：本机回环执行可选用免审，外溢仍永远人工 |
+| [0021](adr/0021-collaboration-plane-dual-path.md) | Collaboration Plane：短路径 Task + 长路径 Requirement / planned Task DAG |
+| [0022](adr/0022-store-sqlite-task-migration.md) | Store 接口 + SQLite 默认；短路径 Task 迁库，禁止双真相 |
 
 > 约定：新决策与既有 ADR 冲突时**新增** `adr/00NN-*.md`，不改写旧 ADR。
 

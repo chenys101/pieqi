@@ -2,29 +2,29 @@ package core
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"sync"
 	"time"
 
 	"pieqi/internal/model"
+	"pieqi/internal/store"
+	"pieqi/internal/store/sqlite"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
-// TaskStore 任务的内存索引 + 文件持久化。
+// TaskStore 任务的内存索引 + SQLite 持久化（ADR-0022）。
 //
-// 一任务一文件 data/tasks/<id>.json，每次状态变更加 os.Rename 原子写。
-// 启动时遍历 data/tasks/ 重建索引；waiting_input 的孤儿任务（claude 子进程已死）
-// 标记 failed，保留 worktree 供手动 resume。
+// 库文件在 tasksDir/pieqi.db；启动时把遗留的 tasksDir/*.json 迁入库后归档。
+// waiting_input 的孤儿任务（claude 子进程已死）标记 failed，保留 worktree 供手动 resume。
 type TaskStore struct {
 	mu       sync.RWMutex
 	tasksDir string
+	backend  store.Store // SQLite；与 RequirementStore 共用同一打开实例
 	tasks    map[string]*model.Task
 	// eventRetention 单任务事件保留上限（0 = 全部保留，见 AppendEvent）。
 	// 与 tasks 共用 mu：它在 Update 的 mutator 内被读取。
@@ -36,7 +36,7 @@ type TaskStore struct {
 	// 莫名其妙的 failed，还得人工 resume。由 SetInterruptedByRestart 在
 	// store 构造后、服务开始服务前注入（见 main 的接线顺序）。
 	interruptedByRestart map[string]bool
-	// badFiles 是启动时读不出来的任务文件（见 load / BadTaskFile）。
+	// badFiles 是启动时读不出来的遗留 JSON / 损坏证据（见 load / BadTaskFile）。
 	//
 	// 记下来而不是就地吞掉：坏文件是**数据丢失的现场**，必须能在日志与诊断导出里
 	// 看到"丢了几个、坏在哪、证据留在哪"。原先裸 continue 让这一切无声无息。
@@ -50,6 +50,25 @@ type TaskStore struct {
 	attachments *AttachmentStore
 	// logger 只用于附件落盘失败这类**本来会被静默吞掉**的诊断（见 saveToolImages）。
 	logger *zap.Logger
+}
+
+// Backend 返回底层 Store（Requirement CRUD 与 Task 同库，禁止另开连接双写）。
+func (s *TaskStore) Backend() store.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.backend
+}
+
+// Close 关闭底层 SQLite（测试里二次 NewTaskStore 同一目录前必须先关）。
+func (s *TaskStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.backend == nil {
+		return nil
+	}
+	err := s.backend.Close()
+	s.backend = nil
+	return err
 }
 
 // SetAttachments 注入图片附件存储（main 启动时接线；未接线时工具图片不落盘）。
@@ -81,9 +100,28 @@ func NewTaskStore(tasksDir string, interrupted ...string) (*TaskStore, error) {
 	if err := os.MkdirAll(tasksDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir tasks dir: %w", err)
 	}
+	backend, err := sqlite.Open(tasksDir)
+	if err != nil {
+		return nil, fmt.Errorf("open task store: %w", err)
+	}
+	mig, err := backend.MigrateJSONTasks(tasksDir)
+	if err != nil {
+		_ = backend.Close()
+		return nil, fmt.Errorf("migrate json tasks: %w", err)
+	}
 	s := &TaskStore{
 		tasksDir: tasksDir,
+		backend:  backend,
 		tasks:    make(map[string]*model.Task),
+	}
+	if mig != nil {
+		for _, b := range mig.BadFiles {
+			s.badFiles = append(s.badFiles, BadTaskFile{
+				Name:   b.Name,
+				Reason: b.Reason,
+				KeptAs: b.KeptAs,
+			})
+		}
 	}
 	if len(interrupted) > 0 {
 		s.interruptedByRestart = make(map[string]bool, len(interrupted))
@@ -92,6 +130,7 @@ func NewTaskStore(tasksDir string, interrupted ...string) (*TaskStore, error) {
 		}
 	}
 	if err := s.load(); err != nil {
+		_ = backend.Close()
 		return nil, fmt.Errorf("load tasks: %w", err)
 	}
 	return s, nil
@@ -113,7 +152,10 @@ func (s *TaskStore) Create(t *model.Task) (*model.Task, error) {
 		t.ClaudeSessionID = uuid.New().String()
 	}
 	now := time.Now()
-	t.Status = model.TaskPending
+	// 空串 → pending（短路径）；调用方可显式传入 planned（长路径 confirm）。
+	if t.Status == "" {
+		t.Status = model.TaskPending
+	}
 	t.CreatedAt = now
 	t.UpdatedAt = now
 
@@ -322,7 +364,7 @@ func lastEventSeq(events []model.TaskEvent) int {
 	return last
 }
 
-// Delete 删除任务记录与磁盘文件。
+// Delete 删除任务记录与库行。
 func (s *TaskStore) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -331,59 +373,22 @@ func (s *TaskStore) Delete(id string) error {
 	}
 	delete(s.tasks, id)
 
-	// 与 Create/Update 一样把文件操作放在锁内：否则某个已在途的快照可能在
-	// 删除之后才落地，凭空把刚删掉的文件写回来（内存里已经没有这条任务，
-	// 磁盘上却多出一个孤儿 .json，重启时被 load() 当作真实任务捞回来）。
-	path := s.path(id)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	// 与 Create/Update 一样把落盘放在锁内：否则某个已在途的快照可能在
+	// 删除之后才落地，把刚删掉的行写回来。
+	if err := s.backend.DeleteTask(id); err != nil {
 		return err
 	}
 	return nil
 }
 
-// load 启动恢复：遍历 tasksDir 重建索引，孤儿 waiting_input 标 failed。
+// load 启动恢复：从 SQLite 重建索引，孤儿 waiting_input 标 failed。
 func (s *TaskStore) load() error {
-	entries, err := os.ReadDir(s.tasksDir)
+	list, err := s.backend.ListTasks()
 	if err != nil {
 		return err
 	}
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		full := filepath.Join(s.tasksDir, e.Name())
-		data, err := os.ReadFile(full)
-		if err != nil {
-			// 读不到就跳过：可能是并发写期间的瞬时占用（rename 窗口）。
-			// 但要**留痕**，否则一个持续读不出来的文件等于静默丢任务。
-			s.recordBadTaskFile(e.Name(), fmt.Sprintf("读文件失败：%v", err))
-			continue
-		}
-		var t model.Task
-		if json.Unmarshal(data, &t) != nil {
-			// ★ 解析失败**不能静默跳过**（2026-10-13 修）。
-			//
-			// 原先这里是裸 `continue`：文件坏了就当作"没有这个任务"，不打日志、
-			// 不计数、不保留 —— 用户看到的是"任务凭空消失"，而日志里一个字都没有。
-			// 最可能的坏法正是**全长零字节**：rename 已改目录项、数据还在页缓存时
-			// 断电（与 magpie issue #1505 同一失效模式，见 persist 的说明），
-			// 而零字节 JSON 必然解析失败。
-			//
-			// 现在的处置（对齐 magpie internal/lastgood 的"a file that is there but
-			// not valid is unknown, never empty"）：
-			//   1. 把坏文件**另存**为 <name>.bad-<时间>，绝不就地丢弃
-			//      —— 它是唯一可能事后恢复的证据；
-			//   2. 记进 badFiles，由调用方在启动日志里显式报出来。
-			// 仍然跳过（不阻塞启动）：一个坏文件不该让整个服务起不来。
-			s.recordBadTaskFile(e.Name(), describeBadJSON(data))
-			s.quarantineBadTaskFile(full, e.Name())
-			continue
-		}
-		if t.ID == "" {
-			s.recordBadTaskFile(e.Name(), "缺少 id 字段")
-			s.quarantineBadTaskFile(full, e.Name())
-			continue
-		}
+	for _, tp := range list {
+		t := *tp
 		// 进程重启后 claude 子进程已死。
 		// - running：进程被杀，标 failed。
 		// - waiting_input(approval, 路径 A)：进程挂在 hook channel，channel 已丢无法恢复，标 failed。
@@ -479,57 +484,16 @@ func renameWithRetry(rename func() error) error {
 	return err
 }
 
-// persist 原子落盘：写 tmp → **刷盘** → rename。
+// persist 写入 SQLite（ADR-0022）。调用方**必须**持有 s.mu
+// （Create/Update/Delete 都在锁内调用；load 只在 NewTaskStore 里单线程跑）。
 //
-// 调用方**必须**持有 s.mu（Create/Update/Delete 都在锁内调用；load 只在
-// NewTaskStore 里单线程跑）。tmp 名带 pid：进程内已由写锁串行化，这个后缀防的是
-// 「同一 data 目录被两个 pieqi 实例同时打开」—— 旧实例没退干净是这里的常见情形，
-// 跨进程撞在同一个 tmp 上照样是 sharing violation。
-//
-// 改名带重试：**这不是补救并发的补丁，而是另一个独立成因**。写锁把同进程的
-// 并发写串行化之后，单线程纯循环 400 次仍会失败 3~5 次（ERROR_ACCESS_DENIED，
-// temp 与非 temp 目录都有），来源于杀软/索引器对刚落盘的目标文件的瞬时持有；
-// 不加这层重试，生产上照样会间歇性丢一条干预/事件。
-//
-// ⚠️ 为什么必须在 rename **之前** fsync（2026-10-13 补）：
-//
-// rename 只是一个目录项改动，它**到盘的时刻由 OS 自行安排，而它背后的数据更晚**。
-// 于是存在一个致命的中间态：目录项已指向新文件，而新文件的数据块还留在页缓存里。
-// 此刻断电/蓝屏 ⇒ 得到一个**长度正确、内容全是 0** 的文件。
-//
-// 这不是理论担忧：magpie 记录过一模一样的事故（issue #1505，其 internal/steady
-// 包的注释）—— 机器在 write 与 rename 之间down掉，`logins.json` 变成"全长零字节"，
-// 程序读出"零个账号"，**下一次写入把这个状态固化**，账号就此丢失。
-//
-// pieqi 的暴露面完全相同，且后果更隐蔽：坏掉的 `<id>.json` 会被 load 静默跳过
-// （见 load 里对 Unmarshal 失败的处理），用户看到的是"任务凭空消失"，而日志里
-// 一个字都没有。
-//
-// 所以顺序写死为 write → Sync → close → rename：Sync 保证数据先落盘，
-// 之后 rename 才可能把目录项指过去。宁可每次多花一次 fsync 的代价
-// （本地 SSD 上亚毫秒级，而这是**事件流落盘**的必经路径），也不要一个
-// "看起来正常、实际全零"的任务文件。
+// 写锁贯穿落盘的理由不变：并发 Update 的顺序必须等于落盘顺序，否则旧快照后写
+// 会把事件流写回退。SQLite 单连接 + 外层 mu 共同保证。
 func (s *TaskStore) persist(t *model.Task) error {
-	data, err := json.MarshalIndent(t, "", "  ")
-	if err != nil {
-		return err
+	if s.backend == nil {
+		return fmt.Errorf("task store backend not open")
 	}
-	path := s.path(t.ID)
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-
-	// 手写而不是 os.WriteFile：后者内部 create→write→close 一气呵成，
-	// 拿不到中间的文件句柄，也就没机会在 close 前 Sync。
-	if err := writeFileSynced(tmp, data, 0644); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-
-	errRename := renameWithRetry(func() error { return os.Rename(tmp, path) })
-	if errRename != nil {
-		// 落盘失败别把 tmp 留在目录里（load 只认 *.json，无害但会越积越多）。
-		_ = os.Remove(tmp)
-	}
-	return errRename
+	return s.backend.UpsertTask(t)
 }
 
 // writeFileSynced 写文件并确保内容**真的落盘**（close 之前 fsync）。
@@ -554,11 +518,7 @@ func writeFileSynced(path string, data []byte, perm os.FileMode) error {
 	return f.Close()
 }
 
-func (s *TaskStore) path(id string) string {
-	return filepath.Join(s.tasksDir, id+".json")
-}
-
-// BadTaskFile 描述一个启动时读不出来的任务文件。
+// BadTaskFile 描述一个启动时读不出来的遗留任务 JSON（迁移阶段）。
 //
 // 存在的理由：这类失败**必须可见**。原先 load 对坏文件是裸 continue，
 // 表现是"任务凭空消失"而日志全干净 —— 排查时无从下手（不知道有几个、坏在哪）。
@@ -569,27 +529,6 @@ type BadTaskFile struct {
 	Reason string
 	// KeptAs 是坏文件被另存的路径（"" = 另存失败，原文件仍在原处）。
 	KeptAs string
-}
-
-// recordBadTaskFile 记下一个坏任务文件（load 期间单线程调用，无需加锁）。
-func (s *TaskStore) recordBadTaskFile(name, reason string) {
-	s.badFiles = append(s.badFiles, BadTaskFile{Name: name, Reason: reason})
-}
-
-// quarantineBadTaskFile 把坏文件另存为 <name>.bad-<时间>，并让原名消失。
-//
-// 为什么是"另存 + 移除原名"而不是只打日志：原名留着会让每次启动都重复报同一个错
-// （噪音淹没真问题），而直接删掉则丢掉唯一可能事后恢复的证据。
-// 另存解决了这个两难 —— 错只报一次，证据还在。
-//
-// 后缀 `.bad-<时间>` 不含 `.json`，所以不会被 load 再次当成任务文件捡起来。
-func (s *TaskStore) quarantineBadTaskFile(full, name string) {
-	kept := fmt.Sprintf("%s.bad-%s", full, time.Now().Format("20060102-150405"))
-	if err := os.Rename(full, kept); err != nil {
-		// 另存失败（权限/占用）不致命：文件仍在原处，只是每次启动会再报一次。
-		return
-	}
-	s.badFiles[len(s.badFiles)-1].KeptAs = kept
 }
 
 // BadFiles 返回启动时读不出来的任务文件（供 main 记日志/诊断导出）。

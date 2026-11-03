@@ -22,10 +22,7 @@ func (f *fakePlanModeAdapter) Modes() agent.ModeState               { return f.m
 
 func TestWirePlan_PersistsTaskPlanAndEvent(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "hi"})
 	if err != nil {
 		t.Fatal(err)
@@ -65,10 +62,7 @@ func TestWirePlan_PersistsTaskPlanAndEvent(t *testing.T) {
 
 func TestWireMode_UpdatesTaskAndEvent(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{
 		ProjectID: "p",
 		Prompt:    "hi",

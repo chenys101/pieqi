@@ -32,10 +32,7 @@ func setupGoalWire(t *testing.T) (*fakeGoalAdapter, *Subscription, *TaskStore, s
 	t.Helper()
 	bus := NewEventBus()
 	sub := bus.Subscribe(64)
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "hi"})
 	if err != nil {
 		t.Fatal(err)
@@ -149,10 +146,7 @@ func TestWireGoal_ClearedIsDistinguishable(t *testing.T) {
 // dsh / qoder 的 goal 走工具调用、print 路径没有 goal —— 这些情况都不该注册回调。
 func TestWireGoal_UnsupportedAdapterReturnsNil(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "hi"})
 	if err != nil {
 		t.Fatal(err)

@@ -397,6 +397,16 @@ func (tr *TaskRunner) projectSem(projectID string) *semaphore {
 // ctx 仅用于派生，实际运行用 context.Background()（见 run 注释）。
 // 经 submitTurn 入队（串行化，见 turn_queue.go）：同一 task 同时只会有一轮在跑。
 func (tr *TaskRunner) Start(ctx context.Context, task *model.Task) {
+	if task != nil && task.Status == model.TaskPlanned {
+		activated, err := tr.store.ActivatePlanned(task.ID)
+		if err != nil {
+			tr.logger.Warn("start planned blocked",
+				zap.String("task", task.ID), zap.Error(err))
+			return
+		}
+		task = activated
+		tr.bus.Publish(Event{Type: "task_updated", TaskID: task.ID, Task: task})
+	}
 	tr.submitTurn(task.ID, func(cur *model.Task) { tr.run(context.Background(), cur, "") })
 }
 
@@ -412,6 +422,16 @@ func (tr *TaskRunner) Start(ctx context.Context, task *model.Task) {
 // 但 StartRich 是个公开入口，谁调用它都该得到完整的记录 —— 让"带了图的 user
 // 事件"只依赖一个调用点的自觉，就是等着漏。
 func (tr *TaskRunner) StartRich(ctx context.Context, task *model.Task, images []agent.ImageInput) {
+	if task != nil && task.Status == model.TaskPlanned {
+		activated, err := tr.store.ActivatePlanned(task.ID)
+		if err != nil {
+			tr.logger.Warn("start planned blocked",
+				zap.String("task", task.ID), zap.Error(err))
+			return
+		}
+		task = activated
+		tr.bus.Publish(Event{Type: "task_updated", TaskID: task.ID, Task: task})
+	}
 	if len(images) > 0 {
 		tr.attachImageMeta(task.ID, images)
 	}
@@ -1883,6 +1903,36 @@ func (tr *TaskRunner) completeTask(taskID, output string) {
 		t.FinishedAt = &now
 	})
 	tr.notifyFinished(updated, "✅ 任务完成")
+	// 长路径：依赖刚满足的 planned 自动激活并启动（ADR-0021 P2 DAG 调度）。
+	tr.scheduleReadyDependents(updated)
+}
+
+// scheduleReadyDependents 在某 Task 完成后，启动同需求下依赖已齐的 planned。
+func (tr *TaskRunner) scheduleReadyDependents(completed *model.Task) {
+	if completed == nil || completed.RequirementID == "" {
+		return
+	}
+	for _, ready := range ReadyPlannedTasks(tr.store, completed.RequirementID) {
+		// 只调度「确实依赖了刚完成者」的节点，避免无关 planned 被误触（无 depends_on 的
+		// planned 等人工 Start / confirm 后显式启动）。
+		dependsOnCompleted := false
+		for _, d := range ready.DependsOn {
+			if d == completed.ID {
+				dependsOnCompleted = true
+				break
+			}
+		}
+		if !dependsOnCompleted {
+			continue
+		}
+		act, err := tr.store.ActivatePlanned(ready.ID)
+		if err != nil {
+			tr.logger.Warn("schedule planned", zap.String("task", ready.ID), zap.Error(err))
+			continue
+		}
+		tr.bus.Publish(Event{Type: "task_updated", TaskID: act.ID, Task: act})
+		tr.Start(context.Background(), act)
+	}
 }
 
 // taskHasContent 判断任务是否已有用户可见的产出（output 非空，或存在文本/工具调用/结果事件）。

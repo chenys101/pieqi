@@ -109,7 +109,7 @@ func containsAll(s string, subs ...string) bool {
 func observedRunner(t *testing.T) (*TaskRunner, *TaskStore, *observer.ObservedLogs) {
 	t.Helper()
 	core, logs := observer.New(zapcore.WarnLevel)
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	tr := NewTaskRunner(zap.New(core), store, wm, NewEventBus(), NewHookService(5*time.Second),
 		"", "bypassPermissions", false, "", 0, nil, 0, 0, "main")

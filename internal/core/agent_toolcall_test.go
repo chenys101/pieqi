@@ -16,10 +16,7 @@ func setupToolCallWire(t *testing.T) (*fakePermAdapter, *EventBus, *Subscription
 	t.Helper()
 	bus := NewEventBus()
 	sub := bus.Subscribe(64)
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "hi", Status: model.TaskRunning})
 	if err != nil {
 		t.Fatal(err)

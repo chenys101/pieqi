@@ -151,7 +151,7 @@ func TestTakePendingImages_ConsumedOnce(t *testing.T) {
 // 关键点：必须在写 user 事件**之前**拒绝。否则任务里会留下一条"带了图"的记录，
 // 而图根本没发出去 —— 那条记录就成了假事实。
 func TestResumeRich_RejectsImagesOnClaudePath(t *testing.T) {
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
@@ -195,7 +195,7 @@ func TestResumeRich_RejectsImagesOnClaudePath(t *testing.T) {
 //
 // 与续问同一口径：不静默丢图，而是让任务以可读的原因失败。
 func TestRunClaudePath_RejectsImages(t *testing.T) {
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)

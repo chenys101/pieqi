@@ -82,11 +82,13 @@ cd services/claude-sdk-bridge && npm test   # 桥全链路：spawn 桥 + 真实 
 
 这直接决定重启行为：`TaskStore.load()` 启动时把 `running` 和等待 approval 的任务标记 `failed`（子进程已死），等待 choice 的任务**保留** `waiting_input`，可隔天继续选。改这块逻辑时必须维持这个区分。
 
-### 持久化（没有 SQL 数据库）
+### 持久化（Store → SQLite，ADR-0022）
 
-- 一任务一文件 `~/.pieqi/tasks/<id>.json`，每次变更 `os.Rename` 原子写（`internal/core/task_store.go`，Windows 分支见 `rename_windows.go`）。内存 map 作索引。
-- 文档里提到的「Event Store / SQLite」尚未落地；当前 `TaskEvent` 是内嵌在 Task JSON 里的切片，就是反馈系统的事实源。
-- 启动恢复逻辑在 `TaskStore.load()`。
+- 默认库文件：`~/.pieqi/tasks/pieqi.db`（与 TaskStore 同目录约定）。接口在 `internal/store`，实现 `internal/store/sqlite`。
+- `TaskStore` 仍是内存索引 + 对外 API；落盘走 Store。启动时把遗留 `tasks/*.json` 迁入库并归档到 `migrated-json/`。
+- Requirement CRUD 与 Task **同库**（禁止双真相）；API：`/api/requirements`。
+- `TaskEvent` 仍内嵌在 Task payload 里，事实源身份不变（ADR-0001）。
+- 启动恢复逻辑在 `TaskStore.load()`（含 running/approval 孤儿 → failed，choice 保留）。
 
 ### 事件模型
 

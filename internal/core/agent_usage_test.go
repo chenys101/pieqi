@@ -32,10 +32,7 @@ func setupUsageWire(t *testing.T) (*fakeUsageAdapter, *Subscription, *TaskStore,
 	t.Helper()
 	bus := NewEventBus()
 	sub := bus.Subscribe(64)
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "hi"})
 	if err != nil {
 		t.Fatal(err)
@@ -149,10 +146,7 @@ func TestWireUsage_CostFlagsPropagate(t *testing.T) {
 // 就等于给"不报用量"这个正常情形引入了故障。
 func TestWireUsage_UnsupportedAdapterReturnsNil(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "hi"})
 	if err != nil {
 		t.Fatal(err)
@@ -185,10 +179,7 @@ func TestUsageHandle_UnwireStopsDelivery(t *testing.T) {
 // 任务被删除后 agent 仍可能推一条收尾用量，这条路径必须静默。
 func TestWireUsage_NilTaskSafety(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	fa := newFakeUsageAdapter()
 	// 不创建 task：store 里没有这个 id。
 	h := WireUsage(fa, bus, store, "no-such-task")

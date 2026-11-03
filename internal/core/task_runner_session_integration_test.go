@@ -175,7 +175,7 @@ func TestRunACPSessionManagerIntegration(t *testing.T) {
 	claude.Configure(claude.Config{BaseURL: baseURL, Logger: dev})
 	defer claude.Configure(claude.Config{BaseURL: bridge.DefaultBaseURL})
 
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(30 * time.Minute)

@@ -66,7 +66,7 @@ func TestTaskHasContent(t *testing.T) {
 // newTestTaskRunner 构造一个不依赖真实 claude 的 runner（hooks 用真 HookService）。
 func newTestTaskRunner(t *testing.T) (*TaskRunner, *TaskStore, *EventBus, *HookService) {
 	t.Helper()
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
@@ -310,7 +310,7 @@ func TestTaskRunner_TransitionTerminalIgnored(t *testing.T) {
 // TestTaskRunner_InjectHookSettings 验证 bypassPermissions + 注入参数齐备时，
 // injectHookSettings 会往 worktree 写出含 PreToolUse hook 的 settings.json。
 func TestTaskRunner_InjectHookSettings(t *testing.T) {
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
@@ -360,7 +360,7 @@ func TestTaskRunner_InjectHookSettings_SkippedWhenNoExecPath(t *testing.T) {
 // TestTaskRunner_NotifyWaitingInput 验证 task 进 waiting_input 时触发 IM 回执回调，
 // 且通知文本含决策摘要。
 func TestTaskRunner_NotifyWaitingInput(t *testing.T) {
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
@@ -424,7 +424,7 @@ func TestTaskRunner_NotifySkippedWhenNoOrigin(t *testing.T) {
 // TestTaskRunner_MaxConcurrentPerProject 验证同项目并发被信号量限流：
 // maxConcurrent=2 时，3 个任务中第 3 个会阻塞，直到前某个 release。
 func TestTaskRunner_MaxConcurrentPerProject(t *testing.T) {
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
@@ -665,7 +665,7 @@ func TestTaskRunner_CancelChoiceWaitingInput(t *testing.T) {
 
 // TestTaskRunner_NotifyWaitingInputChoice 验证 choice kind 的通知文案含选项列表。
 func TestTaskRunner_NotifyWaitingInputChoice(t *testing.T) {
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
@@ -702,7 +702,7 @@ func TestTaskRunner_NotifyWaitingInputChoice(t *testing.T) {
 // approval waiting_input 标 failed。
 func TestTaskStore_RestoreKeepsChoiceWaitingInput(t *testing.T) {
 	dir := t.TempDir()
-	s1, _ := NewTaskStore(dir)
+	s1 := newTestTaskStoreDir(t, dir)
 
 	// choice waiting_input：重启后应保留
 	choiceTask, _ := s1.Create(&model.Task{ProjectID: "cb", Prompt: "choice"})
@@ -724,11 +724,9 @@ func TestTaskStore_RestoreKeepsChoiceWaitingInput(t *testing.T) {
 		t.CurrentDecision = &model.Decision{ID: "d1", ToolName: "Bash"} // Kind 空
 		return true
 	})
+	_ = s1.Close()
 
-	s2, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s2 := newTestTaskStoreDir(t, dir)
 
 	choiceRestored, _ := s2.Get(choiceTask.ID)
 	if choiceRestored.Status != model.TaskWaitingInput {

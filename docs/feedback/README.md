@@ -30,7 +30,7 @@ Feedback 体系（Observe → Verify → Control → Intervene）的完整文档
 | [0013](../adr/0013-remove-visual-capture-entirely.md) | **视觉反馈层整体下线**（console/network 一并移除） |
 | [0015](../adr/0015-approval-noise-reduction-keep-deletes.md) | 审批降噪：测试/构建/只读探查免审，删除一律人工 |
 
-> 自重启（0009）、dsh-acp fork（0011）、需求闭环（0014）不属于 Feedback 层，见
+> 自重启（0009）、dsh-acp fork（0011）、Collaboration Plane（0021，存储 0022；0014 已取代）不属于 Feedback 层，见
 > [`docs/README.md`](../README.md#adr-速查adr) 的总表。
 
 ## 实施顺序（汇总）

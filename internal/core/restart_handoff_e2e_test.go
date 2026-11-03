@@ -19,10 +19,7 @@ func TestSelfRestart_HandoffEndToEnd(t *testing.T) {
 	tasksDir := dir + "/tasks"
 
 	// ---- ① 旧进程：先有一个正在跑的任务 ----
-	store, err := NewTaskStore(tasksDir)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	store := newTestTaskStoreDir(t, tasksDir)
 	if _, err := store.Create(&model.Task{ID: "iter-task", Prompt: "自迭代任务"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -61,10 +58,7 @@ func TestSelfRestart_HandoffEndToEnd(t *testing.T) {
 		t.Fatalf("受影响会话丢失：%+v", out.Journal)
 	}
 
-	store2, err := NewTaskStore(tasksDir, out.Journal.AffectedTaskIDs...)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
+	store2 := newTestTaskStoreDir(t, tasksDir, out.Journal.AffectedTaskIDs...)
 	got, ok := store2.Get("iter-task")
 	if !ok {
 		t.Fatalf("任务在重启后消失")
@@ -97,10 +91,7 @@ func TestSelfRestart_InitiatorEndToEnd(t *testing.T) {
 	tasksDir := dir + "/tasks"
 
 	// ---- ① 旧进程：发起者与一个旁观者都在 running ----
-	store, err := NewTaskStore(tasksDir)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	store := newTestTaskStoreDir(t, tasksDir)
 	for _, id := range []string{"initiator", "bystander"} {
 		if _, err := store.Create(&model.Task{ID: id, Prompt: "p", ProjectPath: dir}); err != nil {
 			t.Fatalf("create %s: %v", id, err)
@@ -144,10 +135,7 @@ func TestSelfRestart_InitiatorEndToEnd(t *testing.T) {
 	}
 	_ = stagedSum
 
-	store2, err := NewTaskStore(tasksDir, out.Journal.AffectedTaskIDs...)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
+	store2 := newTestTaskStoreDir(t, tasksDir, out.Journal.AffectedTaskIDs...)
 
 	// 关键断言 1：发起者被救回来了 —— 它没在 affectedFunc 里，全靠 SetInitiator。
 	init, ok := store2.Get("initiator")
@@ -177,7 +165,7 @@ func TestSelfRestart_HandoffNotSucceededFailsTask(t *testing.T) {
 	dir := t.TempDir()
 	tasksDir := dir + "/tasks"
 
-	store, _ := NewTaskStore(tasksDir)
+	store := newTestTaskStoreDir(t, tasksDir)
 	if _, err := store.Create(&model.Task{ID: "t", Prompt: "p"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -204,10 +192,7 @@ func TestSelfRestart_HandoffNotSucceededFailsTask(t *testing.T) {
 	}
 
 	// 判定失败 ⇒ main 侧传空列表 ⇒ 走原有 failed 分支
-	store2, err := NewTaskStore(tasksDir)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
+	store2 := newTestTaskStoreDir(t, tasksDir)
 	got, _ := store2.Get("t")
 	if got.Status != model.TaskFailed {
 		t.Errorf("status = %s, want failed（未成功则退回人工）", got.Status)

@@ -48,10 +48,7 @@ func emitImageToolCall(fa *fakePermAdapter, id string) {
 
 func TestWireToolCall_ImageResultDoesNotSelfDeadlock(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	// 接线附件存储：覆盖 saveToolImages 的"落盘成功"分支。
 	store.SetAttachments(NewAttachmentStore(t.TempDir()), zap.NewNop())
 
@@ -100,10 +97,7 @@ func TestWireToolCall_ImageResultDoesNotSelfDeadlock(t *testing.T) {
 // 带图结果走 saveToolImages 的 WARN 分支 —— 该分支同样先取 RLock，修复前同样自死锁。
 func TestWireToolCall_ImageResultNoStoreDoesNotSelfDeadlock(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	store.SetAttachments(nil, zap.NewNop())
 
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "画猫"})

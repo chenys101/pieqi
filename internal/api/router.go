@@ -15,15 +15,16 @@ import (
 
 // Server 监控/干预 HTTP API。挂在主进程 gin router 上。
 type Server struct {
-	cfg      *config.Config
-	store    *core.TaskStore
-	runner   *core.TaskRunner
-	hooks    *core.HookService
-	bus      *core.EventBus
-	skills   *core.SkillScanner
-	commands *core.CommandScanner
-	auth     *auth.Service       // wired by SetAuth; nil-safe for legacy tests
-	tunnel   *auth.TunnelManager // wired by SetAuth; nil-safe for legacy tests
+	cfg          *config.Config
+	store        *core.TaskStore
+	requirements *core.RequirementStore // ADR-0021 P0；nil-safe（未接线时空列表 / 503）
+	runner       *core.TaskRunner
+	hooks        *core.HookService
+	bus          *core.EventBus
+	skills       *core.SkillScanner
+	commands     *core.CommandScanner
+	auth         *auth.Service       // wired by SetAuth; nil-safe for legacy tests
+	tunnel       *auth.TunnelManager // wired by SetAuth; nil-safe for legacy tests
 
 	// FileChange 派生短缓存（/file + /artifacts 共用；见 file_changes_cache.go）。
 	fcMu    sync.Mutex
@@ -114,6 +115,12 @@ func (s *Server) SetAuth(svc *auth.Service, tunnel *auth.TunnelManager) {
 	s.tunnel = tunnel
 }
 
+// SetRequirementStore wires Collaboration Plane requirement CRUD (ADR-0021 P0).
+// nil-safe：未接线时 GET 返回空列表，写接口 503。
+func (s *Server) SetRequirementStore(rs *core.RequirementStore) {
+	s.requirements = rs
+}
+
 // SetFeedback wires the feedback store and preview manager (Feedback P0).
 // Called by main.go after NewServer; nil-safe for tests that don't exercise
 // feedback/preview routes.
@@ -198,6 +205,20 @@ func (s *Server) Register(r gin.IRouter) {
 		// 某 agent 的可选模型清单（新任务页 / 会话页的模型选择器）。代价是起一次 agent
 		// 进程，故按需拉取 + agent 包内缓存，不并进 /agents 让所有 agent 一起付。
 		api.GET("/agents/:name/models", s.listAgentModels)
+		// Collaboration Plane（ADR-0021 P0）：需求 CRUD；短路径仍走 /tasks。
+		api.GET("/requirements", s.listRequirements)
+		api.POST("/requirements", s.createRequirement)
+		api.GET("/requirements/:id", s.getRequirement)
+		api.PATCH("/requirements/:id", s.patchRequirement)
+		api.DELETE("/requirements/:id", s.deleteRequirement)
+		// P1：SplitProposal 暂存 + confirm → planned Task
+		api.PUT("/requirements/:id/proposal", s.putRequirementProposal)
+		api.GET("/requirements/:id/proposal", s.getRequirementProposal)
+		api.DELETE("/requirements/:id/proposal", s.deleteRequirementProposal)
+		api.POST("/requirements/:id/confirm", s.confirmRequirement)
+		api.POST("/requirements/:id/expand", s.expandRequirement)
+		api.POST("/requirements/:id/promote", s.promoteRequirement)
+
 		api.GET("/tasks", s.listTasks)
 		api.GET("/tasks/:id", s.getTask)
 		// 该任务会话此刻的能力位（如能否收图）。会话级运行时事实，不进 Task 持久化模型。
@@ -211,6 +232,7 @@ func (s *Server) Register(r gin.IRouter) {
 		// 有活会话时立刻 session/set_mode。
 		api.POST("/tasks/:id/mode", s.setTaskMode)
 		api.POST("/tasks/:id/cancel", s.cancelTask)
+		api.POST("/tasks/:id/start", s.startPlannedTask)
 		api.DELETE("/tasks/:id", s.deleteTask)
 		// Feedback P0（p0-design.md §5）：总览 / Diff / Rewind / Preview
 		api.GET("/tasks/:id/feedback", s.getFeedback)

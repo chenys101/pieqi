@@ -20,10 +20,7 @@ import (
 // TestListSummaryEvents_CountsWithoutCloning 计数字段必须等于真实事件数，
 // 且返回的副本上 Events 必须为空（调用方读不到内容，也就无法误用）。
 func TestListSummaryEvents_CountsWithoutCloning(t *testing.T) {
-	s, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewTaskStore: %v", err)
-	}
+	s := newTestTaskStore(t)
 
 	now := time.Now()
 	a := &model.Task{ID: "a", ProjectPath: "G:/ws", Prompt: "p", CreatedAt: now}

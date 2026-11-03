@@ -544,7 +544,7 @@ func (f *fakeAgentRunner) SupportsImagePrompt(taskID string) bool {
 // cleanupWorktrees=false 且 task 预置 WorktreePath，跳过 wm.Create/Cleanup，无需真实 git repo。
 func newACPTestRunner(t *testing.T, script fakeScript, fellBack bool) (*TaskRunner, *TaskStore, *EventBus, *fakeAgentRunner) {
 	t.Helper()
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
@@ -1034,7 +1034,7 @@ func TestRunACP_Resume_SessionLost(t *testing.T) {
 // TestTaskRunner_ACP_DefaultPathUnaffected 不注入 AgentManager 时走 Phase 1 claude -p 路径。
 // 简单断言 isACPPath 返回 false（旧路径 Intervene/Cancel/Resume 行为由既有测试覆盖）。
 func TestTaskRunner_ACP_DefaultPathUnaffected(t *testing.T) {
-	store, _ := NewTaskStore(t.TempDir())
+	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)

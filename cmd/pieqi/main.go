@@ -564,6 +564,10 @@ func main() {
 			return agent.AvailableAgents(agentRuntimeFromSettings(settingsStore.Get()))
 		})
 		apiServer.SetAuth(authSvc, tunnelMgr)
+		// Collaboration Plane：与 Task 同库（ADR-0022），禁止另开连接。
+		reqStore := core.NewRequirementStore(store.Backend())
+		reqStore.SetTaskStore(store) // confirm 落地 planned Task
+		apiServer.SetRequirementStore(reqStore)
 		apiServer.SetFeedback(feedbackStore, previewMgr)
 		apiServer.SetCheckRunner(checkRunner)
 		apiServer.SetPushRegistry(pushRegistry)

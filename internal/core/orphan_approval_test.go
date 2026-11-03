@@ -135,10 +135,7 @@ func TestStoreLoad_OrphanedApprovalClearedOnRestart(t *testing.T) {
 	dir := t.TempDir()
 
 	// ① 模拟旧进程：写出一个 waiting_input(approval) 的任务文件。
-	s1, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatalf("store1: %v", err)
-	}
+	s1 := newTestTaskStoreDir(t, dir)
 	if _, err := s1.Create(&model.Task{
 		ID: "t2", Prompt: "p", ProjectPath: dir, WorktreePath: dir,
 	}); err != nil {
@@ -151,12 +148,12 @@ func TestStoreLoad_OrphanedApprovalClearedOnRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 
 	// ② 模拟新进程 load：**不传** interrupted（该卡不在快照里，正是事故时序）。
-	s2, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatalf("store2: %v", err)
-	}
+	s2 := newTestTaskStoreDir(t, dir)
 	got, ok := s2.Get("t2")
 	if !ok || got == nil {
 		t.Fatal("任务丢失")
@@ -183,10 +180,7 @@ func TestStoreLoad_OrphanedApprovalClearedOnRestart(t *testing.T) {
 func TestStoreLoad_HandoffTerminalTaskCardCleared(t *testing.T) {
 	dir := t.TempDir()
 
-	s1, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatalf("store1: %v", err)
-	}
+	s1 := newTestTaskStoreDir(t, dir)
 	if _, err := s1.Create(&model.Task{ID: "t4", Prompt: "p", ProjectPath: dir}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -199,11 +193,9 @@ func TestStoreLoad_HandoffTerminalTaskCardCleared(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
+	_ = s1.Close()
 
-	s2, err := NewTaskStore(dir, "t4") // 在接续名单里
-	if err != nil {
-		t.Fatalf("store2: %v", err)
-	}
+	s2 := newTestTaskStoreDir(t, dir, "t4") // 在接续名单里
 	got, _ := s2.Get("t4")
 	if got == nil {
 		t.Fatal("任务丢失")
@@ -226,10 +218,7 @@ func TestStoreLoad_HandoffTerminalTaskCardCleared(t *testing.T) {
 func TestStoreLoad_HandoffKeepsApprovalForResume(t *testing.T) {
 	dir := t.TempDir()
 
-	s1, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatalf("store1: %v", err)
-	}
+	s1 := newTestTaskStoreDir(t, dir)
 	if _, err := s1.Create(&model.Task{ID: "t3", Prompt: "p", ProjectPath: dir}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -240,12 +229,10 @@ func TestStoreLoad_HandoffKeepsApprovalForResume(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
+	_ = s1.Close()
 
 	// 明确把它列进接续名单。
-	s2, err := NewTaskStore(dir, "t3")
-	if err != nil {
-		t.Fatalf("store2: %v", err)
-	}
+	s2 := newTestTaskStoreDir(t, dir, "t3")
 	got, _ := s2.Get("t3")
 	if got == nil {
 		t.Fatal("任务丢失")

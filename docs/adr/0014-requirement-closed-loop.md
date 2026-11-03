@@ -1,9 +1,15 @@
 # ADR-0014: 需求开发闭环（Requirement / Task Graph / Issue）
 
-- 状态：**提议中（Proposed）**
+> ⚠️ **施工以 [ADR-0021](0021-collaboration-plane-dual-path.md) 为准。**
+> 本文件保留为 2026-10-16 的历史提案。0021 吸收并升级了此处的领域模型，
+> 并取消持久 GraphNode，改用 **planned Task + `depends_on`**；存储见 ADR-0022。
+> 文中「Task Graph / GraphNode」用语视为已被 0021 取代，勿按本文开工。
+
+- 状态：**已被 ADR-0021 取代（Superseded）**（原：提议中）
 - 日期：2026-10-16
 - 相关：ADR-0001（TaskEvent 事实源）、ADR-0004（Evidence→Continue 后端组装）、
-  ADR-0005（Check 优先复用）、ADR-0007（非目标清单）、ADR-0013（视觉层移除）
+  ADR-0005（Check 优先复用）、ADR-0007（非目标清单）、ADR-0013（视觉层移除）、
+  **ADR-0021（现行）**
 
 ## 背景
 

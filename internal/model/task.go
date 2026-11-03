@@ -7,10 +7,12 @@ import (
 
 // TaskStatus 任务生命周期状态。
 //
-// 迁移：pending -> running -> waiting_input <-> running -> completed | failed | cancelled
+// 短路径：pending -> running -> waiting_input <-> running -> completed | failed | cancelled
+// 长路径增量（ADR-0021）：planned →（依赖满足后）pending/running …
 type TaskStatus string
 
 const (
+	TaskPlanned      TaskStatus = "planned"       // 已入需求图，依赖未满足或尚未调度；不跑 agent
 	TaskPending      TaskStatus = "pending"       // 已创建，worktree 未建
 	TaskRunning      TaskStatus = "running"       // claude 进程活跃
 	TaskWaitingInput TaskStatus = "waiting_input" // 卡在 hook 等人类决策
@@ -393,6 +395,21 @@ type Task struct {
 	// 只用**指针**、配 omitempty：nil 与零值必须可区分 —— "agent 不上报用量"
 	// 与 "用量是 0" 在 UI 上是两种显示（隐藏 vs 显示 0%）。
 	Usage *TaskUsage `json:"usage,omitempty"`
+
+	// --- Collaboration Plane（ADR-0021；空 = 短路径）---
+
+	// RequirementID 所属需求；空串 = 短路径，不进需求图调度 / 无需求 UI。
+	RequirementID string `json:"requirement_id,omitempty"`
+	// Role 需求图上的角色提示（design/frontend/…）；短路径也可选填，但不进图调度。
+	Role TaskRole `json:"role,omitempty"`
+	// Skills role→skills 目录上的提示，可覆盖。
+	Skills []string `json:"skills,omitempty"`
+	// CoversAC 本 Task 声明覆盖的验收条目 id。
+	CoversAC []string `json:"covers_ac,omitempty"`
+	// Verify 本票验收方式；空 = 未声明。
+	Verify VerifyMode `json:"verify,omitempty"`
+	// DependsOn 同需求内前置 Task id（DAG）；短路径应为空。
+	DependsOn []string `json:"depends_on,omitempty"`
 
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`

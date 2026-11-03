@@ -59,10 +59,7 @@ func TestWriteFileSynced_TruncatesExisting(t *testing.T) {
 // TestPersist_LeavesNoTempOnSuccess 成功路径不该留下 .tmp 残骸。
 func TestPersist_LeavesNoTempOnSuccess(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newTestTaskStoreDir(t, dir)
 	if _, err := s.Create(&model.Task{ProjectID: "cb", Prompt: "t1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -91,10 +88,7 @@ func TestLoad_AllZeroFileIsReportedNotSilentlyDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newTestTaskStoreDir(t, dir)
 
 	bad := s.BadFiles()
 	if len(bad) != 1 {
@@ -132,10 +126,7 @@ func TestLoad_CorruptJSONIsReported(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "truncated.json"), []byte(`{"id":"x","prompt":"未写完`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newTestTaskStoreDir(t, dir)
 	bad := s.BadFiles()
 	if len(bad) != 1 {
 		t.Fatalf("坏文件数 = %d, want 1", len(bad))
@@ -151,10 +142,7 @@ func TestLoad_MissingIDIsReported(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "noid.json"), []byte(`{"prompt":"x"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := newTestTaskStoreDir(t, dir)
 	bad := s.BadFiles()
 	if len(bad) != 1 {
 		t.Fatalf("坏文件数 = %d, want 1", len(bad))
@@ -168,10 +156,7 @@ func TestLoad_MissingIDIsReported(t *testing.T) {
 func TestLoad_GoodFilesUnaffected(t *testing.T) {
 	dir := t.TempDir()
 	// 先经 store 正常写一个任务
-	s0, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s0 := newTestTaskStoreDir(t, dir)
 	created, err := s0.Create(&model.Task{ProjectID: "cb", Prompt: "good"})
 	if err != nil {
 		t.Fatal(err)
@@ -180,11 +165,11 @@ func TestLoad_GoodFilesUnaffected(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "bad.json"), []byte("not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	s, err := NewTaskStore(dir)
-	if err != nil {
+	if err := s0.Close(); err != nil {
 		t.Fatal(err)
 	}
+
+	s := newTestTaskStoreDir(t, dir)
 	if len(s.BadFiles()) != 1 {
 		t.Errorf("坏文件数 = %d, want 1", len(s.BadFiles()))
 	}
@@ -205,9 +190,7 @@ func TestLoad_BadFileDoesNotBlockStartup(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "garbage.json"), []byte("\x00\x01\x02"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewTaskStore(dir); err != nil {
-		t.Fatalf("坏文件导致 store 构造失败：%v", err)
-	}
+	_ = newTestTaskStoreDir(t, dir)
 }
 
 // TestDescribeBadJSON_EmptyVsZeroed 区分"空文件"与"全长全零"。

@@ -121,7 +121,21 @@ func (s *Server) writeSnapshot(ctx context.Context, conn *websocket.Conn) error 
 		// 不克隆事件流：快照只带轻量视图，但每次重同步都会重跑一次，
 		// 克隆那 3.9 万条事件纯属白付。见 core.TaskStore.ListSummaryEvents。
 		ts, counts := s.store.ListSummaryEvents()
-		tasks = model.NewTaskSummaries(ts, counts)
+		// WS 快照与 listTasks 默认一致：排除 planned（ADR-0021 P2）。
+		filtered := make([]*model.Task, 0, len(ts))
+		fCounts := make([]int, 0, len(counts))
+		for i, t := range ts {
+			if t.Status == model.TaskPlanned {
+				continue
+			}
+			filtered = append(filtered, t)
+			n := 0
+			if i < len(counts) {
+				n = counts[i]
+			}
+			fCounts = append(fCounts, n)
+		}
+		tasks = model.NewTaskSummaries(filtered, fCounts)
 		seq = cur
 	})
 	snapshot := gin.H{

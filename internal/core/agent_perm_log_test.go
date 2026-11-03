@@ -174,10 +174,7 @@ func TestPermissionLifecycleLogs(t *testing.T) {
 func newObservedPermWire(t *testing.T, core zapcore.Core, timeout time.Duration) (*PermissionWire, string) {
 	t.Helper()
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	task, err := store.Create(&model.Task{
 		ProjectID:      "p",
 		Prompt:         "hi",

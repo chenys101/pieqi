@@ -248,10 +248,15 @@ func (s *Server) listTasks(c *gin.Context) {
 	// （实测全库任务 33.9MB，事件占单任务 JSON 的 83%），而本接口下发的只有 3.3MB
 	// 轻量视图。见 core.TaskStore.ListSummaryEvents 的判据。
 	tasks, counts := s.store.ListSummaryEvents()
+	// ADR-0021 P2：planned 默认不进首页；?include_planned=1 才带上。
+	includePlanned := c.Query("include_planned") == "1" || c.Query("include_planned") == "true"
 	// 按 project_path 分组（REQ-01）
 	groups := map[string]*taskGroup{}
 	order := []string{}
 	for i, t := range tasks {
+		if !includePlanned && t.Status == model.TaskPlanned {
+			continue
+		}
 		key := normalizeProjectKey(t.ProjectPath)
 		g, ok := groups[key]
 		if !ok {
@@ -453,6 +458,30 @@ func (s *Server) cancelTask(c *gin.Context) {
 	id := c.Param("id")
 	if err := s.runner.Cancel(id); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// startPlannedTask POST /api/tasks/:id/start — 依赖已满足的 planned → pending 并开跑。
+func (s *Server) startPlannedTask(c *gin.Context) {
+	id := c.Param("id")
+	t, ok := s.store.Get(id)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if t.Status != model.TaskPlanned {
+		c.JSON(http.StatusConflict, gin.H{"error": "task is not planned: " + string(t.Status)})
+		return
+	}
+	if !core.DepsSatisfied(s.store, t) {
+		c.JSON(http.StatusConflict, gin.H{"error": "dependencies not satisfied"})
+		return
+	}
+	s.runner.Start(c.Request.Context(), t)
+	if updated, ok := s.store.Get(id); ok {
+		c.JSON(http.StatusOK, updated)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})

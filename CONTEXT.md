@@ -114,45 +114,54 @@ _Avoid_: 消息轰炸
 把单个文件恢复到指定 Turn 的状态（Rewind 的文件粒度）。
 _Avoid_: git restore
 
-### 需求闭环（P4）—— 见 ADR-0014
+### Collaboration Plane（需求级闭环）—— 见 ADR-0021（存储见 ADR-0022）
 
-> 现有 Feedback 体系（Turn / Check / Outcome / Evidence）解的是**单个 Task 内**的闭环。
-> 本节补的是**跨多个 Task** 的层级：一条需求拆成若干开发/测试任务，测试发现问题回流成修复任务。
+> Feedback（Turn / Check / Outcome / Evidence）解的是**单个 Task 内**的闭环。
+> Collaboration Plane 是超集：一条需求拆成若干 Task（含尚未开跑的 planned），
+> 按依赖执行，验证失败经 Issue 回流成 Fix Task。施工以 ADR-0021 为准；
+> ADR-0014 为历史提案（含已被取消的 GraphNode 用语）。
+
+**Short Path（短路径）**:
+不经需求：人/IM → 单个 `Task`（`RequirementID == ""`）→ 今日 Runner / Feedback / 审批。
+一等公民；长路径对短路径 nil-safe。
+_Avoid_: 强制先建需求
+
+**Long Path（长路径）**:
+人/IM → `Requirement` → split/expand 出 `SplitProposal` → 人 confirm →
+落地为（多为 `planned` 的）Task + `depends_on` → 依赖满足后开跑 → AC 全绿且无开放 Issue → done。
+_Avoid_: 静默改图, 未确认提案直接落 Task
 
 **Requirement（需求）**:
-用户意图的持久化载体，是多个 Agent Task 的容器与验收基准。自身持有一条
-`Events []TaskEvent` 事件流（同构 `Task.Events`），因此**仍受 ADR-0001 约束**——
-它本身也是事实源，而非派生视图。
-_Avoid_: 工单, ticket, 项目（Project 另有所指）
+文件夹 + 验收总账：容纳多个 Task、持有 AC / Issues / 需求级事件与 `graph_version`。
+绑定显式 project/cwd。零 AC 时仅作挂靠容器，**不能**宣称 testing 闭环完成。
+_Avoid_: 工单, ticket, 项目（Project 另有所指）, GraphNode
 
-**Task Split（任务拆分）**:
-把 Requirement 的意图展开为一组有依赖关系的子任务（dev / test 两类）。
-产物是**待用户确认的结构化提案**，不是立即执行；且必须经 Go 侧校验
-（每条 AC 至少被一个 test 节点覆盖、DAG 无环），校验不过即拒绝。
-_Avoid_: 计划, plan（与 Plan Mode 冲突）
+**planned Task（计划态任务）**:
+已纳入需求图、依赖未满足或尚未调度的 Task；**不跑 agent**。
+计划格 = planned Task，不再另建持久 GraphNode。仪表盘默认过滤 planned。
+_Avoid_: GraphNode, 子任务列表挂在单 Task 下
 
-**Task Graph（任务图）**:
-拆分产出的子任务依赖关系（DAG）。Task 是节点，依赖是边。
-这是"什么可以并行、什么必须等待"的唯一真相。
-_Avoid_: 列表, 队列
+**SplitProposal（拆分/展开提案）**:
+split / expand 的短暂结构化草案（内存暂存）；confirm 前不进 Task 表；拒则丢弃，通过则创建 planned Task + 边并 `graph_version++`。
+API：`PUT/GET/DELETE /api/requirements/:id/proposal`，`POST /api/requirements/:id/confirm`。
+校验 fail closed：AC 覆盖（或 deferred）、DAG 无环。
+_Avoid_: 计划（与 Plan Mode 冲突）, 未确认即落库的 Task
 
-**Test Plan（测试计划）**:
-针对 Requirement 的验收标准展开的测试任务集合。与 Check 的区别：
-Check 是**一次验证命令的结果**，Test Plan 是**要验证什么的集合**。
-_Avoid_: 测试用例（范围过窄，且暗示手写）
+**Task 依赖边（depends_on）**:
+同需求内前置 Task id 构成的 DAG。边在 Task 上（或等价 edge 表，主键仍是 task_id）；
+无独立 graph_nodes 表。
+_Avoid_: Task Graph 作为与 Task 并列的实体名（旧 0014 用语）
 
 **Acceptance Item / AC（验收标准）**:
-Requirement 拆分产出的可验收条目（AC-1、AC-2…）。是 Issue 与 Test Plan 的
-共同锚点：test 节点声明 `CoversAC`，Issue 记录 `CoversAC` ——
-由此可回答"这条需求哪条验收标准还没被满足"。
+Requirement 上的可验收条目。Task 用 `covers_ac` 声明覆盖；Issue 钉同一 AC。
+有 AC 时 confirm 须覆盖或标 `deferred`（done 前清零）。
 _Avoid_: 需求点, 功能点
 
 **Issue（问题单）**:
-一条**结构化的、可回流**的缺陷记录。与 `TaskOutcome.Issues`（字符串数组）是升级关系：
-Issue 有 ID / severity / 证据链（SourceTaskID + SourceTurn + CheckID）/ CoversAC / FixTaskID，
-且**可以反向生成修复 Task**（回流）。回流按 severity 分流：blocker 自动，其余人工确认。
-_Avoid_: bug（口语）, 报错
-
+结构化、可派活的缺陷：severity / covers_ac / 证据链 / fix_task_id。
+验证失败 → 再开发**只经 Issue**（blocker 可自动建 Fix Task，major/minor 等人确认）；
+不改写已终态 Task 冒充再跑。
+_Avoid_: bug（口语）, 报错, 改写旧 Task Timeline
 ### 探索（P3）
 
 **DOM Inspection**:

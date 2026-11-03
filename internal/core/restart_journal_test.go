@@ -131,10 +131,7 @@ func TestResolveRestartHandoff_EmptyStagedSHA(t *testing.T) {
 func TestTaskStore_InterruptedByRestartKeepsRunning(t *testing.T) {
 	dir := t.TempDir()
 
-	s1, err := NewTaskStore(dir)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	s1 := newTestTaskStoreDir(t, dir)
 	tsk := &model.Task{ID: "keep-me", Prompt: "p"}
 	if _, err := s1.Create(tsk); err != nil {
 		t.Fatalf("create: %v", err)
@@ -145,12 +142,10 @@ func TestTaskStore_InterruptedByRestartKeepsRunning(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
+	_ = s1.Close()
 
 	// 模拟自重启后新进程启动：把该任务列为待接续。
-	s2, err := NewTaskStore(dir, "keep-me")
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
+	s2 := newTestTaskStoreDir(t, dir, "keep-me")
 	got, ok := s2.Get("keep-me")
 	if !ok {
 		t.Fatalf("task not found after reopen")
@@ -168,7 +163,7 @@ func TestTaskStore_InterruptedByRestartKeepsRunning(t *testing.T) {
 func TestTaskStore_NotInterruptedStillFails(t *testing.T) {
 	dir := t.TempDir()
 
-	s1, _ := NewTaskStore(dir)
+	s1 := newTestTaskStoreDir(t, dir)
 	if _, err := s1.Create(&model.Task{ID: "crashed", Prompt: "p"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -178,11 +173,9 @@ func TestTaskStore_NotInterruptedStillFails(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
+	_ = s1.Close()
 
-	s2, err := NewTaskStore(dir) // 不传 interrupted
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
+	s2 := newTestTaskStoreDir(t, dir) // 不传 interrupted
 	got, _ := s2.Get("crashed")
 	if got.Status != model.TaskFailed {
 		t.Errorf("status = %s, want failed（非自重启的 running 仍应判死）", got.Status)

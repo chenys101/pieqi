@@ -65,10 +65,7 @@ func TestApplyTodoToolAsPlan_NameVariants(t *testing.T) {
 
 func TestApplyToolCallUpdate_LiftsTodoWriteIntoTaskPlan(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "hi"})
 	if err != nil {
 		t.Fatal(err)
@@ -110,10 +107,7 @@ func TestApplyToolCallUpdate_LiftsTodoWriteIntoTaskPlan(t *testing.T) {
 
 func TestApplyToolCallUpdate_LateInputAlsoLiftsPlan(t *testing.T) {
 	bus := NewEventBus()
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := newTestTaskStore(t)
 	tt, err := store.Create(&model.Task{ProjectID: "p", Prompt: "hi"})
 	if err != nil {
 		t.Fatal(err)

@@ -93,10 +93,7 @@ func TestAppendEvent_TrimReleasesBackingArray(t *testing.T) {
 // TestAppendEvent_ThroughUpdate 走真实的 Update 路径：
 // AppendEvent 只在 Update 的 mutator 内被调用，这条链路必须通。
 func TestAppendEvent_ThroughUpdate(t *testing.T) {
-	store, err := NewTaskStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	store := newTestTaskStore(t)
 	store.SetEventRetention(2)
 	task, err := store.Create(&model.Task{Prompt: "p"})
 	if err != nil {
@@ -118,10 +115,9 @@ func TestAppendEvent_ThroughUpdate(t *testing.T) {
 		t.Fatalf("persisted events = %d, want 2", len(got.Events))
 	}
 	// 重新载入后计数器也要还在，否则重启会退回 len+1 推序号
-	reopened, err := NewTaskStore(store.tasksDir)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
+	dir := store.tasksDir
+	_ = store.Close()
+	reopened := newTestTaskStoreDir(t, dir)
 	again, _ := reopened.Get(task.ID)
 	if again.NextEventSeq != got.NextEventSeq {
 		t.Fatalf("NextEventSeq not persisted: %d vs %d", again.NextEventSeq, got.NextEventSeq)
