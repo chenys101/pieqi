@@ -52,7 +52,8 @@ async function submit() {
       project_path: projectPath.value.trim(),
       acceptance: acceptance.length ? acceptance : undefined,
     })
-    await router.replace(`/requirements/${r.id}`)
+    // 创建后进详情并自动拉起 Agent 拆分建议（?suggest=1）
+    await router.replace({ path: `/requirements/${r.id}`, query: { suggest: '1' } })
   } catch (e) {
     notify.error(e instanceof Error ? e.message : '创建失败')
   } finally {

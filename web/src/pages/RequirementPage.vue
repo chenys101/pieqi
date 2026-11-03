@@ -58,11 +58,24 @@ watch(
 )
 
 const isSplitSuggestTitle = (title: string) => title.startsWith('[pieqi-split]')
+/** 全部非拆分会话任务（含已废弃 cancelled） */
 const workTasks = computed(() => store.tasks.filter((t) => !isSplitSuggestTitle(t.title)))
+/** 当前有效任务图（覆盖确认后旧票为 cancelled，不进主列表） */
+const activeWorkTasks = computed(() => workTasks.value.filter((t) => t.status !== 'cancelled'))
+const abandonedWorkTasks = computed(() => workTasks.value.filter((t) => t.status === 'cancelled'))
+const willReplaceOnConfirm = computed(() => activeWorkTasks.value.length > 0)
 const suggestTasks = computed(() => store.tasks.filter((t) => isSplitSuggestTitle(t.title)))
 const suggestRunning = computed(() =>
   suggestTasks.value.some((t) => t.status === 'pending' || t.status === 'running' || t.status === 'waiting_input'),
 )
+const bodyExpanded = ref(false)
+const bodyText = computed(() => (store.current?.body || '').trim())
+const bodyPreview = computed(() => {
+  const t = bodyText.value
+  if (!t) return ''
+  if (bodyExpanded.value || t.length <= 280) return t
+  return t.slice(0, 280) + '…'
+})
 
 const statusLabel: Record<string, string> = {
   draft: '草案',
@@ -103,6 +116,12 @@ function startPoll() {
 }
 
 async function runSuggest() {
+  if (willReplaceOnConfirm.value) {
+    const ok = window.confirm(
+      `重新拆分将覆盖当前 ${activeWorkTasks.value.length} 个任务；确认提案后旧任务会废弃。是否继续？`,
+    )
+    if (!ok) return
+  }
   busy.value = true
   suggesting.value = true
   try {
@@ -111,7 +130,11 @@ async function runSuggest() {
       model: suggestModel.value || undefined,
     })
     suggestTaskId.value = res.task?.id || ''
-    notify.success('Agent 正在拆分需求…')
+    notify.success(
+      willReplaceOnConfirm.value
+        ? 'Agent 正在重新拆分；确认后将覆盖并废弃现有任务'
+        : 'Agent 正在拆分需求…',
+    )
     await reload()
     startPoll()
   } catch (e) {
@@ -125,17 +148,25 @@ async function runSuggest() {
 async function confirmProposal(nodes?: ProposedTaskNode[]) {
   const payload = nodes?.length ? nodes : proposal.value?.nodes
   if (!payload?.length) return
+  if (willReplaceOnConfirm.value) {
+    const ok = window.confirm(
+      `确认后将废弃现有 ${activeWorkTasks.value.length} 个任务，并以本提案整表替换。是否继续？`,
+    )
+    if (!ok) return
+  }
   busy.value = true
   try {
-    // 始终带上编辑后的 nodes（含 agent/model / 增删），避免只确认服务端旧提案。
-    if (workTasks.value.length > 0) {
-      await api.expandRequirement(id.value, payload)
-    } else {
-      await api.confirmRequirement(id.value, payload)
-    }
+    // Agent 拆分确认：有旧票则 replace 覆盖；手工追加仍走下方「手工补一票」expand。
+    const result = await api.confirmRequirement(id.value, payload, {
+      replace: willReplaceOnConfirm.value,
+    })
     proposal.value = null
     await reload()
-    notify.success('已生成 planned Task')
+    if (result.abandoned && result.abandoned > 0) {
+      notify.success(`已覆盖落地 ${result.tasks?.length ?? 0} 票，废弃旧任务 ${result.abandoned} 个`)
+    } else {
+      notify.success('已生成 planned Task')
+    }
   } catch (e) {
     notify.error(e instanceof Error ? e.message : '确认失败')
   } finally {
@@ -168,7 +199,7 @@ async function confirmPlanManual() {
         covers_ac: (store.current?.acceptance ?? []).filter((a) => !a.deferred).map((a) => a.id),
       },
     ]
-    if (workTasks.value.length > 0) await api.expandRequirement(id.value, nodes)
+    if (activeWorkTasks.value.length > 0) await api.expandRequirement(id.value, nodes)
     else await api.confirmRequirement(id.value, nodes)
     nodePrompt.value = ''
     nodeTitle.value = ''
@@ -304,12 +335,39 @@ onUnmounted(stopPoll)
             {{ store.current.project_path }}
           </p>
 
+          <!-- 原始需求正文 -->
+          <section class="space-y-1.5">
+            <h2 class="text-xs font-semibold text-text-secondary">原始需求</h2>
+            <div
+              v-if="bodyText"
+              class="whitespace-pre-wrap rounded-lg border border-border bg-elevated/40 px-3 py-2.5 text-sm leading-relaxed text-text"
+            >
+              {{ bodyPreview }}
+              <button
+                v-if="bodyText.length > 280"
+                type="button"
+                class="mt-1 block text-[11px] text-accent"
+                @click="bodyExpanded = !bodyExpanded"
+              >
+                {{ bodyExpanded ? '收起' : '展开全文' }}
+              </button>
+            </div>
+            <p v-else class="text-xs text-muted">未填写正文（仅有标题）</p>
+          </section>
+
           <!-- Agent 拆分（刚需主路径） -->
           <section class="space-y-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
             <div class="flex flex-wrap items-center gap-2">
               <h2 class="text-xs font-semibold text-text-secondary">Agent 拆分建议</h2>
               <span class="text-[11px] text-muted">出 Task List → 你确认 → 一键生成</span>
             </div>
+            <p
+              v-if="willReplaceOnConfirm"
+              class="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-warning"
+              role="status"
+            >
+              已有 {{ activeWorkTasks.length }} 个任务。重新拆分并确认后将整表覆盖，旧任务标记为废弃（cancelled），不会追加。
+            </p>
             <div class="flex flex-wrap items-end gap-2">
               <label class="min-w-[8rem] flex-1 space-y-1">
                 <span class="block text-[11px] text-muted">Agent</span>
@@ -355,10 +413,18 @@ onUnmounted(stopPoll)
                 查看会话
               </RouterLink>
             </p>
+            <p
+              v-if="proposal?.nodes?.length && willReplaceOnConfirm"
+              class="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-warning"
+              role="status"
+            >
+              确认落地将废弃现有任务列表，以本提案替换。请核对后再点确认。
+            </p>
             <SplitProposalEditor
               v-if="proposal?.nodes?.length"
               :nodes="proposal.nodes"
               :busy="busy"
+              :confirm-label="willReplaceOnConfirm ? '覆盖并落地（废弃旧任务）' : '落地为 planned'"
               @confirm="confirmProposal"
               @discard="discardProposal"
             />
@@ -388,8 +454,8 @@ onUnmounted(stopPoll)
           <!-- Tasks -->
           <section>
             <h2 class="mb-2 text-xs font-semibold text-text-secondary">任务图</h2>
-            <ul v-if="workTasks.length" class="space-y-1">
-              <li v-for="t in workTasks" :key="t.id">
+            <ul v-if="activeWorkTasks.length" class="space-y-1">
+              <li v-for="t in activeWorkTasks" :key="t.id">
                 <RouterLink
                   class="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-elevated/60"
                   :to="`/sessions/${t.id}`"
@@ -408,6 +474,22 @@ onUnmounted(stopPoll)
               </li>
             </ul>
             <p v-else class="text-xs text-muted">尚无执行任务 — 确认上方拆分建议即可生成</p>
+            <details v-if="abandonedWorkTasks.length" class="mt-2">
+              <summary class="cursor-pointer text-[11px] text-muted">
+                已废弃 {{ abandonedWorkTasks.length }} 个（覆盖拆分）
+              </summary>
+              <ul class="mt-1 space-y-0.5 opacity-70">
+                <li v-for="t in abandonedWorkTasks" :key="t.id">
+                  <RouterLink
+                    class="flex items-center gap-2 rounded-md px-2 py-1 text-xs text-muted line-through hover:bg-elevated/40"
+                    :to="`/sessions/${t.id}`"
+                  >
+                    <span class="min-w-0 flex-1 truncate">{{ t.title }}</span>
+                    <span class="shrink-0">cancelled</span>
+                  </RouterLink>
+                </li>
+              </ul>
+            </details>
           </section>
 
           <!-- Manual fallback -->
@@ -417,7 +499,7 @@ onUnmounted(stopPoll)
               <Input v-model="nodeTitle" placeholder="节点标题（可选）" />
               <Textarea v-model="nodePrompt" :rows="3" placeholder="这一票要 agent 做什么" />
               <Button size="sm" :disabled="busy || !nodePrompt.trim()" @click="confirmPlanManual">
-                {{ workTasks.length ? '确认 expand' : '确认并落地 planned' }}
+                {{ activeWorkTasks.length ? '确认 expand' : '确认并落地 planned' }}
               </Button>
             </div>
           </details>

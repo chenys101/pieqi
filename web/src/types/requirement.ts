@@ -76,4 +76,6 @@ export interface ProposedTaskNode {
 export interface ConfirmResult {
   requirement: Requirement
   tasks: Array<{ id: string; title?: string; status: string; prompt: string }>
+  /** 覆盖确认时被废弃的旧工作任务数 */
+  abandoned?: number
 }

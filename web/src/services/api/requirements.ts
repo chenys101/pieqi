@@ -33,12 +33,47 @@ export async function getRequirementOutcome(id: string): Promise<RequirementOutc
 
 export async function confirmRequirement(
   id: string,
-  nodes: ProposedTaskNode[],
+  nodes?: ProposedTaskNode[],
+  opts?: { replace?: boolean },
 ): Promise<ConfirmResult> {
+  const body: { nodes?: ProposedTaskNode[]; replace?: boolean } = {}
+  if (nodes?.length) body.nodes = nodes
+  if (opts?.replace) body.replace = true
   return request<ConfirmResult>(`/requirements/${encodeURIComponent(id)}/confirm`, {
     method: 'POST',
-    body: { nodes },
+    body,
   })
+}
+
+export async function getProposal(id: string): Promise<{
+  id: string
+  requirement_id: string
+  nodes: ProposedTaskNode[]
+  created_at: string
+} | null> {
+  try {
+    return await request(`/requirements/${encodeURIComponent(id)}/proposal`)
+  } catch {
+    return null
+  }
+}
+
+/** 启动 agent 拆分；完成后提案出现在 getProposal。agent/model 与建任务同口径。 */
+export async function suggestSplit(
+  id: string,
+  opts?: { agent?: string; model?: string },
+): Promise<{ task: { id: string; status: string }; message?: string }> {
+  const body: { agent?: string; model?: string } = {}
+  if (opts?.agent) body.agent = opts.agent
+  if (opts?.model) body.model = opts.model
+  return request(`/requirements/${encodeURIComponent(id)}/suggest`, {
+    method: 'POST',
+    body,
+  })
+}
+
+export async function discardProposal(id: string): Promise<void> {
+  await request(`/requirements/${encodeURIComponent(id)}/proposal`, { method: 'DELETE' })
 }
 
 export async function expandRequirement(

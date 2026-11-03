@@ -24,6 +24,8 @@ export interface DraftNode extends ProposedTaskNode {
 const props = defineProps<{
   nodes: ProposedTaskNode[]
   busy?: boolean
+  /** 覆盖确认时的主按钮文案 */
+  confirmLabel?: string
 }>()
 
 const emit = defineEmits<{
@@ -524,7 +526,9 @@ function onConfirm() {
     </section>
 
     <div class="flex flex-wrap gap-2 pt-1">
-      <Button variant="primary" :disabled="busy || !draft.length" @click="onConfirm">落地为 planned</Button>
+      <Button variant="primary" :disabled="busy || !draft.length" @click="onConfirm">
+        {{ confirmLabel || '落地为 planned' }}
+      </Button>
       <Button size="sm" variant="ghost" :disabled="busy" @click="emit('discard')">丢弃建议</Button>
     </div>
 

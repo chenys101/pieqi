@@ -268,9 +268,13 @@ func (s *RequirementStore) MarkDone(requirementID string) (*model.Requirement, e
 	})
 }
 
-// OnTaskCompleted 任务完成时的回流钩子：Fix → 建重验；重验完成 → Resolve。
+// OnTaskCompleted 任务完成时的回流钩子：拆分建议→提案；Fix → 建重验；重验完成 → Resolve。
 func (s *RequirementStore) OnTaskCompleted(t *model.Task) {
 	if s == nil || t == nil || t.RequirementID == "" {
+		return
+	}
+	if IsSplitSuggestTask(t) {
+		s.tryIngestSplitSuggestFromTask(t)
 		return
 	}
 	s.mu.Lock()

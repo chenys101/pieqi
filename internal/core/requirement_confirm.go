@@ -77,6 +77,8 @@ func (s *RequirementStore) DiscardProposal(requirementID string) {
 type ConfirmResult struct {
 	Requirement *model.Requirement `json:"requirement"`
 	Tasks       []*model.Task      `json:"tasks"`
+	// Abandoned 覆盖确认时被废弃的旧工作任务数（不含拆分会话本身）。
+	Abandoned int `json:"abandoned,omitempty"`
 }
 
 // Confirm 接受首次拆分提案：创建 planned Task、改写 depends_on 为真实 id、graph_version++。
@@ -89,6 +91,88 @@ func (s *RequirementStore) Confirm(requirementID string, nodes []model.ProposedT
 // Expand 渐进追加 planned Task（ADR-0021）：DependsOn 可挂已有 Task；事件类型 expand。
 func (s *RequirementStore) Expand(requirementID string, nodes []model.ProposedTaskNode) (*ConfirmResult, error) {
 	return s.applyProposal(requirementID, nodes, true)
+}
+
+// WorkTaskIDs 同需求下尚未废弃的工作任务 id（不含拆分会话、不含已 cancelled）。
+func (s *RequirementStore) WorkTaskIDs(requirementID string) []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	ts := s.tasks
+	s.mu.RUnlock()
+	if ts == nil || requirementID == "" {
+		return nil
+	}
+	var ids []string
+	for _, t := range filterOutSuggest(tasksInRequirement(ts, requirementID)) {
+		if t == nil || t.ID == "" || t.Status == model.TaskCancelled {
+			continue
+		}
+		ids = append(ids, t.ID)
+	}
+	return ids
+}
+
+// AbandonWorkTasks 将同需求下非拆分工作任务标为 cancelled（覆盖拆分前调用）。
+// 已在跑的任务应先由调用方 Cancel；本方法只做状态落盘，幂等。
+func (s *RequirementStore) AbandonWorkTasks(requirementID string) (int, error) {
+	if s == nil {
+		return 0, fmt.Errorf("requirement store not wired")
+	}
+	s.mu.RLock()
+	ts := s.tasks
+	s.mu.RUnlock()
+	if ts == nil {
+		return 0, fmt.Errorf("task store not wired")
+	}
+	const abandonReason = "abandoned: requirement re-split"
+	n := 0
+	now := time.Now()
+	for _, t := range filterOutSuggest(tasksInRequirement(ts, requirementID)) {
+		if t == nil {
+			continue
+		}
+		// 上次覆盖已废弃的票跳过，避免二次确认把历史 cancelled 再计入 abandoned。
+		if t.Status == model.TaskCancelled && strings.Contains(t.Error, abandonReason) {
+			continue
+		}
+		_, err := ts.Update(t.ID, func(x *model.Task) bool {
+			changed := false
+			if x.Status != model.TaskCancelled {
+				x.Status = model.TaskCancelled
+				changed = true
+			}
+			if x.FinishedAt == nil {
+				x.FinishedAt = &now
+				changed = true
+			}
+			if !strings.Contains(x.Error, abandonReason) {
+				x.Error = abandonReason
+				changed = true
+			}
+			return changed
+		})
+		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// ConfirmReplace 覆盖确认：先废弃旧工作任务，再按首次 Confirm 落地新提案（不走 expand）。
+func (s *RequirementStore) ConfirmReplace(requirementID string, nodes []model.ProposedTaskNode) (*ConfirmResult, error) {
+	abandoned, err := s.AbandonWorkTasks(requirementID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.applyProposal(requirementID, nodes, false)
+	if err != nil {
+		return nil, err
+	}
+	out.Abandoned = abandoned
+	return out, nil
 }
 
 func (s *RequirementStore) applyProposal(requirementID string, nodes []model.ProposedTaskNode, expand bool) (*ConfirmResult, error) {
