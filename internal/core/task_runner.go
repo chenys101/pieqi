@@ -65,6 +65,9 @@ type TaskRunner struct {
 	// nil = 未接线（测试/旧部署），捕获钩子全部 no-op。
 	feedback *FeedbackStore
 
+	// requirements 协作平面回流钩子（Fix→重验→Resolve）；nil = 短路径 / 未接线。
+	requirements *RequirementStore
+
 	// ACP 路径（Task 4.4）：agentMgr 非空且 useACP=true 时 run 走 AgentManager 驱动；
 	// 否则保持 Phase 1 claude -p 路径。新增字段零值默认走旧路径，不破坏 Phase 1。
 	agentMgr    agentRunner // nil = Phase 1 claude -p 路径（默认）
@@ -211,6 +214,11 @@ func (tr *TaskRunner) SetNotifier(fn func(task *model.Task, text string)) {
 // SetFeedbackStore 注入 FeedbackStore（Feedback P0）。nil-safe：不调用即关闭 Checkpoint 捕获。
 func (tr *TaskRunner) SetFeedbackStore(fs *FeedbackStore) {
 	tr.feedback = fs
+}
+
+// SetRequirementStore 注入协作平面回流（Issue/Fix/重验）；nil-safe。
+func (tr *TaskRunner) SetRequirementStore(rs *RequirementStore) {
+	tr.requirements = rs
 }
 
 // captureBaseline Task 开始（Agent 尚未动工）时捕获 baseline 并持久化到 task.Baseline。
@@ -1903,6 +1911,10 @@ func (tr *TaskRunner) completeTask(taskID, output string) {
 		t.FinishedAt = &now
 	})
 	tr.notifyFinished(updated, "✅ 任务完成")
+	// 长路径回流：Fix 完成建重验；重验完成 Resolve Issue（须在调度前，以便新 planned 被拉起）。
+	if tr.requirements != nil {
+		tr.requirements.OnTaskCompleted(updated)
+	}
 	// 长路径：依赖刚满足的 planned 自动激活并启动（ADR-0021 P2 DAG 调度）。
 	tr.scheduleReadyDependents(updated)
 }

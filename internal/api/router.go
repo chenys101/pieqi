@@ -218,6 +218,14 @@ func (s *Server) Register(r gin.IRouter) {
 		api.POST("/requirements/:id/confirm", s.confirmRequirement)
 		api.POST("/requirements/:id/expand", s.expandRequirement)
 		api.POST("/requirements/:id/promote", s.promoteRequirement)
+		// P3：Outcome / Issue 回流
+		api.GET("/requirements/:id/outcome", s.getRequirementOutcome)
+		api.POST("/requirements/:id/done", s.markRequirementDone)
+		api.GET("/requirements/:id/issues", s.listRequirementIssues)
+		api.POST("/requirements/:id/issues", s.openRequirementIssue)
+		api.POST("/requirements/:id/acceptance/:acId/verify", s.humanVerifyAC)
+		api.POST("/issues/:id/confirm-fix", s.confirmIssueFix)
+		api.POST("/issues/:id/resolve", s.resolveIssue)
 
 		api.GET("/tasks", s.listTasks)
 		api.GET("/tasks/:id", s.getTask)

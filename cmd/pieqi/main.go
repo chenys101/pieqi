@@ -567,6 +567,7 @@ func main() {
 		// Collaboration Plane：与 Task 同库（ADR-0022），禁止另开连接。
 		reqStore := core.NewRequirementStore(store.Backend())
 		reqStore.SetTaskStore(store) // confirm 落地 planned Task
+		runner.SetRequirementStore(reqStore)
 		apiServer.SetRequirementStore(reqStore)
 		apiServer.SetFeedback(feedbackStore, previewMgr)
 		apiServer.SetCheckRunner(checkRunner)

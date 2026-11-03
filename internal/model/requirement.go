@@ -56,6 +56,8 @@ type AcceptanceItem struct {
 	Text       string `json:"text"`
 	Verifiable bool   `json:"verifiable"`
 	Deferred   bool   `json:"deferred,omitempty"`
+	// HumanResult 人验结论："" | "pass" | "fail"（verify=human 时写入）。
+	HumanResult string `json:"human_result,omitempty"`
 }
 
 // IssueSeverity 缺陷严重度；回流分流依据（ADR-0021）。
@@ -78,18 +80,47 @@ const (
 
 // Issue 结构化缺陷；验证失败 → 再开发只经 Issue。
 type Issue struct {
-	ID           string        `json:"id"`
-	Title        string        `json:"title"`
-	Detail       string        `json:"detail,omitempty"`
-	Severity     IssueSeverity `json:"severity"`
-	CoversAC     []string      `json:"covers_ac,omitempty"`
-	SourceTaskID string        `json:"source_task_id,omitempty"`
-	SourceTurn   int           `json:"source_turn,omitempty"`
-	CheckID      string        `json:"check_id,omitempty"`
-	Status       IssueStatus   `json:"status"`
-	FixTaskID    string        `json:"fix_task_id,omitempty"`
-	CreatedAt    time.Time     `json:"created_at"`
-	UpdatedAt    time.Time     `json:"updated_at"`
+	ID             string        `json:"id"`
+	Title          string        `json:"title"`
+	Detail         string        `json:"detail,omitempty"`
+	Severity       IssueSeverity `json:"severity"`
+	CoversAC       []string      `json:"covers_ac,omitempty"`
+	SourceTaskID   string        `json:"source_task_id,omitempty"`
+	SourceTurn     int           `json:"source_turn,omitempty"`
+	CheckID        string        `json:"check_id,omitempty"`
+	Status         IssueStatus   `json:"status"`
+	FixTaskID      string        `json:"fix_task_id,omitempty"`
+	ReverifyTaskID string        `json:"reverify_task_id,omitempty"` // Fix 完成后自动建的重验 Task
+	CreatedAt      time.Time     `json:"created_at"`
+	UpdatedAt      time.Time     `json:"updated_at"`
+}
+
+// ACState 需求 Outcome 上单条 AC 的汇总态。
+type ACState string
+
+const (
+	ACPending  ACState = "pending"
+	ACGreen    ACState = "green"
+	ACRed      ACState = "red"
+	ACDeferred ACState = "deferred"
+)
+
+// ACOutcome 单条 AC 在需求总账上的视图。
+type ACOutcome struct {
+	ID            string   `json:"id"`
+	Text          string   `json:"text"`
+	State         ACState  `json:"state"`
+	OpenIssueIDs  []string `json:"open_issue_ids,omitempty"`
+	CoveringTasks []string `json:"covering_tasks,omitempty"`
+}
+
+// RequirementOutcome 需求级总账（派生，不单独落盘；ADR-0021 §3.5）。
+type RequirementOutcome struct {
+	RequirementID string      `json:"requirement_id"`
+	Status        string      `json:"status"` // 需求 Status 字面值
+	Acceptance    []ACOutcome `json:"acceptance"`
+	OpenIssues    []Issue     `json:"open_issues,omitempty"` // open + fixing
+	CanMarkDone   bool        `json:"can_mark_done"`
 }
 
 // RequirementEventType 需求级审计事件。
