@@ -66,6 +66,9 @@ func validateProposal(req *model.Requirement, p *model.SplitProposal, existing [
 	if err := detectCycle(p.Nodes); err != nil {
 		return err
 	}
+	if err := checkTestDependsOn(p.Nodes); err != nil {
+		return err
+	}
 	if req != nil {
 		if err := checkACCoverage(req.Acceptance, p.Nodes, existing); err != nil {
 			return err

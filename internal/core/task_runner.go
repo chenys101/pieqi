@@ -1984,6 +1984,10 @@ func (tr *TaskRunner) failTask(taskID, errMsg string) {
 	})
 	tr.logger.Error("task failed", zap.String("task", taskID), zap.String("err", errMsg))
 	tr.notifyFinished(updated, "❌ 任务失败: "+errMsg)
+	// 长路径：test 失败回流 Issue（与 completeTask 的 OnTaskCompleted 对称）。
+	if tr.requirements != nil {
+		tr.requirements.OnTaskFailed(updated)
+	}
 }
 
 // failOrphanedApproval 清算"孤儿审批卡"：任务停在 waiting_input(approval)，
@@ -2022,6 +2026,9 @@ func (tr *TaskRunner) forceFailTask(taskID, errMsg string) {
 	tr.logger.Error("task failed", zap.String("task", taskID), zap.String("err", errMsg))
 	tr.bus.Publish(Event{Type: "task_updated", TaskID: taskID, Task: updated})
 	tr.notifyFinished(updated, "❌ 任务失败: "+errMsg)
+	if tr.requirements != nil {
+		tr.requirements.OnTaskFailed(updated)
+	}
 }
 
 // notifyFinished 往 IM 原渠道推送任务终态通知。

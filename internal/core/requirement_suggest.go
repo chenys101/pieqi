@@ -120,15 +120,21 @@ func buildSplitSuggestPrompt(r *model.Requirement) string {
 2. 数组元素字段：
    - temp_id: 提案内唯一短 id（如 "design"、"fe-1"）
    - title: 短标题
-   - prompt: 交给 coding agent 的完整任务说明（中文可）
+   - prompt: 交给 coding agent 的完整任务说明（中文可）；实现票写清「仅单测自测」；test 票写清「等合入需求分支后隔离起服务做功能测」
    - role: 可选 design|frontend|backend|test|review|fix|other
    - covers_ac: 字符串数组，覆盖的 AC id（有未 deferred 的 AC 时，全部 AC 必须被至少一个节点覆盖）
    - depends_on: 本数组内其它 temp_id（可空；表达先后）
 3. 拆成合理粒度：能并行的不要串成一条；明显先后的用 depends_on。
 4. 不要创建"空话任务"；每条 prompt 必须可独立开跑。
+5. **交付与测试纪律（必须）**：
+   - 交付面是「需求分支」：实现票在 worktree 改完后合入需求分支才算交付；不要假设票 completed 即已进 main。
+   - 实现类（frontend/backend/fix/…）自测 = **仅单元/组件测试**；禁止把起服务/完整链路当实现票完成条件。
+   - test 票按波次拆：每个 test 必须 depends_on 本波全部相关实现票；禁止无依赖的 test 与实现并行。
+   - test 票做功能测试：基于已合入的需求分支编译，**另起隔离进程**（pieqi 用独立 PIEQI_HOME + 端口，勿占现网服务）。
+   - 不要给每个实现票复制一张空 test；终验可单独一张，depends_on 齐所有实现。
 
 示例形态：
-[{"temp_id":"t1","title":"...","prompt":"...","role":"design","covers_ac":["ac1"],"depends_on":[]}]
+[{"temp_id":"be-1","title":"...","prompt":"...","role":"backend","covers_ac":["ac1"],"depends_on":[]},{"temp_id":"test-1","title":"...","prompt":"...","role":"test","covers_ac":["ac1"],"depends_on":["be-1"]}]
 `)
 	return b.String()
 }

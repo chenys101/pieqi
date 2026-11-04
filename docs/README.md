@@ -27,6 +27,7 @@
 | [`comm-arch-upgrade-evaluation.md`](comm-arch-upgrade-evaluation.md) | 对通信架构升级方案的评估意见 | 历史存档 |
 | [`security-hardening.md`](security-hardening.md) | 外网安全整改方案（named / quick 两种部署形态） | **现行，改鉴权前必读** |
 | [`agents-goal-and-capabilities.md`](agents-goal-and-capabilities.md) | claude / qoder / dsh 三家的 goal 能力证据链与结论（2026-10-18） | 结论有效 |
+| [`notes/requirement-delivery.md`](notes/requirement-delivery.md) | **定案**：需求分支交付面；实现票仅单测；test 票合入后隔离功能测；ConfirmReplace force；test failed→Issue | 已定案 / 已接线 |
 | [`notes/approval-miss-and-soft-complete.md`](notes/approval-miss-and-soft-complete.md) | **提案**：审批卡未弹出 + Prompt 软完成 → 误标 completed（会话 `662450a6`） | 提案未施工 |
 | [`notes/cursor-acp-p0.md`](notes/cursor-acp-p0.md) / [`cursor-acp-p1-smoke.md`](notes/cursor-acp-p1-smoke.md) | Cursor ACP 探针结论与冒烟 | 参考 |
 | [`dsh-acp-official-verification-report.md`](dsh-acp-official-verification-report.md) | 官方 dsh-acp 兼容性验证报告（2026-10-09） | 历史存档 |

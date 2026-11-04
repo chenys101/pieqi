@@ -127,7 +127,7 @@ func TestRequirementConfirmReplace_AbandonsOldWorkTasks(t *testing.T) {
 	out, err := rs.ConfirmReplace(req.ID, []model.ProposedTaskNode{
 		{TempID: "n1", Prompt: "new work", CoversAC: []string{"ac1"}, Agent: "claude"},
 		{TempID: "n2", Prompt: "new work 2", CoversAC: []string{"ac1"}, DependsOn: []string{"n1"}},
-	})
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestRequirementConfirmReplace_AbandonsOldWorkTasks(t *testing.T) {
 	// 再次覆盖：只废弃本轮 active，不计历史 abandoned。
 	out2, err := rs.ConfirmReplace(req.ID, []model.ProposedTaskNode{
 		{TempID: "z", Prompt: "third", CoversAC: []string{"ac1"}},
-	})
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

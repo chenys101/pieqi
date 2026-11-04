@@ -304,6 +304,41 @@ func (s *RequirementStore) OnTaskCompleted(t *model.Task) {
 	}
 }
 
+// OnTaskFailed test 票失败 → 自动 OpenIssue(blocker) 并建 Fix（docs/notes/requirement-delivery.md）。
+// 同一 source_task 不重复开立。
+func (s *RequirementStore) OnTaskFailed(t *model.Task) {
+	if s == nil || t == nil || t.RequirementID == "" {
+		return
+	}
+	if t.Role != model.RoleTest {
+		return
+	}
+	if IsSplitSuggestTask(t) {
+		return
+	}
+	r, ok := s.Get(t.RequirementID)
+	if !ok {
+		return
+	}
+	for _, iss := range r.Issues {
+		if iss.SourceTaskID == t.ID && iss.Status != model.IssueResolved {
+			return
+		}
+	}
+	title := "test failed: " + truncateRunes(t.Title, 48)
+	detail := strings.TrimSpace(t.Error)
+	if detail == "" {
+		detail = "test task failed without error detail"
+	}
+	_, _ = s.OpenIssue(t.RequirementID, model.Issue{
+		Title:        title,
+		Detail:       detail,
+		Severity:     model.SeverityBlocker,
+		CoversAC:     append([]string(nil), t.CoversAC...),
+		SourceTaskID: t.ID,
+	})
+}
+
 func (s *RequirementStore) spawnReverify(r *model.Requirement, iss *model.Issue, fix *model.Task) {
 	s.mu.Lock()
 	ts := s.tasks

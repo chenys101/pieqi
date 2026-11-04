@@ -64,6 +64,10 @@ const workTasks = computed(() => store.tasks.filter((t) => !isSplitSuggestTitle(
 const activeWorkTasks = computed(() => workTasks.value.filter((t) => t.status !== 'cancelled'))
 const abandonedWorkTasks = computed(() => workTasks.value.filter((t) => t.status === 'cancelled'))
 const willReplaceOnConfirm = computed(() => activeWorkTasks.value.length > 0)
+/** 已有票离开 planned：覆盖拆分需 force（与后端 replace_needs_force 对齐） */
+const hasProgressedWork = computed(() =>
+  activeWorkTasks.value.some((t) => t.status !== 'planned'),
+)
 const suggestTasks = computed(() => store.tasks.filter((t) => isSplitSuggestTitle(t.title)))
 const suggestRunning = computed(() =>
   suggestTasks.value.some((t) => t.status === 'pending' || t.status === 'running' || t.status === 'waiting_input'),
@@ -157,9 +161,18 @@ async function confirmProposal(nodes?: ProposedTaskNode[]) {
   busy.value = true
   try {
     // Agent 拆分确认：有旧票则 replace 覆盖；手工追加仍走下方「手工补一票」expand。
-    const result = await api.confirmRequirement(id.value, payload, {
-      replace: willReplaceOnConfirm.value,
-    })
+    const replace = willReplaceOnConfirm.value
+    let force = false
+    if (replace && hasProgressedWork.value) {
+      force = window.confirm(
+        '已有任务开跑或完成。覆盖拆分将废弃这些票（含未合入需求分支的施工）。确定强制覆盖？',
+      )
+      if (!force) {
+        busy.value = false
+        return
+      }
+    }
+    const result = await api.confirmRequirement(id.value, payload, { replace, force })
     proposal.value = null
     await reload()
     if (result.abandoned && result.abandoned > 0) {
@@ -414,11 +427,18 @@ onUnmounted(stopPoll)
               </RouterLink>
             </p>
             <p
-              v-if="proposal?.nodes?.length && willReplaceOnConfirm"
+              v-if="proposal?.nodes?.length && willReplaceOnConfirm && !hasProgressedWork"
               class="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-warning"
               role="status"
             >
               确认落地将废弃现有任务列表，以本提案替换。请核对后再点确认。
+            </p>
+            <p
+              v-else-if="proposal?.nodes?.length && hasProgressedWork"
+              class="rounded-md border border-error/40 bg-error/10 px-2.5 py-2 text-[11px] leading-relaxed text-error"
+              role="status"
+            >
+              已有任务开跑或完成。覆盖需二次确认（force）；未合入需求分支的施工会被废弃。
             </p>
             <SplitProposalEditor
               v-if="proposal?.nodes?.length"
@@ -428,6 +448,19 @@ onUnmounted(stopPoll)
               @confirm="confirmProposal"
               @discard="discardProposal"
             />
+          </section>
+
+          <section
+            class="rounded-md border border-border bg-elevated/40 px-3 py-2.5 text-[11px] leading-relaxed text-muted"
+            aria-label="交付约定"
+          >
+            <p class="font-medium text-text-secondary">交付约定</p>
+            <ul class="mt-1 list-disc space-y-0.5 pl-4">
+              <li>交付面是<strong class="font-medium text-text">需求分支</strong>：实现票 worktree 改完后合入该分支才算交付。</li>
+              <li>实现票自测<strong class="font-medium text-text">仅单元/组件测试</strong>；功能测由 test 票在依赖合入后、隔离起服务执行。</li>
+              <li>pieqi 功能测须另起实例（独立 PIEQI_HOME + 端口），勿占用现网面板。</li>
+              <li>票面 completed ≠ 已进 main；test 失败会自动开 Issue（blocker）派修。</li>
+            </ul>
           </section>
 
           <!-- AC -->

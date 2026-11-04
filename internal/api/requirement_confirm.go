@@ -19,6 +19,8 @@ type confirmReq struct {
 	Nodes []model.ProposedTaskNode `json:"nodes"`
 	// Replace 为 true 时覆盖确认：废弃同需求已有工作任务，再按首次拆分落地（不 expand）。
 	Replace bool `json:"replace"`
+	// Force 与 Replace 联用：已有离开 planned 的工作票时必须为 true，否则 409。
+	Force bool `json:"force"`
 }
 
 // putRequirementProposal PUT /api/requirements/:id/proposal
@@ -84,13 +86,21 @@ func (s *Server) confirmRequirement(c *gin.Context) {
 	if req.Replace {
 		// 覆盖前先打断仍在跑的旧票，再统一标 cancelled。
 		// abandoned 以 Cancel 前的工作票数为准（Cancel 会先置 cancelled，Abandon 再扫会少计）。
+		// 有已推进工作且未 force：先 409，避免 Cancel 已执行却确认失败。
+		if !req.Force && s.requirements.HasProgressedWork(rid) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "requirement has progressed work tasks; confirm with force=true to abandon and replace",
+				"code":  "replace_needs_force",
+			})
+			return
+		}
 		oldIDs := s.requirements.WorkTaskIDs(rid)
 		if s.runner != nil {
 			for _, tid := range oldIDs {
 				_ = s.runner.Cancel(tid)
 			}
 		}
-		result, err = s.requirements.ConfirmReplace(rid, req.Nodes)
+		result, err = s.requirements.ConfirmReplace(rid, req.Nodes, req.Force)
 		if result != nil && result.Abandoned < len(oldIDs) {
 			result.Abandoned = len(oldIDs)
 		}
@@ -101,6 +111,9 @@ func (s *Server) confirmRequirement(c *gin.Context) {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
+		}
+		if strings.Contains(err.Error(), "force=true") {
+			status = http.StatusConflict
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
 		return

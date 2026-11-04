@@ -34,11 +34,12 @@ export async function getRequirementOutcome(id: string): Promise<RequirementOutc
 export async function confirmRequirement(
   id: string,
   nodes?: ProposedTaskNode[],
-  opts?: { replace?: boolean },
+  opts?: { replace?: boolean; force?: boolean },
 ): Promise<ConfirmResult> {
-  const body: { nodes?: ProposedTaskNode[]; replace?: boolean } = {}
+  const body: { nodes?: ProposedTaskNode[]; replace?: boolean; force?: boolean } = {}
   if (nodes?.length) body.nodes = nodes
   if (opts?.replace) body.replace = true
+  if (opts?.force) body.force = true
   return request<ConfirmResult>(`/requirements/${encodeURIComponent(id)}/confirm`, {
     method: 'POST',
     body,

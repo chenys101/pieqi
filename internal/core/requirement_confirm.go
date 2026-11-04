@@ -162,7 +162,11 @@ func (s *RequirementStore) AbandonWorkTasks(requirementID string) (int, error) {
 }
 
 // ConfirmReplace 覆盖确认：先废弃旧工作任务，再按首次 Confirm 落地新提案（不走 expand）。
-func (s *RequirementStore) ConfirmReplace(requirementID string, nodes []model.ProposedTaskNode) (*ConfirmResult, error) {
+// force=false 时若已有离开 planned 的工作票则拒绝（避免未交付施工被默默废弃）。
+func (s *RequirementStore) ConfirmReplace(requirementID string, nodes []model.ProposedTaskNode, force bool) (*ConfirmResult, error) {
+	if !force && s.HasProgressedWork(requirementID) {
+		return nil, errReplaceNeedsForce
+	}
 	abandoned, err := s.AbandonWorkTasks(requirementID)
 	if err != nil {
 		return nil, err
@@ -256,7 +260,7 @@ func (s *RequirementStore) applyProposal(requirementID string, nodes []model.Pro
 			RequirementID: requirementID,
 			ProjectID:     r.ProjectID,
 			ProjectPath:   r.ProjectPath,
-			Prompt:        n.Prompt,
+			Prompt:        AppendDeliveryDoD(n.Role, n.Prompt),
 			Title:         title,
 			Role:          n.Role,
 			Skills:        append([]string(nil), n.Skills...),
