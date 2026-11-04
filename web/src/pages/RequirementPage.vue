@@ -9,6 +9,7 @@ import Textarea from '@/components/ui/Textarea.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import ModelPicker from '@/features/session/components/ModelPicker.vue'
 import SplitProposalEditor from '@/features/requirement/SplitProposalEditor.vue'
+import { newRequirementTarget } from '@/features/requirement/newRequirementTarget'
 import * as api from '@/services/api/requirements'
 import { useAgentStore } from '@/stores/agent'
 import { useNotificationStore } from '@/stores/notification'
@@ -80,6 +81,9 @@ const bodyPreview = computed(() => {
   if (bodyExpanded.value || t.length <= 280) return t
   return t.slice(0, 280) + '…'
 })
+
+/** header「新建需求」：带上当前需求的 project_path（ADR-0021）。 */
+const newReqTarget = computed(() => newRequirementTarget(store.current?.project_path))
 
 const statusLabel: Record<string, string> = {
   draft: '草案',
@@ -327,6 +331,14 @@ onUnmounted(stopPoll)
           <span v-if="store.current" class="shrink-0 text-[11px] text-muted">
             {{ statusLabel[store.current.status] || store.current.status }}
           </span>
+          <RouterLink
+            v-if="store.current"
+            class="shrink-0 rounded-lg border border-border px-2.5 py-1 text-xs text-muted hover:bg-elevated/60 hover:text-text"
+            data-testid="requirement-new-requirement"
+            :to="newReqTarget"
+          >
+            ＋ 新建需求
+          </RouterLink>
           <Button
             v-if="store.outcome?.can_mark_done && store.current?.status !== 'done'"
             size="sm"
