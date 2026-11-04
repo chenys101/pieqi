@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,15 +20,31 @@ import (
 	"go.uber.org/zap"
 )
 
+// apiTestTempDir 在仓库 build/ 下建临时目录（沙箱写不了系统 Temp）。
+func apiTestTempDir(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("cwd: %v", err)
+	}
+	base := filepath.Clean(filepath.Join(wd, "..", "..", "build"))
+	dir, err := os.MkdirTemp(base, "pieqi-api-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func setupAPITest(t *testing.T) (*Server, *core.TaskStore, *gin.Engine) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	store, _ := core.NewTaskStore(t.TempDir())
+	store, _ := core.NewTaskStore(apiTestTempDir(t))
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(5 * time.Second)
 	// TaskRunner 用真构造但 Start 不会在本测试真跑（不调 createTask 的 Start 路径校验）
-	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	wm := core.NewWorktreeManager(zap.NewNop(), apiTestTempDir(t))
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 	cfg := &config.Config{}
 	srv := NewServer(cfg, store, runner, hooks, bus, nil, nil)
 	r := gin.New()
@@ -217,7 +234,7 @@ func TestAPI_AuthMiddleware(t *testing.T) {
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(5 * time.Second)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "", false, "", 0, nil, 0, 0)
 	cfg := &config.Config{}
 	cfg.API.Token = "secret"
 	srv := NewServer(cfg, store, runner, hooks, bus, nil, nil)
@@ -308,7 +325,7 @@ func TestAPI_AuthRoutesRegistered(t *testing.T) {
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(5 * time.Second)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 	cfg := &config.Config{}
 	cfg.API.Enabled = true
 	srv := NewServer(cfg, store, runner, hooks, bus, nil, nil)

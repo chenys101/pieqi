@@ -155,7 +155,7 @@ func TestResumeRich_RejectsImagesOnClaudePath(t *testing.T) {
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
-	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 	// 不注入 agentMgr：走 claude -p 路径。
 
 	wt := t.TempDir()
@@ -199,7 +199,7 @@ func TestRunClaudePath_RejectsImages(t *testing.T) {
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
-	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 
 	wt := t.TempDir()
 	task, err := store.Create(&model.Task{

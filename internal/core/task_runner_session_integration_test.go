@@ -179,7 +179,7 @@ func TestRunACPSessionManagerIntegration(t *testing.T) {
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(30 * time.Minute)
-	tr := NewTaskRunner(dev, store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	tr := NewTaskRunner(dev, store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 	mgr := agent.NewAgentSessionManager("claude", agent.ManagerConfig{MaxConcurrent: 1}, zap.NewNop())
 	tr.SetAgentManager(mgr, true, 0)
 	// 测试结束前兜底关所有会话（杀 claude 子进程），避免孤儿 claude 持 wt 句柄导致 TempDir 清理失败。

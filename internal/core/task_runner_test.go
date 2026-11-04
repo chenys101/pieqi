@@ -70,7 +70,7 @@ func newTestTaskRunner(t *testing.T) (*TaskRunner, *TaskStore, *EventBus, *HookS
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
-	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 	return tr, store, bus, hooks
 }
 
@@ -316,7 +316,7 @@ func TestTaskRunner_InjectHookSettings(t *testing.T) {
 	hooks := NewHookService(5 * time.Second)
 	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks,
 		"", "bypassPermissions", false,
-		"/path/to/pieqi", 39998, []string{"Bash", "Edit"}, 60, 0, "main")
+		"/path/to/pieqi", 39998, []string{"Bash", "Edit"}, 60, 0)
 
 	wt := t.TempDir() // 假 worktree，不真跑 git
 	task, _ := store.Create(&model.Task{ProjectID: "cb", WorktreePath: wt})
@@ -365,7 +365,7 @@ func TestTaskRunner_NotifyWaitingInput(t *testing.T) {
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
 	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks,
-		"", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+		"", "bypassPermissions", false, "", 0, nil, 0, 0)
 
 	task, _ := store.Create(&model.Task{
 		ProjectID: "cb",
@@ -430,7 +430,7 @@ func TestTaskRunner_MaxConcurrentPerProject(t *testing.T) {
 	hooks := NewHookService(5 * time.Second)
 	// maxConcurrent=2
 	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks,
-		"", "bypassPermissions", false, "", 0, nil, 0, 2, "main")
+		"", "bypassPermissions", false, "", 0, nil, 0, 2)
 
 	sem := tr.projectSem("proj-x")
 	if sem == nil {
@@ -670,7 +670,7 @@ func TestTaskRunner_NotifyWaitingInputChoice(t *testing.T) {
 	bus := NewEventBus()
 	hooks := NewHookService(5 * time.Second)
 	tr := NewTaskRunner(zap.NewNop(), store, wm, bus, hooks,
-		"", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+		"", "bypassPermissions", false, "", 0, nil, 0, 0)
 
 	task, _ := store.Create(&model.Task{
 		ProjectID:     "cb",

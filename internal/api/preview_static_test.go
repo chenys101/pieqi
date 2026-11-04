@@ -53,7 +53,7 @@ func setupStaticPreviewTest(t *testing.T) (*Server, *gin.Engine, *core.EventBus,
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(0)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 
 	task, err := store.Create(&model.Task{ProjectID: "static", ProjectPath: wt, WorktreePath: wt, Prompt: "UI 方案"})
 	if err != nil {
@@ -185,7 +185,7 @@ func setupPreviewTestWithFiles(t *testing.T, files map[string]string) (*Server, 
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(0)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 
 	task, err := store.Create(&model.Task{ProjectID: "wt", ProjectPath: wt, WorktreePath: wt, Prompt: "UI 方案"})
 	if err != nil {

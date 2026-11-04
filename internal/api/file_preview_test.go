@@ -60,7 +60,7 @@ func setupFilePreviewTest(t *testing.T) (*gin.Engine, *core.TaskStore, *model.Ta
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(0)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 	srv := NewServer(&config.Config{}, store, runner, hooks, bus, nil, nil)
 	r := gin.New()
 	srv.Register(r)

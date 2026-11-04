@@ -447,7 +447,9 @@ type TaskBaseline struct {
 // 项目不再预注册：从 task 的 project_path 派生（deriveProjectID 取目录名），
 // 仅在运行期构造，供 WorktreeManager.Create 使用。
 type Project struct {
-	ID         string `json:"id"`
-	RepoPath   string `json:"repo_path"`   // 绝对路径，project_path 取此
-	BaseBranch string `json:"base_branch"` // 默认 "main"
+	ID       string `json:"id"`
+	RepoPath string `json:"repo_path"` // 绝对路径，project_path 取此
+	// BaseRef 可选 worktree 起点。空 = WorktreeManager 按 origin/HEAD → main → master → HEAD 现算。
+	// 长路径需求票填 IntegrationBranch，使施工基于需求分支而非裸默认分支。
+	BaseRef string `json:"base_ref,omitempty"`
 }

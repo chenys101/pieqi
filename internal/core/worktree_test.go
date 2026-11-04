@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"pieqi/internal/model"
+
 	"go.uber.org/zap"
 )
 
@@ -48,7 +49,7 @@ func TestWorktreeManager_CreateAndCleanup(t *testing.T) {
 	wtBase := filepath.Join(dir, "worktrees")
 
 	wm := NewWorktreeManager(zap.NewNop(), wtBase)
-	project := &model.Project{ID: "cb", RepoPath: repo, BaseBranch: "main"}
+	project := &model.Project{ID: "cb", RepoPath: repo}
 
 	ctx := context.Background()
 	wtPath, err := wm.Create(ctx, project, "task-1")
@@ -83,7 +84,7 @@ func TestWorktreeManager_CleanupIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	repo := initRepo(t, dir, "main")
 	wm := NewWorktreeManager(zap.NewNop(), filepath.Join(dir, "wt"))
-	project := &model.Project{ID: "cb", RepoPath: repo, BaseBranch: "main"}
+	project := &model.Project{ID: "cb", RepoPath: repo}
 	ctx := context.Background()
 
 	wtPath, _ := wm.Create(ctx, project, "task-2")
@@ -101,7 +102,7 @@ func TestWorktreeManager_ConcurrentCreatesSerialize(t *testing.T) {
 	dir := t.TempDir()
 	repo := initRepo(t, dir, "main")
 	wm := NewWorktreeManager(zap.NewNop(), filepath.Join(dir, "wt"))
-	project := &model.Project{ID: "cb", RepoPath: repo, BaseBranch: "main"}
+	project := &model.Project{ID: "cb", RepoPath: repo}
 	ctx := context.Background()
 
 	const n = 5
@@ -128,18 +129,69 @@ func TestWorktreeManager_ConcurrentCreatesSerialize(t *testing.T) {
 	}
 }
 
-func TestWorktreeManager_CreateBadBaseBranch(t *testing.T) {
+func TestWorktreeManager_CreateOnMasterRepo(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 	dir := t.TempDir()
-	repo := initRepo(t, dir, "main")
+	// 业务仓常见：默认分支是 master，没有 main。
+	repo := initRepo(t, dir, "master")
 	wm := NewWorktreeManager(zap.NewNop(), filepath.Join(dir, "wt"))
-	project := &model.Project{ID: "cb", RepoPath: repo, BaseBranch: "nonexistent"}
+	project := &model.Project{ID: "cb", RepoPath: repo}
 	ctx := context.Background()
 
-	if _, err := wm.Create(ctx, project, "task-x"); err == nil {
-		t.Fatal("Create with bad base branch should error")
+	wtPath, err := wm.Create(ctx, project, "task-biz")
+	if err != nil {
+		t.Fatalf("Create on master-only repo failed: %v", err)
+	}
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("worktree missing: %v", err)
+	}
+	got, err := resolveBaseRef(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "master" {
+		t.Fatalf("resolved base=%q, want master", got)
+	}
+}
+
+func TestResolveBaseRef_OriginHEAD(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	// 本地检出 develop，但 origin/HEAD 指向 master —— 应以远端默认为准。
+	repo := initRepo(t, dir, "master")
+	mustGit(t, repo, "checkout", "-b", "develop")
+	mustGit(t, repo, "remote", "add", "origin", repo)
+	mustGit(t, repo, "update-ref", "refs/remotes/origin/master", "master")
+	mustGit(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+
+	ctx := context.Background()
+	got, err := resolveBaseRef(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "master" {
+		t.Fatalf("got %q, want master (from origin/HEAD)", got)
+	}
+}
+
+func TestResolveBaseRef_NoUsableRef(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "empty")
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repo, "init", "-b", "orphan-tmp")
+	ctx := context.Background()
+
+	if _, err := resolveBaseRef(ctx, repo); err == nil {
+		t.Fatal("empty repo should fail to resolve base")
 	}
 }
 

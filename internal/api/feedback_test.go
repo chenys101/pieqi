@@ -26,7 +26,7 @@ func setupFeedbackTest(t *testing.T) (*Server, *core.TaskStore, *gin.Engine) {
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(0)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 	srv := NewServer(&config.Config{}, store, runner, hooks, bus, nil, nil)
 	srv.SetFeedback(core.NewFeedbackStore(zap.NewNop(), t.TempDir()), nil)
 	r := gin.New()

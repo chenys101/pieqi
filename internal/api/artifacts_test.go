@@ -56,7 +56,7 @@ func setupArtifactTest(t *testing.T) (*Server, *gin.Engine, *model.Task) {
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(0)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 
 	task, err := store.Create(&model.Task{
 		ProjectID: "art", ProjectPath: wt, WorktreePath: wt,

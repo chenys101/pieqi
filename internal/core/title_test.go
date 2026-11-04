@@ -112,7 +112,7 @@ func observedRunner(t *testing.T) (*TaskRunner, *TaskStore, *observer.ObservedLo
 	store := newTestTaskStore(t)
 	wm := NewWorktreeManager(zap.NewNop(), t.TempDir())
 	tr := NewTaskRunner(zap.New(core), store, wm, NewEventBus(), NewHookService(5*time.Second),
-		"", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+		"", "bypassPermissions", false, "", 0, nil, 0, 0)
 	return tr, store, logs
 }
 

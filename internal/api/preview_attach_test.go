@@ -62,7 +62,7 @@ func setupAttachTest(t *testing.T) (*Server, *core.TaskStore, *gin.Engine, *mode
 	bus := core.NewEventBus()
 	hooks := core.NewHookService(0)
 	wm := core.NewWorktreeManager(zap.NewNop(), t.TempDir())
-	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0, "main")
+	runner := core.NewTaskRunner(zap.NewNop(), store, wm, bus, hooks, "", "bypassPermissions", false, "", 0, nil, 0, 0)
 
 	// worktree：.pieqi/preview.json 覆盖 → node 单行 server
 	wt := t.TempDir()

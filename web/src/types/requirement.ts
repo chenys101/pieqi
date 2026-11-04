@@ -34,6 +34,8 @@ export interface Requirement {
   body?: string
   project_id?: string
   project_path: string
+  /** confirm 后创建的集成分支，如 req/<id8> */
+  integration_branch?: string
   status: RequirementStatus
   acceptance?: AcceptanceItem[]
   issues?: Issue[]

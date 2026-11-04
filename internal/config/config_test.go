@@ -461,9 +461,6 @@ func TestConfig_ExampleFileIsLoadable(t *testing.T) {
 	if cfg.Auth.Cloudflared.IsNamed() {
 		t.Fatal("example 不应是 named 模式")
 	}
-	if cfg.Pieqi.BaseBranch != "main" {
-		t.Fatalf("example base_branch = %q, want main（默认分支，用户按需改）", cfg.Pieqi.BaseBranch)
-	}
 	if cfg.Agents.Claude.Transport != "sdk-bridge" {
 		t.Fatalf("example agents.claude.transport = %q, want sdk-bridge", cfg.Agents.Claude.Transport)
 	}

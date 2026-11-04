@@ -46,8 +46,11 @@ type Requirement struct {
 	Issues       []Issue           `json:"issues,omitempty"`
 	Events       []RequirementEvent `json:"events,omitempty"`
 	GraphVersion int               `json:"graph_version"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
+	// IntegrationBranch 需求集成分支（confirm 后从默认基线拉出，如 req/<id8>）。
+	// 各实现/test 票 worktree 以此为 base；合入目标也是它，不是 main。
+	IntegrationBranch string `json:"integration_branch,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // AcceptanceItem 需求上的一条验收标准。

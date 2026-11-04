@@ -5,12 +5,53 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"pieqi/internal/core"
 	"pieqi/internal/model"
 )
+
+// gitProjectPath 给 Confirm 路径用的已 init 仓库（Confirm 会 EnsureIntegrationBranch）。
+// 目录落在仓库 build/：沙箱写不了系统 Temp，且隔离父仓 .git。
+func gitProjectPath(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Skipf("cwd: %v", err)
+	}
+	base := filepath.Clean(filepath.Join(wd, "..", "..", "build"))
+	dir, err := os.MkdirTemp(base, "pieqi-apireq-*")
+	if err != nil {
+		t.Skipf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	repo := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "README.md")
+	run("-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "-m", "init")
+	return repo
+}
 
 func setupReqAPI(t *testing.T) (*Server, *core.RequirementStore, *core.TaskStore, http.Handler) {
 	t.Helper()
@@ -25,7 +66,7 @@ func setupReqAPI(t *testing.T) (*Server, *core.RequirementStore, *core.TaskStore
 
 func TestAPI_ConfirmInjectsDoD_AndTestNeedsDepends(t *testing.T) {
 	_, _, _, r := setupReqAPI(t)
-	proj := t.TempDir()
+	proj := gitProjectPath(t)
 
 	body, _ := json.Marshal(map[string]any{
 		"title":        "delivery",
@@ -73,10 +114,17 @@ func TestAPI_ConfirmInjectsDoD_AndTestNeedsDepends(t *testing.T) {
 		t.Fatalf("confirm status=%d body=%s", w.Code, w.Body.String())
 	}
 	var conf struct {
-		Tasks []*model.Task `json:"tasks"`
+		Requirement *model.Requirement `json:"requirement"`
+		Tasks       []*model.Task      `json:"tasks"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &conf); err != nil {
 		t.Fatal(err)
+	}
+	if conf.Requirement == nil || conf.Requirement.IntegrationBranch == "" {
+		t.Fatalf("confirm should set integration_branch: %+v", conf.Requirement)
+	}
+	if !strings.HasPrefix(conf.Requirement.IntegrationBranch, "req/") {
+		t.Fatalf("branch=%q", conf.Requirement.IntegrationBranch)
 	}
 	var sawBE, sawTE bool
 	for _, tk := range conf.Tasks {
@@ -100,7 +148,7 @@ func TestAPI_ConfirmInjectsDoD_AndTestNeedsDepends(t *testing.T) {
 
 func TestAPI_ConfirmReplace_NeedsForce(t *testing.T) {
 	_, rs, store, r := setupReqAPI(t)
-	proj := t.TempDir()
+	proj := gitProjectPath(t)
 	reqObj, err := rs.Create(&model.Requirement{
 		Title: "r", ProjectPath: proj,
 		Acceptance: []model.AcceptanceItem{{ID: "ac1", Text: "x", Verifiable: true}},
@@ -155,7 +203,7 @@ func TestAPI_ConfirmReplace_NeedsForce(t *testing.T) {
 // planned 可无 force 覆盖 → DoD 仍在 → blocker Issue 自动建 Fix。
 func TestAPI_DeliveryFlow_SoftReplaceAndBlockerIssue(t *testing.T) {
 	_, _, _, r := setupReqAPI(t)
-	proj := t.TempDir()
+	proj := gitProjectPath(t)
 	body, _ := json.Marshal(map[string]any{
 		"title": "flow", "project_path": proj,
 		"acceptance": []map[string]any{{"id": "ac1", "text": "ok", "verifiable": true}},

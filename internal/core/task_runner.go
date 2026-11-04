@@ -33,7 +33,6 @@ type TaskRunner struct {
 	wm               *WorktreeManager
 	bus              *EventBus
 	hooks            *HookService
-	baseBranch       string // worktree 基准分支，默认 "main"
 	sysPrompt        string
 	permissionMode   string
 	cleanupWorktrees bool
@@ -165,16 +164,13 @@ type acpWires struct {
 // execPath/port/hookTools/hookTimeoutSec 用于往 worktree 注入 PreToolUse hook settings；
 // 仅 permissionMode=="bypassPermissions" 时注入（plan 模式下 claude 自身会 ask）。
 // maxConcurrent 为每项目并发上限，<=0 表示不限制。
-// baseBranch 为 worktree 基准分支，空则默认 "main"。
-func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bus *EventBus, hooks *HookService, sysPrompt, permissionMode string, cleanupWorktrees bool, execPath string, port int, hookTools []string, hookTimeoutSec, maxConcurrent int, baseBranch string) *TaskRunner {
+// worktree 基准分支按目标仓库现算（origin/HEAD → main → master → HEAD），不走全局配置。
+func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bus *EventBus, hooks *HookService, sysPrompt, permissionMode string, cleanupWorktrees bool, execPath string, port int, hookTools []string, hookTimeoutSec, maxConcurrent int) *TaskRunner {
 	if permissionMode == "" {
 		permissionMode = "bypassPermissions"
 	}
 	if hookTimeoutSec <= 0 {
 		hookTimeoutSec = 1800 // 30min，与 HookService 默认对齐
-	}
-	if baseBranch == "" {
-		baseBranch = "main"
 	}
 	tr := &TaskRunner{
 		logger:           logger,
@@ -182,7 +178,6 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 		wm:               wm,
 		bus:              bus,
 		hooks:            hooks,
-		baseBranch:       baseBranch,
 		sysPrompt:        sysPrompt,
 		permissionMode:   permissionMode,
 		cleanupWorktrees: cleanupWorktrees,
@@ -219,6 +214,51 @@ func (tr *TaskRunner) SetFeedbackStore(fs *FeedbackStore) {
 // SetRequirementStore 注入协作平面回流（Issue/Fix/重验）；nil-safe。
 func (tr *TaskRunner) SetRequirementStore(rs *RequirementStore) {
 	tr.requirements = rs
+}
+
+// projectForTask 构造 WorktreeManager 用的 Project；需求票带上 IntegrationBranch 作 BaseRef。
+func (tr *TaskRunner) projectForTask(task *model.Task) *model.Project {
+	p := &model.Project{ID: task.ProjectID, RepoPath: task.ProjectPath}
+	if task == nil || task.RequirementID == "" || tr.requirements == nil {
+		return p
+	}
+	if req, ok := tr.requirements.Get(task.RequirementID); ok && req != nil {
+		if br := strings.TrimSpace(req.IntegrationBranch); br != "" {
+			p.BaseRef = br
+		}
+	}
+	return p
+}
+
+// ensureRequirementContext 首轮开跑前把需求上下文（含需求分支）写入 task.Prompt（幂等）。
+func (tr *TaskRunner) ensureRequirementContext(task *model.Task) *model.Task {
+	if task == nil || task.RequirementID == "" || tr.requirements == nil {
+		return task
+	}
+	if strings.Contains(task.Prompt, reqContextMarker) {
+		return task
+	}
+	req, ok := tr.requirements.Get(task.RequirementID)
+	if !ok || req == nil {
+		return task
+	}
+	block := FormatRequirementExecContext(req, task)
+	newPrompt := AppendRequirementContext(task.Prompt, block)
+	if newPrompt == task.Prompt {
+		return task
+	}
+	updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
+		if strings.Contains(t.Prompt, reqContextMarker) {
+			return false
+		}
+		t.Prompt = AppendRequirementContext(t.Prompt, block)
+		return true
+	})
+	if err != nil || updated == nil {
+		task.Prompt = newPrompt
+		return task
+	}
+	return updated
 }
 
 // captureBaseline Task 开始（Agent 尚未动工）时捕获 baseline 并持久化到 task.Baseline。
@@ -850,8 +890,9 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 	defer sem.release()
 
 	// 项目直接用 task 自带的 ProjectID/ProjectPath（不再预注册）。
-	// BaseBranch 统一取配置（默认 main）。
-	project := &model.Project{ID: task.ProjectID, RepoPath: task.ProjectPath, BaseBranch: tr.baseBranch}
+	// 长路径：需求票以 IntegrationBranch 为 worktree base。
+	project := tr.projectForTask(task)
+	task = tr.ensureRequirementContext(task)
 	if task.WorktreePath == "" {
 		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
 		if err != nil {
@@ -997,7 +1038,8 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resumePrompt, turnModel string, images []agent.ImageInput) {
 	tr.logger.Debug("runACP: enter", zap.String("task", task.ID), zap.String("agent", task.Agent),
 		zap.String("worktree", task.WorktreePath), zap.Bool("use_acp", tr.useACP), zap.Bool("has_mgr", tr.agentMgr != nil))
-	project := &model.Project{ID: task.ProjectID, RepoPath: task.ProjectPath, BaseBranch: tr.baseBranch}
+	project := tr.projectForTask(task)
+	task = tr.ensureRequirementContext(task)
 	if task.WorktreePath == "" {
 		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
 		if err != nil {
@@ -1403,7 +1445,7 @@ func (tr *TaskRunner) onAgentSessionClosed(taskID string) {
 	// 非 worktree 任务（WorktreePath==ProjectPath，如生产直接跑原目录）不清理，避免误删原项目目录。
 	if tr.cleanupWorktrees {
 		if t, ok := tr.store.Get(taskID); ok && t != nil && t.WorktreePath != "" && t.WorktreePath != t.ProjectPath {
-			project := &model.Project{ID: t.ProjectID, RepoPath: t.ProjectPath, BaseBranch: tr.baseBranch}
+			project := &model.Project{ID: t.ProjectID, RepoPath: t.ProjectPath}
 			_ = tr.wm.Cleanup(context.Background(), project, taskID, t.WorktreePath)
 		}
 	}

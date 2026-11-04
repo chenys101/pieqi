@@ -39,7 +39,7 @@
 
 * **反馈体系（Feedback，Observe → Verify → Control → Intervene）**：Turn 变更列表与 Diff、审批前的前瞻 Diff、Checks（复用 agent 已跑过的 test/lint/build）、Task Outcome、Evidence → Continue、Checkpoint / Rewind、Preview（把改完的代码跑起来在手机上看）。术语见 [`CONTEXT.md`](CONTEXT.md)，设计见 [`docs/feedback/`](docs/feedback/README.md)。
 
-* **任务并行与隔离**：任务可在任意本地路径运行，或建 git worktree 隔离并行，每项目并发上限控制；`base_branch` 可配。
+* **任务并行与隔离**：任务可在任意本地路径运行，或建 git worktree 隔离并行，每项目并发上限控制；worktree 基准分支按目标仓库自动解析（`origin/HEAD` → `main` → `master` → `HEAD`）。
 
 * **跨渠道会话共享**：身份映射把各渠道用户 ID 归一为统一身份，同一用户换渠道可续接上下文。
 
@@ -262,9 +262,9 @@ agents:
 
 pieqi:
   max_concurrent_per_project: 4
-  base_branch: main        # worktree 基准分支（按你仓库的主分支改：main / master）
   hook_timeout: 30m        # 审批等待上限（print 回退路径）
   hook_tools: [Bash, Write, Edit, NotebookEdit]
+  # worktree 基准分支不配：按每个仓库现算（origin/HEAD → main → master → HEAD）
 
 auth:
   cloudflared:

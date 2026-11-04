@@ -13,7 +13,7 @@ func TestRequirementConfirm_CreatesPlannedTasks(t *testing.T) {
 
 	req, err := rs.Create(&model.Requirement{
 		Title:       "feat",
-		ProjectPath: t.TempDir(),
+		ProjectPath: gitProjectPath(t),
 		Acceptance:  []model.AcceptanceItem{{ID: "ac1", Text: "works", Verifiable: true}},
 	})
 	if err != nil {
@@ -69,7 +69,7 @@ func TestRequirementConfirm_WritesAgentModel(t *testing.T) {
 	rs := NewRequirementStore(ts.Backend())
 	rs.SetTaskStore(ts)
 	req, _ := rs.Create(&model.Requirement{
-		Title: "x", ProjectPath: t.TempDir(),
+		Title: "x", ProjectPath: gitProjectPath(t),
 		Acceptance: []model.AcceptanceItem{{ID: "ac1", Text: "a", Verifiable: true}},
 	})
 	out, err := rs.Confirm(req.ID, []model.ProposedTaskNode{
@@ -91,7 +91,7 @@ func TestRequirementConfirm_RejectsBadProposal(t *testing.T) {
 	rs := NewRequirementStore(ts.Backend())
 	rs.SetTaskStore(ts)
 	req, _ := rs.Create(&model.Requirement{
-		Title: "x", ProjectPath: t.TempDir(),
+		Title: "x", ProjectPath: gitProjectPath(t),
 		Acceptance: []model.AcceptanceItem{{ID: "ac1", Text: "a", Verifiable: true}},
 	})
 	_, err := rs.Confirm(req.ID, []model.ProposedTaskNode{
@@ -107,7 +107,7 @@ func TestRequirementConfirmReplace_AbandonsOldWorkTasks(t *testing.T) {
 	rs := NewRequirementStore(ts.Backend())
 	rs.SetTaskStore(ts)
 	req, err := rs.Create(&model.Requirement{
-		Title: "feat", ProjectPath: t.TempDir(),
+		Title: "feat", ProjectPath: gitProjectPath(t),
 		Acceptance: []model.AcceptanceItem{{ID: "ac1", Text: "works", Verifiable: true}},
 	})
 	if err != nil {

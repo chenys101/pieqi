@@ -49,7 +49,7 @@ func TestConfirmReplace_NeedsForceWhenProgressed(t *testing.T) {
 	rs := NewRequirementStore(ts.Backend())
 	rs.SetTaskStore(ts)
 	req, err := rs.Create(&model.Requirement{
-		Title: "feat", ProjectPath: t.TempDir(),
+		Title: "feat", ProjectPath: gitProjectPath(t),
 		Acceptance: []model.AcceptanceItem{{ID: "ac1", Text: "works", Verifiable: true}},
 	})
 	if err != nil {
@@ -96,7 +96,7 @@ func TestOnTaskFailed_TestOpensBlockerIssue(t *testing.T) {
 	rs := NewRequirementStore(ts.Backend())
 	rs.SetTaskStore(ts)
 	req, err := rs.Create(&model.Requirement{
-		Title: "feat", ProjectPath: t.TempDir(),
+		Title: "feat", ProjectPath: gitProjectPath(t),
 		Acceptance: []model.AcceptanceItem{{ID: "ac1", Text: "works", Verifiable: true}},
 	})
 	if err != nil {

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -277,6 +278,15 @@ func (s *RequirementStore) applyProposal(requirementID string, nodes []model.Pro
 		created = append(created, got)
 	}
 
+	// 首次 confirm（非 expand）：若尚无需求分支，从仓库默认基线拉出并登记。
+	integBranch := strings.TrimSpace(r.IntegrationBranch)
+	if !expand && integBranch == "" {
+		integBranch = IntegrationBranchName(requirementID)
+		if err := EnsureIntegrationBranch(context.Background(), r.ProjectPath, integBranch); err != nil {
+			return nil, fmt.Errorf("ensure integration branch %q: %w", integBranch, err)
+		}
+	}
+
 	snap, _ := json.Marshal(p)
 	now := time.Now()
 	evType := model.ReqEventConfirm
@@ -284,10 +294,15 @@ func (s *RequirementStore) applyProposal(requirementID string, nodes []model.Pro
 	if expand {
 		evType = model.ReqEventExpand
 		evText = fmt.Sprintf("expanded %d planned tasks", len(created))
+	} else if integBranch != "" && strings.TrimSpace(r.IntegrationBranch) == "" {
+		evText = fmt.Sprintf("confirmed %d planned tasks; integration_branch=%s", len(created), integBranch)
 	}
 	updated, err := s.Update(requirementID, func(req *model.Requirement) bool {
 		req.GraphVersion++
 		req.Status = model.RequirementActive
+		if !expand && strings.TrimSpace(req.IntegrationBranch) == "" && integBranch != "" {
+			req.IntegrationBranch = integBranch
+		}
 		seq := 1
 		for _, ev := range req.Events {
 			if ev.Seq >= seq {

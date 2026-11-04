@@ -13,7 +13,7 @@ func TestExpand_DependsOnExistingTask(t *testing.T) {
 
 	req, err := rs.Create(&model.Requirement{
 		Title:       "feat",
-		ProjectPath: t.TempDir(),
+		ProjectPath: gitProjectPath(t),
 		Acceptance:  []model.AcceptanceItem{{ID: "ac1", Text: "done"}},
 	})
 	if err != nil {

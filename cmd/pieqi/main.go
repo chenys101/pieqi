@@ -223,7 +223,7 @@ func main() {
 		logger, store, wm, bus, hooks,
 		"", cfg.Pieqi.PermissionMode, cfg.Pieqi.CleanupWorktrees,
 		execPath, cfg.Server.Port, cfg.Pieqi.HookTools, hookTimeoutSec,
-		cfg.Pieqi.MaxConcurrentPerProject, cfg.Pieqi.BaseBranch,
+		cfg.Pieqi.MaxConcurrentPerProject,
 	)
 	// 免审名单由全局偏好推导（L0/L1 可配、L2/L3 永不放行）；
 	// 设置页改动后经 OnChange 即刻推给 runner（只影响之后创建的会话）。

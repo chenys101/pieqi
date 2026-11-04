@@ -347,6 +347,13 @@ onUnmounted(stopPoll)
           <p class="truncate text-xs text-muted" :title="store.current.project_path">
             {{ store.current.project_path }}
           </p>
+          <p
+            v-if="store.current.integration_branch"
+            class="font-mono text-xs text-muted"
+            title="实现票 worktree 基线与合入目标"
+          >
+            需求分支 · {{ store.current.integration_branch }}
+          </p>
 
           <!-- 原始需求正文 -->
           <section class="space-y-1.5">

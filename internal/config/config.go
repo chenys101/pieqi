@@ -111,7 +111,6 @@ type PieqiConfig struct {
 	HookTimeout             time.Duration `mapstructure:"hook_timeout"`               // hook 等决策上限，Phase 0 验证后定
 	HookTools               []string      `mapstructure:"hook_tools"`                 // PreToolUse 拦截的工具名，默认 Bash/Write/Edit/NotebookEdit
 	MaxConcurrentPerProject int           `mapstructure:"max_concurrent_per_project"` // 每项目并发上限，默认 4
-	BaseBranch              string        `mapstructure:"base_branch"`                // worktree 基准分支，默认 "main"
 	BotsDir                 string        `mapstructure:"bots_dir"`                   // IM 机器人绑定记录目录；空 = ~/.pieqi/bots
 	ACP                     ACPConfig     `mapstructure:"acp"`                        // ACP 协议配置（Phase 2 引入；use_acp=false 时走 Phase 1 PrintAgent 路径）
 }
@@ -326,7 +325,6 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pieqi.hook_tools", []string{"Bash", "Write", "Edit", "NotebookEdit"})
 	v.SetDefault("pieqi.max_concurrent_per_project", 4)
 	v.SetDefault("pieqi.worktree_base", "") // 空 = DefaultDataRoot()/worktrees（main 侧解析）
-	v.SetDefault("pieqi.base_branch", "main")
 	v.SetDefault("pieqi.bots_dir", filepath.Join(DefaultDataRoot(), "bots"))
 	v.SetDefault("pieqi.acp.use_acp", false)
 	v.SetDefault("pieqi.acp.agent_type", "claude-code")
@@ -422,6 +420,14 @@ func Load(configPath string) (*Config, error) {
 	if v.InConfig("pieqi.auto_approve_tools") {
 		cfg.Deprecations = append(cfg.Deprecations,
 			"pieqi.auto_approve_tools 已移除（它从未生效）：免审名单请在设置页用 auto_approve_l0 / auto_approve_l1 开关控制")
+	}
+
+	// pieqi.base_branch 已删除：主分支是仓库属性（GitHub 常 main、业务仓常 master），
+	// 全局一项无法表达「每项目不同」。worktree 起点现按目标仓库现算
+	// （origin/HEAD → main → master → HEAD），写了也不再生效。
+	if v.InConfig("pieqi.base_branch") {
+		cfg.Deprecations = append(cfg.Deprecations,
+			"pieqi.base_branch 已删除（不再生效）：worktree 基准分支按每个仓库自动解析（origin/HEAD → main → master → HEAD）")
 	}
 
 	// 2b) pieqi.self_update_dir 已删除（2026-10-14 定案）：交付落点改由**约定推导**

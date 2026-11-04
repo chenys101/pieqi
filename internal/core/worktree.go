@@ -19,7 +19,7 @@ import (
 // 每任务一个 worktree + 新分支 pieqi/<taskID>，让多个编码任务在同一 repo 上并行隔离。
 // git worktree 操作碰 .git/worktrees/ 不并发安全，单个 sync.Mutex 串行所有 Create。
 type WorktreeManager struct {
-	logger      *zap.Logger
+	logger       *zap.Logger
 	worktreeBase string
 
 	mu sync.Mutex
@@ -42,17 +42,66 @@ func (wm *WorktreeManager) Create(ctx context.Context, project *model.Project, t
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
 
-	// git worktree add -b <branch> <path> <baseBranch>：一条命令原子建分支+worktree
-	out, err := runGit(ctx, project.RepoPath, "worktree", "add", "-b", branch, worktreePath, project.BaseBranch)
+	base := strings.TrimSpace(project.BaseRef)
+	if base == "" {
+		var err error
+		base, err = resolveBaseRef(ctx, project.RepoPath)
+		if err != nil {
+			return "", fmt.Errorf("resolve base branch: %w", err)
+		}
+	} else if !gitRefExists(ctx, project.RepoPath, base) {
+		return "", fmt.Errorf("base ref %q not found in repo", base)
+	}
+
+	// git worktree add -b <branch> <path> <base>：一条命令原子建分支+worktree
+	out, err := runGit(ctx, project.RepoPath, "worktree", "add", "-b", branch, worktreePath, base)
 	if err != nil {
 		return "", fmt.Errorf("git worktree add: %w\n%s", err, out)
 	}
 	wm.logger.Info("worktree created",
 		zap.String("project", project.ID),
 		zap.String("branch", branch),
+		zap.String("base", base),
 		zap.String("path", worktreePath),
 	)
 	return worktreePath, nil
+}
+
+// resolveBaseRef 按**该仓库自身**选出 worktree 起点。
+// 顺序：origin/HEAD（远端默认分支）→ main → master → 当前 HEAD。
+// 判据：GitHub 默认 main、业务仓常为 master，全局配置无法覆盖「每项目不同」；
+// 远端默认分支才是事实源。无 remote 时再试常见名与当前检出。
+func resolveBaseRef(ctx context.Context, repoPath string) (string, error) {
+	if out, err := runGit(ctx, repoPath, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		ref := strings.TrimSpace(out) // e.g. origin/main
+		if ref != "" {
+			if short, ok := strings.CutPrefix(ref, "origin/"); ok && short != "" {
+				if gitRefExists(ctx, repoPath, short) {
+					return short, nil
+				}
+			}
+			if gitRefExists(ctx, repoPath, ref) {
+				return ref, nil
+			}
+		}
+	}
+	for _, cand := range []string{"main", "master"} {
+		if gitRefExists(ctx, repoPath, cand) {
+			return cand, nil
+		}
+	}
+	if out, err := runGit(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+		ref := strings.TrimSpace(out)
+		if ref != "" && ref != "HEAD" && gitRefExists(ctx, repoPath, ref) {
+			return ref, nil
+		}
+	}
+	return "", fmt.Errorf("no usable base branch (tried origin/HEAD, main, master, HEAD)")
+}
+
+func gitRefExists(ctx context.Context, repoPath, ref string) bool {
+	_, err := runGit(ctx, repoPath, "rev-parse", "--verify", "--quiet", ref)
+	return err == nil
 }
 
 // Cleanup 删除 worktree 及其分支。对已删除的 worktree 幂等（吞 not found）。

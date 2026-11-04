@@ -58,7 +58,9 @@ pieqi:
   hook_timeout: 30m                  # hook 等人类决策的上限
   hook_tools: [Bash, Write, Edit, NotebookEdit]   # PreToolUse 拦截的工具；读类不拦
   max_concurrent_per_project: 4      # 每项目并发上限
-  base_branch: main                  # worktree 基准分支（按你仓库的主分支改：main / master）
+  # 注：pieqi.base_branch 已删除 —— 主分支是仓库属性（GitHub 常 main、业务仓常 master），
+  #     全局一项无法表达「每项目不同」。worktree 起点按目标仓库现算：
+  #     origin/HEAD → main → master → 当前 HEAD。显式配置只会得到弃用告警。
   bots_dir: ""                       # IM 机器人绑定记录目录；空 = ~/.pieqi/bots
   # 注：自重启的交付落点**没有配置项、也没有环境变量**。
   # 落点由**约定推导**：<dataRoot>/bin，即 %USERPROFILE%\.pieqi\bin\pieqi.new.exe
