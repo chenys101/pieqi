@@ -633,6 +633,8 @@ func (tr *TaskRunner) ResumeRich(taskID, text, turnModel string, images []agent.
 	// 新一轮会把它覆盖成 running / 新的 CurrentDecision，但前端那张旧卡是拿 id 回投的，
 	// 留着它只会让用户再点一次 no pending。
 	tr.clearStaleDecision(taskID)
+	// 新 EventUser = 下一 turn 起点：上一轮的 approve_turn 记忆作废。
+	tr.clearTurnAutoPass(taskID)
 	// 追加一条 user 事件，标记续问起点（前端渲染为右对齐气泡，与首次 prompt 一致）。
 	// 带图时同时记下图片元数据（see model.TaskEvent.Images）。
 	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text, Images: ImageMeta(images)})
@@ -1501,6 +1503,13 @@ func (tr *TaskRunner) permWire(taskID string) *PermissionWire {
 	return nil
 }
 
+// clearTurnAutoPass 清空该 task 本 turn 的 approve_turn 记忆。无 wire 时 no-op。
+func (tr *TaskRunner) clearTurnAutoPass(taskID string) {
+	if ph := tr.permWire(taskID); ph != nil {
+		ph.ClearTurnMemory()
+	}
+}
+
 // isACPPath task 是否走在 ACP 路径（useACP 且 adapter 仍 open）。
 func (tr *TaskRunner) isACPPath(taskID string) bool {
 	if !tr.useACP || tr.agentMgr == nil {
@@ -2118,9 +2127,10 @@ func (tr *TaskRunner) transition(taskID string, target model.TaskStatus, mutator
 	}
 	// Feedback P0：Task 进入终态 = 最后一个 Turn 的结束边界，捕获快照（幂等）。
 	// 此时 Agent 进程已退出（completeTask/failTask 均在流解析/Run 返回之后调用），
-	// 读盘无竞态。
+	// 读盘无竞态。同时清空 approve_turn 记忆（轮末作废）。
 	if target == model.TaskCompleted || target == model.TaskFailed || target == model.TaskCancelled {
 		tr.captureTurnEnd(taskID)
+		tr.clearTurnAutoPass(taskID)
 	}
 	evType := "task_updated"
 	if target == model.TaskCompleted {

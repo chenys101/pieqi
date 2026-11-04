@@ -97,6 +97,14 @@ type PermissionWire struct {
 	// 与 sessionAlways 同生命周期：不落盘、随 Unwire 消失。
 	sessionRecipes map[string]struct{}
 
+	// turnAlways / turnRecipes 是用户在本 turn 点过「本轮同类免审」(approve_turn) 的集合。
+	// 与 session 记忆同形、同硬边界（kindSessionRememberable / RecipeRememberable），
+	// 但生命周期更短：新 EventUser（下一 turn）、终态转换、Unwire 时 ClearTurnMemory。
+	// turnN 记录写入时的 CurrentTurnCount，供日志与诊断；命中判据靠 Clear 边界，不跨 turn。
+	turnN       int
+	turnAlways  map[string]struct{}
+	turnRecipes map[string]struct{}
+
 	// trustedRecipes 来自 Settings.TrustedRecipes（跨任务、落盘）。
 	// 建会话时拷入；改设置只影响之后新建的会话（与 autoApprove 同纪律）。
 	trustedRecipes map[string]struct{}
@@ -204,6 +212,8 @@ func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore,
 		pending:        make(map[string]*permPending),
 		sessionAlways:  make(map[string]struct{}),
 		sessionRecipes: make(map[string]struct{}),
+		turnAlways:     make(map[string]struct{}),
+		turnRecipes:    make(map[string]struct{}),
 		trustedRecipes: make(map[string]struct{}),
 		settled:         make(map[string]*settledPerm),
 		timeoutCooldown: make(map[string]time.Time),
@@ -302,8 +312,8 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 	}
 }
 
-// tryAutoApprove 免审名单命中判定与放行：ToolKind 在 autoApprove / sessionAlways 中，
-// 或本会话已记住的命令配方覆盖本请求全部段时，选首个 allow 选项直接 Approve。
+// tryAutoApprove 免审名单命中判定与放行：ToolKind 在 autoApprove / sessionAlways / turnAlways 中，
+// 或本会话/本 turn 已记住的命令配方覆盖本请求全部段时，选首个 allow 选项直接 Approve。
 //
 // 返回 true 表示已处理（不再走人工审批）；以下情况返回 false，调用方回退到正常人工审批：
 //   - 免审名单未命中且配方未覆盖；
@@ -311,10 +321,11 @@ func (pw *PermissionWire) onPermissionRequest(req agent.PermissionRequest) {
 //   - adapter.Approve 失败（如请求已被另一路径解决）——回退走人工审批，由 30min 超时兜底，
 //     不会永久卡死。
 func (pw *PermissionWire) tryAutoApprove(req agent.PermissionRequest) bool {
-	byKind := pw.autoApproves(req.ToolKind)
+	byKind, byTurnKind := pw.autoApproves(req.ToolKind)
 	byRecipe := !byKind && pw.sessionRecipesCover(req)
-	byLocal := !byKind && !byRecipe && pw.localExecuteCovers(req)
-	if !byKind && !byRecipe && !byLocal {
+	byTurnRecipe := !byKind && !byRecipe && pw.turnRecipesCover(req)
+	byLocal := !byKind && !byRecipe && !byTurnRecipe && pw.localExecuteCovers(req)
+	if !byKind && !byRecipe && !byTurnRecipe && !byLocal {
 		return false
 	}
 	optionID, ok := pickAllowOption(req.Options)
@@ -333,13 +344,24 @@ func (pw *PermissionWire) tryAutoApprove(req agent.PermissionRequest) bool {
 			zap.String("tool_kind", req.ToolKind), zap.Error(err))
 		return false
 	}
-	pw.logger.Debug("auto-approved permission (no review)",
-		zap.String("task", pw.taskID), zap.String("req", req.ReqID),
-		zap.String("tool_kind", req.ToolKind), zap.String("option", optionID),
-		zap.Bool("by_recipe", byRecipe),
-		zap.Bool("by_local_execute", byLocal))
+	recipes := recipesFromPermission(req)
+	if byTurnKind || byTurnRecipe {
+		pw.logger.Info("turn auto-pass applied",
+			zap.String("task", pw.taskID),
+			zap.Int("turn", pw.currentTurn()),
+			zap.String("tool", req.ToolTitle),
+			zap.String("tool_kind", req.ToolKind),
+			zap.Strings("recipes", recipes),
+			zap.String("via", "turn"))
+	} else {
+		pw.logger.Debug("auto-approved permission (no review)",
+			zap.String("task", pw.taskID), zap.String("req", req.ReqID),
+			zap.String("tool_kind", req.ToolKind), zap.String("option", optionID),
+			zap.Bool("by_recipe", byRecipe),
+			zap.Bool("by_local_execute", byLocal))
+	}
 	// 免审也要留痕：否则"这条 id 怎么查不到"里会混进一批其实已经被自动放行的请求。
-	pw.rememberSettled(req.ReqID, req.ToolTitle, req.ToolKind, recipesFromPermission(req), PermResolveApproved, false)
+	pw.rememberSettled(req.ReqID, req.ToolTitle, req.ToolKind, recipes, PermResolveApproved, false)
 	return true
 }
 
@@ -391,16 +413,22 @@ func (pw *PermissionWire) rememberSettledLocked(reqID, toolTitle, toolKind strin
 	}
 }
 
-// autoApproves 该 ToolKind 是否免审：配置名单（由 L0/L1 推导）命中，或用户本次会话点过
-// "同类免审"（仅非宽泛 kind，见 kindSessionRememberable）。
-func (pw *PermissionWire) autoApproves(kind string) bool {
+// autoApproves 该 ToolKind 是否免审：配置名单（由 L0/L1 推导）命中，或用户本次会话/本 turn
+// 点过"同类免审"（仅非宽泛 kind，见 kindSessionRememberable）。
+// 第二个返回值 byTurn 表示命中的是 turnAlways（供 turn auto-pass 日志区分 via）。
+func (pw *PermissionWire) autoApproves(kind string) (hit bool, byTurn bool) {
 	pw.mu.Lock()
 	defer pw.mu.Unlock()
 	if _, ok := pw.autoApprove[kind]; ok {
-		return true
+		return true, false
 	}
-	_, ok := pw.sessionAlways[kind]
-	return ok
+	if _, ok := pw.sessionAlways[kind]; ok {
+		return true, false
+	}
+	if _, ok := pw.turnAlways[kind]; ok {
+		return true, true
+	}
+	return false, false
 }
 
 // sessionRecipesCover 本请求的全部 shell 配方是否已被会话记住 / 全局可信，
@@ -479,6 +507,79 @@ func (pw *PermissionWire) rememberSessionApproval(kind string, recipes []string)
 			zap.Bool("kind_kept", kindKept),
 			zap.Strings("recipes", kept))
 	}
+}
+
+// turnRecipesCover 本请求的全部 shell 配方是否已被本 turn 记住。
+// 不含 trustedRecipes（那是跨会话设置）；复合命令取「每一段都覆盖」。
+func (pw *PermissionWire) turnRecipesCover(req agent.PermissionRequest) bool {
+	recipes := recipesFromPermission(req)
+	if len(recipes) == 0 {
+		return false
+	}
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	for _, r := range recipes {
+		if _, ok := pw.turnRecipes[r]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// rememberTurnApproval 把「本轮同类免审」落到 turnRecipes / turnAlways。
+// 硬边界与 rememberSessionApproval 完全一致；失败不记账由调用方保证（adapter 成功后才调）。
+func (pw *PermissionWire) rememberTurnApproval(kind string, recipes []string) {
+	var kept []string
+	for _, r := range recipes {
+		if agent.RecipeRememberable(r) {
+			kept = append(kept, r)
+		}
+	}
+	turn := pw.currentTurn()
+	pw.mu.Lock()
+	pw.turnN = turn
+	if pw.turnRecipes == nil {
+		pw.turnRecipes = make(map[string]struct{})
+	}
+	for _, r := range kept {
+		pw.turnRecipes[r] = struct{}{}
+	}
+	kindKept := false
+	if kindSessionRememberable(kind) {
+		if pw.turnAlways == nil {
+			pw.turnAlways = make(map[string]struct{})
+		}
+		pw.turnAlways[kind] = struct{}{}
+		kindKept = true
+	}
+	pw.mu.Unlock()
+	if len(kept) > 0 || kindKept {
+		pw.logger.Info("turn auto-pass remembered",
+			zap.String("task", pw.taskID),
+			zap.Int("turn", turn),
+			zap.String("tool_kind", kind),
+			zap.Bool("kind_kept", kindKept),
+			zap.Strings("recipes", kept))
+	}
+}
+
+// ClearTurnMemory 清空本 turn 的同类免审记忆。公开方法，供 TaskRunner 在
+// 新 EventUser / 终态 / Unwire 边界调用。
+func (pw *PermissionWire) ClearTurnMemory() {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	pw.turnAlways = make(map[string]struct{})
+	pw.turnRecipes = make(map[string]struct{})
+	pw.turnN = 0
+}
+
+// currentTurn 当前任务事件流中的 Turn 数（EventUser 条数，1-based 累计；无则 0）。
+func (pw *PermissionWire) currentTurn() int {
+	t, ok := pw.store.Get(pw.taskID)
+	if !ok || t == nil {
+		return 0
+	}
+	return CurrentTurnCount(t.Events)
 }
 
 // recipesFromPermission 从权限请求的 RawInput 抽 shell 配方；无命令文本 → nil。
@@ -613,10 +714,10 @@ func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary
 			Risk:     RiskOfKind(toolKind),
 			Summary:  summary,
 			Segments: append([]model.DecisionSegment(nil), segments...),
-			// approve_session 只在这里出现 = 只有 ACP 路径支持"同类免审"。
-			// hook 路径（claude PreToolUse）的 Resolve 不认这个值，前端按这份列表决定
-			// 长第三个按钮 —— 用 Options 当能力声明，而不是让前端去猜"这是哪条路径"。
-			Options:   []string{"approve", "deny", "approve_session"},
+			// approve_session / approve_turn 只在这里出现 = 只有 ACP 路径支持"同类免审"。
+			// hook 路径（claude PreToolUse）的 Resolve 不认这些值，前端按这份列表决定
+			// 按钮 —— 用 Options 当能力声明，而不是让前端去猜"这是哪条路径"。
+			Options:   []string{"approve", "deny", "approve_session", "approve_turn"},
 			CreatedAt: time.Now(),
 		}
 		applied = true
@@ -641,8 +742,9 @@ func (pw *PermissionWire) setWaitingApproval(reqID, toolTitle, toolKind, summary
 // Resolve 投递用户审批决策。由 M4 的 AgentManager.Intervene 路由调用（ACP 路径）。
 //
 //   - choice="approve"：从记录的 options 选首个 allow（allow_once 优先，次 allow_always）→ adapter.Approve(reqID, optionID)
-//   - choice="approve_session"：同 approve，另外把该请求的 ToolKind 记进本会话免审集合
+//   - choice="approve_session"：同 approve，另外把该请求记进本会话免审集合
 //     （pieqi 侧记账，不写 agent 配置；见 sessionAlways 的注释）
+//   - choice="approve_turn"：同 approve，另外记进本 turn 免审集合（ClearTurnMemory 边界清空）
 //   - choice="deny"：选 reject 选项（reject_once 优先）用 Approve 选中；无 reject 选项则 adapter.Deny（→Cancelled）
 //
 // 成功后 task 回 running（清 CurrentDecision + Publish task_updated），停掉超时定时器。
@@ -778,12 +880,13 @@ func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResul
 	var adapterErr error
 	status := PermResolveApproved
 	switch choice {
-	case "approve", "approve_session", "approve_same":
+	case "approve", "approve_session", "approve_same", "approve_turn":
 		// approve_same：前端在"上一张卡已经批过"的竞态下改投的补偿动作 ——
 		// 那条命令本来就应该放行，只是它的审批请求已经没有载体。pieqi 侧记成
 		// "本会话同类免审"，让 agent 发起的**下一次**同类请求直接通过（不再等人工）。
 		// 这与 approve_session 的落点相同，差别只在语义来源：一个是用户主动授权，
-		// 一个是重放补偿。
+		// 一个是重放补偿。⚠️ approve_same 故意保持 session 作用域，不改成 turn：
+		// 补偿若记 turn，轮末 Clear 后无处兑现。
 		optionID, ok := pickAllowOption(options)
 		if !ok {
 			pw.rememberSettled(decisionID, entry.toolTitle, entry.toolKind, recipes, PermResolveDenied, false)
@@ -793,11 +896,15 @@ func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResul
 		adapterErr = pw.callAdapterApprove(decisionID, optionID)
 		// "同类免审"只在**这次真的放行了**之后记账：approve 失败说明这次没批，
 		// 记下去会让以后同类静默通过。
-		// 注意回给 agent 的仍是 allow_once —— 会话内的免审由 pieqi 自己判，
+		// 注意回给 agent 的仍是 allow_once —— 会话/turn 内的免审由 pieqi 自己判，
 		// agent 侧那份"始终允许"不会被写（理由见 PermissionWire.sessionAlways）。
-		// shell / 宽泛 kind 优先记配方，绝不把 execute 记进 sessionAlways。
+		// shell / 宽泛 kind 优先记配方，绝不把 execute 记进 Always。
 		if adapterErr == nil && choice != "approve" {
-			pw.rememberSessionApproval(toolKind, recipes)
+			if choice == "approve_turn" {
+				pw.rememberTurnApproval(toolKind, recipes)
+			} else {
+				pw.rememberSessionApproval(toolKind, recipes)
+			}
 		}
 	case "deny":
 		status = PermResolveDenied
@@ -819,7 +926,7 @@ func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResul
 		}
 		pw.mu.Unlock()
 		return resolveResult{reqID: decisionID, status: PermResolveMissing},
-			fmt.Errorf("invalid choice %q (want approve/approve_session/approve_same/deny)", choice)
+			fmt.Errorf("invalid choice %q (want approve/approve_session/approve_turn/approve_same/deny)", choice)
 	}
 	if adapterErr != nil {
 		// adapter 拒绝（请求已被另一路解决 / 会话已关）：按已结算处理，让重复点击
@@ -855,20 +962,28 @@ func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResul
 //     同时把真实结论回报给调用方（否则用户会以为批准生效了）。
 //   - 其余（拒绝重投拒绝 / 批过再拒绝）→ 与已发生的结论冲突，只记日志不改状态。
 func (pw *PermissionWire) redeliverSettled(decisionID, choice string, settled *settledPerm) (resolveResult, error) {
-	wantApprove := choice == "approve" || choice == "approve_session" || choice == "approve_same"
+	wantApprove := choice == "approve" || choice == "approve_session" || choice == "approve_same" || choice == "approve_turn"
 	switch {
 	case settled.kind == PermResolveApproved && choice == "approve_same":
 		// 已批过 + 前端改投 approve_same：这是**用户第二次表达"允许"**，而它唯一的
 		// 可兑现效果就是"以后同类直接过"（那条 RequestPermission 早已返回，没有载体）。
 		// 这一步不能省成"什么都不做"：省掉它，用户点两次批准后得到的只有一张消失的卡，
 		// 而 agent 下一次同类操作照样弹卡 —— 从用户视角看，就是"批了没用"。
+		// 补偿故意记 session（不是 turn）：轮末 Clear 后仍要能兑现。
 		pw.rememberSessionApproval(settled.toolKind, settled.recipes)
+		return resolveResult{reqID: decisionID, status: PermResolveApproved}, nil
+	case settled.kind == PermResolveApproved && choice == "approve_turn":
+		pw.rememberTurnApproval(settled.toolKind, settled.recipes)
 		return resolveResult{reqID: decisionID, status: PermResolveApproved}, nil
 	case settled.kind == PermResolveApproved && wantApprove:
 		// 已批准：重复投递不会再驱动一次执行，直接回"已经批过了"。
 		return resolveResult{reqID: decisionID, status: PermResolveApproved}, nil
+	case settled.kind == PermResolveDenied && choice == "approve_turn":
+		pw.rememberTurnApproval(settled.toolKind, settled.recipes)
+		return resolveResult{reqID: decisionID, status: PermResolveDenied}, nil
 	case settled.kind == PermResolveDenied && wantApprove:
 		// 已拒绝：没有载体可补，改记同类免审（下一次同类请求自动通过）。
+		// approve_same / approve_session / approve 补偿仍记 session。
 		pw.rememberSessionApproval(settled.toolKind, settled.recipes)
 		return resolveResult{reqID: decisionID, status: PermResolveDenied}, nil
 	default:
@@ -1119,6 +1234,10 @@ func (pw *PermissionWire) Unwire() {
 	pw.pending = make(map[string]*permPending)
 	pw.queue = nil
 	pw.displayed = ""
+	// turn 记忆随 Unwire 一并作废（会话销毁）。
+	pw.turnAlways = make(map[string]struct{})
+	pw.turnRecipes = make(map[string]struct{})
+	pw.turnN = 0
 	// settled **不在这里清**：拆卸后同一进程里仍可能有卡片残留（前端还没收到
 	// task_updated），此时点下去应当得到"这次的审批随会话结束了"，而不是 no pending。
 	// settled 本身有界（settledMax），随 wire 一起被 GC。

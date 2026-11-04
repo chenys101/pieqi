@@ -225,8 +225,8 @@ func TestWirePermission_RequestTriggersWaitingInput(t *testing.T) {
 	if cd.Summary != "Bash" {
 		t.Errorf("decision.Summary=%q, want 原样 title", cd.Summary)
 	}
-	// approve_session 出现在 Options 里 = 告诉前端"这条路径支持同类免审"。
-	wantOpts := []string{"approve", "deny", "approve_session"}
+	// approve_session / approve_turn 出现在 Options 里 = 告诉前端"这条路径支持同类免审"。
+	wantOpts := []string{"approve", "deny", "approve_session", "approve_turn"}
 	if len(cd.Options) != len(wantOpts) {
 		t.Fatalf("decision.Options=%v, want %v", cd.Options, wantOpts)
 	}
@@ -1399,5 +1399,113 @@ func TestForceClearDecision_ClearsStaleCard(t *testing.T) {
 	tt, _ := store.Get(taskID)
 	if tt.CurrentDecision != nil || tt.Status != model.TaskRunning {
 		t.Fatalf("after clear: status=%q decision=%+v", tt.Status, tt.CurrentDecision)
+	}
+}
+
+// seedTurnEvent 往任务事件流追加一条 EventUser，使 CurrentTurnCount >= 1（approve_turn 日志用）。
+func seedTurnEvent(t *testing.T, store *TaskStore, taskID string) {
+	t.Helper()
+	_, err := store.Update(taskID, func(tk *model.Task) bool {
+		store.AppendEvent(tk, model.TaskEvent{Type: model.EventUser, Text: "seed turn"})
+		return true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWirePermission_ApproveTurnSameTurnHit 本轮同类免审后，同 turn 内同类自动放行。
+func TestWirePermission_ApproveTurnSameTurnHit(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+	seedTurnEvent(t, store, taskID)
+
+	fa.emitPerm(permReqCmd("req-t1", "pwsh", "execute", "curl -s http://127.0.0.1:3000/api/tasks", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-t1", "approve_turn"); err != nil {
+		t.Fatalf("resolve approve_turn: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+	if fa.approveCount() != 1 {
+		t.Fatalf("approveCount=%d, want 1", fa.approveCount())
+	}
+
+	// 同配方第二次：本 turn 内免审。
+	fa.emitPerm(permReqCmd("req-t2", "pwsh", "execute", "curl -s -o NUL http://127.0.0.1:3000/ready", standardOptions()))
+	if fa.approveCount() != 2 {
+		t.Fatalf("approveCount=%d, want 2（同 turn 同配方应免审）", fa.approveCount())
+	}
+	if tt, _ := store.Get(taskID); tt.Status != model.TaskRunning {
+		t.Fatalf("status=%q, want running", tt.Status)
+	}
+}
+
+// TestWirePermission_ApproveTurnClearCrossTurnMiss ClearTurnMemory 后不再免审（模拟新 turn）。
+func TestWirePermission_ApproveTurnClearCrossTurnMiss(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+	seedTurnEvent(t, store, taskID)
+
+	fa.emitPerm(permReqCmd("req-c1", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-c1", "approve_turn"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+
+	pw.ClearTurnMemory()
+
+	fa.emitPerm(permReqCmd("req-c2", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if fa.approveCount() != 1 {
+		t.Fatalf("approveCount=%d, want 1（ClearTurnMemory 后不得免审）", fa.approveCount())
+	}
+}
+
+// TestWirePermission_ApproveTurnHardBoundaryDelete 硬边界删除类不得记入 turn 记忆。
+func TestWirePermission_ApproveTurnHardBoundaryDelete(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+	seedTurnEvent(t, store, taskID)
+
+	fa.emitPerm(permReqCmd("req-rm", "pwsh", "execute", "Remove-Item -Recurse -Force build", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-rm", "approve_turn"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+
+	fa.emitPerm(permReqCmd("req-curl", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if fa.approveCount() != 1 {
+		t.Fatalf("approveCount=%d, want 1（删除类 turn 免审不得放行其它 execute）", fa.approveCount())
+	}
+}
+
+// TestWirePermission_ApproveTurnNoLeakToSession approve_turn 不得写入 session 记忆。
+func TestWirePermission_ApproveTurnNoLeakToSession(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+	seedTurnEvent(t, store, taskID)
+
+	fa.emitPerm(permReq("req-e1", "Write", "edit", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-e1", "approve_turn"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+
+	// 同 turn：edit 应免审（turnAlways）。
+	fa.emitPerm(permReq("req-e2", "Write", "edit", standardOptions()))
+	if fa.approveCount() != 2 {
+		t.Fatalf("approveCount=%d, want 2（同 turn edit 应免审）", fa.approveCount())
+	}
+
+	// 清 turn 记忆后：不得因误写 sessionAlways 而继续免审。
+	pw.ClearTurnMemory()
+	fa.emitPerm(permReq("req-e3", "Write", "edit", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if fa.approveCount() != 2 {
+		t.Fatalf("approveCount=%d, want 2（turn 记忆不得泄漏到 session）", fa.approveCount())
 	}
 }
