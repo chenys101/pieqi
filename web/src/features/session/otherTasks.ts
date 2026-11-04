@@ -35,3 +35,17 @@ export function otherRunningTasks(tasks: readonly Task[], currentTaskId: string)
       return rank !== 0 ? rank : timestamp(b.updatedAt) - timestamp(a.updatedAt)
     })
 }
+
+/**
+ * 当前任务之外、正在等你决策的条数（顶栏「其他任务」角标的待办分量）。
+ *
+ * 与 otherRunningTasks 同源过滤：排除当前会话，只计 waiting_input。
+ * 顶栏复用这条通道，不另造通知体系（ac2）。
+ */
+export function otherWaitingCount(tasks: readonly Task[], currentTaskId: string): number {
+  let n = 0
+  for (const t of tasks) {
+    if (t.id !== currentTaskId && t.status === 'waiting_input') n++
+  }
+  return n
+}

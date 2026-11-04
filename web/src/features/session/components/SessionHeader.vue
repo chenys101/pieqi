@@ -30,7 +30,7 @@ import ContentColumn from '@/components/layout/ContentColumn.vue'
 import UsageBadge from './UsageBadge.vue'
 import SessionStatusPopover from './SessionStatusPopover.vue'
 import SessionOtherTasksPopover from './SessionOtherTasksPopover.vue'
-import { otherRunningTasks } from '../otherTasks'
+import { otherRunningTasks, otherWaitingCount } from '../otherTasks'
 import type { Task } from '@/types/task'
 import { STATUS_DOT, STATUS_LABELS, shortId } from '@/utils/format'
 import { timeAgo } from '@/utils/date'
@@ -96,6 +96,8 @@ const statusDotRing = computed(() => (props.task.status === 'waiting_input' ? 'r
 const otherTasks = computed(() => otherRunningTasks(taskStore.tasks, props.task.id))
 const visibleOtherTasks = computed(() => otherTasks.value.slice(0, 3))
 const otherCount = computed(() => otherTasks.value.length)
+/** 非当前会话的待决策条数 —— 顶栏待办角标（ac2，复用 other-tasks 通道） */
+const waitingElsewhere = computed(() => otherWaitingCount(taskStore.tasks, props.task.id))
 /** 按钮里放两位数没问题；100 个以上才收成 99+（不要一过 9 就把 18 伪装成 9+） */
 const otherCountLabel = computed(() => (otherCount.value > 99 ? '99+' : String(otherCount.value)))
 
@@ -201,15 +203,24 @@ function goBack() {
             </button>
           </div>
 
-          <!-- 其他任务：描边圆 + 堆叠图标 + 数量；下拉只列任务，不混状态详情 -->
+          <!-- 其他任务：描边圆 + 堆叠图标 + 数量；有待决策时转警告色（顶栏待办计数） -->
           <button
             v-if="otherCount"
-            class="flex h-7 w-7 shrink-0 items-center justify-center gap-0.5 rounded-full border border-border bg-surface-subtle text-muted transition-colors hover:border-border-strong hover:bg-elevated hover:text-text"
-            :aria-label="`其他运行中任务（${otherCount} 个）`"
+            class="relative flex h-7 w-7 shrink-0 items-center justify-center gap-0.5 rounded-full border transition-colors"
+            :class="
+              waitingElsewhere
+                ? 'border-warning/50 bg-warning/10 text-warning hover:border-warning hover:bg-warning/15'
+                : 'border-border bg-surface-subtle text-muted hover:border-border-strong hover:bg-elevated hover:text-text'
+            "
+            :aria-label="
+              waitingElsewhere
+                ? `其他运行中任务（${otherCount} 个，其中 ${waitingElsewhere} 项待决策）`
+                : `其他运行中任务（${otherCount} 个）`
+            "
             :aria-expanded="openPopover === 'tasks'"
             aria-haspopup="dialog"
             data-testid="session-tasks"
-            title="其他运行中任务"
+            :title="waitingElsewhere ? `其他任务 · ${waitingElsewhere} 项待决策` : '其他运行中任务'"
             @click.stop="togglePopover('tasks')"
           >
             <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -217,7 +228,12 @@ function goBack() {
               <rect x="6" y="11" width="12" height="4" rx="1.5" />
               <rect x="8" y="17" width="8" height="4" rx="1.5" />
             </svg>
-            <span class="text-[8px] font-bold tabular-nums">{{ otherCountLabel }}</span>
+            <span class="text-[8px] font-bold tabular-nums" data-testid="session-tasks-count">{{ otherCountLabel }}</span>
+            <span
+              v-if="waitingElsewhere"
+              class="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-warning px-0.5 text-[8px] font-bold leading-none text-white"
+              data-testid="session-pending-count"
+            >{{ waitingElsewhere > 99 ? '99+' : waitingElsewhere }}</span>
           </button>
 
           <!-- 新建任务：accent 实心圆 + 加号（从底栏上移） -->
