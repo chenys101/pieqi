@@ -15,6 +15,7 @@ import { useSessionStore } from '@/stores/session'
 import { useSidebarStore } from '@/stores/sidebar'
 import { useTaskStore } from '@/stores/task'
 import { useTaskTreeStore } from '@/stores/taskTree'
+import { useApprovalStore } from '@/stores/approval'
 import { useNotificationStore } from '@/stores/notification'
 import type { Task, TaskGroup } from '@/types/task'
 import { TASKS_PER_PROJECT } from '@/features/task'
@@ -27,7 +28,12 @@ const sessionStore = useSessionStore()
 const sidebar = useSidebarStore()
 const taskStore = useTaskStore()
 const tree = useTaskTreeStore()
+const approvalStore = useApprovalStore()
 const notify = useNotificationStore()
+
+/** 全局待决策条数（侧栏「仪表盘」角标；与 BottomNav 首页圆点同源 approvalStore.pending） */
+const pendingCount = computed(() => approvalStore.pending.length)
+const pendingCountLabel = computed(() => (pendingCount.value > 99 ? '99+' : String(pendingCount.value)))
 
 /** 当前会话 id（/sessions/:id），用于自动展开所在项目 */
 const currentSessionId = computed(() => route.path.match(/^\/sessions\/([^/]+)/)?.[1] ?? null)
@@ -161,10 +167,19 @@ async function doDelete(id: string) {
       <nav class="space-y-0.5">
         <RouterLink
           to="/dashboard"
-          class="block rounded-lg px-3 py-2 text-sm transition-colors"
+          class="flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm transition-colors"
           :class="route.path.startsWith('/dashboard') ? 'bg-elevated font-medium text-text' : 'text-muted hover:bg-elevated/60 hover:text-text'"
+          data-testid="sidebar-dashboard"
+          :aria-label="pendingCount ? `仪表盘（${pendingCount} 项待决策）` : '仪表盘'"
         >
-          仪表盘
+          <span>仪表盘</span>
+          <!-- 待办计数（ac2）：非当前会话时也能看见有审批在等；点进仪表盘就是待审批组。
+               不另开「审批」导航项 —— SPEC §2.1 仍是仪表盘承接行动面。 -->
+          <span
+            v-if="pendingCount"
+            class="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-warning px-1.5 text-[11px] font-semibold tabular-nums text-white"
+            data-testid="sidebar-pending-count"
+          >{{ pendingCountLabel }}</span>
         </RouterLink>
         <RouterLink
           to="/requirements"
@@ -174,10 +189,6 @@ async function doDelete(id: string) {
         >
           需求
         </RouterLink>
-        <!-- 没有「审批」项：SPEC §2.1 的侧栏是 3 项 + 1 分组，且已无独立审批中心。
-             审批收敛为「仪表盘待审批组 + Session 内联决策」—— 决策必须发生在它的上下文里
-             （批准一条 Bash 命令时要看得见它在改哪个项目的哪个文件），独立页做不到这点。
-             待审批的**计数**没丢：它在仪表盘（首页）那一块，而不是挪到导航项上。 -->
       </nav>
       <!-- 落点见 newTaskTarget：在详情页上时带上该任务的项目（桌面/平板没有头部的
            那枚「新建任务」，这枚就是它们唯一的入口，所以上下文必须由它承接）。 -->

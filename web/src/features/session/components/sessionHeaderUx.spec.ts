@@ -133,6 +133,52 @@ describe('需求 2：中止入口唯一', () => {
     expect(header.host.textContent).not.toContain('状态与任务')
   })
 
+  it('移动端顶栏：非当前会话有 waiting_input 时显示待办角标', async () => {
+    const { createPinia, setActivePinia } = await import('pinia')
+    const { useTaskStore } = await import('@/stores/task')
+    // 单独 pinia：把"其他会话待决策"塞进 task store，再挂 compact 头。
+    document.body.innerHTML = ''
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useTaskStore().applySnapshot([
+      {
+        ...baseTask,
+        id: 'other',
+        status: 'waiting_input',
+        decision: {
+          id: 'd1',
+          taskId: 'other',
+          kind: 'approval',
+          tool: 'Bash',
+          summary: 'ls',
+          options: ['approve', 'deny'],
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      } as unknown as Task,
+      { ...baseTask, id: 't1', status: 'running' } as unknown as Task,
+    ])
+
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const { createApp, h } = await import('vue')
+    const app = createApp({
+      render: () =>
+        h(SessionHeader, {
+          task: { ...baseTask, id: 't1', status: 'running' } as unknown as Task,
+          canCancel: true,
+          compact: true,
+        }),
+    })
+    app.use(pinia)
+    app.mount(host)
+    await nextTick()
+
+    expect(host.querySelector('[data-testid="session-tasks"]')).not.toBeNull()
+    const badge = host.querySelector('[data-testid="session-pending-count"]')
+    expect(badge).not.toBeNull()
+    expect(badge!.textContent).toBe('1')
+  })
+
   it('运行中的中止入口只剩输入框那一枚（emit cancel 一次）', () => {
     // 头部：**不点击**返回/删除（它们各自要 router / emit，与本用例无关），
     // 只收集"能触发中止"的按钮 —— 判据是 title 文案里有没有「中止」。

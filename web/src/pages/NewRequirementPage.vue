@@ -1,10 +1,17 @@
 <script setup lang="ts">
+// 新建需求页。
+//
+// **返回箭头只在移动端（compact / isMobile）渲染**（V2.0.1 ac3）：
+// 桌面侧栏已是导航，再挂箭头会叠成「双返回」；窄屏无侧栏才需要 ←。
+// 判据对齐 AppLayout：`useResponsive().isMobile`（≤768），与 Session 页
+// 「侧栏=导航、compact=移动返回」心智一致——本页不扩改 SessionHeader。
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Textarea from '@/components/ui/Textarea.vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { createRequirement } from '@/services/api/requirements'
 import { getSettings } from '@/services/api/settings'
 import { useNotificationStore } from '@/stores/notification'
@@ -12,6 +19,7 @@ import { useNotificationStore } from '@/stores/notification'
 const props = withDefaults(defineProps<{ initialProjectPath?: string }>(), { initialProjectPath: '' })
 const router = useRouter()
 const notify = useNotificationStore()
+const { isMobile } = useResponsive()
 
 const title = ref('')
 const body = ref('')
@@ -67,9 +75,13 @@ async function submit() {
     <header class="border-b border-border bg-surface/60 px-3 py-2.5 md:px-4">
       <ContentColumn :resizable="false">
         <div class="flex items-center gap-2">
+          <!-- 桌面不渲染：侧栏已承担导航；窄屏保留 ← → /requirements -->
           <button
+            v-if="isMobile"
             class="rounded-md px-1.5 py-1 text-muted hover:bg-elevated hover:text-text"
+            title="返回"
             aria-label="返回"
+            data-testid="new-requirement-back"
             @click="router.push('/requirements')"
           >
             <svg viewBox="0 0 24 24" class="h-4 w-4" aria-hidden="true">
