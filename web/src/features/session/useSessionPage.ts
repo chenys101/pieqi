@@ -35,8 +35,18 @@ export function useSessionPage(taskId: ComputedRef<string>) {
   const notify = useNotificationStore()
 
   const viewing = computed(() => artifactsStore.viewing)
-  const { task, canCancel, canSendPrompt, submitPrompt, cancel, approve, approveSession, deny, consumeForceScroll } =
-    useSession(taskId)
+  const {
+    task,
+    canCancel,
+    canSendPrompt,
+    submitPrompt,
+    cancel,
+    approve,
+    approveTurn,
+    approveSession,
+    deny,
+    consumeForceScroll,
+  } = useSession(taskId)
 
   /**
    * 续问可选的模型：按任务自己的 agent 拉清单（store 内幂等 + 失败可重试）。
@@ -318,6 +328,7 @@ export function useSessionPage(taskId: ComputedRef<string>) {
   }
 
   const onApprove = () => runDecision(approve)
+  const onApproveTurn = () => runDecision(approveTurn)
   const onApproveSession = () => runDecision(approveSession)
   const onDeny = () => runDecision(deny)
 
@@ -353,6 +364,7 @@ export function useSessionPage(taskId: ComputedRef<string>) {
     decision,
     approvalBusy,
     onApprove,
+    onApproveTurn,
     onApproveSession,
     onDeny,
     loadError,

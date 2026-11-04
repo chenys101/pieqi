@@ -18,6 +18,13 @@ export function isAlreadySettled(err: unknown): boolean {
   return msg.includes('已经处理过') || msg.includes('already resolved')
 }
 
+/** 可见的"允许"类 choice：已结算时一律改投 approve_same（session 补偿，不改 turn）。 */
+const APPROVE_LIKE: ReadonlySet<ApprovalChoice> = new Set([
+  'approve',
+  'approve_turn',
+  'approve_session',
+])
+
 export const useApprovalStore = defineStore('approval', {
   getters: {
     /** 全部待决策：从 Task Store 实时派生 */
@@ -71,7 +78,8 @@ export const useApprovalStore = defineStore('approval', {
         // 已结算的卡片：用户的意图仍然是"允许这条"，只是它的审批请求已经没有载体。
         // 改投 approve_same：后端据此把这个工具类别记成本会话免审，下一个同类请求
         // 直接通过（否则那条命令永远没机会跑，而用户以为已经批准了）。
-        if (isAlreadySettled(err) && (choice === 'approve' || choice === 'approve_session')) {
+        // ⚠️ 含 approve_turn：补偿故意仍记 session，不改成 turn（轮末清空后无处兑现）。
+        if (isAlreadySettled(err) && APPROVE_LIKE.has(choice)) {
           await tasksApi.intervene(taskId, { kind: 'decision', decisionId, choice: 'approve_same' })
         } else {
           throw err
@@ -85,6 +93,16 @@ export const useApprovalStore = defineStore('approval', {
     /** 批准这一次（approve） */
     async approve(taskId: string) {
       await this.resolve(taskId, 'approve')
+    },
+
+    /**
+     * 批准 + 本 turn 内同类操作免审（approve_turn）。
+     *
+     * 与 approve_session 同形、作用域更短：新用户消息 / 轮末清空。
+     * 可用性由后端在 Decision.options 里声明（仅 ACP）。
+     */
+    async approveTurn(taskId: string) {
+      await this.resolve(taskId, 'approve_turn')
     },
 
     /**

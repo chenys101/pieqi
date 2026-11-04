@@ -42,8 +42,25 @@ describe('ApprovalBanner · 该审必见', () => {
     const root = host.querySelector('[data-testid="approval-banner"]')
     expect(root).not.toBeNull()
     expect(host.textContent).toContain('需决策：Bash')
-    expect(host.textContent).toContain('批准')
+    expect(host.textContent).toContain('允许一次')
     expect(host.textContent).toContain('拒绝')
+  })
+
+  it('options 含 turn/session 时露出「本轮 / 本会话」按钮，文案不混淆', async () => {
+    vi.spyOn(console, 'info').mockImplementation(() => {})
+    const { host } = mount({
+      decision: decision({
+        options: ['approve', 'deny', 'approve_turn', 'approve_session'],
+      }),
+    })
+    await nextTick()
+    expect(host.querySelector('[data-testid="banner-approve-turn"]')!.textContent).toContain(
+      '本轮同类免审',
+    )
+    expect(host.querySelector('[data-testid="banner-approve-session"]')!.textContent).toContain(
+      '本会话同类免审',
+    )
+    expect(host.textContent).not.toContain('批准·同类免审')
   })
 
   it('挂载时滚动锚定 + decision_rendered 对照日志', async () => {

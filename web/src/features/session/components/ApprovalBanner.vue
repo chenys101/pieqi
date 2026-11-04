@@ -13,7 +13,7 @@ import { anchorDecisionEntry, logDecisionRendered } from '../decisionReveal'
 import type { ApprovalRequest } from '@/types/approval'
 
 const props = defineProps<{ decision: ApprovalRequest; loading?: boolean }>()
-const emit = defineEmits<{ approve: []; approveSession: []; deny: [] }>()
+const emit = defineEmits<{ approve: []; approveTurn: []; approveSession: []; deny: [] }>()
 
 /** 前瞻性 Diff 展开/收起（不展开不请求） */
 const showDiff = ref(false)
@@ -21,10 +21,11 @@ const showDiff = ref(false)
 const rootEl = ref<HTMLElement | null>(null)
 
 /**
- * 「同类免审」只在后端声明支持时出现 —— 动作集是后端的能力声明，不是前端的选项。
- * hook 路径（claude PreToolUse）的 Decision.options 不带 approve_session，
+ * 「本轮 / 本会话同类免审」只在后端声明支持时出现 —— 动作集是后端的能力声明，不是前端的选项。
+ * hook 路径（claude PreToolUse）的 Decision.options 不带 approve_turn / approve_session，
  * 那儿批准的含义只有"这一次"，多给一个按钮就是承诺一个后端不会兑现的行为。
  */
+const canApproveTurn = computed(() => props.decision.options.includes('approve_turn'))
 const canApproveSession = computed(() => props.decision.options.includes('approve_session'))
 
 function reveal() {
@@ -54,15 +55,26 @@ watch(() => props.decision.id, reveal)
       <ApprovalDiffCard v-if="showDiff" :task-id="decision.taskId" :decision-id="decision.id" />
 
       <div class="mt-3 flex flex-wrap gap-2">
-        <Button variant="primary" size="sm" :loading="loading" @click="emit('approve')">✓ 批准</Button>
+        <Button variant="primary" size="sm" :loading="loading" @click="emit('approve')">✓ 允许一次</Button>
+        <Button
+          v-if="canApproveTurn"
+          variant="secondary"
+          size="sm"
+          :disabled="loading"
+          data-testid="banner-approve-turn"
+          @click="emit('approveTurn')"
+        >
+          本轮同类免审
+        </Button>
         <Button
           v-if="canApproveSession"
           variant="secondary"
           size="sm"
           :disabled="loading"
+          data-testid="banner-approve-session"
           @click="emit('approveSession')"
         >
-          批准·同类免审
+          本会话同类免审
         </Button>
         <Button variant="danger" size="sm" :disabled="loading" @click="emit('deny')">✗ 拒绝</Button>
         <Button variant="ghost" size="sm" :disabled="loading" @click="showDiff = !showDiff">

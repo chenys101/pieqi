@@ -34,6 +34,7 @@ const {
   decision,
   approvalBusy,
   onApprove,
+  onApproveTurn,
   onApproveSession,
   onDeny,
   loadError,
@@ -116,6 +117,7 @@ const {
                   :decision="decision"
                   :loading="approvalBusy"
                   @approve="onApprove"
+                  @approve-turn="onApproveTurn"
                   @approve-session="onApproveSession"
                   @deny="onDeny"
                 />

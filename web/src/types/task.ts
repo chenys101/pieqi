@@ -126,7 +126,7 @@ export interface TaskIntervention {
   taskId: string
   /** "decision"（审批） | "append_prompt"（续问） */
   kind: string
-  /** "approve" | "approve_session" | "deny"（仅 decision） */
+  /** "approve" | "approve_turn" | "approve_session" | "approve_same" | "deny"（仅 decision） */
   choice?: string
   text?: string
   /** 来源渠道（im/http/cli） */

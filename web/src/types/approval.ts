@@ -1,20 +1,28 @@
-// Approval 模型（方案 §9.4）。
+// Approval 模型（方案 §9.4 / V2.0.1 单 turn 免审）。
 // 动作集由**后端在 Decision.options 里声明**（见下），前端不猜路径：
 //   approve / deny                —— 两条审批路径（ACP 与 claude PreToolUse hook）都有
-//   approve_session               —— 仅 ACP 路径：本会话内同类免审
+//   approve_turn                  —— 仅 ACP：本 turn 内同类免审（新用户消息 / 轮末清空）
+//   approve_session               —— 仅 ACP：本会话内同类免审
 //     · shell / execute：按命令配方（go test、curl…）记，不放行整档 execute
 //     · edit/move/read 等细粒度 kind：仍按 ToolKind 记
 // ACP 的 allow_always **刻意不透传**：那会把"以后都不用问"写进 agent 自己的配置，
 // 之后 agent 不再发 RequestPermission，后端的 L2/L3 硬边界就失去拦截点。
-// 会话级免审由后端记账（不落盘、随会话销毁），见 sessionAlways + sessionRecipes。
+// 会话/turn 级免审由后端记账（不落盘、随会话销毁），见 sessionAlways / turnAlways。
 
 //   approve_same                  —— 后端的**补偿动作**：这张卡的审批请求已经有结论
 //     （已批准/已拒绝/已被新卡顶掉），再投"批"没有载体。approve_same 的语义是
 //     "这条本来就应该放行，把命令配方/细粒度 kind 记成本会话免审"。
-//     它**不出现在按钮上**，只在"用户点允许、后端回报已结算"时由 approve() 自动改投。
+//     它**不出现在按钮上**，只在用户点「允许 / 本轮 / 本会话」、后端回报已结算时
+//     由 store 自动改投。⚠️ 补偿故意保持 **session** 作用域，不改成 turn：
+//     轮末 turn 记忆会清空，记 turn 等于补偿无处兑现。
 //     为什么要这个动作：ACP 的 RequestPermission 一旦返回就无法再被放行，用户看到的是
 //     "我批了，但那条命令没跑" —— 补偿到"同类免审"才有可兑现的效果。
-export type ApprovalChoice = 'approve' | 'approve_session' | 'approve_same' | 'deny'
+export type ApprovalChoice =
+  | 'approve'
+  | 'approve_turn'
+  | 'approve_session'
+  | 'approve_same'
+  | 'deny'
 
 /** 审批风险分级。等级由**后端**判定（复用 riskLevelKinds），前端不自己算 —— 见 riskOf()。 */
 export type RiskLevel = 'L0' | 'L1' | 'L2' | 'L3'

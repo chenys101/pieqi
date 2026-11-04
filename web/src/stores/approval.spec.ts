@@ -5,7 +5,8 @@
 // 这一层的判据很窄但很硬：
 //   ① 提交时必须是 **store 里此刻**的那条 id，不是调用方手里的旧值；
 //   ② 卡已经不在了（别处已批 / 任务已推进）→ 一个请求都不发；
-//   ③ 后端回"已经处理过了" → 改投 approve_same，把同意兑现成同类免审；
+//   ③ 后端回"已经处理过了" → 改投 approve_same，把同意兑现成**会话**同类免审
+//      （含 approve_turn：补偿故意不记 turn，轮末清空后仍能兑现）；
 //   ④ 其余失败必须抛出去（调用方要 notify），不能被吞掉。
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -49,7 +50,7 @@ function decision(id: string) {
     tool: 'pwsh',
     risk: 'L2' as const,
     summary: 'pwsh：git status',
-    options: ['approve', 'deny', 'approve_session'],
+    options: ['approve', 'deny', 'approve_turn', 'approve_session'],
     createdAt: '2026-10-23T00:00:00Z',
   }
 }
@@ -125,6 +126,54 @@ describe('ApprovalStore', () => {
     expect(intervene.mock.calls[1][1]).toMatchObject({ decisionId: 'req-dup', choice: 'approve_same' })
     // 成功收尾后本地清态（卡不该继续挂在界面上）
     expect(taskStore.byId('t1')?.decision).toBeUndefined()
+  })
+
+  it('approve_turn 正常投递 choice=approve_turn', async () => {
+    const s = useApprovalStore()
+    const taskStore = useTaskStore()
+    taskStore.upsertTask(task({ decision: decision('req-turn') }))
+    getTask.mockResolvedValue(task({ decision: decision('req-turn') }))
+
+    await s.approveTurn('t1')
+
+    expect(intervene).toHaveBeenCalledWith('t1', {
+      kind: 'decision',
+      decisionId: 'req-turn',
+      choice: 'approve_turn',
+    })
+  })
+
+  it('approve_turn 遇到已结算 → 仍改投 approve_same（补偿记 session，不记 turn）', async () => {
+    const s = useApprovalStore()
+    const taskStore = useTaskStore()
+    taskStore.upsertTask(task({ decision: decision('req-turn-dup') }))
+    getTask.mockResolvedValue(task({ decision: decision('req-turn-dup') }))
+    intervene
+      .mockRejectedValueOnce(new Error('审批 req-turn-dup 已经处理过了（那张卡是旧的）'))
+      .mockResolvedValueOnce(undefined)
+
+    await s.approveTurn('t1')
+
+    expect(intervene).toHaveBeenCalledTimes(2)
+    expect(intervene.mock.calls[0][1]).toMatchObject({ choice: 'approve_turn' })
+    expect(intervene.mock.calls[1][1]).toMatchObject({
+      decisionId: 'req-turn-dup',
+      choice: 'approve_same',
+    })
+  })
+
+  it('approve_session 遇到已结算 → 改投 approve_same', async () => {
+    const s = useApprovalStore()
+    const taskStore = useTaskStore()
+    taskStore.upsertTask(task({ decision: decision('req-sess') }))
+    getTask.mockResolvedValue(task({ decision: decision('req-sess') }))
+    intervene
+      .mockRejectedValueOnce(new Error('审批 req-sess 已经处理过了（那张卡是旧的）'))
+      .mockResolvedValueOnce(undefined)
+
+    await s.approveSession('t1')
+
+    expect(intervene.mock.calls[1][1]).toMatchObject({ choice: 'approve_same' })
   })
 
   it('其他失败必须抛出去（调用方要 notify，不能静默吞掉）', async () => {

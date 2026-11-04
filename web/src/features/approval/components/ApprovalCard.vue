@@ -66,16 +66,33 @@ const tone = computed(() => TONE[risk.value])
 const needsConfirm = computed(() => risk.value === 'L3')
 /**
  * 被 L3 确认条拦下来的那个允许动作；null = 没有在确认中。
- * 只可能是两个"可见的允许"按钮 —— approve_same 是补偿动作，不出现在按钮上
+ * 只可能是可见的允许按钮 —— approve_same 是补偿动作，不出现在按钮上
  * （见 types/approval.ts），所以这里的联合类型刻意不含它。
  */
-const pending = ref<'approve' | 'approve_session' | null>(null)
+const pending = ref<'approve' | 'approve_turn' | 'approve_session' | null>(null)
 
-/** act 只接"看得见的按钮"对应的三种 choice（approve_same 由 store 内部改投） */
+/** act 只接"看得见的按钮"对应的 choice（approve_same 由 store 内部改投） */
 type ButtonChoice = Exclude<ApprovalChoice, 'approve_same'>
 
-/** 「同类免审」由后端在 options 里声明可用（只有 ACP 路径带） */
+/** 「本轮 / 本会话同类免审」由后端在 options 里声明可用（只有 ACP 路径带） */
+const canApproveTurn = computed(() => props.approval.options.includes('approve_turn'))
 const canApproveSession = computed(() => props.approval.options.includes('approve_session'))
+
+function confirmTitle(kind: NonNullable<typeof pending.value>): string {
+  if (kind === 'approve_turn') return '确认允许，并让同类命令本轮免审？'
+  if (kind === 'approve_session') return '确认允许，并让同类命令本会话免审？'
+  return '此操作不可逆，确认允许？'
+}
+
+function confirmHint(kind: NonNullable<typeof pending.value>): string {
+  if (kind === 'approve_turn') {
+    return '批准后立即执行；本轮内相同命令配方（如 go test / curl）不再询问，新一轮提问后需重新授权。删除、推送、装依赖等硬边界仍会弹卡。'
+  }
+  if (kind === 'approve_session') {
+    return '批准后立即执行；本任务内相同命令配方（如 go test / curl）不再询问。删除、推送、装依赖等硬边界仍会弹卡。'
+  }
+  return '批准后立即执行，无法撤回。'
+}
 
 async function act(kind: ButtonChoice) {
   if (kind !== 'deny' && needsConfirm.value && pending.value === null) {
@@ -87,6 +104,7 @@ async function act(kind: ButtonChoice) {
   try {
     const taskId = props.approval.taskId
     if (kind === 'approve') await approvalStore.approve(taskId)
+    else if (kind === 'approve_turn') await approvalStore.approveTurn(taskId)
     else if (kind === 'approve_session') await approvalStore.approveSession(taskId)
     else await approvalStore.deny(taskId)
   } catch (err) {
@@ -100,7 +118,7 @@ async function act(kind: ButtonChoice) {
 </script>
 
 <template>
-  <div class="rounded-lg border p-4" :class="tone.box">
+  <div class="rounded-lg border p-4" data-testid="approval-card" :class="tone.box">
     <div class="flex items-start justify-between gap-2">
       <div class="flex items-center gap-2">
         <span class="text-sm font-medium" :class="tone.head">{{ tone.title }}</span>
@@ -132,20 +150,16 @@ async function act(kind: ButtonChoice) {
     <div
       v-if="pending"
       class="mt-3 rounded border border-error/40 bg-error/5 px-3 py-2"
+      data-testid="approval-l3-confirm"
     >
       <div class="text-xs font-medium text-error">
-        {{ pending === 'approve_session' ? '确认允许，并让同类命令本会话免审？' : '此操作不可逆，确认允许？' }}
+        {{ confirmTitle(pending) }}
       </div>
       <div class="mt-0.5 text-[11.5px] text-muted">
-        <template v-if="pending === 'approve_session'">
-          批准后立即执行；本任务内相同命令配方（如 go test / curl）不再询问。删除、推送、装依赖等硬边界仍会弹卡。
-        </template>
-        <template v-else>
-          批准后立即执行，无法撤回。
-        </template>
+        {{ confirmHint(pending) }}
       </div>
       <div class="mt-2 flex gap-2">
-        <!-- act(pending)：模板里 pending 已收窄为 'approve' | 'approve_session'（非 deny），
+        <!-- act(pending)：模板里 pending 已收窄为允许类（非 deny），
              与 ButtonChoice 对应；不用非空断言，让类型检查替我守住这条不变量 -->
         <Button variant="danger" size="sm" :loading="loading === pending" @click="act(pending)">确认允许</Button>
         <Button variant="ghost" size="sm" @click="pending = null">取消</Button>
@@ -158,24 +172,43 @@ async function act(kind: ButtonChoice) {
         size="sm"
         :loading="loading === 'approve'"
         :disabled="!!loading"
+        data-testid="approval-approve"
         @click="act('approve')"
       >
         允许一次
       </Button>
-      <!-- 同类免审排在"允许一次"之后、拒绝之前：它是**更大的授权**，
-           视觉上不能比单次批准更抢眼，但必须摸得到。
-           shell 按命令配方记（非整档 execute）；edit 等细粒度 kind 仍按 ToolKind。 -->
+      <!-- 作用域由小到大：本轮 → 本会话。文案必须分清「本轮」vs「本会话」，
+           禁止把旧「同类免审」改名却仍写 session 记忆。approve_same 不进按钮。 -->
+      <Button
+        v-if="canApproveTurn"
+        variant="secondary"
+        size="sm"
+        :disabled="!!loading"
+        data-testid="approval-approve-turn"
+        title="本轮内相同命令配方免审（如 go test）；新一轮提问后失效。不把整档「执行命令」放行。不落盘、不改 agent 配置"
+        @click="act('approve_turn')"
+      >
+        本轮同类免审
+      </Button>
       <Button
         v-if="canApproveSession"
         variant="secondary"
         size="sm"
         :disabled="!!loading"
+        data-testid="approval-approve-session"
         title="本任务内相同命令配方免审（如 go test）；不把整档「执行命令」放行。不落盘、不跨任务、不改 agent 配置"
         @click="act('approve_session')"
       >
-        同类免审
+        本会话同类免审
       </Button>
-      <Button variant="danger" size="sm" :loading="loading === 'deny'" :disabled="!!loading" @click="act('deny')">
+      <Button
+        variant="danger"
+        size="sm"
+        :loading="loading === 'deny'"
+        :disabled="!!loading"
+        data-testid="approval-deny"
+        @click="act('deny')"
+      >
         拒绝
       </Button>
       <Button variant="ghost" size="sm" :disabled="!!loading" @click="showDiff = !showDiff">
