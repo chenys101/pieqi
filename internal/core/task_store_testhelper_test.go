@@ -15,7 +15,12 @@ func newTestTaskStore(t testing.TB, interrupted ...string) *TaskStore {
 	if err != nil {
 		t.Fatalf("cwd: %v", err)
 	}
+	// PIEQI_TEST_TMP：沙箱下 worktree 内 Go 进程常无法 mkdir，可指到已放行的目录
+	// （如主仓 build/）。未设时仍用仓库 build/。
 	base := filepath.Clean(filepath.Join(wd, "..", "..", "build"))
+	if v := os.Getenv("PIEQI_TEST_TMP"); v != "" {
+		base = v
+	}
 	dir, err := os.MkdirTemp(base, "pieqi-store-*")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)

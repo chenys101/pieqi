@@ -108,13 +108,15 @@ const activeTo = computed(() => {
       </svg>
       {{ it.label }}
 
-      <!-- 角标：点（不是数字）—— 底栏图标上塞计数会挤，而"有事 / 有异常"
-           这个二值信号用点已经足够。⚠️ 它不是导航高亮：不改变 active 归属，
-           只回答"那一页里有东西在等你"。 -->
+      <!-- 角标：点 + 隐藏计数文案（底栏图标塞数字会挤；视觉仍用点，
+           aria / data-testid 带数量供读屏与 ac2 组件测）。
+           ⚠️ 不是导航高亮：不改变 active 归属，只回答"那一页里有东西在等你"。 -->
       <span
         v-if="it.to === '/dashboard' && approvalStore.pending.length"
         class="absolute right-1/2 top-1 -mr-3 h-1.5 w-1.5 rounded-full bg-warning"
-        aria-hidden="true"
+        data-testid="nav-pending-dot"
+        :aria-label="`${approvalStore.pending.length} 项待决策`"
+        :data-pending-count="approvalStore.pending.length"
       />
       <span
         v-if="it.to === '/settings' && connectionDown"

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Task, TaskStatus } from '@/types/task'
-import { otherRunningTasks } from './otherTasks'
+import { otherRunningTasks, otherWaitingCount } from './otherTasks'
 
 function task(id: string, status: TaskStatus, updatedAt = '2026-01-01T00:00:00Z'): Task {
   return { id, status, updatedAt, title: id, project: 'p' } as unknown as Task
@@ -38,3 +38,18 @@ describe('otherRunningTasks', () => {
     expect(out).not.toBe(tasks)
   })
 })
+
+describe('otherWaitingCount', () => {
+  it('只计非当前会话的 waiting_input（顶栏待办角标）', () => {
+    const tasks = [
+      task('current', 'waiting_input'),
+      task('w1', 'waiting_input'),
+      task('w2', 'waiting_input'),
+      task('r', 'running'),
+      task('done', 'completed'),
+    ]
+    expect(otherWaitingCount(tasks, 'current')).toBe(2)
+    expect(otherWaitingCount(tasks, 'none')).toBe(3)
+  })
+})
+

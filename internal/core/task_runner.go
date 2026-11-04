@@ -1014,14 +1014,14 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 	// 正常退出但未拿到 result 事件：若任务确实没产出任何内容（无文本/工具事件、空 output），
 	// 不静默标 completed —— 否则会出现"会话无响应"却无任何提示。改为标 failed 并带出 stdout
 	// 统计与 stderr，便于定位（如 825667b3 这类 claude 干活了但 stream 一条没捕获的情况）。
-	// 若已有内容但缺 result 事件，保持原行为（视为完成）。
+	// 若已有内容但缺 result 事件：走 completeAfterTurn（软完成收紧：未决审批/悬挂 tool_use → failed）。
 	if t, ok := tr.store.Get(task.ID); ok && t.Status != model.TaskCompleted && t.Status != model.TaskFailed {
 		if t.Output == "" && !taskHasContent(t) {
 			tr.failTask(task.ID, fmt.Sprintf(
 				"claude 退出码 0 但未产出任何内容（stdout %d 行/%d 字节）\nstderr: %s",
 				streamLines, streamBytes, truncateErr(stderrStr)))
 		} else {
-			tr.completeTask(task.ID, t.Output)
+			tr.completeAfterTurn(task.ID, t.Output)
 		}
 	}
 
@@ -1269,7 +1269,7 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 	}
 
 	// 正常结束但未达终态：与 claude -p 路径一致的空输出兜底——无任何产出则标 failed，
-	// 有产出则标 completed（adapter 内部已通过 wire 把增量持久化进 Output/Events）。
+	// 有产出则经 completeAfterTurn（软完成收紧：未决审批 / 悬挂 tool_use → failed，否则 completed）。
 	//
 	// ⚠️ 必须先 Flush 流式增量缓冲再判：增量落盘有 200ms 合并窗口（见 core.FlushDeltaWindow），
 	// 此刻最后一段正文可能还在内存里。不刷就判会有两个后果，且都是静默的：
@@ -1281,7 +1281,7 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 		if t.Output == "" && !taskHasContent(t) {
 			tr.failTask(task.ID, "agent 结束但未产出任何内容")
 		} else {
-			tr.completeTask(task.ID, t.Output)
+			tr.completeAfterTurn(task.ID, t.Output)
 		}
 	}
 
@@ -1628,7 +1628,7 @@ func (tr *TaskRunner) handleLine(taskID, line string, pending map[string]string)
 		if tr.maybePauseForChoice(taskID, r.Result) {
 			return
 		}
-		tr.completeTask(taskID, r.Result)
+		tr.completeAfterTurn(taskID, r.Result)
 	}
 }
 
