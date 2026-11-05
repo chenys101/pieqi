@@ -25,7 +25,7 @@ const deliveryDoDTest = `
 
 1. **等 depends_on 全部完成且改动已合入需求分支** 后再做功能测试；禁止与未完成的实现票并行开跑。
 2. 功能测试：检出需求分支 → 编译 → **另起隔离实例**验收（pieqi：独立 PIEQI_HOME + PIEQI_SERVER_PORT，禁止占用现网 :3000 / ~/.pieqi）。
-3. 本票不做「只跑单测就报完成」；发现缺陷应让任务 failed（或结构化失败），以便回流开 Issue。
+3. 本票不做「只跑单测就报完成」；发现缺陷应让任务 failed。报告须含「总评：FAIL」（系统据此标 failed 并开 Issue），禁止只写 FAIL 却标 completed。
 4. 不要用缩短审批超时、自动 approve 冒充修测试失败。
 `
 

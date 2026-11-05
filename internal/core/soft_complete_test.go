@@ -117,6 +117,31 @@ func TestCompleteAfterTurn_HungToolUseFails(t *testing.T) {
 	}
 }
 
+// TestCompleteAfterTurn_TestReportFail：test 票正文声明总评 FAIL → failed，便于 OnTaskFailed 开 Issue。
+func TestCompleteAfterTurn_TestReportFail(t *testing.T) {
+	tr, store, _, _ := newTestTaskRunner(t)
+	task, err := store.Create(&model.Task{
+		ID: "t-soft-test-fail", Prompt: "e2e", Role: model.RoleTest, Output: "partial",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	report := "**总评：FAIL**（隔离实例）\nac4 未通过"
+	_, _ = store.Update(task.ID, func(x *model.Task) bool {
+		x.Status = model.TaskRunning
+		x.Events = []model.TaskEvent{{Type: model.EventText, Text: report, At: time.Now()}}
+		return true
+	})
+	tr.completeAfterTurn(task.ID, report)
+	got, _ := store.Get(task.ID)
+	if got.Status != model.TaskFailed {
+		t.Fatalf("status=%s error=%q, want failed", got.Status, got.Error)
+	}
+	if got.Error != errTestReportFail {
+		t.Fatalf("Error=%q, want %q", got.Error, errTestReportFail)
+	}
+}
+
 // TestCompleteAfterTurn_NormalCompletes：无悬挂、无 pending → 仍 completed。
 func TestCompleteAfterTurn_NormalCompletes(t *testing.T) {
 	tr, store, bus, _ := newTestTaskRunner(t)

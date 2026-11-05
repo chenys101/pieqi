@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"strings"
 
 	"pieqi/internal/model"
 )
@@ -12,6 +13,7 @@ import (
 const (
 	errApprovalUnresolved    = "approval unresolved"
 	errToolHungWithoutResult = "tool hung without result"
+	errTestReportFail        = "test report: FAIL"
 )
 
 // completeAfterTurn 是 ACP / print 轮末「有产出 → 终态」的唯一入口。
@@ -32,7 +34,53 @@ func (tr *TaskRunner) completeAfterTurn(taskID, output string) {
 		tr.failTask(taskID, reason)
 		return
 	}
+	// test 票：报告写了「总评：FAIL」却仍有产出时，不得 completed（否则 OnTaskFailed 不开 Issue）。
+	if t.Role == model.RoleTest && testReportDeclaresFail(output, t) {
+		tr.failTask(taskID, errTestReportFail)
+		return
+	}
 	tr.completeTask(taskID, output)
+}
+
+// testReportDeclaresFail test 票正文/事件是否声明终验失败（交付纪律约定的人读标记）。
+func testReportDeclaresFail(output string, t *model.Task) bool {
+	if testReportTextHasFail(output) {
+		return true
+	}
+	if t == nil {
+		return false
+	}
+	if testReportTextHasFail(t.Output) {
+		return true
+	}
+	for i := len(t.Events) - 1; i >= 0; i-- {
+		ev := t.Events[i]
+		if ev.Type != model.EventText {
+			continue
+		}
+		if testReportTextHasFail(ev.Text) {
+			return true
+		}
+	}
+	return false
+}
+
+func testReportTextHasFail(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	// 与终验报告 / DoD 文案对齐；避免误伤普通句子里的 "FAIL"。
+	markers := []string{
+		"总评：FAIL", "总评: FAIL", "**总评：FAIL**", "**总评: FAIL**",
+		"本 test 票判定：failed", "本 test 票判定: failed",
+	}
+	for _, m := range markers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // softCompleteInterruptReason 返回不得 completed 的稳定 Error 前缀；空串 = 可 completed。

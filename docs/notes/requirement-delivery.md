@@ -38,6 +38,7 @@ test 按**波次**拆，写全 `depends_on`；不要「一实现票一空 test�
 
 - 验证失败 → **Issue** → Fix → 重验 → Resolve（ADR-0021）。
 - **已接线**：test 票 `failed` → 自动 OpenIssue（blocker，带 Fix）。
+- test 报告含「总评：FAIL」时，轮末不得 `completed`（`completeAfterTurn` → `test report: FAIL`），避免会话跑完却不开 Issue。
 - ConfirmReplace：若已有票离开 `planned`（已开跑/完成/失败），默认拒绝；须 `force: true`。
 
 ## 拆分助手须遵守

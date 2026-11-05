@@ -253,7 +253,9 @@ func (s *session) handleEvent(kind string, raw []byte) {
 	switch ev.Kind {
 	case "turn_end":
 		out := turnOutcome{info: toTurnInfo(ev.Turn)}
-		if ev.IsError || ev.Subtype != "" && ev.Subtype != "success" {
+		// subtype=success 优先：实测桥偶发 isError=true 且 subtype=success，
+		// 旧逻辑会变成「agent run: claude: turn success」假失败（V2.0.1 终验 ac1）。
+		if turnEndFailed(ev.IsError, ev.Subtype) {
 			msg := ev.Message
 			if msg == "" {
 				msg = fmt.Sprintf("turn %s", ev.Subtype)
@@ -329,7 +331,7 @@ func (s *session) toAgentEvent(ev bridge.SSEEvent) agent.Event {
 		e.Permission = agent.DowngradeReadonlyPermission(perm)
 	case "turn_end":
 		e.Turn = toTurnInfo(ev.Turn)
-		if ev.IsError || (ev.Subtype != "" && ev.Subtype != "success") {
+		if turnEndFailed(ev.IsError, ev.Subtype) {
 			e.Err = fmt.Errorf("claude: turn %s", ev.Subtype)
 		}
 	case "goal_changed":
@@ -351,4 +353,15 @@ func (s *session) toAgentEvent(ev bridge.SSEEvent) agent.Event {
 		e.State = ev.State
 	}
 	return e
+}
+
+// turnEndFailed 桥 turn_end 是否算失败。subtype=success 恒成功（覆盖 isError 误报）。
+func turnEndFailed(isError bool, subtype string) bool {
+	if subtype == "success" {
+		return false
+	}
+	if isError {
+		return true
+	}
+	return subtype != "" && subtype != "success"
 }
