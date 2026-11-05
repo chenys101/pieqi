@@ -48,8 +48,10 @@ api:
 pieqi:
   enabled: true                      # 总开关；开启后 IM 消息走 TaskCreator
   # 运行时数据根目录：留空 = ~/.pieqi（或环境变量 PIEQI_HOME 覆盖）。
-  # tasks/worktrees/sessions 等全部数据存到用户主目录，不入仓库。
-  worktree_base: ""                  # worktree 根目录；留空默认 ~/.pieqi/worktrees
+  # tasks/logs/settings 等 pieqi 运行时数据在数据根；agent 源码 cwd 不在此。
+  # worktree_base 留空 = 每项目 <RepoPath>/.pieqi/worktrees/<taskID>（仓内，对齐宿主沙箱）。
+  # 显式覆盖到仓外（旧默认 ~/.pieqi/worktrees）可能破坏 agent 沙箱可写根——勿轻易改。
+  worktree_base: ""
   skills_dirs: []                    # 空 = 默认 ~/.claude/skills + CLAUDE_CONFIG_DIR/.claude/skills
   permission_mode: bypassPermissions # claude 自身不拦，由 PreToolUse hook 拦截
   # 注：旧的 auto_approve_tools 已移除 —— 它从未生效（免审名单一直来自设置页的

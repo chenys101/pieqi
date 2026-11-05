@@ -104,7 +104,7 @@ type APIConfig struct {
 // PieqiConfig Pieqi 后端总开关与行为参数
 type PieqiConfig struct {
 	Enabled                 bool          `mapstructure:"enabled"`
-	WorktreeBase            string        `mapstructure:"worktree_base"`   // worktree 根目录
+	WorktreeBase            string        `mapstructure:"worktree_base"`   // 空=仓内 .pieqi/worktrees；非空=覆盖根
 	SkillsDirs              []string      `mapstructure:"skills_dirs"`     // 空 = 默认 ~/.claude/skills
 	PermissionMode          string        `mapstructure:"permission_mode"` // 默认 "bypassPermissions"，hook 真正拦截
 	CleanupWorktrees        bool          `mapstructure:"cleanup_worktrees"`
@@ -324,7 +324,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pieqi.hook_timeout", "30m")
 	v.SetDefault("pieqi.hook_tools", []string{"Bash", "Write", "Edit", "NotebookEdit"})
 	v.SetDefault("pieqi.max_concurrent_per_project", 4)
-	v.SetDefault("pieqi.worktree_base", "") // 空 = DefaultDataRoot()/worktrees（main 侧解析）
+	v.SetDefault("pieqi.worktree_base", "") // 空 = <RepoPath>/.pieqi/worktrees（WorktreeManager）
 	v.SetDefault("pieqi.bots_dir", filepath.Join(DefaultDataRoot(), "bots"))
 	v.SetDefault("pieqi.acp.use_acp", false)
 	v.SetDefault("pieqi.acp.agent_type", "claude-code")

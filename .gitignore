@@ -137,6 +137,9 @@ data/sessions/
 data/mappings/
 data/*.png
 
+# 仓内 agent worktree（pieqi 默认落点，勿提交）
+.pieqi/worktrees/
+
 # 调试临时产物(base64 截图、cloudflared 日志、commit 草稿、临时脚本)
 data/*.b64
 data/*.out

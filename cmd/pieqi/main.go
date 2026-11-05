@@ -109,9 +109,10 @@ func main() {
 
 	for _, dir := range []string{
 		filepath.Join(dataRoot, "tasks"),
-		filepath.Join(dataRoot, "worktrees"),
 		filepath.Join(dataRoot, "checkpoints"), // Feedback P0：Turn 快照/baseline 落盘
 		filepath.Join(dataRoot, "cache"),       // 模型清单等可重建的跨重启缓存（见 SetModelCatalogDir）
+		// 注：不再 mkdir dataRoot/worktrees —— agent worktree 默认在
+		// <project>/.pieqi/worktrees（docs/notes/worktree-in-project-sandbox.md）。
 	} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			logger.Fatal("mkdir data dir", zap.String("dir", dir), zap.Error(err))
@@ -176,11 +177,9 @@ func main() {
 	}
 
 	bus := core.NewEventBus()
-	worktreeBase := cfg.Pieqi.WorktreeBase
-	if worktreeBase == "" {
-		worktreeBase = filepath.Join(dataRoot, "worktrees")
-	}
-	wm := core.NewWorktreeManager(logger, worktreeBase)
+	// worktree_base 空 = 每项目 <RepoPath>/.pieqi/worktrees/<task>（仓内，对齐 agent 沙箱）；
+	// 非空才覆盖。禁止再默认落到 ~/.pieqi/worktrees。
+	wm := core.NewWorktreeManager(logger, cfg.Pieqi.WorktreeBase)
 	hooks := core.NewHookService(cfg.Pieqi.HookTimeout)
 	skills := core.NewSkillScanner(logger, cfg.Pieqi.SkillsDirs)
 	commands := core.NewCommandScanner(logger, nil)
@@ -217,6 +216,10 @@ func main() {
 		settingsStore.SetFallbackProjectPath(defaultProjectDir)
 		logger.Info("default project path resolved",
 			zap.String("default_project_path", settingsStore.Get().DefaultProjectPath))
+	}
+	// ac4：缺失/空 settings.json → 原子首落盘（须在 SetFallback 之后）。
+	if err := settingsStore.EnsurePersisted(); err != nil {
+		logger.Fatal("init settings file", zap.Error(err))
 	}
 
 	runner := core.NewTaskRunner(

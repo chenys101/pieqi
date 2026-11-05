@@ -2180,7 +2180,11 @@ func (b *concurrentBuffer) String() string {
 // newTaskID 生成任务 ID（独立函数便于测试）。
 func newTaskID() string { return uuid.New().String() }
 
-// worktreePathFor 给定 worktreeBase/projectID/taskID 拼路径（测试用）。
+// worktreePathFor 兼容旧测试：显式 base + projectID + taskID。
 func worktreePathFor(base, projectID, taskID string) string {
-	return filepath.Join(base, projectID, taskID)
+	p, err := WorktreePathFor(base, &model.Project{ID: projectID, RepoPath: "unused"}, taskID)
+	if err != nil {
+		return filepath.Join(base, projectID, taskID)
+	}
+	return p
 }
