@@ -500,9 +500,9 @@ curl --noproxy '*' -s http://127.0.0.1:3000/api/admin/restart # {"available":tru
     说明被你的 `-A` 卷走了 —— 那批改动已在 HEAD 里，别慌，但也别再继续叠提交。
 - **多会话并行时用 worktree 隔离**（可选但推荐）：
   `git worktree add ../pieqi-<用途> -b <分支>`，各自目录、各自索引，`-A` 也就伤不到别人。
-  - 注意本仓库**运行期**的 worktree（默认 `<项目仓>/.pieqi/worktrees/<task>`，pieqi 给 agent 建的）与
- **开发期**的 worktree 是两件事，别混为一谈。仓外 `worktree_base` 会破坏宿主沙箱可写根（见
- `docs/notes/worktree-in-project-sandbox.md`）。
+  - 注意本仓库**运行期** worktree（`use_worktrees` 默认 true 时建议 `<项目仓>/.worktrees/<task>`；
+ false 则 cwd=项目根）与**开发期** worktree 是两件事。pieqi 只建议落点，不代替 Cursor/dsh
+ 策略；仓外 `worktree_base` 会破坏宿主沙箱（见 `docs/notes/worktree-in-project-sandbox.md`）。
  - worktree 里跑 pieqi 要遵守既有约束：**exe 必须在工作区外运行或由 svchost/Explorer 启动**
  （见「发版流程 · 启动纪律」——会话内直启会因受限令牌写不了 `~/.pieqi`），
  且要显式设 `agents.claude.bridge.dir`（见技能 `pieqi-rebuild-restart` 坑 5/坑 8）。

@@ -104,7 +104,8 @@ type APIConfig struct {
 // PieqiConfig Pieqi 后端总开关与行为参数
 type PieqiConfig struct {
 	Enabled                 bool          `mapstructure:"enabled"`
-	WorktreeBase            string        `mapstructure:"worktree_base"`   // 空=仓内 .pieqi/worktrees；非空=覆盖根
+	UseWorktrees            bool          `mapstructure:"use_worktrees"`   // false=cwd 用项目根、不建 git worktree；默认 true
+	WorktreeBase            string        `mapstructure:"worktree_base"`   // 空=建议 <repo>/.worktrees；非空=覆盖根
 	SkillsDirs              []string      `mapstructure:"skills_dirs"`     // 空 = 默认 ~/.claude/skills
 	PermissionMode          string        `mapstructure:"permission_mode"` // 默认 "bypassPermissions"，hook 真正拦截
 	CleanupWorktrees        bool          `mapstructure:"cleanup_worktrees"`
@@ -320,11 +321,12 @@ func Load(configPath string) (*Config, error) {
 	// 是设置页的 auto_approve_l0 / auto_approve_l1（core.Settings.AutoApproveTools），
 	// 由 main.go 直接读 SettingsStore —— 这个配置项此前**只被解析、无人消费**，
 	// 且其默认值里的 delete 属 L3，与"L3 永不放行"的硬边界矛盾。
+	v.SetDefault("pieqi.use_worktrees", true)
 	v.SetDefault("pieqi.cleanup_worktrees", true)
 	v.SetDefault("pieqi.hook_timeout", "30m")
 	v.SetDefault("pieqi.hook_tools", []string{"Bash", "Write", "Edit", "NotebookEdit"})
 	v.SetDefault("pieqi.max_concurrent_per_project", 4)
-	v.SetDefault("pieqi.worktree_base", "") // 空 = <RepoPath>/.pieqi/worktrees（WorktreeManager）
+	v.SetDefault("pieqi.worktree_base", "") // 空 = 建议 <RepoPath>/.worktrees（WorktreeManager）
 	v.SetDefault("pieqi.bots_dir", filepath.Join(DefaultDataRoot(), "bots"))
 	v.SetDefault("pieqi.acp.use_acp", false)
 	v.SetDefault("pieqi.acp.agent_type", "claude-code")

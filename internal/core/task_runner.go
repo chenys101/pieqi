@@ -36,6 +36,7 @@ type TaskRunner struct {
 	sysPrompt        string
 	permissionMode   string
 	cleanupWorktrees bool
+	useWorktrees     bool // false：不建 git worktree，cwd=项目根（各 agent 自管隔离时）
 
 	// hook 注入：仅 permissionMode==bypassPermissions 时写 settings.json
 	execPath       string   // pieqi 可执行文件绝对路径，os.Executable() 取
@@ -181,6 +182,7 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 		sysPrompt:        sysPrompt,
 		permissionMode:   permissionMode,
 		cleanupWorktrees: cleanupWorktrees,
+		useWorktrees:     true, // 可由 SetUseWorktrees 关掉
 		execPath:         execPath,
 		port:             port,
 		hookTools:        hookTools,
@@ -214,6 +216,49 @@ func (tr *TaskRunner) SetFeedbackStore(fs *FeedbackStore) {
 // SetRequirementStore 注入协作平面回流（Issue/Fix/重验）；nil-safe。
 func (tr *TaskRunner) SetRequirementStore(rs *RequirementStore) {
 	tr.requirements = rs
+}
+
+// SetUseWorktrees 是否由 pieqi 建 git worktree。false 时 cwd=项目根，把隔离交给宿主 agent。
+func (tr *TaskRunner) SetUseWorktrees(v bool) {
+	tr.useWorktrees = v
+}
+
+// ensureTaskWorktree 若尚无 WorktreePath：use_worktrees 开则 git worktree add（建议 .worktrees）；
+// 关则 cwd=项目根（WorktreePath=ProjectPath），不替 agent 定隔离目录。
+func (tr *TaskRunner) ensureTaskWorktree(ctx context.Context, task *model.Task, project *model.Project) (*model.Task, error) {
+	if task == nil {
+		return nil, fmt.Errorf("nil task")
+	}
+	if task.WorktreePath != "" {
+		return task, nil
+	}
+	var wtPath string
+	if !tr.useWorktrees {
+		wtPath = strings.TrimSpace(task.ProjectPath)
+		if wtPath == "" && project != nil {
+			wtPath = strings.TrimSpace(project.RepoPath)
+		}
+		if wtPath == "" {
+			return nil, fmt.Errorf("project path required when use_worktrees=false")
+		}
+	} else {
+		if tr.wm == nil {
+			return nil, fmt.Errorf("worktree manager not wired")
+		}
+		p, err := tr.wm.Create(ctx, project, task.ID)
+		if err != nil {
+			return nil, err
+		}
+		wtPath = p
+	}
+	updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
+		t.WorktreePath = wtPath
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // projectForTask 构造 WorktreeManager 用的 Project；需求票带上 IntegrationBranch 作 BaseRef。
@@ -895,19 +940,10 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 	// 长路径：需求票以 IntegrationBranch 为 worktree base。
 	project := tr.projectForTask(task)
 	task = tr.ensureRequirementContext(task)
-	if task.WorktreePath == "" {
-		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
+	{
+		updated, err := tr.ensureTaskWorktree(parentCtx, task, project)
 		if err != nil {
 			tr.failTask(task.ID, "create worktree: "+err.Error())
-			return
-		}
-		var updated *model.Task
-		updated, err = tr.store.Update(task.ID, func(t *model.Task) bool {
-			t.WorktreePath = wtPath
-			return true
-		})
-		if err != nil {
-			tr.failTask(task.ID, "store worktree path: "+err.Error())
 			return
 		}
 		task = updated
@@ -1042,18 +1078,10 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		zap.String("worktree", task.WorktreePath), zap.Bool("use_acp", tr.useACP), zap.Bool("has_mgr", tr.agentMgr != nil))
 	project := tr.projectForTask(task)
 	task = tr.ensureRequirementContext(task)
-	if task.WorktreePath == "" {
-		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
+	{
+		updated, err := tr.ensureTaskWorktree(parentCtx, task, project)
 		if err != nil {
 			tr.failTask(task.ID, "create worktree: "+err.Error())
-			return
-		}
-		updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
-			t.WorktreePath = wtPath
-			return true
-		})
-		if err != nil {
-			tr.failTask(task.ID, "store worktree path: "+err.Error())
 			return
 		}
 		task = updated

@@ -14,9 +14,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// 仓内相对落点（docs/notes/worktree-in-project-sandbox.md）：
-// 默认 cwd 必须在项目树内，避免编排器把真实 agent 拖出宿主沙箱。
-const projectWorktreeRel = ".pieqi/worktrees"
+// 仓内建议落点（docs/notes/worktree-in-project-sandbox.md）：
+// pieqi 只建议路径，不代替 Cursor/dsh 等宿主的 worktree 策略；须在项目树内以免拖出沙箱。
+const projectWorktreeRel = ".worktrees"
 
 // WorktreeManager 为每个任务在项目 repo 下创建并管理 git worktree。
 //
@@ -24,14 +24,14 @@ const projectWorktreeRel = ".pieqi/worktrees"
 // git worktree 操作碰 .git/worktrees/ 不并发安全，单个 sync.Mutex 串行所有 Create。
 type WorktreeManager struct {
 	logger *zap.Logger
-	// worktreeBase 非空时作覆盖根（高级/测试）；空 = 默认 <RepoPath>/.pieqi/worktrees/<taskID>。
+	// worktreeBase 非空时作覆盖根（高级/测试）；空 = 建议 <RepoPath>/.worktrees/<taskID>。
 	worktreeBase string
 
 	mu sync.Mutex
 }
 
 // NewWorktreeManager 创建管理器。
-// worktreeBase 为空：按项目落到 RepoPath/.pieqi/worktrees（推荐，对齐 agent 沙箱）。
+// worktreeBase 为空：建议落到 RepoPath/.worktrees（对齐宿主沙箱，非 pieqi 品牌目录）。
 // 非空：filepath.Join(base, projectID?, taskID) —— 仓外路径可能破坏宿主沙箱，调用方自负。
 func NewWorktreeManager(logger *zap.Logger, worktreeBase string) *WorktreeManager {
 	return &WorktreeManager{

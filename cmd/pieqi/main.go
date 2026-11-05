@@ -177,8 +177,8 @@ func main() {
 	}
 
 	bus := core.NewEventBus()
-	// worktree_base 空 = 每项目 <RepoPath>/.pieqi/worktrees/<task>（仓内，对齐 agent 沙箱）；
-	// 非空才覆盖。禁止再默认落到 ~/.pieqi/worktrees。
+	// use_worktrees + worktree_base：pieqi 只建议隔离目录，不代替各 agent 策略。
+	// 默认建议 <RepoPath>/.worktrees/<task>；use_worktrees=false 则 cwd=项目根。
 	wm := core.NewWorktreeManager(logger, cfg.Pieqi.WorktreeBase)
 	hooks := core.NewHookService(cfg.Pieqi.HookTimeout)
 	skills := core.NewSkillScanner(logger, cfg.Pieqi.SkillsDirs)
@@ -228,6 +228,7 @@ func main() {
 		execPath, cfg.Server.Port, cfg.Pieqi.HookTools, hookTimeoutSec,
 		cfg.Pieqi.MaxConcurrentPerProject,
 	)
+	runner.SetUseWorktrees(cfg.Pieqi.UseWorktrees)
 	// 免审名单由全局偏好推导（L0/L1 可配、L2/L3 永不放行）；
 	// 设置页改动后经 OnChange 即刻推给 runner（只影响之后创建的会话）。
 	runner.SetAutoApproveTools(settingsStore.Get().AutoApproveTools())

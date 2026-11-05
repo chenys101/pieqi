@@ -47,7 +47,7 @@ func TestWorktreeManager_DefaultUnderProjectRepo(t *testing.T) {
 	}
 	dir := t.TempDir()
 	repo := initRepo(t, dir, "main")
-	// worktreeBase 空 → 仓内 .pieqi/worktrees（对齐 agent 沙箱）
+	// worktreeBase 空 → 仓内 .worktrees（建议落点，对齐 agent 沙箱）
 	wm := NewWorktreeManager(zap.NewNop(), "")
 	project := &model.Project{ID: "cb", RepoPath: repo}
 	ctx := context.Background()
@@ -56,7 +56,7 @@ func TestWorktreeManager_DefaultUnderProjectRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPrefix := filepath.Join(repo, ".pieqi", "worktrees")
+	wantPrefix := filepath.Join(repo, ".worktrees")
 	if !strings.HasPrefix(wtPath, wantPrefix+string(filepath.Separator)) && wtPath != filepath.Join(wantPrefix, "task-in-tree") {
 		t.Fatalf("want under %s, got %s", wantPrefix, wtPath)
 	}
