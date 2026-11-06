@@ -4,12 +4,13 @@
 >
 > - 想知道「这东西是什么、怎么跑起来」→ 回仓库根 [`README.md`](../README.md)
 > - 想改代码（发版流程、沙箱纪律、审批分级、血泪坑）→ [`AGENTS.md`](../AGENTS.md)
-> - 想知道某个词到底指什么、哪些事明确不做 → [`CONTEXT.md`](../CONTEXT.md)（术语唯一真相）
+> - 想知道某个词到底指什么、哪些事明确不做 → [`CONTEXT.md`](CONTEXT.md)（术语唯一真相）
 
 ## 目录地图
 
 | 目录 / 文件 | 内容 | 状态 |
 |---|---|---|
+| [`CONTEXT.md`](CONTEXT.md) | **领域词汇表**（Feedback + Collaboration Plane + Non-goals） | 长期有效 |
 | [`adr/`](adr) | **架构决策记录**（ADR 0001–0022），改相关代码前先读对应 ADR | 长期有效 |
 | [`feedback/`](feedback/README.md) | 反馈体系（Observe→Verify→Control→Intervene）：功能点全量规划 + P0–P3 设计 | Design / Roadmap |
 | [`testing/`](testing) | UI 真机验收（Playwright 三层）、下版待办、线上复量方案 | 已落地 |

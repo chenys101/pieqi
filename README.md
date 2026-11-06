@@ -13,7 +13,7 @@
                                └── 安全：Cloudflare Access 或外链 token + 隧道 + 限流 / 审计
 ```
 
-> 人类阅读看本文件；**给 AI coding agent 的协作指南见 [`AGENTS.md`](AGENTS.md)**（发版流程、沙箱纪律、审批分级、血泪坑都在那里）；领域术语以 [`CONTEXT.md`](CONTEXT.md) 为唯一真相。
+> 人类阅读看本文件；**agent 操作规程见 [`AGENTS.md`](AGENTS.md)**（硬规则、发版、审批、协作约定）；**领域术语以 [`docs/CONTEXT.md`](docs/CONTEXT.md) 为唯一真相**。
 
 ***
 
@@ -37,7 +37,7 @@
 
 * **协议级审批 + 免审名单**：agent 请求敏感工具时任务进入 `waiting_input`，IM / PWA 弹审批卡，Approve / Deny（AllowOnce / AllowAlways）直达 agent。风险按 ToolKind 分四档（L0 读 / L1 编辑 / L2 执行 / L3 删除），设置页两个开关（`auto_approve_l0`/`auto_approve_l1`，默认都开）决定哪些档免审；**只读 shell 命令、测试/构建命令按白名单降级**，而**删除、工作区外写、`git push`、改基线永远人工**（ADR-0008 / ADR-0015）。
 
-* **反馈体系（Feedback，Observe → Verify → Control → Intervene）**：Turn 变更列表与 Diff、审批前的前瞻 Diff、Checks（复用 agent 已跑过的 test/lint/build）、Task Outcome、Evidence → Continue、Checkpoint / Rewind、Preview（把改完的代码跑起来在手机上看）。术语见 [`CONTEXT.md`](CONTEXT.md)，设计见 [`docs/feedback/`](docs/feedback/README.md)。
+* **反馈体系（Feedback，Observe → Verify → Control → Intervene）**：Turn 变更列表与 Diff、审批前的前瞻 Diff、Checks（复用 agent 已跑过的 test/lint/build）、Task Outcome、Evidence → Continue、Checkpoint / Rewind、Preview（把改完的代码跑起来在手机上看）。术语见 [`docs/CONTEXT.md`](docs/CONTEXT.md)，设计见 [`docs/feedback/`](docs/feedback/README.md)。
 
 * **任务并行与隔离**：任务可在任意本地路径运行，或建 git worktree 隔离并行，每项目并发上限控制；worktree 基准分支按目标仓库自动解析（`origin/HEAD` → `main` → `master` → `HEAD`）。
 
@@ -360,7 +360,7 @@ GOOS=windows GOARCH=amd64 go build -o build/release/pieqi-windows-amd64.exe ./cm
 
 * **运行依赖**：`claude` CLI（登录态）、Node.js ≥20（桥服务）、`cloudflared`（需要外网访问时）；qoder / dsh 等 ACP agent 需本机装对应 CLI。
 
-完整发版四步（前端 build → 编 `.new` → `restart.bat` 投递 → `POST /api/admin/restart`）与验证清单见 [`AGENTS.md`](AGENTS.md)「发版流程」。
+日常发版用 `build\release.ps1`；落点、验证与纪律见 [`AGENTS.md`](AGENTS.md)「发版」。Low 标签与废弃路径深潜见 [`docs/notes/windows-low-integrity-and-release-layout.md`](docs/notes/windows-low-integrity-and-release-layout.md)。
 
 ***
 
@@ -370,7 +370,7 @@ GOOS=windows GOARCH=amd64 go build -o build/release/pieqi-windows-amd64.exe ./cm
 
 | 想知道什么 | 看哪里 |
 |---|---|
-| 术语怎么用 / 什么不做 | [`CONTEXT.md`](CONTEXT.md) |
+| 术语怎么用 / 什么不做 | [`docs/CONTEXT.md`](docs/CONTEXT.md) |
 | 怎么改代码、发版、避坑 | [`AGENTS.md`](AGENTS.md) |
 | 多 Agent 架构（`agents.*`、桥 / print / ACP） | [`docs/multi-agent.md`](docs/multi-agent.md)、[`docs/phase2-acp.md`](docs/phase2-acp.md) |
 | 安全模型与整改判据 | [`docs/security-hardening.md`](docs/security-hardening.md) |

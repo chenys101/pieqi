@@ -11,7 +11,7 @@ Feedback 体系（Observe → Verify → Control → Intervene）的完整文档
 | [P1 设计](p1-design.md) | 控制闭环：双视角 Changes、Approval→Diff、Checks、Task Outcome、Evidence、Evidence→Continue、Rewind→Verify、Preview Refresh/Attach | Design |
 | [P2 设计](p2-design.md) | 视觉反馈：Screenshot、Browser Console、Network Error、Screenshot→Evidence、File Rewind、Evidence Push（**a/b/c 已于 2026-10-15 移除，见 ADR-0012/0013**） | Design（部分废弃） |
 | [P3 路线图](p3-roadmap.md) | 探索：DOM Inspection、Region Annotation、Visual Evidence→Agent、Task Replay | Roadmap |
-| [词汇表](../../CONTEXT.md) | 领域术语 + 明确不做清单 | Stable |
+| [词汇表](../CONTEXT.md) | 领域术语 + 明确不做清单 | Stable |
 
 ## ADR 索引
 

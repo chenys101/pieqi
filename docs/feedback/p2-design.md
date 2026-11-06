@@ -2,7 +2,7 @@
 
 > Status: **部分废弃 / 部分已落地**（原文 2026-09-03；2026-10-21 校订）
 > Updated: 2026-10-21
-> 关联：`CONTEXT.md`、[ADR-0007](../adr/0007-feedback-non-goals.md)、[ADR-0012](../adr/0012-remove-screenshot-keep-console-network.md)、[ADR-0013](../adr/0013-remove-visual-capture-entirely.md)、`p0-design.md`、`p1-design.md`、[`functional-plan.md`](functional-plan.md)（原《Pieqi「反馈体系」功能点规划》）
+> 关联：[`../CONTEXT.md`](../CONTEXT.md)、[ADR-0007](../adr/0007-feedback-non-goals.md)、[ADR-0012](../adr/0012-remove-screenshot-keep-console-network.md)、[ADR-0013](../adr/0013-remove-visual-capture-entirely.md)、`p0-design.md`、`p1-design.md`、[`functional-plan.md`](functional-plan.md)（原《Pieqi「反馈体系」功能点规划》）
 
 ---
 

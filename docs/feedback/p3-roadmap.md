@@ -2,7 +2,7 @@
 
 > Status: Roadmap / Exploration（不承诺排期，作为长期差异化方向记录）
 > Updated: 2026-09-03
-> 关联：`CONTEXT.md`、`docs/adr/0001~0007`、`p0-design.md`、`p1-design.md`、`p2-design.md`
+> 关联：[`../CONTEXT.md`](../CONTEXT.md)、`docs/adr/0001~0007`、`p0-design.md`、`p1-design.md`、`p2-design.md`
 
 ---
 

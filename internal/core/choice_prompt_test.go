@@ -209,7 +209,7 @@ func TestParseChoiceBlock_Lenient_ChineseLabels(t *testing.T) {
 
 // 容错防误判：普通带编号列点的正文（无 [CHOICE] 标记）不应被误判为提问。
 func TestParseChoiceBlock_Lenient_NoChoiceMarker(t *testing.T) {
-	text := "给你三个方案：\n1. 文档驱动，先读 CONTEXT.md\n2. 代码驱动，追一条链路\n3. 实战驱动，从问题切入\n你看哪个合适？"
+	text := "给你三个方案：\n1. 文档驱动，先读 docs/CONTEXT.md\n2. 代码驱动，追一条链路\n3. 实战驱动，从问题切入\n你看哪个合适？"
 	pc, _ := parseChoiceBlock(text)
 	if pc != nil {
 		t.Fatal("plain numbered list without [CHOICE] must not match")

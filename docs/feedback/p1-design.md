@@ -2,7 +2,7 @@
 
 > Status: Design（对应 [`functional-plan.md`](functional-plan.md)（原《Pieqi「反馈体系」功能点规划》）的 P1 范围）
 > Updated: 2026-09-03
-> 关联：`CONTEXT.md`、`docs/adr/0001~0007`、`p0-design.md`（P1 全部建立在 P0 之上）
+> 关联：[`../CONTEXT.md`](../CONTEXT.md)、`docs/adr/0001~0007`、`p0-design.md`（P1 全部建立在 P0 之上）
 
 ---
 

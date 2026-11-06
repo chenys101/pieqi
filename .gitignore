@@ -30,7 +30,7 @@ web/node_modules/
 # （只要有人往里面填过真凭据，入库即泄露）。脚本模板请放 config.example.yaml。
 build/accept-config.yaml
 build/verify-config.yaml
-# 同类的验证报告是一次性证据，不入库（长期结论应沉淀到 docs/ 或 CONTEXT.md）。
+# 同类的验证报告是一次性证据，不入库（长期结论应沉淀到 docs/ 或 docs/CONTEXT.md）。
 build/dsh-acp-official-verification-report.md
 
 # ── 交付位与运行位的产物（都不入库）───────────────────────────────────────

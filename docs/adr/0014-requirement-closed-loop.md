@@ -218,7 +218,7 @@ PATCH  /api/issues/:id                  更新状态
 | P5 | PWA 界面（AC 矩阵 + Issue 卡片） | 真机验证（遵守 `ui-change-verification`：量数字对基线） |
 
 **每阶段必须同时做的反向约束**（否则会腐化）：
-`CONTEXT.md` 同步新词；负向断言测试（如 `TestEvidencePrompt_NoVisualResidue` 那样）
+`docs/CONTEXT.md` 同步新词；负向断言测试（如 `TestEvidencePrompt_NoVisualResidue` 那样）
 钉住被否掉的方案不复活。
 
 ## 被否掉的方案
@@ -231,12 +231,12 @@ PATCH  /api/issues/:id                  更新状态
 - **测试任务无脑重跑全部用例**：违反 ADR-0005（复用优先）；
   重跑只在用户显式点击或原结果过期时发生。
 - **把 Requirement 做成"项目/工单"**：术语会与 `Project`（worktree 分组基准，
-  `model.Project`）冲突。见 `CONTEXT.md` 的 `_Avoid_` 项。
+  `model.Project`）冲突。见 `docs/CONTEXT.md` 的 `_Avoid_` 项。
 
 ## 影响
 
 - `internal/model/`：新增 `requirement.go`、`issue.go`；`task.go` 加 `RequirementID`
 - `internal/core/`：新增 `requirement.go`（状态机 + 拆分校验）、`requirement_outcome.go`（派生）
 - `internal/api/`：新增 `requirement.go` 路由 + nil-safe 注入
-- `CONTEXT.md`：新增 Requirement / Task Split / Task Graph / Test Plan / Issue 五词
+- `docs/CONTEXT.md`：新增 Requirement / Task Split / Task Graph / Test Plan / Issue 五词
 - 既有 Task 单用路径**零改动**（`RequirementID` 为空即旧行为）

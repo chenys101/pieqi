@@ -77,7 +77,7 @@ Requirement 级事件同样 append-only，状态变更可审计（配合 `graph_
 
 - P0（0021 分期）以本 ADR 为施工单：接口 + SQLite + Task 迁移 + Requirement CRUD 落库。
 - 回归：**短路径黄金样例**是迁库唯一放行门槛；长路径 UI 不挡 P0。
-- `CONTEXT.md` / AGENTS 涉及「一任务一 JSON」的表述在实现落地后改为 Store/SQLite（实现 PR 同步改，免文档抢跑）。
+- `docs/CONTEXT.md` / AGENTS 涉及「一任务一 JSON」的表述在实现落地后改为 Store/SQLite（实现 PR 同步改，免文档抢跑）。
 
 ## 实施分期（对齐 0021 §7）
 

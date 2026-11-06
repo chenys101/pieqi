@@ -2,7 +2,7 @@
 
 > Status: Design (对应 [`functional-plan.md`](functional-plan.md)（原《Pieqi「反馈体系」功能点规划》）的 P0 范围)
 > Updated: 2026-09-03
-> 关联：`CONTEXT.md`（词汇表）、`docs/adr/0001~0003`（架构决策）
+> 关联：[`../CONTEXT.md`](../CONTEXT.md)（词汇表）、`docs/adr/0001~0003`（架构决策）
 
 ---
 
@@ -20,7 +20,7 @@ Feedback 入口 → FileChange → Turn Change List → Change Summary
     → Preview（Discovery / Lifecycle / Proxy）
 ```
 
-P1+（双视角 Changes、Approval→Diff、Checks、Task Outcome、Evidence、Evidence→Continue、Rewind→Verify、视觉反馈）只定术语（`CONTEXT.md` 已收），不进本文。
+P1+（双视角 Changes、Approval→Diff、Checks、Task Outcome、Evidence、Evidence→Continue、Rewind→Verify、视觉反馈）只定术语（`docs/CONTEXT.md` 已收），不进本文。
 
 ## 2. 总体架构
 

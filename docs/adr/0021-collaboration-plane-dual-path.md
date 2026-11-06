@@ -314,4 +314,4 @@ append-only events（task + requirement）。
 ---
 
 定稿动作：本文件 Accepted；`docs/README.md` 挂 0021/0022；0014 文首横幅；
-`CONTEXT.md` 术语改指本 ADR（Short/Long Path、planned Task、SplitProposal；不写 GraphNode）。
+`docs/CONTEXT.md` 术语改指本 ADR（Short/Long Path、planned Task、SplitProposal；不写 GraphNode）。
