@@ -74,11 +74,10 @@ type AgentManifest struct {
 	InitTimeout time.Duration
 	IdleTimeout time.Duration
 
-	// OptIn 是否默认关闭。
+	// OptIn 历史标记：曾表示「默认不进选择器」（需额外凭据）。
 	//
-	// true 表示「装了也未必能用」：需要额外凭据、或由用户显式选择才启用
-	// （例如 dsh 要 DEEPSEEK_API_KEY、codebuddy 要登录）。这类 agent 在
-	// settings.agents.enabled 里不出现时**不注册**，避免用户选了之后只得到一条失败。
+	// 2026-11-06 起默认启停改由设置页勾选、出厂全选；本字段**不再**参与
+	// enabledSet / AvailableAgents 判据，仅保留作文档与能力说明（如缺 key 会失败）。
 	OptIn bool
 }
 

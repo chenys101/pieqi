@@ -12,9 +12,10 @@ defineProps<{
   /** 锁定行：不可配置项 */
   locked?: boolean
   /**
-   * 控件较宽时置 true（如分段控件）：窄屏改为纵向堆叠。
-   * 不这么做的话，左侧说明会被宽控件挤成一条几字宽的窄柱 ——
-   * 说明文字是这行的主要内容，不该为控件让位到不可读。
+   * 控件较宽时置 true（可信配方 / 时段 / 路径等）：**始终**纵向堆叠。
+   * 只在 max-md 堆叠不够——桌面宽屏下右侧 `shrink-0` 宽控件仍会把左侧说明
+   * 挤成单字窄柱（设置页「可信命令配方」复现）。说明是这行的主要内容，
+   * 不该为控件让位到不可读。
    */
   stack?: boolean
 }>()
@@ -22,13 +23,13 @@ defineProps<{
 
 <template>
   <div
-    class="setting-row flex items-center gap-[14px] px-[14px] py-[11px]"
+    class="setting-row flex gap-[14px] px-[14px] py-[11px]"
     :class="[
       locked ? 'bg-surface-inset' : '',
-      stack ? 'max-md:flex-col max-md:items-stretch max-md:gap-2' : '',
+      stack ? 'flex-col items-stretch gap-2' : 'items-center',
     ]"
   >
-    <div class="min-w-0 flex-1">
+    <div class="min-w-0" :class="stack ? 'w-full' : 'flex-1'">
       <div
         class="flex items-center gap-1.5 text-[13px]"
         :class="locked ? 'text-text-secondary' : 'text-text'"
@@ -42,7 +43,10 @@ defineProps<{
         <slot name="desc">{{ desc }}</slot>
       </div>
     </div>
-    <div class="flex shrink-0 items-center gap-1.5" :class="stack ? 'max-md:justify-start' : ''">
+    <div
+      class="flex"
+      :class="stack ? 'w-full min-w-0 flex-col items-stretch gap-0' : 'shrink-0 items-center gap-1.5'"
+    >
       <slot />
     </div>
   </div>

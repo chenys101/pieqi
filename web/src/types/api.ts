@@ -720,10 +720,21 @@ export interface AgentDto {
   cold_start_cold?: boolean
 }
 
+/** 对接支持列表项（设置页勾选源；含未启用） */
+export interface SupportedAgentDto {
+  name: string
+  display_name: string
+  description?: string
+  transport?: string
+}
+
 /** GET /api/agents 响应 */
 export interface AgentsResponseDto {
+  /** 当前已启用（选择器用）；顺序 = settings.agents.enabled */
   agents: AgentDto[]
-  /** 服务端默认 agent（新任务页选择器初始选中项） */
+  /** 全量对接列表（设置页勾选源） */
+  supported?: SupportedAgentDto[]
+  /** 服务端默认 agent（目录首位；新任务页选择器初始选中项） */
   default: string
 }
 

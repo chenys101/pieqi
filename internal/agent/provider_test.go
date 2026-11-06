@@ -171,13 +171,22 @@ func TestConfigureACPProviders(t *testing.T) {
 // 「manifest 里有它（Kind=acp）+ 运行期被启用」。因此这组测试也不再需要构造
 // config.AgentsConfig —— 那正是本次要消灭的"用配置表达代码事实"。
 func TestACPProviderConfigFromRuntime(t *testing.T) {
-	// 默认（Enabled 为空）= 只启用非 OptIn 的，即 claude + qoder。
+	// 默认（Enabled 为空）= 对接列表全选，ACP 侧注册全部 ACP agent。
 	got := ACPProviderConfigFromRuntime(AgentRuntimeConfig{})
-	if len(got.Agents) != 1 {
-		t.Fatalf("默认应只注册 qoder，got %+v", got.Agents)
+	wantACP := 0
+	for _, m := range AllManifests() {
+		if m.Kind == TransportACP {
+			wantACP++
+		}
+	}
+	if len(got.Agents) != wantACP {
+		t.Fatalf("默认应注册全部 ACP agent（%d），got %+v", wantACP, got.Agents)
 	}
 	if _, ok := got.Agents[AgentQoder]; !ok {
 		t.Fatalf("默认缺 qoder: %+v", got.Agents)
+	}
+	if _, ok := got.Agents[AgentDsh]; !ok {
+		t.Fatalf("默认缺 dsh（全选）: %+v", got.Agents)
 	}
 
 	// 显式启用四个 ACP agent。
@@ -204,15 +213,13 @@ func TestACPProviderConfigFromRuntime(t *testing.T) {
 		t.Fatalf("qoder 未列入却注册了: %+v", got.Agents)
 	}
 
-	// 空选择 = 回到默认（非 OptIn 的 qoder），不是"一个都不开"。
-	// 这条语义是有意的：让"从没配过"和"清空"都回到默认，避免用户在设置页
-	// 删光后得到一个空目录。
+	// 空选择 = 回到默认全选，不是"一个都不开"。
 	got = ACPProviderConfigFromRuntime(AgentRuntimeConfig{Enabled: []string{}})
 	if _, ok := got.Agents[AgentQoder]; !ok {
-		t.Fatalf("空选择应回到默认（含 qoder），got %+v", got.Agents)
+		t.Fatalf("空选择应回到默认全选（含 qoder），got %+v", got.Agents)
 	}
-	if _, ok := got.Agents[AgentDsh]; ok {
-		t.Fatalf("空选择不应启用 OptIn 的 dsh，got %+v", got.Agents)
+	if _, ok := got.Agents[AgentDsh]; !ok {
+		t.Fatalf("空选择应回到默认全选（含 dsh），got %+v", got.Agents)
 	}
 }
 
@@ -236,14 +243,10 @@ func TestManifestIsTheOnlySource(t *testing.T) {
 				t.Fatalf("%s 的默认 spawn[0]=%q 含路径分隔符：manifest 必须写裸名", m.Name, spawn[0])
 			}
 		}
-		// OptIn 的 agent 默认不启用 —— 它们需要额外凭据，默认注册只会让用户
-		// 选到一个必然失败的东西。
-		if m.OptIn {
-			rt := AgentRuntimeConfig{}
-			enabled := rt.enabledSet()
-			if enabled[m.Name] {
-				t.Fatalf("%s 标了 OptIn 却在默认选择里被启用", m.Name)
-			}
+		// OptIn 不再参与默认启停：出厂全选，设置页可关。
+		rt := AgentRuntimeConfig{}
+		if !rt.enabledSet()[m.Name] {
+			t.Fatalf("%s 应在默认全选里被启用", m.Name)
 		}
 	}
 }
@@ -251,20 +254,35 @@ func TestManifestIsTheOnlySource(t *testing.T) {
 // TestAvailableAgents 目录本身即「新任务页能选什么」的唯一事实源：
 // 顺序（默认 agent = 首位）与可用性判据都必须钉住。
 func TestAvailableAgents(t *testing.T) {
-	t.Run("默认只有 claude + qoder（OptIn 的不默认启用）", func(t *testing.T) {
+	t.Run("默认全选（manifest 顺序）", func(t *testing.T) {
 		got := AvailableAgents(AgentRuntimeConfig{})
-		if len(got) != 2 {
-			t.Fatalf("agents=%+v, want claude + qoder", got)
+		want := DefaultEnabledNames()
+		if len(got) != len(want) {
+			t.Fatalf("agents=%+v, want %v", got, want)
 		}
-		if got[0].Name != AgentClaude || got[1].Name != AgentQoder {
-			t.Fatalf("顺序 = %q,%q，want claude,qoder", got[0].Name, got[1].Name)
+		for i, n := range want {
+			if got[i].Name != n {
+				t.Fatalf("顺序[%d]=%q, want %q", i, got[i].Name, n)
+			}
 		}
 	})
 
-	t.Run("claude 永远排首位（默认 agent = 首位 = Claude Code）", func(t *testing.T) {
+	t.Run("空 enabled 时 claude 仍为 manifest 首位", func(t *testing.T) {
 		got := AvailableAgents(AgentRuntimeConfig{})
 		if got[0].Name != AgentClaude || got[0].DisplayName != "Claude Code" {
 			t.Fatalf("首位 = %+v, want Claude Code", got[0])
+		}
+	})
+
+	t.Run("显式 enabled 顺序即展示顺序", func(t *testing.T) {
+		got := AvailableAgents(AgentRuntimeConfig{
+			Enabled: []string{AgentQoder, AgentClaude, AgentDsh},
+		})
+		if len(got) != 3 {
+			t.Fatalf("agents=%+v, want 3", got)
+		}
+		if got[0].Name != AgentQoder || got[1].Name != AgentClaude || got[2].Name != AgentDsh {
+			t.Fatalf("顺序 = %q,%q,%q want qoder,claude,dsh", got[0].Name, got[1].Name, got[2].Name)
 		}
 	})
 
@@ -297,7 +315,7 @@ func TestAvailableAgents(t *testing.T) {
 		}
 	})
 
-	t.Run("dsh 需显式启用，且排在 qoder 之后", func(t *testing.T) {
+	t.Run("dsh 能力字段与顺序", func(t *testing.T) {
 		got := AvailableAgents(AgentRuntimeConfig{
 			Enabled: []string{AgentClaude, AgentQoder, AgentDsh},
 		})
@@ -323,7 +341,7 @@ func TestAvailableAgents(t *testing.T) {
 		}
 	})
 
-	t.Run("codebuddy 需显式启用，且排在 dsh 之后", func(t *testing.T) {
+	t.Run("codebuddy 能力字段", func(t *testing.T) {
 		got := AvailableAgents(AgentRuntimeConfig{
 			Enabled: []string{AgentClaude, AgentQoder, AgentDsh, AgentCodebuddy},
 		})
@@ -358,15 +376,19 @@ func TestAvailableAgents(t *testing.T) {
 		}
 	})
 
-	t.Run("codebuddy 默认不启用", func(t *testing.T) {
+	t.Run("codebuddy 默认启用（全选）", func(t *testing.T) {
+		found := false
 		for _, a := range AvailableAgents(AgentRuntimeConfig{}) {
 			if a.Name == AgentCodebuddy {
-				t.Fatalf("OptIn 的 codebuddy 出现在默认目录里")
+				found = true
 			}
+		}
+		if !found {
+			t.Fatalf("默认全选应含 codebuddy")
 		}
 	})
 
-	t.Run("cursor 需显式启用", func(t *testing.T) {
+	t.Run("cursor 能力字段", func(t *testing.T) {
 		got := AvailableAgents(AgentRuntimeConfig{
 			Enabled: []string{AgentClaude, AgentQoder, AgentCursor},
 		})
@@ -400,11 +422,15 @@ func TestAvailableAgents(t *testing.T) {
 		}
 	})
 
-	t.Run("cursor 默认不启用", func(t *testing.T) {
+	t.Run("cursor 默认启用（全选）", func(t *testing.T) {
+		found := false
 		for _, a := range AvailableAgents(AgentRuntimeConfig{}) {
 			if a.Name == AgentCursor {
-				t.Fatalf("OptIn 的 cursor 出现在默认目录里")
+				found = true
 			}
+		}
+		if !found {
+			t.Fatalf("默认全选应含 cursor")
 		}
 	})
 

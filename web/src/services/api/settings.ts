@@ -6,6 +6,15 @@
 
 import { request, requestBlob } from './client'
 
+/** agent 运行期选择（设置页勾选 + 排序；顺序 = 选择器展示序） */
+export interface AgentSelection {
+  /** 启用的业务名；空 = 服务端投影为对接列表全选 */
+  enabled: string[]
+  spawn_overrides?: Record<string, string[]>
+  /** sdk-bridge | print；空 = sdk-bridge */
+  claude_transport?: string
+}
+
 export interface AppSettings {
   /** L0 只读探测自动放行 */
   auto_approve_l0: boolean
@@ -37,6 +46,11 @@ export interface AppSettings {
    * 存在的目录，前端猜一个（例如 '~'）只会在提交时换来一句 400。
    */
   default_project_path: string
+  /**
+   * Agent 启停与顺序。由设置页勾选管理，不要手改 settings.json。
+   * GET 时空 enabled 已投影为全选。
+   */
+  agents: AgentSelection
 }
 
 export async function getSettings(): Promise<AppSettings> {

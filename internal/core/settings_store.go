@@ -188,12 +188,15 @@ type Settings struct {
 //
 // 字段刻意保持"用户意图"粒度：**不出现** agent_type / 能力声明 / 默认 spawn 这类
 // 代码事实（它们由 manifest 提供）。这样接入一个新 agent 不需要任何人动这个文件。
+//
+// 用户侧入口是**设置页勾选 + 上下排序**（不再靠手改 settings.json）；本结构仍是
+// 落盘形态。Enabled 数组顺序 = 选择器展示顺序。
 type AgentSelection struct {
-	// Enabled 启用的业务名（claude / qoder / dsh / codebuddy ...）。
+	// Enabled 启用的业务名（claude / qoder / dsh / codebuddy ...），顺序即展示序。
 	//
-	// nil 或空 = 用 manifest 的默认值（即所有非 OptIn 的 agent）。显式列出时以列表为准 ——
-	// 可以只开一个，也可以把默认开着的关掉。nil 与空切片语义相同是有意的：
-	// 让"从没配过"和"清空"都回到默认，避免用户在设置页删光后得到"一个都没有"。
+	// nil 或空 = 对接列表全选（manifest 顺序）。显式列出时以列表为准 ——
+	// 可以只开一个，也可以关掉某个。nil 与空切片语义相同是有意的：
+	// 让"从没配过"和"清空"都回到默认全选，避免用户在设置页删光后得到"一个都没有"。
 	Enabled []string `json:"enabled,omitempty"`
 
 	// SpawnOverrides 按业务名覆盖 spawn 命令（例如把 dsh 指到独立安装位置）。

@@ -2,3 +2,4 @@
 export { default as TunnelPanel } from './components/TunnelPanel.vue'
 export { default as RobotList } from './components/RobotList.vue'
 export { default as RobotCreateModal } from './components/RobotCreateModal.vue'
+export { default as AgentEngineList } from './components/AgentEngineList.vue'

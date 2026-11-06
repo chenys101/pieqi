@@ -25,11 +25,11 @@
 
   * `qoder` 等 → 原生 ACP（`qodercli --acp`，`coder/acp-go-sdk`）。
 
-  * `dsh` → 同为 ACP，但入口是一个 profile（`dsh --profile acp`，DeepSeek Harness）。默认**不启用**（需显式列进运行期设置的 `agents.enabled`）：需要本机装 `@deepseek-ai/dsh`，且其 `acp` profile 里 pin 了可用模型路由（出厂路由需 `DEEPSEEK_API_KEY`，也可改 pin 到本地网关等免 key 的 provider）；模型由 dsh 侧决定，不在本项目配置里。
+  * `dsh` → 同为 ACP，但入口是一个 profile（`dsh --profile acp`，DeepSeek Harness）。出厂在对接列表里（设置页可关）：需要本机装 `@deepseek-ai/dsh`，且其 `acp` profile 里 pin 了可用模型路由（出厂路由需 `DEEPSEEK_API_KEY`，也可改 pin 到本地网关等免 key 的 provider）；模型由 dsh 侧决定，不在本项目配置里。
 
-  * `codebuddy` → ACP（`codebuddy --acp`，腾讯 CodeBuddy CLI）。默认**不启用**：需要本机装 `@tencent-ai/codebuddy-code` 并已登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`；模型清单由 `session/new` 的标准 `configOptions` 下发，支持会话内切换。
+  * `codebuddy` → ACP（`codebuddy --acp`，腾讯 CodeBuddy CLI）。出厂在对接列表里（设置页可关）：需要本机装 `@tencent-ai/codebuddy-code` 并已登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`；模型清单由 `session/new` 的标准 `configOptions` 下发，支持会话内切换。
 
-  * 接入一个新 agent 只需改 `internal/agent/manifest.go` 一处（**不需要动任何配置**）；开/关它则改运行期设置 `agents.enabled`，可热改。
+  * 接入一个新 agent 只需改 `internal/agent/manifest.go` 一处（**不需要动任何配置**）；开/关与排序在设置页勾选，可热改。
 
   * 可选 agent 列表以 `GET /api/agents` 为唯一事实源，前端选择器由它驱动。
 
@@ -77,7 +77,7 @@
 
 * **ACP**：JSON-RPC over stdio，`session/request_permission` / `session/prompt` / `session/resume` / `session/set_config_option` 为协议级能力（`internal/agent/acp.go`）。模型清单有**两条通道**（标准 `configOptions` 优先，`_meta["pieqi/configOptions"]` 为兜底），选哪条由 `internal/agent/model_catalog.go` 的 `catalogSource` 判定。
 
-* 加一个 ACP agent **只改一处**：`internal/agent/manifest.go` 加一条（transport / agent_type / 默认 spawn / 超时都是代码事实，不写进配置）。用户侧只剩运行期两件事：`settings.json` 的 `agents.enabled`（开不开）与 `agents.spawn_overrides`（装在哪），可热改；前端目录来自 `GET /api/agents`，不用改。
+* 加一个 ACP agent **只改一处**：`internal/agent/manifest.go` 加一条（transport / agent_type / 默认 spawn / 超时都是代码事实，不写进配置）。用户侧在**设置页**勾选启停、上下排序（落盘 `agents.enabled`，出厂全选）；装在哪仍可 `agents.spawn_overrides`。前端目录来自 `GET /api/agents`，不用改。
 
 > 旧配置 `pieqi.acp.*` 与 `agents.qoder/dsh/codebuddy` 各节均已移除（显式配置会触发告警并指出新落点）；详见 [`docs/multi-agent.md`](docs/multi-agent.md)。
 
@@ -254,11 +254,8 @@ agents:
   # qoder / dsh / codebuddy 等 ACP agent **不再在这里配置**：
   # 它们的 transport / agent_type / 默认 spawn / 能力声明都是代码事实，
   # 统一在 internal/agent/manifest.go 里声明。
-  # 开/关某个 agent、或覆盖它的启动命令，改运行期设置（可热改，不必重启）：
-  #   ~/.pieqi/settings.json
-  #   { "agents": { "enabled": ["claude","qoder","dsh","codebuddy"],
-  #                 "spawn_overrides": { "qoder": ["qodercli","--acp","-m","Qwen3.8-Flash"] } } }
-  # 也可以直接调 PATCH /api/settings 的 agents 段。默认只启用 claude + qoder。
+  # 开/关与排序：设置页勾选（落盘 ~/.pieqi/settings.json 的 agents.enabled，出厂全选）；
+  # 覆盖启动命令仍可 spawn_overrides。也可 PATCH /api/settings 的 agents 段。
 
 pieqi:
   max_concurrent_per_project: 4
@@ -391,9 +388,9 @@ GOOS=windows GOARCH=amd64 go build -o build/release/pieqi-windows-amd64.exe ./cm
 
 * **qoder 等 ACP agent** 需本机安装对应 CLI（`qodercli` / `codex` 等）并支持 `--acp`；qoder 默认模型是付费档，Credits 耗尽会报 `error_code 118`（模板里已显式带 `-m Qwen3.8-Flash`）。
 
-* **dsh（DeepSeek Harness）** 需 `npm install -g @deepseek-ai/dsh`（ACP 入口是它的 profile：`dsh --profile acp`），并在其 `acp` profile 里 pin 好模型路由。默认不注册；握手实测冷启动 >90s，故其 `init_timeout` 默认 2m。清空 pin 不会回落默认模型，会话会彻底没模型。
+* **dsh（DeepSeek Harness）** 需 `npm install -g @deepseek-ai/dsh`（ACP 入口是它的 profile：`dsh --profile acp`），并在其 `acp` profile 里 pin 好模型路由。出厂在对接列表里（设置页可关）；握手实测冷启动 >90s，故其 `init_timeout` 默认 2m。清空 pin 不会回落默认模型，会话会彻底没模型。
 
-* **codebuddy（腾讯 CodeBuddy CLI）** 需 `npm install -g @tencent-ai/codebuddy-code` 并在 CLI 内登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`。默认不启用（需在运行期设置的 `agents.enabled` 里显式列出）；模型清单走标准 ACP `configOptions`（实测 v2.159.0 下发 20 个模型），可在会话内切换。
+* **codebuddy（腾讯 CodeBuddy CLI）** 需 `npm install -g @tencent-ai/codebuddy-code` 并在 CLI 内登录（iOA / Google·GitHub / 微信 / 企业域名），或在服务环境提供 `CODEBUDDY_API_KEY`。出厂在对接列表里（设置页可关）；模型清单走标准 ACP `configOptions`（实测 v2.159.0 下发 20 个模型），可在会话内切换。
 
 * **dsh 的 goal 不在 ACP 路径上**（走 SDK control request），pieqi 侧取不到；已在 Qoder/dsh 侧记录，结论见 [`docs/agents-goal-and-capabilities.md`](docs/agents-goal-and-capabilities.md)。
 

@@ -27,7 +27,7 @@ func TestSettings_AgentsRoundTrip(t *testing.T) {
 	s := &Server{}
 	s.SetSettingsStore(store)
 
-	// 1) 默认：agents 段是零值 —— 表示"回到 manifest 默认"（claude + qoder）。
+	// 1) 默认：落盘 enabled 为空，但 GET 投影为全选（设置页勾选态）。
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest("GET", "/api/settings", nil)
@@ -39,8 +39,18 @@ func TestSettings_AgentsRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got.Agents.Enabled) != 0 {
-		t.Fatalf("默认 enabled 应为空（= 回落到 manifest 默认），got %v", got.Agents.Enabled)
+	want := agent.DefaultEnabledNames()
+	if len(got.Agents.Enabled) != len(want) {
+		t.Fatalf("默认 enabled 投影应全选 %v，got %v", want, got.Agents.Enabled)
+	}
+	for i, n := range want {
+		if got.Agents.Enabled[i] != n {
+			t.Fatalf("默认 enabled[%d]=%q want %q", i, got.Agents.Enabled[i], n)
+		}
+	}
+	// 投影不写盘：store 里仍是空。
+	if len(store.Get().Agents.Enabled) != 0 {
+		t.Fatalf("投影不应写盘，store.enabled=%v", store.Get().Agents.Enabled)
 	}
 
 	// 2) 打开 codebuddy。
@@ -103,16 +113,27 @@ func TestAgentCatalogSource_Dynamic(t *testing.T) {
 		return out
 	}
 
-	// 默认：claude + qoder
+	// 默认：全选（含 codebuddy）
 	before := names()
-	if len(before) != 2 || before[0] != agent.AgentClaude || before[1] != agent.AgentQoder {
-		t.Fatalf("默认目录 = %v, want [claude qoder]", before)
+	wantDefault := agent.DefaultEnabledNames()
+	if len(before) != len(wantDefault) {
+		t.Fatalf("默认目录 = %v, want %v", before, wantDefault)
 	}
 
-	// 打开 codebuddy 后**无需重启**即出现。
-	sel := core.AgentSelection{Enabled: []string{agent.AgentClaude, agent.AgentQoder, agent.AgentCodebuddy}}
+	// 收窄到不含 codebuddy 后**无需重启**即消失；再打开又出现。
+	sel := core.AgentSelection{Enabled: []string{agent.AgentClaude, agent.AgentQoder}}
 	if _, err := store.Patch(core.SettingsPatch{Agents: &sel}); err != nil {
 		t.Fatalf("patch: %v", err)
+	}
+	mid := names()
+	for _, n := range mid {
+		if n == agent.AgentCodebuddy {
+			t.Fatalf("关掉后目录仍含 codebuddy: %v", mid)
+		}
+	}
+	sel2 := core.AgentSelection{Enabled: []string{agent.AgentClaude, agent.AgentQoder, agent.AgentCodebuddy}}
+	if _, err := store.Patch(core.SettingsPatch{Agents: &sel2}); err != nil {
+		t.Fatalf("patch2: %v", err)
 	}
 	after := names()
 	found := false

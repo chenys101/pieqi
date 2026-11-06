@@ -199,7 +199,10 @@ func TestCreatePlan_DefersSetModeUntilFlush(t *testing.T) {
 	}
 }
 
-func TestHandleCursorExtension_CreatePlanOutsidePlanAsksConfirm(t *testing.T) {
+// TestHandleCursorExtension_CreatePlanOutsidePlanAsksAccept 回归 d09f1751：
+// 非 plan 下 create_plan 也必须弹「批准并执行」并切 agent，不能只问「进入计划模式」
+// 后停在 plan 导致本轮完结、无人被提醒执行。
+func TestHandleCursorExtension_CreatePlanOutsidePlanAsksAccept(t *testing.T) {
 	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
 	a.modeMu.Lock()
 	a.modeState.CurrentID = "agent"
@@ -224,29 +227,35 @@ func TestHandleCursorExtension_CreatePlanOutsidePlanAsksConfirm(t *testing.T) {
 	if inner["outcome"] != "accepted" {
 		t.Fatalf("want accepted after confirm, got %v", resp)
 	}
-	if asked.ToolKind != "switch_mode" || !strings.Contains(asked.ToolTitle, "进入计划模式") {
-		t.Fatalf("asked=%+v", asked)
+	if asked.ToolKind != "switch_mode" || !strings.Contains(asked.ToolTitle, "批准计划") {
+		t.Fatalf("asked=%+v want 批准计划", asked)
+	}
+	if !strings.HasPrefix(asked.ReqID, "plan-accept:") {
+		t.Fatalf("ReqID=%q want plan-accept: prefix", asked.ReqID)
 	}
 	if len(got.Entries) != 1 {
 		t.Fatalf("entries=%+v", got.Entries)
 	}
+	a.pendingModeMu.Lock()
+	pending := a.pendingModeAfterExt
+	a.pendingModeMu.Unlock()
+	if pending == nil || pending.modeID != "agent" {
+		t.Fatalf("pending=%+v want agent after accept", pending)
+	}
 }
 
-func TestHandleCursorExtension_CreatePlanOutsidePlanDeclineClears(t *testing.T) {
+func TestHandleCursorExtension_CreatePlanOutsidePlanDeclineKeepsPlan(t *testing.T) {
 	a := NewACPAgent(config.ACPConfig{AgentType: "agent"}, nil)
 	a.modeMu.Lock()
 	a.modeState.CurrentID = "agent"
 	a.modeMu.Unlock()
+	a.lastSessionID = "s-decline"
 
 	a.OnPermissionRequest(func(req PermissionRequest) {
 		go func() { _ = a.Deny(context.Background(), req.ReqID) }()
 	})
 	var last PlanUpdate
-	n := 0
-	a.OnPlanUpdate(func(u PlanUpdate) {
-		n++
-		last = u
-	})
+	a.OnPlanUpdate(func(u PlanUpdate) { last = u })
 
 	raw := []byte(`{"toolCallId":"c4","name":"Nope","todos":[{"id":"1","content":"X","status":"pending"}]}`)
 	resp, err := a.handleCursorExtension(context.Background(), "cursor/create_plan", raw, true)
@@ -258,11 +267,14 @@ func TestHandleCursorExtension_CreatePlanOutsidePlanDeclineClears(t *testing.T) 
 	if inner["outcome"] != "cancelled" {
 		t.Fatalf("want cancelled, got %v", resp)
 	}
-	if n < 2 {
-		t.Fatalf("expect preview then clear, n=%d", n)
+	if len(last.Entries) != 1 || last.Entries[0].Content != "X" {
+		t.Fatalf("decline must keep preview, got %+v", last.Entries)
 	}
-	if len(last.Entries) != 0 {
-		t.Fatalf("clear should emit empty, got %+v", last.Entries)
+	a.pendingModeMu.Lock()
+	pending := a.pendingModeAfterExt
+	a.pendingModeMu.Unlock()
+	if pending == nil || pending.modeID != "plan" {
+		t.Fatalf("decline from agent must queue plan, pending=%+v", pending)
 	}
 }
 

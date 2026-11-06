@@ -119,7 +119,7 @@ func acpConfigFor(name string) config.ACPConfig {
 // 开不开、装在哪、用哪个模型。凡是 manifest 能表达的（agent_type、默认 spawn、
 // 能力声明）都不出现在这里。
 type AgentRuntimeConfig struct {
-	// Enabled 被启用的业务名集合。为空时只启用 manifest 里非 OptIn 的（即 claude/qoder）。
+	// Enabled 被启用的业务名集合（顺序即展示序）。为空时全选对接列表。
 	Enabled []string
 	// Overrides 按业务名给出的运行期覆盖（spawn_command、transport 等机器相关知识）。
 	//
@@ -161,15 +161,26 @@ func ACPProviderConfigFromRuntime(rt AgentRuntimeConfig) ACPProviderConfig {
 	return out
 }
 
+// DefaultEnabledNames 出厂启用列表（manifest 顺序，含全部对接 agent）。
+//
+// 设置页「默认全选」与 Enabled 空值回落共用这份名单，避免两处各写一份。
+func DefaultEnabledNames() []string {
+	out := make([]string, 0, len(agentManifests))
+	for _, spec := range agentManifests {
+		out = append(out, spec.Name)
+	}
+	return out
+}
+
 // enabledSet 计算最终启用的业务名集合。
 //
-// 规则（约定优于配置）：Enabled 为空 = 用默认值，即所有非 OptIn 的 agent。
-// 显式列出时**以列表为准**（可以只开一个，也可以把默认开的关掉）。
+// 规则：Enabled 为空 = 全部对接 agent（设置页默认全选）。
+// 显式列出时**以列表为准**（可以只开一个，也可以关掉某个）。
 func (rt AgentRuntimeConfig) enabledSet() map[string]bool {
 	out := make(map[string]bool, len(agentManifests))
 	if len(rt.Enabled) == 0 {
 		for _, spec := range agentManifests {
-			out[spec.Name] = !spec.OptIn
+			out[spec.Name] = true
 		}
 		return out
 	}
@@ -179,6 +190,42 @@ func (rt AgentRuntimeConfig) enabledSet() map[string]bool {
 	}
 	for _, spec := range agentManifests {
 		out[spec.Name] = want[spec.Name]
+	}
+	return out
+}
+
+// enabledOrder 返回已启用 agent 的展示顺序。
+//
+// 显式 Enabled 时以该数组顺序为准（设置页上下排序的落盘形态）；
+// 空 Enabled 时用 manifest 顺序。未知名跳过；Enabled 漏掉但仍启用的
+// （理论上不会，enabledSet 已对齐）按 manifest 顺序追加。
+func (rt AgentRuntimeConfig) enabledOrder() []string {
+	enabled := rt.enabledSet()
+	if len(rt.Enabled) == 0 {
+		out := make([]string, 0, len(agentManifests))
+		for _, spec := range agentManifests {
+			if enabled[spec.Name] {
+				out = append(out, spec.Name)
+			}
+		}
+		return out
+	}
+	seen := make(map[string]bool, len(rt.Enabled))
+	out := make([]string, 0, len(rt.Enabled))
+	for _, n := range rt.Enabled {
+		if !enabled[n] || seen[n] {
+			continue
+		}
+		if _, ok := manifestByName(n); !ok {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	for _, spec := range agentManifests {
+		if enabled[spec.Name] && !seen[spec.Name] {
+			out = append(out, spec.Name)
+		}
 	}
 	return out
 }
@@ -289,21 +336,21 @@ const (
 	AgentCursor    = "cursor"
 )
 
-// AvailableAgents 按配置算出可被任务选择的 agent 列表（顺序即前端展示顺序，claude 在前）。
+// AvailableAgents 按配置算出可被任务选择的 agent 列表（顺序即前端展示顺序）。
 //
 // 判据是「被启用」，不做进程探活——探活要 spawn 子进程，代价与副作用都不该
 // 花在渲染一个下拉框上。真跑不起来时任务会带明确错误失败（ensureACPSession 的 surface 路径）。
 //
-// 2026-10-22 重构：目录不再由 config.AgentsConfig 逐节手写，而是**从 manifest 派生**。
-// 这样"加一个 agent"不再需要在配置里登记（transport/agent_type 这些是代码事实，
-// 写进配置只会多一个写错的地方）。启用与否来自 AgentRuntimeConfig。
+// 顺序：显式 settings.agents.enabled 的数组序（设置页可调）；空 enabled 时用
+// manifest 顺序。启用与否来自 AgentRuntimeConfig。
 func AvailableAgents(rt AgentRuntimeConfig) []AgentInfo {
-	enabled := rt.enabledSet()
 	configured := ACPProviderConfigFromRuntime(rt)
+	order := rt.enabledOrder()
 
-	out := make([]AgentInfo, 0, len(agentManifests))
-	for _, spec := range agentManifests {
-		if !enabled[spec.Name] {
+	out := make([]AgentInfo, 0, len(order))
+	for _, name := range order {
+		spec, ok := manifestByName(name)
+		if !ok {
 			continue
 		}
 		info := AgentInfo{

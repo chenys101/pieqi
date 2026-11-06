@@ -60,10 +60,11 @@ cd services/claude-sdk-bridge && npm test   # 桥全链路：spawn 桥 + 真实 
   不要再往 `config.AgentsConfig` 加节、不要加 `AgentXxxConfig` 类型、不要改 `ACPProviderConfigFromAgents`
   （它已改名为 `ACPProviderConfigFromRuntime`）。原因：`transport` / `agent_type` / 默认 spawn /
   超时 / 能力声明都是**代码事实**，写进配置文件只会形成第二份真相（例如 `agent_type: codebuddy`
-  的值永远是 `codebuddy`）。用户侧只剩两件事可配，且都在**运行期**（`settings.json` 的 `agents` 段，
-  可热改）：开不开（`enabled`）、装在哪（`spawn_overrides`）。前端不用改（目录来自 `GET /api/agents`，
-  且已改为按当前设置现算）。`agent_type` 缺省时 `defaultSpawnCommand` 兜底成 `<agentType> --acp`，
-  dsh 这类非 `--acp` 形态在 manifest 的 `DefaultSpawn` 里显式写。
+  的值永远是 `codebuddy`）。用户侧启停与顺序在**设置页勾选/上下排序**（落盘仍是
+  `settings.json` 的 `agents.enabled`，数组序 = 选择器展示序；出厂全选），装在哪仍可
+  `spawn_overrides`。前端目录来自 `GET /api/agents`（按当前设置现算）；设置页勾选源是
+  同接口的 `supported`（全量 manifest）。`agent_type` 缺省时 `defaultSpawnCommand` 兜底成
+  `<agentType> --acp`，dsh 这类非 `--acp` 形态在 manifest 的 `DefaultSpawn` 里显式写。
 
 **ACP 的模型通道有两条，读哪条决定写哪条**（`internal/agent/model_catalog.go` 的 `catalogSource`）：原生 agent（qodercli、**官方 dsh-acp**）在**标准 `configOptions`** 下发清单、用 **`session/set_config_option`** 设模型（**按轮换模型也走这条**，见 `acp.go` 的 `promptOnce`：先 set 再 prompt，顺序不能反）；另一条是 **`_meta["pieqi/configOptions"]`** 清单 + 请求 **`_meta.model`** 的兜底通道。判据是**标准字段优先**——反过来会把"两者都发"的原生 agent 误判成兜底通道，用 `_meta.model` 去设，而原生 agent 忽略 `_meta`，表现是「界面显示已切换、实际没换」。`_meta` 那条**别当成所有 ACP agent 的通用入口**（bd0cd28 就是这么误伤的 qoder）。它曾用于一份**已弃用的**本地 dsh-acp fork——该 fork 已删（见 `docs/adr/0011`，原因是它要求清空 profile pin，而 pin 一空 `promptCapabilities.image` 必为 false、图片能力全失）；**分支与回归测试刻意保留**，因为它是"标准字段恒空时怎么活"的协议容错，删掉等于假定所有 ACP agent 都合规。回归测试 `internal/agent/model_catalog_test.go`。
 
@@ -527,4 +528,4 @@ curl --noproxy '*' -s http://127.0.0.1:3000/api/admin/restart # {"available":tru
     agent 自己保管（dsh 在 `~/.dsh/storages/session_projcache/sessions/`；claude 由 CLI 管）。
     别把 `~/.dsh` 的内容算作 pieqi 的数据。
 - 改文档涉及领域概念时同步更新 `CONTEXT.md`；引入与既有 ADR 冲突的决策时新增 `docs/adr/00NN-*.md`，不要静默推翻。
-- 运行依赖：`claude` CLI（登录态）、Node.js（桥服务）、`cloudflared`（需要外网访问时）；qoder 等 ACP agent 需本机装对应 CLI 且支持 `--acp`。dsh 额外两点：ACP 入口是 profile（`dsh --profile acp`，不是 `--acp`），且模型路由只取自 dsh `acp` profile 里 `acp` 这条 entry 的 pin（出厂 pin `deepseek-official` 需 `DEEPSEEK_API_KEY`，改 pin 到本地网关等就不需要；清空 pin 不回落 `agent-default-model`，会话会彻底没模型）——路由归 dsh 侧配置，pieqi 不干预。dsh 在 manifest 里标了 `OptIn`：**默认不进选择器**，要用需在运行期设置 `agents.enabled` 里显式列出。
+- 运行依赖：`claude` CLI（登录态）、Node.js（桥服务）、`cloudflared`（需要外网访问时）；qoder 等 ACP agent 需本机装对应 CLI 且支持 `--acp`。dsh 额外两点：ACP 入口是 profile（`dsh --profile acp`，不是 `--acp`），且模型路由只取自 dsh `acp` profile 里 `acp` 这条 entry 的 pin（出厂 pin `deepseek-official` 需 `DEEPSEEK_API_KEY`，改 pin 到本地网关等就不需要；清空 pin 不回落 `agent-default-model`，会话会彻底没模型）——路由归 dsh 侧配置，pieqi 不干预。对接列表出厂**全选**（含 dsh/codebuddy/cursor）；未装 CLI / 无凭据时选中会失败，可在设置页关掉。

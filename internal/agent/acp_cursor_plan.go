@@ -55,16 +55,14 @@ type cursorUpdateTodosParams struct {
 
 // handleCursorCreatePlan 处理 Cursor 的 create_plan。
 //
-// 两条路径（2026-11-02 修订；原「plan 直通」会吞掉批准卡）：
+// 统一路径（2026-11-06）：不论当前是否已在 plan，都先推清单，再弹「批准计划 /
+// 批准并执行」卡。批准 → accepted + 切 agent；拒绝 → cancelled、保留预览，
+// 并确保落在 plan 以便继续改（非 plan 来源会排队 set_mode(plan)）。
 //
-//  1. **已在 plan**：先推清单给人看，再弹「批准计划」审批卡；确认后回
-//     accepted 并切到 agent（hapi#1044：接受后停在 plan 会装死）；拒绝则
-//     cancelled、保留预览、继续停在 plan 改计划。
-//  2. **非 plan**（agent/ask/…）：agent 是在「建议进入计划模式」。先把清单
-//     推到 Task.Plan 给人预览，再经审批卡问「是否进入计划模式」；确认后
-//     set_mode(plan)+accepted；拒绝则清空预览并回 cancelled。
+// 旧「非 plan → 只问是否进入计划模式」会在用户点批准后停在 plan、本轮随即
+// end_turn → 任务 completed，却从未问过「是否执行」（本机会话 d09f1751 复现）。
 //
-// 无 OnPermissionRequest 时（单测 / 未接线）两条路径都直接采纳，避免挂死。
+// 无 OnPermissionRequest 时（单测 / 未接线）直接采纳并切 agent，避免挂死。
 func (a *ACPAgent) handleCursorCreatePlan(ctx context.Context, params json.RawMessage) (any, error) {
 	var p cursorCreatePlanParams
 	_ = json.Unmarshal(params, &p)
@@ -75,45 +73,10 @@ func (a *ACPAgent) handleCursorCreatePlan(ctx context.Context, params json.RawMe
 	cur := a.modeState.CurrentID
 	a.modeMu.RUnlock()
 
-	if cur == "plan" {
-		return a.acceptCursorCreatePlan(ctx, p, entries, cur)
-	}
-
-	// 非 plan：先预览清单，再等人确认是否进入计划模式。
-	a.emitPlan(entries)
-	a.rememberCursorTodos(p.Todos)
-
-	ok, err := a.awaitPlanConfirm(ctx, p, entries, planConfirmEnter)
-	if err != nil {
-		a.clearEmittedPlan()
-		return cursorNestedOutcome(map[string]any{"outcome": "cancelled"}), err
-	}
-	if !ok {
-		a.clearEmittedPlan()
-		a.logger.Debug("acp extension default reply",
-			zap.String("method", "cursor/create_plan"),
-			zap.String("reply", "cancelled"),
-			zap.String("reason", "user_declined_plan_mode"),
-			zap.String("from_mode", cur),
-		)
-		return cursorNestedOutcome(map[string]any{"outcome": "cancelled"}), nil
-	}
-
-	// 先回 accepted，set_mode(plan) 排队到扩展应答写完后再跑（见 queueModeAfterExtReply）。
-	a.queueModeAfterExtReply(a.lastSessionID, "plan")
-
-	a.logger.Debug("acp extension default reply",
-		zap.String("method", "cursor/create_plan"),
-		zap.String("reply", "accepted"),
-		zap.Int("entries", len(entries)),
-		zap.String("name", p.Name),
-		zap.String("from_mode", cur),
-		zap.String("path", "confirm_enter_plan"),
-	)
-	return cursorNestedOutcome(map[string]any{"outcome": "accepted"}), nil
+	return a.acceptCursorCreatePlan(ctx, p, entries, cur)
 }
 
-// acceptCursorCreatePlan plan 模式下等人批准计划：emit → 审批卡 → accepted + 切 agent。
+// acceptCursorCreatePlan emit →「批准并执行」审批卡 → accepted + 切 agent。
 //
 // ⚠️ 禁止在此同步 applyMode：本函数跑在 cursorExtBridge.tryIntercept 栈上，
 // 同步 SetSessionMode 会等 stdout 回包，而 stdout 正被本桥占用 → 死锁。
@@ -121,12 +84,16 @@ func (a *ACPAgent) acceptCursorCreatePlan(ctx context.Context, p cursorCreatePla
 	a.emitPlan(entries)
 	a.rememberCursorTodos(p.Todos)
 
-	ok, err := a.awaitPlanConfirm(ctx, p, entries, planConfirmAccept)
+	ok, err := a.awaitPlanConfirm(ctx, p, entries)
 	if err != nil {
 		// 清单已推给前端预览；超时/退出不强制清，方便下一轮续改。
 		return cursorNestedOutcome(map[string]any{"outcome": "cancelled"}), err
 	}
 	if !ok {
+		// 拒绝执行：保留预览；若还不在 plan，切过去继续改（勿清空清单）。
+		if fromMode != "plan" {
+			a.queueModeAfterExtReply(a.lastSessionID, "plan")
+		}
 		a.logger.Debug("acp extension default reply",
 			zap.String("method", "cursor/create_plan"),
 			zap.String("reply", "cancelled"),
@@ -191,17 +158,9 @@ func (a *ACPAgent) flushPendingModeAfterExtReply() {
 	}()
 }
 
-// planConfirmKind 区分 create_plan 两条审批文案（共用同一条等待通道）。
-type planConfirmKind int
-
-const (
-	planConfirmEnter  planConfirmKind = iota // 非 plan：是否进入计划模式
-	planConfirmAccept                        // 已在 plan：是否批准计划并执行
-)
-
-// awaitPlanConfirm 弹出 create_plan 审批卡，阻塞到用户决策。
+// awaitPlanConfirm 弹出「批准并执行」审批卡，阻塞到用户决策。
 // 无 onPerm 时返回 true（与 RequestPermission 无回调自动放行同口径）。
-func (a *ACPAgent) awaitPlanConfirm(ctx context.Context, p cursorCreatePlanParams, entries []PlanEntry, kind planConfirmKind) (bool, error) {
+func (a *ACPAgent) awaitPlanConfirm(ctx context.Context, p cursorCreatePlanParams, entries []PlanEntry) (bool, error) {
 	a.cbMu.RLock()
 	onPerm := a.onPerm
 	a.cbMu.RUnlock()
@@ -214,12 +173,7 @@ func (a *ACPAgent) awaitPlanConfirm(ctx context.Context, p cursorCreatePlanParam
 		reqID = "cursor-create-plan"
 	}
 	// 与真实工具审批错开：避免盖掉同 id 的 RequestPermission。
-	switch kind {
-	case planConfirmAccept:
-		reqID = "plan-accept:" + reqID
-	default:
-		reqID = "plan-mode:" + reqID
-	}
+	reqID = "plan-accept:" + reqID
 
 	ch := make(chan PermissionResponse, 1)
 	a.permMu.Lock()
@@ -230,7 +184,7 @@ func (a *ACPAgent) awaitPlanConfirm(ctx context.Context, p cursorCreatePlanParam
 	if title == "" {
 		title = "计划"
 	}
-	toolTitle, allowName, rejectName, lead := planConfirmCopy(kind, title)
+	toolTitle, allowName, rejectName, lead := planConfirmCopy(title)
 	summary := buildPlanConfirmSummary(lead, p, entries)
 	onPerm(PermissionRequest{
 		ReqID:       reqID,
@@ -257,19 +211,11 @@ func (a *ACPAgent) awaitPlanConfirm(ctx context.Context, p cursorCreatePlanParam
 	}
 }
 
-func planConfirmCopy(kind planConfirmKind, title string) (toolTitle, allowName, rejectName, lead string) {
-	switch kind {
-	case planConfirmAccept:
-		return "批准计划：" + title,
-			"批准并执行",
-			"继续改计划",
-			"计划已写完。批准后切到执行模式按此清单推进；拒绝则留在计划模式继续修改。\n\n"
-	default:
-		return "进入计划模式：" + title,
-			"进入计划模式",
-			"保持当前模式",
-			"Agent 建议进入计划模式。确认后采纳此计划；拒绝则保持当前模式。\n\n"
-	}
+func planConfirmCopy(title string) (toolTitle, allowName, rejectName, lead string) {
+	return "批准计划：" + title,
+		"批准并执行",
+		"继续改计划",
+		"计划已写完。批准后切到执行模式按此清单推进；拒绝则留在计划模式继续修改。\n\n"
 }
 
 func buildPlanConfirmSummary(lead string, p cursorCreatePlanParams, entries []PlanEntry) string {
@@ -379,18 +325,6 @@ func (a *ACPAgent) emitPlan(entries []PlanEntry) {
 		return
 	}
 	pfn(PlanUpdate{SessionID: a.lastSessionID, Entries: entries})
-}
-
-// clearEmittedPlan 用户拒绝进入 plan 时清掉预览快照。
-func (a *ACPAgent) clearEmittedPlan() {
-	a.cbMu.RLock()
-	pfn := a.onPlan
-	a.cbMu.RUnlock()
-	if pfn == nil {
-		return
-	}
-	pfn(PlanUpdate{SessionID: a.lastSessionID, Entries: nil})
-	a.rememberCursorTodos(nil)
 }
 
 func (a *ACPAgent) rememberCursorTodos(todos []cursorTodo) {

@@ -48,13 +48,14 @@ func (s *Server) agentCatalog() []agent.AgentInfo {
 	return s.agents
 }
 
-// effectiveDefaultAgent 默认 agent（未接线时 claude —— 需求即「默认使用 Claude Code」）。
+// effectiveDefaultAgent 默认 agent = 当前目录首位（设置页排序后首位即默认）。
+// 未接线 / 目录空时退回启动快照或 claude。
 func (s *Server) effectiveDefaultAgent() string {
+	if cat := s.agentCatalog(); len(cat) > 0 {
+		return cat[0].Name
+	}
 	if s.defaultAgent != "" {
 		return s.defaultAgent
-	}
-	if len(s.agents) > 0 {
-		return s.agents[0].Name
 	}
 	return agent.AgentClaude
 }
@@ -76,11 +77,38 @@ func (s *Server) resolveAgent(name string) (string, error) {
 	return "", fmt.Errorf("unknown agent: %s", name)
 }
 
-// listAgents GET /api/agents：可选 agent 目录 + 默认 agent。
+// supportedAgentDTO 对接支持列表项（设置页勾选源；含未启用）。
+// 与 AgentInfo 刻意分开：设置页只需要身份与文案，不必带能力判据。
+type supportedAgentDTO struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Description string `json:"description,omitempty"`
+	Transport   string `json:"transport,omitempty"`
+}
+
+// supportedAgents 返回 manifest 全量对接列表（顺序 = manifest 顺序）。
+func supportedAgents() []supportedAgentDTO {
+	ms := agent.AllManifests()
+	out := make([]supportedAgentDTO, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, supportedAgentDTO{
+			Name:        m.Name,
+			DisplayName: m.DisplayName,
+			Description: m.Description,
+			Transport:   m.Transport,
+		})
+	}
+	return out
+}
+
+// listAgents GET /api/agents：可选 agent 目录 + 默认 agent + 对接支持列表。
+//
+// agents = 当前已启用（选择器用）；supported = 全量对接（设置页勾选源）。
 func (s *Server) listAgents(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"agents":  s.agentCatalog(),
-		"default": s.effectiveDefaultAgent(),
+		"agents":    s.agentCatalog(),
+		"supported": supportedAgents(),
+		"default":   s.effectiveDefaultAgent(),
 	})
 }
 

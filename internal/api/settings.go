@@ -41,6 +41,12 @@ func toSettingsDTO(s core.Settings) settingsDto {
 	if recipes == nil {
 		recipes = []string{}
 	}
+	agents := s.Agents
+	// 空 enabled 投影为「全选 + manifest 顺序」，设置页首屏勾选态与真实默认一致，
+	// 不必前端再猜；不强制写盘——用户首次改勾选/排序时才持久化显式列表。
+	if len(agents.Enabled) == 0 {
+		agents.Enabled = agent.DefaultEnabledNames()
+	}
 	return settingsDto{
 		AutoApproveL0:           s.AutoApproveL0,
 		AutoApproveL1:           s.AutoApproveL1,
@@ -53,7 +59,7 @@ func toSettingsDTO(s core.Settings) settingsDto {
 		// 空串也必须下发（不能 omitempty）：前端要用它区分"没配"与"配了"，
 		// 决定新建任务页项目选择器的默认形态。
 		DefaultProjectPath: s.DefaultProjectPath,
-		Agents:             s.Agents,
+		Agents:             agents,
 	}
 }
 
