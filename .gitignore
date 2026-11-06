@@ -52,6 +52,8 @@ build/pieqi.new.exe
 build/pieqi.exe
 build/pieqi.exe.old
 build/pieqi.exe.failed
+# 隔离验收临时脚本（勿入库）
+build/.tmp_*
 
 # 过时的旧落点（2026-10-14 起运行位在 %USERPROFILE%\.pieqi\bin，交付位在 build/）。
 # 保留忽略以防旧检出里还有残留 —— 目录本身已于 2026-10-14 清理，规则留着当护栏，
@@ -137,9 +139,11 @@ data/sessions/
 data/mappings/
 data/*.png
 
-# 仓内 agent worktree（pieqi 建议落点 .worktrees；旧 .pieqi/worktrees 一并忽略）
+# 仓内 agent worktree（pieqi 建议落点 .worktrees）
 .worktrees/
-.pieqi/worktrees/
+# 仓根 .pieqi/：本地方案预览 / inspect 脚本 / task dump，不入库
+# （运行期 worktree 建议落 .worktrees/；旧 .pieqi/worktrees 也被这条盖住）
+.pieqi/
 
 # 调试临时产物(base64 截图、cloudflared 日志、commit 草稿、临时脚本)
 data/*.b64

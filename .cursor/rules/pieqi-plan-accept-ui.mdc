@@ -1,0 +1,32 @@
+﻿---
+description: pieqi/Cursor Plan 模式批准弹窗可能不出现或不生效
+alwaysApply: true
+---
+
+# pieqi / Cursor Plan UI 已知问题
+
+## pieqi 侧（2026-11-06）
+
+`cursor/create_plan` **不论当前模式**都经审批卡「批准计划 / 批准并执行」等人确认，再
+`accepted` 并切 agent；拒绝则保留预览并落在 plan 继续改。
+旧「非 plan 只问进入计划模式」会在批准后停在 plan、本轮完结，**从不提醒是否执行**
+（已删）。若仍看不到卡，查 `CurrentDecision` / 日志 `path=confirm_accept_plan`。
+
+## 其它宿主 / 残留症状
+
+在 Cursor IDE 等宿主里仍可能出现：
+
+- 计划写完后 **没有弹出** Accept / 批准计划 的卡片
+- 用户点了批准但 **会话仍停在 Plan 模式**，或点击无反馈
+
+## 代理侧应对
+
+- 用户说「先执行」「按这个做」「没有弹窗」时：视为已批准，**切到 Agent 并直接实现**，不要空等弹窗。
+- 不要假设 CreatePlan 之后 UI 一定能完成确认闭环。
+- 若需登记同类宿主 UI 缺陷，记在本规则或 pieqi 侧运维备注，避免反复卡在「等批准」。
+
+## 相关优化提案（工具审批，不只 Plan）
+
+会话里「多次未弹审核 → 轮次默认 completed」的产品方案已登记：
+`docs/notes/approval-miss-and-soft-complete.md`（P0 收紧软完成 / P1 卡必达）。
+施工前先读该笔记；不要在未立项时改 `completeTask` 判据。

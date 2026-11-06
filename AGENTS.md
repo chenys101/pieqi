@@ -425,6 +425,14 @@ curl --noproxy '*' -s http://127.0.0.1:3000/api/admin/restart # {"available":tru
 
 ## 协作约定
 
+- **⚠️ PowerShell `$home` / `$HOME` 禁作自定义变量（2026-11-06 实锤，全 agent 适用）**：
+  二者是**用户主目录**的只读别名。脚本写 `$home = Join-Path $iso "home"` 会赋值失败，
+  变量仍指向 `C:\Users\<you>`，随后 `Remove-Item (Join-Path $home "*") -Recurse -Force`
+  会**清空整个用户目录**（不进回收站）。隔离目录变量必须用 `$PieqiHome` / `$IsoHome` /
+  `$DataRoot` 等；清理只删**字面量单文件**（`-LiteralPath`），禁止对目录通配 `*` 再
+  `-Recurse -Force`；执行前确认展开后的路径落在仓内 / 明确隔离根下，绝不是 `%USERPROFILE%`。
+  本条对 Cursor / Claude / qoder / dsh / 任何在本仓跑 shell 的 agent **一律生效**——
+  不因宿主不同而放宽。
 - **UI 改动的验收纪律**（三条，血泪换来的，见技能 `ui-change-verification`）：
   1. **`npm run test` 绿灯 ≠ 验收**。jsdom 量不出**尺寸、遮挡、滚动、首屏渲染代价**——
      涉及这些的改动必须做**真机**验证，而且要**量出数字并与基线对比**
