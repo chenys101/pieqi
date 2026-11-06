@@ -113,6 +113,7 @@ data/wechat_token.json
 # IDE
 .idea/
 .vscode/
+.cursor/
 *.swp
 
 # TRAE IDE（spec / 分享包产物，不入库）
