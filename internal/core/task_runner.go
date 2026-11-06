@@ -36,6 +36,7 @@ type TaskRunner struct {
 	sysPrompt        string
 	permissionMode   string
 	cleanupWorktrees bool
+	useWorktrees     bool // false：不建 git worktree，cwd=项目根（各 agent 自管隔离时）
 
 	// hook 注入：仅 permissionMode==bypassPermissions 时写 settings.json
 	execPath       string   // pieqi 可执行文件绝对路径，os.Executable() 取
@@ -181,6 +182,7 @@ func NewTaskRunner(logger *zap.Logger, store *TaskStore, wm *WorktreeManager, bu
 		sysPrompt:        sysPrompt,
 		permissionMode:   permissionMode,
 		cleanupWorktrees: cleanupWorktrees,
+		useWorktrees:     true, // 可由 SetUseWorktrees 关掉
 		execPath:         execPath,
 		port:             port,
 		hookTools:        hookTools,
@@ -214,6 +216,49 @@ func (tr *TaskRunner) SetFeedbackStore(fs *FeedbackStore) {
 // SetRequirementStore 注入协作平面回流（Issue/Fix/重验）；nil-safe。
 func (tr *TaskRunner) SetRequirementStore(rs *RequirementStore) {
 	tr.requirements = rs
+}
+
+// SetUseWorktrees 是否由 pieqi 建 git worktree。false 时 cwd=项目根，把隔离交给宿主 agent。
+func (tr *TaskRunner) SetUseWorktrees(v bool) {
+	tr.useWorktrees = v
+}
+
+// ensureTaskWorktree 若尚无 WorktreePath：use_worktrees 开则 git worktree add（建议 .worktrees）；
+// 关则 cwd=项目根（WorktreePath=ProjectPath），不替 agent 定隔离目录。
+func (tr *TaskRunner) ensureTaskWorktree(ctx context.Context, task *model.Task, project *model.Project) (*model.Task, error) {
+	if task == nil {
+		return nil, fmt.Errorf("nil task")
+	}
+	if task.WorktreePath != "" {
+		return task, nil
+	}
+	var wtPath string
+	if !tr.useWorktrees {
+		wtPath = strings.TrimSpace(task.ProjectPath)
+		if wtPath == "" && project != nil {
+			wtPath = strings.TrimSpace(project.RepoPath)
+		}
+		if wtPath == "" {
+			return nil, fmt.Errorf("project path required when use_worktrees=false")
+		}
+	} else {
+		if tr.wm == nil {
+			return nil, fmt.Errorf("worktree manager not wired")
+		}
+		p, err := tr.wm.Create(ctx, project, task.ID)
+		if err != nil {
+			return nil, err
+		}
+		wtPath = p
+	}
+	updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
+		t.WorktreePath = wtPath
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // projectForTask 构造 WorktreeManager 用的 Project；需求票带上 IntegrationBranch 作 BaseRef。
@@ -633,6 +678,8 @@ func (tr *TaskRunner) ResumeRich(taskID, text, turnModel string, images []agent.
 	// 新一轮会把它覆盖成 running / 新的 CurrentDecision，但前端那张旧卡是拿 id 回投的，
 	// 留着它只会让用户再点一次 no pending。
 	tr.clearStaleDecision(taskID)
+	// 新 EventUser = 下一 turn 起点：上一轮的 approve_turn 记忆作废。
+	tr.clearTurnAutoPass(taskID)
 	// 追加一条 user 事件，标记续问起点（前端渲染为右对齐气泡，与首次 prompt 一致）。
 	// 带图时同时记下图片元数据（see model.TaskEvent.Images）。
 	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventUser, Text: text, Images: ImageMeta(images)})
@@ -893,19 +940,10 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 	// 长路径：需求票以 IntegrationBranch 为 worktree base。
 	project := tr.projectForTask(task)
 	task = tr.ensureRequirementContext(task)
-	if task.WorktreePath == "" {
-		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
+	{
+		updated, err := tr.ensureTaskWorktree(parentCtx, task, project)
 		if err != nil {
 			tr.failTask(task.ID, "create worktree: "+err.Error())
-			return
-		}
-		var updated *model.Task
-		updated, err = tr.store.Update(task.ID, func(t *model.Task) bool {
-			t.WorktreePath = wtPath
-			return true
-		})
-		if err != nil {
-			tr.failTask(task.ID, "store worktree path: "+err.Error())
 			return
 		}
 		task = updated
@@ -1014,14 +1052,14 @@ func (tr *TaskRunner) run(parentCtx context.Context, task *model.Task, resumePro
 	// 正常退出但未拿到 result 事件：若任务确实没产出任何内容（无文本/工具事件、空 output），
 	// 不静默标 completed —— 否则会出现"会话无响应"却无任何提示。改为标 failed 并带出 stdout
 	// 统计与 stderr，便于定位（如 825667b3 这类 claude 干活了但 stream 一条没捕获的情况）。
-	// 若已有内容但缺 result 事件，保持原行为（视为完成）。
+	// 若已有内容但缺 result 事件：走 completeAfterTurn（软完成收紧：未决审批/悬挂 tool_use → failed）。
 	if t, ok := tr.store.Get(task.ID); ok && t.Status != model.TaskCompleted && t.Status != model.TaskFailed {
 		if t.Output == "" && !taskHasContent(t) {
 			tr.failTask(task.ID, fmt.Sprintf(
 				"claude 退出码 0 但未产出任何内容（stdout %d 行/%d 字节）\nstderr: %s",
 				streamLines, streamBytes, truncateErr(stderrStr)))
 		} else {
-			tr.completeTask(task.ID, t.Output)
+			tr.completeAfterTurn(task.ID, t.Output)
 		}
 	}
 
@@ -1040,18 +1078,10 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 		zap.String("worktree", task.WorktreePath), zap.Bool("use_acp", tr.useACP), zap.Bool("has_mgr", tr.agentMgr != nil))
 	project := tr.projectForTask(task)
 	task = tr.ensureRequirementContext(task)
-	if task.WorktreePath == "" {
-		wtPath, err := tr.wm.Create(parentCtx, project, task.ID)
+	{
+		updated, err := tr.ensureTaskWorktree(parentCtx, task, project)
 		if err != nil {
 			tr.failTask(task.ID, "create worktree: "+err.Error())
-			return
-		}
-		updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
-			t.WorktreePath = wtPath
-			return true
-		})
-		if err != nil {
-			tr.failTask(task.ID, "store worktree path: "+err.Error())
 			return
 		}
 		task = updated
@@ -1269,7 +1299,7 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 	}
 
 	// 正常结束但未达终态：与 claude -p 路径一致的空输出兜底——无任何产出则标 failed，
-	// 有产出则标 completed（adapter 内部已通过 wire 把增量持久化进 Output/Events）。
+	// 有产出则经 completeAfterTurn（软完成收紧：未决审批 / 悬挂 tool_use → failed，否则 completed）。
 	//
 	// ⚠️ 必须先 Flush 流式增量缓冲再判：增量落盘有 200ms 合并窗口（见 core.FlushDeltaWindow），
 	// 此刻最后一段正文可能还在内存里。不刷就判会有两个后果，且都是静默的：
@@ -1281,7 +1311,7 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 		if t.Output == "" && !taskHasContent(t) {
 			tr.failTask(task.ID, "agent 结束但未产出任何内容")
 		} else {
-			tr.completeTask(task.ID, t.Output)
+			tr.completeAfterTurn(task.ID, t.Output)
 		}
 	}
 
@@ -1501,6 +1531,13 @@ func (tr *TaskRunner) permWire(taskID string) *PermissionWire {
 	return nil
 }
 
+// clearTurnAutoPass 清空该 task 本 turn 的 approve_turn 记忆。无 wire 时 no-op。
+func (tr *TaskRunner) clearTurnAutoPass(taskID string) {
+	if ph := tr.permWire(taskID); ph != nil {
+		ph.ClearTurnMemory()
+	}
+}
+
 // isACPPath task 是否走在 ACP 路径（useACP 且 adapter 仍 open）。
 func (tr *TaskRunner) isACPPath(taskID string) bool {
 	if !tr.useACP || tr.agentMgr == nil {
@@ -1628,7 +1665,7 @@ func (tr *TaskRunner) handleLine(taskID, line string, pending map[string]string)
 		if tr.maybePauseForChoice(taskID, r.Result) {
 			return
 		}
-		tr.completeTask(taskID, r.Result)
+		tr.completeAfterTurn(taskID, r.Result)
 	}
 }
 
@@ -2118,9 +2155,10 @@ func (tr *TaskRunner) transition(taskID string, target model.TaskStatus, mutator
 	}
 	// Feedback P0：Task 进入终态 = 最后一个 Turn 的结束边界，捕获快照（幂等）。
 	// 此时 Agent 进程已退出（completeTask/failTask 均在流解析/Run 返回之后调用），
-	// 读盘无竞态。
+	// 读盘无竞态。同时清空 approve_turn 记忆（轮末作废）。
 	if target == model.TaskCompleted || target == model.TaskFailed || target == model.TaskCancelled {
 		tr.captureTurnEnd(taskID)
+		tr.clearTurnAutoPass(taskID)
 	}
 	evType := "task_updated"
 	if target == model.TaskCompleted {
@@ -2170,7 +2208,11 @@ func (b *concurrentBuffer) String() string {
 // newTaskID 生成任务 ID（独立函数便于测试）。
 func newTaskID() string { return uuid.New().String() }
 
-// worktreePathFor 给定 worktreeBase/projectID/taskID 拼路径（测试用）。
+// worktreePathFor 兼容旧测试：显式 base + projectID + taskID。
 func worktreePathFor(base, projectID, taskID string) string {
-	return filepath.Join(base, projectID, taskID)
+	p, err := WorktreePathFor(base, &model.Project{ID: projectID, RepoPath: "unused"}, taskID)
+	if err != nil {
+		return filepath.Join(base, projectID, taskID)
+	}
+	return p
 }

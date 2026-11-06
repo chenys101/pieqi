@@ -34,6 +34,7 @@ const {
   decision,
   approvalBusy,
   onApprove,
+  onApproveTurn,
   onApproveSession,
   onDeny,
   loadError,
@@ -104,17 +105,19 @@ const {
             @focus-turn="onFocusTurn"
           />
 
-          <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20）
+          <!-- 决策横幅：在输入区上方，手机免滚动直接操作（方案 §20 / ac2）
                shrink-0 必需：横幅里的审批摘要展开后可能很高，不加它会被 flex 压缩
                （内容被裁、按钮被挤走）；同时给它限高 + 内部滚动，
-               保证「批准/拒绝」与下方输入框始终留在可视区。 -->
-          <div v-if="decision" class="shrink-0 px-3 pb-2 md:px-4">
+               保证「批准/拒绝」与下方输入框始终留在可视区。
+               Banner 自身挂载时再 scrollIntoView 一次，防止外层布局把它挤出视口。 -->
+          <div v-if="decision" class="shrink-0 px-3 pb-2 md:px-4" data-testid="session-decision-dock">
             <ContentColumn :resizable="false">
               <div class="max-h-[45vh] overflow-y-auto overscroll-contain">
                 <ApprovalBanner
                   :decision="decision"
                   :loading="approvalBusy"
                   @approve="onApprove"
+                  @approve-turn="onApproveTurn"
                   @approve-session="onApproveSession"
                   @deny="onDeny"
                 />

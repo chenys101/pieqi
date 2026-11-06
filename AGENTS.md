@@ -500,11 +500,12 @@ curl --noproxy '*' -s http://127.0.0.1:3000/api/admin/restart # {"available":tru
     说明被你的 `-A` 卷走了 —— 那批改动已在 HEAD 里，别慌，但也别再继续叠提交。
 - **多会话并行时用 worktree 隔离**（可选但推荐）：
   `git worktree add ../pieqi-<用途> -b <分支>`，各自目录、各自索引，`-A` 也就伤不到别人。
-  - 注意本仓库**运行期**的 worktree（`~/.pieqi/worktrees/`，pieqi 给被驱动 agent 建的）与
-    **开发期**的 worktree 是两件事，别混为一谈；后者只是 git 层面的隔离。
-  - worktree 里跑 pieqi 要遵守既有约束：**exe 必须在工作区外运行或由 svchost/Explorer 启动**
-    （见「发版流程 · 启动纪律」——会话内直启会因受限令牌写不了 `~/.pieqi`），
-    且要显式设 `agents.claude.bridge.dir`（见技能 `pieqi-rebuild-restart` 坑 5/坑 8）。
+  - 注意本仓库**运行期** worktree（`use_worktrees` 默认 true 时建议 `<项目仓>/.worktrees/<task>`；
+ false 则 cwd=项目根）与**开发期** worktree 是两件事。pieqi 只建议落点，不代替 Cursor/dsh
+ 策略；仓外 `worktree_base` 会破坏宿主沙箱（见 `docs/notes/worktree-in-project-sandbox.md`）。
+ - worktree 里跑 pieqi 要遵守既有约束：**exe 必须在工作区外运行或由 svchost/Explorer 启动**
+ （见「发版流程 · 启动纪律」——会话内直启会因受限令牌写不了 `~/.pieqi`），
+ 且要显式设 `agents.claude.bridge.dir`（见技能 `pieqi-rebuild-restart` 坑 5/坑 8）。
   - 用完 `git worktree remove <路径>` 清理；临时探针别留在 `git worktree list` 里
     （`build/` 下的历史遗留探针 2026-10-13 已清）。
 - **只有 `git push` 与 `git reset` 需要先经用户批准**（仓库所有者要求，长期有效）。

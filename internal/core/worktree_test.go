@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -37,6 +38,37 @@ func mustGit(t *testing.T, dir string, args ...string) {
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
+func TestWorktreeManager_DefaultUnderProjectRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	repo := initRepo(t, dir, "main")
+	// worktreeBase 空 → 仓内 .worktrees（建议落点，对齐 agent 沙箱）
+	wm := NewWorktreeManager(zap.NewNop(), "")
+	project := &model.Project{ID: "cb", RepoPath: repo}
+	ctx := context.Background()
+
+	wtPath, err := wm.Create(ctx, project, "task-in-tree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := filepath.Join(repo, ".worktrees")
+	if !strings.HasPrefix(wtPath, wantPrefix+string(filepath.Separator)) && wtPath != filepath.Join(wantPrefix, "task-in-tree") {
+		t.Fatalf("want under %s, got %s", wantPrefix, wtPath)
+	}
+	if _, err := os.Stat(filepath.Join(wtPath, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := wm.Cleanup(ctx, project, "task-in-tree", wtPath); err != nil {
+		t.Fatal(err)
+	}
+	// 拒删项目根
+	if err := wm.Cleanup(ctx, project, "x", repo); err == nil {
+		t.Fatal("cleanup of repo root must fail")
 	}
 }
 

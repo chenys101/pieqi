@@ -48,13 +48,19 @@ api:
 pieqi:
   enabled: true                      # 总开关；开启后 IM 消息走 TaskCreator
   # 运行时数据根目录：留空 = ~/.pieqi（或环境变量 PIEQI_HOME 覆盖）。
-  # tasks/worktrees/sessions 等全部数据存到用户主目录，不入仓库。
-  worktree_base: ""                  # worktree 根目录；留空默认 ~/.pieqi/worktrees
+  # tasks/logs/settings 等 pieqi 运行时数据在数据根；agent 源码 cwd 不在此。
+  #
+  # worktree（编排建议，不代替 Cursor/dsh 各自策略）：
+  #   use_worktrees: false → cwd=项目根，不建 git worktree（隔离交给宿主）
+  #   use_worktrees: true  + worktree_base 空 → 建议 <RepoPath>/.worktrees/<taskID>（仓内）
+  #   worktree_base 非空 → 覆盖根（仓外可能破坏宿主沙箱，勿轻易改）
+  use_worktrees: true
+  worktree_base: ""
   skills_dirs: []                    # 空 = 默认 ~/.claude/skills + CLAUDE_CONFIG_DIR/.claude/skills
   permission_mode: bypassPermissions # claude 自身不拦，由 PreToolUse hook 拦截
   # 注：旧的 auto_approve_tools 已移除 —— 它从未生效（免审名单一直来自设置页的
   #     auto_approve_l0 / auto_approve_l1 开关，默认都开）。显式配置它只会得到一条弃用告警。
-  cleanup_worktrees: true            # 任务完成即清 worktree
+  cleanup_worktrees: true            # 任务完成即清 worktree（use_worktrees=false 时无操作）
   hook_timeout: 30m                  # hook 等人类决策的上限
   hook_tools: [Bash, Write, Edit, NotebookEdit]   # PreToolUse 拦截的工具；读类不拦
   max_concurrent_per_project: 4      # 每项目并发上限

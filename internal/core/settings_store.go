@@ -344,11 +344,13 @@ func NewSettingsStore(path string) (*SettingsStore, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return s, nil // 还没配过 —— 用默认值，首次写入时才落盘
+			// 缺文件：内存 Default；main 在 SetFallbackProjectPath 后调 EnsurePersisted 首落盘。
+			return s, nil
 		}
 		return nil, fmt.Errorf("read settings: %w", err)
 	}
 	if len(data) == 0 {
+		// 空文件与缺失同等：交 EnsurePersisted 初始化（不在这里写，等 fallback 注入）。
 		return s, nil
 	}
 	var loaded Settings
@@ -376,6 +378,30 @@ func (s *SettingsStore) SetFallbackProjectPath(dir string) {
 	defer s.mu.Unlock()
 	s.fallbackProjectPath = strings.TrimSpace(dir)
 	s.applyFallbackLocked()
+}
+
+// EnsurePersisted 启动首落盘（V2.0.1 ac4）：path 指向的文件不存在或为空时，
+// 把当前内存态（含 SetFallbackProjectPath 后的缺省）原子写入。
+//
+// 约束：必须在 SetFallbackProjectPath 之后调用；path==""（纯内存）不落盘；
+// 已有非空文件不覆盖（损坏文件由 NewSettingsStore 直接报错，不会走到这里）。
+func (s *SettingsStore) EnsurePersisted() error {
+	if s == nil {
+		return fmt.Errorf("nil settings store")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.path == "" {
+		return nil
+	}
+	info, err := os.Stat(s.path)
+	if err == nil && info.Size() > 0 {
+		return nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("stat settings: %w", err)
+	}
+	return s.persistLocked()
 }
 
 // applyFallbackLocked 在用户没显式配置时用出厂缺省填上。调用方需持锁。

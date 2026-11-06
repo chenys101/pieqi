@@ -93,6 +93,15 @@ export function useSession(taskId: Ref<string>) {
     }
   }
 
+  /** 批准 + 本 turn 同类免审（只有 ACP 路径的决策带这个动作） */
+  async function approveTurn() {
+    try {
+      await approvalStore.approveTurn(taskId.value)
+    } catch (err) {
+      notify.error(err instanceof Error ? err.message : '审批失败')
+    }
+  }
+
   /** 批准 + 本会话同类免审（只有 ACP 路径的决策带这个动作） */
   async function approveSession() {
     try {
@@ -129,6 +138,7 @@ export function useSession(taskId: Ref<string>) {
     submitPrompt,
     cancel,
     approve,
+    approveTurn,
     approveSession,
     deny,
     consumeForceScroll,

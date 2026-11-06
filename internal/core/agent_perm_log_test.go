@@ -200,5 +200,49 @@ func logMessages(logs *observer.ObservedLogs) []string {
 	return out
 }
 
+// TestTurnAutoPassLogs 单 turn 免审的可检索日志：remembered + applied，字段齐全。
+func TestTurnAutoPassLogs(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	pw, taskID := newObservedPermWire(t, core, time.Minute)
+	fa := pw.adapter.(*fakePermAdapter)
+	seedTurnEvent(t, pw.store, taskID)
+
+	fa.onPerm(permReqCmd("req-turn-1", "pwsh", "execute", "curl -s http://127.0.0.1:3000/ready", standardOptions()))
+	waitForStatus(t, pw.store, taskID, model.TaskWaitingInput, 2*time.Second)
+	if err := pw.Resolve("req-turn-1", "approve_turn"); err != nil {
+		t.Fatalf("resolve approve_turn: %v", err)
+	}
+
+	remembered := logs.FilterMessage("turn auto-pass remembered").All()
+	if len(remembered) != 1 {
+		t.Fatalf("turn auto-pass remembered 应有 1 条，实际 %d（%v）", len(remembered), logMessages(logs))
+	}
+	rctx := remembered[0].ContextMap()
+	for _, k := range []string{"task", "turn", "tool_kind", "kind_kept", "recipes"} {
+		if _, ok := rctx[k]; !ok {
+			t.Fatalf("remembered 缺少字段 %q：%v", k, rctx)
+		}
+	}
+
+	fa.onPerm(permReqCmd("req-turn-2", "pwsh", "execute", "curl -s -o NUL http://127.0.0.1:3000/api/tasks", standardOptions()))
+	if fa.approveCount() != 2 {
+		t.Fatalf("approveCount=%d, want 2（同 turn 应自动放行）", fa.approveCount())
+	}
+
+	applied := logs.FilterMessage("turn auto-pass applied").All()
+	if len(applied) != 1 {
+		t.Fatalf("turn auto-pass applied 应有 1 条，实际 %d（%v）", len(applied), logMessages(logs))
+	}
+	actx := applied[0].ContextMap()
+	for _, k := range []string{"task", "turn", "tool", "tool_kind", "recipes", "via"} {
+		if _, ok := actx[k]; !ok {
+			t.Fatalf("applied 缺少字段 %q：%v", k, actx)
+		}
+	}
+	if actx["via"] != "turn" {
+		t.Fatalf("via=%v, want turn", actx["via"])
+	}
+}
+
 // 保持 agent 包被引用（permReq/standardOptions 用到其类型）。
 var _ = agent.PermissionOptionAllowOnce

@@ -37,7 +37,7 @@ func TestSettings_DefaultProjectPath_Fallback(t *testing.T) {
 		t.Fatalf("未显式配置时应回落出厂缺省 %q, got %q", ws, got)
 	}
 
-	// 重启（重新加载同一份文件）：文件里没有这个键 → 继续用缺省。
+	// 未 EnsurePersisted 时文件仍可不存在：重启靠 fallback 注入。
 	s2, err := NewSettingsStore(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
@@ -45,6 +45,59 @@ func TestSettings_DefaultProjectPath_Fallback(t *testing.T) {
 	s2.SetFallbackProjectPath(ws)
 	if got := s2.Get().DefaultProjectPath; got != ws {
 		t.Fatalf("重启后仍应用缺省 %q, got %q", ws, got)
+	}
+}
+
+// TestSettings_EnsurePersisted_WritesMissingFile ac4：缺失 → 首落盘，且含 fallback 项目路径。
+func TestSettings_EnsurePersisted_WritesMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	ws := filepath.Join(dir, DefaultWorkspaceDirName)
+	if err := os.MkdirAll(ws, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := NewSettingsStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetFallbackProjectPath(ws)
+	if err := s.EnsurePersisted(); err != nil {
+		t.Fatalf("EnsurePersisted: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("settings.json should exist after EnsurePersisted: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"default_project_path"`) {
+		t.Fatalf("首落盘必须含 default_project_path 键, body=%s", raw)
+	}
+	if !strings.Contains(string(raw), `"auto_approve_l0"`) {
+		t.Fatalf("首落盘应含 DefaultSettings 字段, body=%s", raw)
+	}
+
+	// 再调一次不得破坏已有文件（含显式清空后的空串）。
+	sClear, err := NewSettingsStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := ""
+	if _, err := sClear.Patch(SettingsPatch{DefaultProjectPath: &empty}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sClear.EnsurePersisted(); err != nil {
+		t.Fatal(err)
+	}
+	s3, err := NewSettingsStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s3.SetFallbackProjectPath(ws)
+	if got := s3.Get().DefaultProjectPath; got != "" {
+		t.Fatalf("EnsurePersisted 不得覆盖已有文件里的显式清空, got %q", got)
 	}
 }
 

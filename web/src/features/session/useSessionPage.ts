@@ -17,6 +17,7 @@ import { onRealtimeResync } from '@/composables/useWebSocket'
 import { useFeedbackPanelStore } from '@/stores/feedbackPanel'
 import { useArtifactsStore } from '@/stores/artifacts'
 import { useNotificationStore } from '@/stores/notification'
+import { paneForDecision } from './decisionReveal'
 import type { PendingImage } from '@/types/image'
 
 /**
@@ -34,8 +35,18 @@ export function useSessionPage(taskId: ComputedRef<string>) {
   const notify = useNotificationStore()
 
   const viewing = computed(() => artifactsStore.viewing)
-  const { task, canCancel, canSendPrompt, submitPrompt, cancel, approve, approveSession, deny, consumeForceScroll } =
-    useSession(taskId)
+  const {
+    task,
+    canCancel,
+    canSendPrompt,
+    submitPrompt,
+    cancel,
+    approve,
+    approveTurn,
+    approveSession,
+    deny,
+    consumeForceScroll,
+  } = useSession(taskId)
 
   /**
    * 续问可选的模型：按任务自己的 agent 拉清单（store 内幂等 + 失败可重试）。
@@ -157,7 +168,7 @@ export function useSessionPage(taskId: ComputedRef<string>) {
     void submitPrompt(text, undefined, images)
   }
 
-  /** 决策横幅：waiting_input 且带 decision 时展示 */
+  /** 决策横幅：waiting_input 且带 decision 时展示（与后端 CurrentDecision 对齐） */
   const decision = computed(() => (task.value?.status === 'waiting_input' ? task.value.decision : undefined))
   const approvalBusy = ref(false)
   /** 冷启动探测完成（详情已尝试拉取），仍无任务 → 视为不存在 */
@@ -187,6 +198,17 @@ export function useSessionPage(taskId: ComputedRef<string>) {
   const feedbackOpen = ref(false)
   /** 移动端整屏：时间线 / 变更反馈 二选一（头部那一行的反馈图标来回切） */
   const mobilePane = ref<'timeline' | 'feedback'>('timeline')
+
+  /**
+   * 决策出现时强制回时间线：移动端「变更反馈」整屏会把 ApprovalBanner 藏掉
+   * （SessionPage 用 v-show 切换），那正好是「后端 shown、界面像没弹」的现场。
+   */
+  watch(
+    () => decision.value?.id,
+    (id) => {
+      mobilePane.value = paneForDecision(mobilePane.value, !!id)
+    },
+  )
 
   /**
    * 反馈入口的落点按档位不同 —— 三档的入口本来就不是同一个东西。
@@ -306,6 +328,7 @@ export function useSessionPage(taskId: ComputedRef<string>) {
   }
 
   const onApprove = () => runDecision(approve)
+  const onApproveTurn = () => runDecision(approveTurn)
   const onApproveSession = () => runDecision(approveSession)
   const onDeny = () => runDecision(deny)
 
@@ -341,6 +364,7 @@ export function useSessionPage(taskId: ComputedRef<string>) {
     decision,
     approvalBusy,
     onApprove,
+    onApproveTurn,
     onApproveSession,
     onDeny,
     loadError,
