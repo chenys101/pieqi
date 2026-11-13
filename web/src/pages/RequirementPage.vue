@@ -11,10 +11,19 @@ import ModelPicker from '@/features/session/components/ModelPicker.vue'
 import SplitProposalEditor from '@/features/requirement/SplitProposalEditor.vue'
 import { newRequirementTarget } from '@/features/requirement/newRequirementTarget'
 import * as api from '@/services/api/requirements'
+import { getSettings } from '@/services/api/settings'
+import {
+  getReviewCapacity,
+  getWorkflow,
+  listWorkflows,
+  type WorkflowDetail,
+  type WorkflowSummary,
+} from '@/services/api/workflows'
 import { useAgentStore } from '@/stores/agent'
 import { useNotificationStore } from '@/stores/notification'
 import { useRequirementStore } from '@/stores/requirement'
 import type { ProposedTaskNode } from '@/types/requirement'
+import { ApiError } from '@/services/api/client'
 
 const route = useRoute()
 const router = useRouter()
@@ -85,6 +94,77 @@ const bodyPreview = computed(() => {
 /** header「新建需求」：带上当前需求的 project_path（ADR-0021）。 */
 const newReqTarget = computed(() => newRequirementTarget(store.current?.project_path))
 
+const packDetail = ref<WorkflowDetail | null>(null)
+const packList = ref<WorkflowSummary[]>([])
+const showPackSheet = ref(false)
+const showDodPreview = ref(false)
+const showL0Nudge = ref(false)
+const capacityBlocked = ref(false)
+const capacityCount = ref(0)
+
+const canChangePack = computed(() => !hasProgressedWork.value)
+const packChangeHint = computed(() =>
+  hasProgressedWork.value
+    ? '已有 running/completed 票：禁止换包；请新建对照需求'
+    : store.current && store.current.graph_version > 0
+      ? '已 confirm 且票全 planned：换包须 ConfirmReplace + 重拆'
+      : '未 confirm：可换包，须重拆',
+)
+
+const nodesExceedMax = computed(() => {
+  const n = proposal.value?.nodes?.length ?? 0
+  const max = packDetail.value?.gates.max_nodes ?? 0
+  return max > 0 && n > max
+})
+
+const missingEvidenceCount = computed(() => store.outcome?.missing_evidence?.length ?? 0)
+const markDoneBlockedReason = computed(() => {
+  if (!store.outcome || store.outcome.can_mark_done) return ''
+  if (store.outcome.open_issues?.length) return `有 ${store.outcome.open_issues.length} 个开放 Issue`
+  if (missingEvidenceCount.value) return `缺 ${missingEvidenceCount.value} 条 AC 证据`
+  return '尚不可关单'
+})
+
+async function refreshPackMeta() {
+  const wid = store.current?.workflow_id
+  if (!wid) {
+    packDetail.value = null
+    return
+  }
+  try {
+    packDetail.value = await getWorkflow(wid)
+  } catch {
+    packDetail.value = null
+  }
+}
+
+async function refreshCapacityAndNudge() {
+  try {
+    const [cap, settings] = await Promise.all([getReviewCapacity(), getSettings()])
+    capacityCount.value = cap.high_stakes_pending
+    capacityBlocked.value = cap.blocked
+    showL0Nudge.value = !settings.auto_approve_l0
+  } catch {
+    /* ignore */
+  }
+}
+
+async function changePack(id: string) {
+  if (!canChangePack.value) return
+  busy.value = true
+  try {
+    await api.patchRequirement(store.current!.id, { workflow_id: id })
+    showPackSheet.value = false
+    await reload()
+    await refreshPackMeta()
+    notify.success('已更换流程包；请重新拆分')
+  } catch (e) {
+    notify.error(e instanceof Error ? e.message : '换包失败')
+  } finally {
+    busy.value = false
+  }
+}
+
 const statusLabel: Record<string, string> = {
   draft: '草案',
   active: '进行中',
@@ -102,6 +182,7 @@ async function reload() {
   if (!id.value) return
   await store.loadDetail(id.value)
   proposal.value = await api.getProposal(id.value)
+  await Promise.all([refreshPackMeta(), refreshCapacityAndNudge()])
 }
 
 function stopPoll() {
@@ -176,7 +257,37 @@ async function confirmProposal(nodes?: ProposedTaskNode[]) {
         return
       }
     }
-    const result = await api.confirmRequirement(id.value, payload, { replace, force })
+    if (nodesExceedMax.value && !force) {
+      const ok = window.confirm(
+        `节点 ${payload.length} > suggest_max_nodes ${packDetail.value?.gates.max_nodes}。确认强制落地？`,
+      )
+      if (!ok) {
+        busy.value = false
+        return
+      }
+      force = true
+    }
+    if (capacityBlocked.value) {
+      notify.error(`审不过来：全局高风险审批待处理 ≥ 2（当前 ${capacityCount.value}）。请先处理后再落地/Start 实现票。`)
+      busy.value = false
+      return
+    }
+    let result
+    try {
+      result = await api.confirmRequirement(id.value, payload, { replace, force })
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 400 && String(e.message).includes('max_nodes')) {
+        const ok = window.confirm(`${e.message}\n\n强制确认？`)
+        if (ok) {
+          result = await api.confirmRequirement(id.value, payload, { replace, force: true })
+        } else {
+          busy.value = false
+          return
+        }
+      } else {
+        throw e
+      }
+    }
     proposal.value = null
     await reload()
     if (result.abandoned && result.abandoned > 0) {
@@ -340,14 +451,21 @@ onUnmounted(stopPoll)
             ＋ 新建需求
           </RouterLink>
           <Button
-            v-if="store.outcome?.can_mark_done && store.current?.status !== 'done'"
+            v-if="store.current?.status !== 'done'"
             size="sm"
-            :disabled="busy"
+            :disabled="busy || !store.outcome?.can_mark_done"
+            :title="markDoneBlockedReason || undefined"
             @click="markDone"
           >
             标记完成
           </Button>
         </div>
+        <p
+          v-if="store.current?.status !== 'done' && markDoneBlockedReason"
+          class="mt-1 text-right text-[11px] text-muted"
+        >
+          {{ markDoneBlockedReason }}
+        </p>
       </ContentColumn>
     </header>
 
@@ -366,6 +484,72 @@ onUnmounted(stopPoll)
           >
             需求分支 · {{ store.current.integration_branch }}
           </p>
+
+          <div v-if="store.current.workflow_id" class="flex flex-wrap items-center gap-2 text-xs">
+            <span class="text-muted">流程包 ·</span>
+            <strong>
+              {{ packDetail?.label || store.current.workflow_id }}
+              <span class="font-normal text-muted">@{{ store.current.workflow_version || packDetail?.version || '?' }}</span>
+            </strong>
+            <button
+              type="button"
+              class="rounded border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-elevated disabled:opacity-40"
+              :disabled="!canChangePack || busy"
+              :title="packChangeHint"
+              @click="async () => { packList = (await listWorkflows()).workflows; showPackSheet = !showPackSheet }"
+            >
+              更换
+            </button>
+            <button
+              type="button"
+              class="rounded border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-elevated"
+              @click="showDodPreview = !showDodPreview"
+            >
+              预览 DoD
+            </button>
+            <span v-if="store.current.path" class="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted">
+              {{ store.current.path.toUpperCase() }}
+            </span>
+          </div>
+          <p v-if="packDetail?.ui_steps?.length" class="text-[11px] text-muted">
+            <template v-for="(s, i) in packDetail.ui_steps" :key="s.id">
+              <span v-if="i"> → </span>{{ s.label }}
+            </template>
+          </p>
+          <div v-if="showPackSheet" class="rounded-lg border border-border bg-surface p-2">
+            <button
+              v-for="w in packList"
+              :key="w.id"
+              type="button"
+              class="mb-1 block w-full rounded-md px-2 py-2 text-left text-sm hover:bg-accent/10"
+              @click="changePack(w.id)"
+            >
+              {{ w.label }} @{{ w.version }}
+            </button>
+            <p class="px-1 text-[11px] text-muted">{{ packChangeHint }}</p>
+          </div>
+          <pre
+            v-if="showDodPreview && packDetail"
+            class="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-elevated/40 p-3 font-mono text-[11px]"
+          >{{ (packDetail.dod_implement || '') + '\n---\n' + (packDetail.dod_test || '') }}</pre>
+
+          <div
+            v-if="showL0Nudge"
+            class="rounded-lg border border-accent/30 bg-accent/5 px-3 py-2 text-[12px]"
+            role="status"
+          >
+            需求执行建议打开「L0 只读探测」免审，少打断。
+            <RouterLink class="ml-2 text-accent underline-offset-2 hover:underline" to="/settings">去设置打开</RouterLink>
+            <button type="button" class="ml-2 text-[11px] text-muted" @click="showL0Nudge = false">稍后</button>
+          </div>
+
+          <div
+            v-if="capacityBlocked"
+            class="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-[12px] text-warning"
+            role="alert"
+          >
+            审不过来：全局高风险审批待处理 ≥ 2（当前 {{ capacityCount }}）。请先处理后再 Start 新实现票。design / 只读仍可开。
+          </div>
 
           <!-- 原始需求正文 -->
           <section class="space-y-1.5">
@@ -391,8 +575,17 @@ onUnmounted(stopPoll)
           <section class="space-y-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
             <div class="flex flex-wrap items-center gap-2">
               <h2 class="text-xs font-semibold text-text-secondary">Agent 拆分建议</h2>
-              <span class="text-[11px] text-muted">出 Task List → 你确认 → 一键生成</span>
+              <span class="text-[11px] text-muted">
+                按流程包「{{ packDetail?.short_label || store.current.workflow_id || '默认' }}@{{ store.current.workflow_version || packDetail?.version || '?' }}」生成 · 你确认 → 一键生成
+              </span>
             </div>
+            <p
+              v-if="nodesExceedMax"
+              class="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-2 text-[11px] text-warning"
+              role="status"
+            >
+              节点 {{ proposal?.nodes?.length }} &gt; suggest_max_nodes {{ packDetail?.gates.max_nodes }} — 确认需 force，不静默。
+            </p>
             <p
               v-if="willReplaceOnConfirm"
               class="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-warning"
@@ -494,6 +687,13 @@ onUnmounted(stopPoll)
                 <span class="font-mono text-[11px] text-muted">{{ ac.id }}</span>
                 <span class="min-w-0 flex-1">{{ ac.text }}</span>
                 <span class="text-[11px] font-medium" :class="acColor[ac.state]">{{ ac.state }}</span>
+                <span
+                  v-if="ac.state !== 'deferred'"
+                  class="text-[10px]"
+                  :class="ac.has_evidence ? 'text-accent' : 'text-error'"
+                >
+                  {{ ac.has_evidence ? '有证据' : '缺证据' }}
+                </span>
                 <template v-if="ac.state !== 'deferred' && ac.state !== 'green'">
                   <button class="text-[11px] text-accent" :disabled="busy" @click="verifyAC(ac.id, true)">人验过</button>
                   <button class="text-[11px] text-error" :disabled="busy" @click="verifyAC(ac.id, false)">人验拒</button>

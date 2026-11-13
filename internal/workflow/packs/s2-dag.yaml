@@ -1,0 +1,48 @@
+id: s2-dag
+version: "1"
+label: "S2 · requirement DAG"
+short_label: S2
+description: "Multi-ticket dependency graph; limited parallel. Higher cold-start and review cost."
+tags: [multi-ticket, limited parallel, audit]
+ui_steps:
+  - { id: design, label: Design }
+  - { id: implement, label: Implement }
+  - { id: verify, label: Verify }
+  - { id: outcome, label: Close }
+gates:
+  max_nodes: 12
+  max_parallel_implement: 2
+  forbid_fe_be_hard_split: false
+  require_ac_evidence_to_done: true
+  path_bias: full_dag
+  require_brief_in_prompt: true
+split_instructions: |
+  3. **Split philosophy (S2)**: Reasonable grain; use depends_on for order.
+     Parallel only when file/module sets are disjoint with independent acceptance.
+     Do not split solely because "there is FE and BE". Prefer delivery slices over org roles.
+  4. No empty prompts; each must be runnable.
+  5. **Delivery**: implement merges to req branch; unit tests only on implement;
+     test waves depend_on implements; isolate functional tests; one final verify ok.
+brief_header: |
+  Stakes: low | high
+  Hypothesis: ...
+  Goal / out of scope: ...
+  Done = <command or AC id + how to verify>
+  Mode: do-it
+  Handoff: read docs/handoff/req-<id8>.md if present; write back conclusions + evidence only
+dod_implement: |
+
+  ## pieqi delivery (implement)
+
+  1. Work in this task worktree; **merge into the requirement integration branch** when done.
+  2. Self-test = unit/component tests only. Do not start pieqi service as completion criteria.
+  3. Sandbox/test failures => do not mark completed; leave evidence.
+  4. Ticket completed means merged to req branch, not "session finished".
+dod_test: |
+
+  ## pieqi delivery (test)
+
+  1. Wait until depends_on are done and merged to req branch before functional tests.
+  2. Functional test: checkout req branch → build → **isolated instance** (separate PIEQI_HOME + port).
+  3. Report must include "总评：FAIL" on failure. Do not mark completed on FAIL.
+  4. Do not shorten approval timeout or auto-approve to fake a green test.

@@ -9,6 +9,7 @@ import (
 	"pieqi/internal/auth"
 	"pieqi/internal/config"
 	"pieqi/internal/core"
+	"pieqi/internal/workflow"
 
 	"github.com/gin-gonic/gin"
 )
@@ -18,6 +19,7 @@ type Server struct {
 	cfg          *config.Config
 	store        *core.TaskStore
 	requirements *core.RequirementStore // ADR-0021 P0；nil-safe（未接线时空列表 / 503）
+	workflows    *workflow.Registry     // 流程包；nil-safe
 	runner       *core.TaskRunner
 	hooks        *core.HookService
 	bus          *core.EventBus
@@ -205,9 +207,15 @@ func (s *Server) Register(r gin.IRouter) {
 		// 某 agent 的可选模型清单（新任务页 / 会话页的模型选择器）。代价是起一次 agent
 		// 进程，故按需拉取 + agent 包内缓存，不并进 /agents 让所有 agent 一起付。
 		api.GET("/agents/:name/models", s.listAgentModels)
+		// 流程包（设置页只读 + 新建需求选用）
+		api.GET("/workflows", s.listWorkflows)
+		api.GET("/workflows/:id", s.getWorkflow)
+		api.POST("/workflows/reload", s.reloadWorkflows)
+		api.POST("/workflows/default", s.setDefaultWorkflow)
 		// Collaboration Plane（ADR-0021 P0）：需求 CRUD；短路径仍走 /tasks。
 		api.GET("/requirements", s.listRequirements)
 		api.POST("/requirements", s.createRequirement)
+		api.GET("/requirements/capacity", s.getReviewCapacity)
 		api.GET("/requirements/:id", s.getRequirement)
 		api.PATCH("/requirements/:id", s.patchRequirement)
 		api.DELETE("/requirements/:id", s.deleteRequirement)

@@ -31,23 +31,35 @@ const deliveryDoDTest = `
 
 // AppendDeliveryDoD 按角色在 prompt 末尾追加交付纪律（已含标记则不重复）。
 func AppendDeliveryDoD(role model.TaskRole, prompt string) string {
-	const marker = "pieqi 交付纪律"
-	// 先认标记再 Trim：避免已注入正文被 TrimSpace 剥尾换行后破坏幂等。
-	if strings.Contains(prompt, marker) {
+	return AppendDeliveryDoDFrom(role, prompt, deliveryDoDImplement, deliveryDoDTest)
+}
+
+// AppendDeliveryDoDFrom 使用自定义实现/test 文案（来自 Workflow Pack）；空则回落内置。
+func AppendDeliveryDoDFrom(role model.TaskRole, prompt, dodImplement, dodTest string) string {
+	const markerCN = "pieqi 交付纪律"
+	const markerEN = "pieqi delivery"
+	if strings.Contains(prompt, markerCN) || strings.Contains(prompt, markerEN) {
 		return prompt
 	}
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return prompt
 	}
+	impl := dodImplement
+	if strings.TrimSpace(impl) == "" {
+		impl = deliveryDoDImplement
+	}
+	test := dodTest
+	if strings.TrimSpace(test) == "" {
+		test = deliveryDoDTest
+	}
 	switch role {
 	case model.RoleTest:
-		return prompt + deliveryDoDTest
+		return prompt + test
 	case model.RoleDesign, model.RoleReview:
 		return prompt
 	default:
-		// frontend / backend / fix / other / 空
-		return prompt + deliveryDoDImplement
+		return prompt + impl
 	}
 }
 

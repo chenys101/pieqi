@@ -41,6 +41,20 @@ test 按**波次**拆，写全 `depends_on`；不要「一实现票一空 test�
 - test 报告含「总评：FAIL」时，轮末不得 `completed`（`completeAfterTurn` → `test report: FAIL`），避免会话跑完却不开 Issue。
 - ConfirmReplace：若已有票离开 `planned`（已开跑/完成/失败），默认拒绝；须 `force: true`。
 
+## 路径分级（S0 / S1 / S2）
+
+与 [workflow-execution-efficiency.md](workflow-execution-efficiency.md) §4 对齐；创建时显式选路径，启发式可覆盖：
+
+| 代号 | 形态 | 说明 |
+|---|---|---|
+| **S0** | 短路径 Task | 不进需求图、无流程包；UI 跳转「新建任务」 |
+| **S1** | 轻量 Requirement | 少票 + 同需求实现并行默认 1；钉死流程包 |
+| **S2** | 完整 Collaboration Plane | 多票 DAG；成本文案明示冷启动 / 人审 / 合入税 |
+
+流程包（`workflow_id` + `workflow_version`）在创建时钉死；跑中有 progressed 票禁止换包。策略文案来自 Pack；L0 契约（JSON 校验 / test depends / L3 / 软完成否决 / 零 AC）仍在代码。
+
+关单：有非 deferred AC 时须人验 pass 或 `evidence_ref`；票绿 alone 不够。零 AC 容器仍可 done（不宣称 testing）。
+
 ## 拆分助手须遵守
 
-见 `buildSplitSuggestPrompt` / `AppendDeliveryDoD` 注入正文。
+见 `buildSplitSuggestPrompt`（读 Pack `split_instructions`）/ `AppendDeliveryDoDFrom`（读 Pack DoD）注入正文。

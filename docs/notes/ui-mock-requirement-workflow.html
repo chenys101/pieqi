@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pieqi · 流程包 UI（对齐 workflow-execution-efficiency）</title>
+  <style>
+    :root {
+      --bg: 246 247 249; --surface: 255 255 255; --elevated: 248 249 251;
+      --border: 220 223 230; --text: 24 26 32; --muted: 130 136 150; --text2: 90 96 110;
+      --accent: 110 65 205; --warning: 180 120 20; --error: 180 50 50;
+      --radius: 10px; --font: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    }
+    [data-theme="dark"] {
+      --bg: 12 13 17; --surface: 20 22 27; --elevated: 26 29 35;
+      --border: 50 55 65; --text: 235 237 242; --muted: 120 126 140; --text2: 170 176 190;
+      --accent: 155 109 255;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: var(--font); background: rgb(var(--bg)); color: rgb(var(--text)); line-height: 1.45; font-size: 13px; }
+    .banner { background: rgb(var(--accent) / 0.1); border-bottom: 1px solid rgb(var(--accent) / 0.3); padding: 10px 16px; font-size: 12px; }
+    .banner strong { color: rgb(var(--accent)); }
+    .path { font-family: ui-monospace, Consolas, monospace; font-size: 11px; background: rgb(var(--elevated)); padding: 1px 5px; border-radius: 4px; }
+    .top { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid rgb(var(--border)); background: rgb(var(--surface)); position: sticky; top: 0; z-index: 5; }
+    .top button { border: 1px solid rgb(var(--border)); background: rgb(var(--surface)); color: rgb(var(--text)); border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+    .top button.on { border-color: rgb(var(--accent)); background: rgb(var(--accent) / 0.08); color: rgb(var(--accent)); font-weight: 600; }
+    .shell { max-width: 42rem; margin: 0 auto; padding: 16px; }
+    .screen { display: none; } .screen.on { display: block; }
+    h1 { font-size: 14px; margin: 0; }
+    .muted { color: rgb(var(--text2)); font-size: 12px; }
+    .tiny { color: rgb(var(--muted)); font-size: 11px; }
+    .page-h { display: flex; align-items: center; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid rgb(var(--border)); margin-bottom: 14px; }
+    .page-h h1 { flex: 1; }
+    label.f { display: block; margin-bottom: 12px; }
+    label.f > span { display: block; font-size: 12px; color: rgb(var(--text2)); margin-bottom: 4px; }
+    input, textarea, select { width: 100%; border: 1px solid rgb(var(--border)); background: rgb(var(--elevated)); color: rgb(var(--text)); border-radius: 8px; padding: 8px 10px; font: inherit; }
+    textarea { min-height: 64px; resize: vertical; }
+    .btn { border: none; border-radius: 8px; padding: 7px 12px; font-size: 12px; font-weight: 500; cursor: pointer; }
+    .btn-p { background: rgb(var(--accent)); color: #fff; }
+    .btn-g { background: transparent; color: rgb(var(--text2)); border: 1px solid rgb(var(--border)); }
+    .link { color: rgb(var(--accent)); font-size: 12px; cursor: pointer; text-decoration: underline; }
+    .callout { border: 1px solid rgb(var(--accent) / 0.3); background: rgb(var(--accent) / 0.06); border-radius: var(--radius); padding: 10px 12px; font-size: 12px; margin-bottom: 14px; }
+    .warn { border: 1px solid rgb(var(--warning) / 0.45); background: rgb(var(--warning) / 0.1); color: rgb(var(--warning)); border-radius: 8px; padding: 8px 10px; font-size: 11px; margin: 8px 0; }
+    .err { border: 1px solid rgb(var(--error) / 0.4); background: rgb(var(--error) / 0.08); color: rgb(var(--error)); border-radius: 8px; padding: 8px 10px; font-size: 11px; margin: 8px 0; }
+    .card { border: 1px solid rgb(var(--border)); background: rgb(var(--surface)); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; }
+    .card.def { border-color: rgb(var(--accent) / 0.45); background: rgb(var(--accent) / 0.05); }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .pill { font-size: 10px; font-weight: 600; color: rgb(var(--accent)); background: rgb(var(--accent) / 0.12); border-radius: 6px; padding: 1px 6px; }
+    .pill.n { color: rgb(var(--text2)); background: rgb(var(--elevated)); }
+    .locked { border: 1px dashed rgb(var(--border)); border-radius: 8px; padding: 10px; margin-top: 12px; }
+    .path-opt { display: block; width: 100%; text-align: left; border: 1px solid rgb(var(--border)); background: rgb(var(--surface)); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; cursor: pointer; }
+    .path-opt.sel { border-color: rgb(var(--accent)); background: rgb(var(--accent) / 0.06); box-shadow: inset 3px 0 0 rgb(var(--accent)); }
+    .path-opt .t { font-weight: 600; font-size: 13px; }
+    .pack-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 0; border-top: 1px solid rgb(var(--border)); border-bottom: 1px solid rgb(var(--border)); margin: 12px 0; }
+    .sheet { border: 1px solid rgb(var(--border)); border-radius: var(--radius); background: rgb(var(--surface)); padding: 12px; margin-top: 10px; }
+    .sheet .item { display: block; width: 100%; text-align: left; border: 1px solid transparent; border-radius: 8px; padding: 8px; margin: 4px 0; cursor: pointer; background: transparent; color: inherit; }
+    .sheet .item:hover, .sheet .item.sel { background: rgb(var(--accent) / 0.08); border-color: rgb(var(--accent) / 0.3); }
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid rgb(var(--border)); margin-bottom: 10px; padding-bottom: 6px; }
+    .tabs button { border: none; background: transparent; color: rgb(var(--text2)); padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+    .tabs button.on { background: rgb(var(--accent) / 0.1); color: rgb(var(--accent)); font-weight: 600; }
+    .pane { display: none; } .pane.on { display: block; }
+    pre.tpl { white-space: pre-wrap; font-size: 11px; background: rgb(var(--elevated)); border-radius: 8px; padding: 10px; max-height: 160px; overflow: auto; }
+    .steps { font-size: 11px; color: rgb(var(--muted)); margin: 6px 0 12px; }
+    .steps .cur { color: rgb(var(--accent)); font-weight: 600; }
+    .panel { border: 1px solid rgb(var(--accent) / 0.3); background: rgb(var(--accent) / 0.05); border-radius: var(--radius); padding: 12px; }
+    .ac { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid rgb(var(--border)); font-size: 12px; }
+    .badge-miss { color: rgb(var(--error)); font-size: 10px; }
+    .badge-ok { color: rgb(var(--accent)); font-size: 10px; }
+  </style>
+</head>
+<body>
+  <div class="banner">
+    <strong>线框 · 对齐效率笔记 §4/§8/§11</strong>
+    — 路径与流程包分离；新建一行+Sheet；设置一期只读+设默认；详情含换包/证据/容量/L0 nudge。
+    文件：<span class="path">docs/notes/ui-mock-requirement-workflow.html</span>
+  </div>
+  <div class="top">
+    <button type="button" class="on" data-s="settings">A 设置·流程包</button>
+    <button type="button" data-s="view">A′ 只读查看</button>
+    <button type="button" data-s="new">B 新建</button>
+    <button type="button" data-s="detail">C 详情</button>
+    <button type="button" data-s="list">D 列表</button>
+    <button type="button" id="theme">深色</button>
+  </div>
+
+  <div class="shell">
+    <!-- A Settings -->
+    <section id="settings" class="screen on">
+      <div class="page-h"><h1>设置 · 流程包</h1></div>
+      <p class="tiny" style="margin-top:-8px;margin-bottom:12px">why：拆分文案 / 并行 knobs · 创建时钉死版本</p>
+
+      <div class="card def">
+        <div class="tiny">默认（之后新建）</div>
+        <div class="row" style="margin-top:4px">
+          <strong>S1 · 计划闸串行</strong>
+          <span class="pill">light_req</span>
+          <span class="pill n">内置</span>
+        </div>
+        <div class="tiny" style="margin-top:4px">s1-plan-serial @1 · max_parallel=1 · max_nodes=5</div>
+        <button type="button" class="btn btn-g" style="margin-top:8px" data-s="view">更换默认…</button>
+      </div>
+
+      <p class="muted">已发布 / 本地</p>
+      <div class="card row">
+        <span style="flex:1">s0-single @1</span><span class="pill n">内置</span>
+        <button type="button" class="btn btn-g" data-s="view">查看</button>
+      </div>
+      <div class="card row">
+        <span style="flex:1">s1-plan-serial @1</span><span class="pill">默认</span><span class="pill n">内置</span>
+        <button type="button" class="btn btn-g" data-s="view">查看</button>
+      </div>
+      <div class="card row">
+        <span style="flex:1">s2-dag @1</span><span class="pill n">内置</span>
+        <button type="button" class="btn btn-g" data-s="view">查看</button>
+        <button type="button" class="btn btn-g">设为默认</button>
+      </div>
+
+      <div class="locked">
+        <div class="muted" style="font-weight:600">L0 契约（不可热改）</div>
+        <p class="tiny" style="margin:6px 0 0">提案 JSON 校验 · test 必须 depends · L3 删除 · 软完成否决 · 零 AC 容器语义。改这些必须发版 + ADR。</p>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button type="button" class="btn btn-g">重新扫描 ~/.pieqi/workflows</button>
+      </div>
+      <p class="tiny" style="margin-top:8px">一期：模板只读；编辑靠盘文件 + 扫描。Fork/发布二期。</p>
+    </section>
+
+    <!-- A′ view pack -->
+    <section id="view" class="screen">
+      <div class="page-h">
+        <button type="button" class="btn btn-g" data-s="settings">←</button>
+        <h1>查看 · s1-plan-serial @1</h1>
+        <button type="button" class="btn btn-p">设为默认</button>
+      </div>
+      <div class="tabs">
+        <button type="button" class="on" data-pane="k">Knobs</button>
+        <button type="button" data-pane="sp">拆分</button>
+        <button type="button" data-pane="br">Brief</button>
+        <button type="button" data-pane="dd">DoD</button>
+      </div>
+      <div id="k" class="pane on">
+        <p>max_implement_parallel = <strong>1</strong></p>
+        <p>suggest_max_nodes = <strong>5</strong></p>
+        <p>path_bias = <strong>light_req</strong></p>
+        <p>require_brief_in_prompt = <strong>true</strong></p>
+        <p>forbid_fe_be_hard_split = <strong>true</strong></p>
+        <p class="tiny">变量白名单：title, body, project_path, acceptance[], role, covers_ac, integration_branch, handoff_path, id/id8, temp_ids…</p>
+      </div>
+      <div id="sp" class="pane"><pre class="tpl">默认少票：0～1 design + 1～2 实现串行 + 0～1 test…
+禁止 FE/BE 工种硬拆…</pre></div>
+      <div id="br" class="pane"><pre class="tpl">Stakes / Hypothesis / Goal / Done= / Mode / Handoff</pre></div>
+      <div id="dd" class="pane"><pre class="tpl">## pieqi 交付纪律（实现票）
+1. merge 进需求分支…
+—
+## test 票纪律
+1. depends_on 齐后再功能测…</pre></div>
+    </section>
+
+    <!-- B New -->
+    <section id="new" class="screen">
+      <div class="page-h"><h1>新建需求</h1></div>
+      <label class="f"><span>标题</span><input value="V2.0.1 流程优化" /></label>
+      <label class="f"><span>项目路径</span><input value="D:\code\go\pieqi" /></label>
+      <label class="f"><span>说明</span><textarea>…</textarea></label>
+      <label class="f"><span>验收标准（每行一条）</span><textarea>登录可用
+列表分页</textarea></label>
+
+      <p class="muted">执行路径</p>
+      <button type="button" class="path-opt" data-path="s0"><div class="t">S0 短路径任务</div><div class="tiny">不进需求图 · 无流程包</div></button>
+      <button type="button" class="path-opt sel" data-path="s1"><div class="t">S1 轻量需求 <span class="pill">建议</span></div><div class="tiny">先定案再串行实现</div></button>
+      <button type="button" class="path-opt" data-path="s2"><div class="t">S2 完整协作平面</div><div class="tiny">冷启动高 · 人审与合入税更高</div></button>
+      <p class="tiny">依据：AC≤3 且正文短 → 本可建议 S0；有定案必要 → S1（可覆盖）</p>
+
+      <div id="packRow" class="pack-line">
+        <span class="tiny">流程包</span>
+        <strong>S1 · 计划闸串行 @1</strong>
+        <button type="button" class="btn btn-g" id="chgPack">更换</button>
+      </div>
+      <div id="packSheet" class="sheet" hidden>
+        <div class="muted" style="margin-bottom:6px">选用已发布包</div>
+        <button type="button" class="item">s0-single @1 · 单票</button>
+        <button type="button" class="item sel">s1-plan-serial @1 · 计划闸串行（默认）</button>
+        <button type="button" class="item">s2-dag @1 · 需求 DAG</button>
+      </div>
+
+      <div class="err" id="dedup" hidden>
+        已有进行中的同文案需求「V2.0.1 流程优化」
+        <button type="button" class="btn btn-g" style="margin-left:8px">打开续跑</button>
+        <div class="tiny" style="margin-top:4px">禁止再建一条空转图。</div>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <button type="button" class="btn btn-p" id="createBtn">创建</button>
+        <span class="link" data-s="detail">（演示：创建后进详情）</span>
+        <a class="link" href="#">改走短路径：新建任务</a>
+      </div>
+    </section>
+
+    <!-- C Detail -->
+    <section id="detail" class="screen">
+      <div class="page-h">
+        <h1>V2.0.1 流程优化</h1>
+        <span class="tiny">进行中</span>
+        <button type="button" class="btn btn-g" disabled title="缺 2 条 AC 证据">标记完成</button>
+      </div>
+      <p class="tiny">D:\code\go\pieqi</p>
+      <p class="tiny" style="font-family:ui-monospace">需求分支 · req/bb2f5ab5</p>
+      <div class="row" style="margin:8px 0">
+        <span class="tiny">流程包 ·</span>
+        <strong>S1 · 计划闸串行 @1</strong>
+        <button type="button" class="btn btn-g">更换</button>
+        <button type="button" class="btn btn-g" data-s="view">预览 DoD</button>
+      </div>
+      <div class="steps"><span class="cur">定案</span> → 实现 → 终验 → 收口</div>
+      <p class="tiny">换包：未 confirm 可换须重拆；票全 planned 可 ConfirmReplace；有 running/completed 禁用。</p>
+
+      <div class="callout">
+        需求执行建议打开「L0 只读探测」免审，少打断。
+        <button type="button" class="btn btn-p" style="margin-left:8px">去设置打开</button>
+        <button type="button" class="btn btn-g">稍后</button>
+      </div>
+
+      <div class="warn">
+        审不过来：全局高风险审批待处理 ≥ 2。请先处理后再 Start 新实现票。design / 只读仍可开。
+      </div>
+
+      <div class="panel">
+        <div class="muted" style="font-weight:600">Agent 拆分建议</div>
+        <p class="tiny">按流程包「S1 @1」生成 · <span class="link" data-s="view">预览将注入的 DoD</span></p>
+        <div class="warn">节点 6 &gt; suggest_max_nodes 5 — 确认需 force，不静默。</div>
+        <button type="button" class="btn btn-p">让 Agent 拆分</button>
+      </div>
+
+      <h2 class="muted" style="font-size:12px;margin:16px 0 6px">验收</h2>
+      <div class="ac"><span style="flex:1">ac1 · 登录可用</span><span class="badge-miss">缺证据</span></div>
+      <div class="ac"><span style="flex:1">ac2 · 列表分页</span><span class="badge-miss">缺证据</span></div>
+      <p class="tiny">标记完成禁用：缺 2 条 AC 证据。零 AC 容器可 done（不宣称 testing）。</p>
+    </section>
+
+    <!-- D List -->
+    <section id="list" class="screen">
+      <div class="page-h"><h1>需求</h1><button type="button" class="btn btn-p" data-s="new">＋ 新建</button></div>
+      <div class="card row">
+        <span style="flex:1;font-weight:500">V2.0.1 流程优化</span>
+        <span class="pill">S1</span>
+        <span class="tiny">进行中</span>
+      </div>
+      <div class="card row">
+        <span style="flex:1;font-weight:500">小修文案</span>
+        <span class="pill n">S0</span>
+        <span class="tiny">草案</span>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    function show(id) {
+      document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('on', s.id === id))
+      document.querySelectorAll('.top button[data-s]').forEach((b) => b.classList.toggle('on', b.dataset.s === id))
+    }
+    document.querySelectorAll('[data-s]').forEach((el) => {
+      el.addEventListener('click', (e) => { e.preventDefault(); show(el.dataset.s) })
+    })
+    document.querySelectorAll('.tabs button[data-pane]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const root = btn.closest('section')
+        root.querySelectorAll('.tabs button').forEach((b) => b.classList.remove('on'))
+        btn.classList.add('on')
+        root.querySelectorAll('.pane').forEach((p) => p.classList.remove('on'))
+        root.querySelector('#' + btn.dataset.pane)?.classList.add('on')
+      })
+    })
+    document.querySelectorAll('.path-opt').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.path-opt').forEach((b) => b.classList.remove('sel'))
+        btn.classList.add('sel')
+        document.getElementById('packRow').hidden = btn.dataset.path === 's0'
+      })
+    })
+    document.getElementById('chgPack')?.addEventListener('click', () => {
+      const sh = document.getElementById('packSheet')
+      sh.hidden = !sh.hidden
+    })
+    document.getElementById('createBtn')?.addEventListener('click', () => {
+      document.getElementById('dedup').hidden = false
+    })
+    document.getElementById('theme')?.addEventListener('click', () => {
+      const h = document.documentElement
+      h.dataset.theme = h.dataset.theme === 'dark' ? 'light' : 'dark'
+    })
+  </script>
+</body>
+</html>

@@ -77,6 +77,20 @@ func validateProposal(req *model.Requirement, p *model.SplitProposal, existing [
 	return nil
 }
 
+// ValidateSplitProposalWithPack 在 ValidateSplitProposal 之上叠加 Pack 闸门。
+// force=true 时跳过 max_nodes 硬拦（仍拦 FE/BE 与并行上限）。
+func ValidateSplitProposalWithPack(req *model.Requirement, p *model.SplitProposal, packGates func([]model.ProposedTaskNode) error) error {
+	if err := ValidateSplitProposal(req, p); err != nil {
+		return err
+	}
+	if packGates != nil && p != nil {
+		if err := packGates(p.Nodes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func checkACCoverage(acs []model.AcceptanceItem, nodes []model.ProposedTaskNode, existing []*model.Task) error {
 	need := make(map[string]struct{})
 	for _, ac := range acs {

@@ -169,6 +169,10 @@ type Settings struct {
 	// TestSettings_DefaultProjectPath_ExplicitClearSticks。
 	DefaultProjectPath string `json:"default_project_path"`
 
+	// DefaultWorkflowID 新建需求默认流程包 id（只影响之后新建）。
+	// 空 = 用 Registry 内置默认（s1-plan-serial）。
+	DefaultWorkflowID string `json:"default_workflow_id,omitempty"`
+
 	// ---------- ⑤ Agent 选择（2026-10-22 新增，运行期） ----------
 
 	// Agents 启用了哪些 agent，以及各 agent 的机器相关覆盖项。
@@ -302,6 +306,8 @@ type SettingsPatch struct {
 	// 补丁语义而不是"整体替换"：它是一台机器上一个固定目录，本身就是单值，
 	// 不存在 Agents 那种"集合并发改丢一项"的问题。
 	DefaultProjectPath *string
+	// DefaultWorkflowID 新建需求默认流程包（nil = 不修改；空串 = 回落 Registry 默认）。
+	DefaultWorkflowID *string
 	// Agents 整体替换 agent 选择（nil = 不修改）。
 	//
 	// 用整体替换而非逐字段补丁：agent 列表本来就是一个集合，"加一个/删一个"
@@ -492,6 +498,9 @@ func (s *SettingsStore) Patch(p SettingsPatch) (Settings, error) {
 		// 出厂缺省不再回填 —— 否则用户清空后重启，默认目录又回来了。
 		// 只在**落盘成功之后**置位，避免写到一半失败时内存态与磁盘态分叉。
 		explicitProjectPath = true
+	}
+	if p.DefaultWorkflowID != nil {
+		next.DefaultWorkflowID = strings.TrimSpace(*p.DefaultWorkflowID)
 	}
 	if p.Agents != nil {
 		next.Agents = *p.Agents

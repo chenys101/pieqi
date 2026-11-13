@@ -23,8 +23,20 @@ export async function createRequirement(body: {
   body?: string
   project_path: string
   acceptance?: Array<{ id: string; text: string; verifiable?: boolean }>
+  path?: 's0' | 's1' | 's2'
+  workflow_id?: string
 }): Promise<Requirement> {
   return request<Requirement>('/requirements', { method: 'POST', body })
+}
+
+export async function patchRequirement(
+  id: string,
+  body: { workflow_id?: string; path?: 's0' | 's1' | 's2'; title?: string; body?: string },
+): Promise<Requirement> {
+  return request<Requirement>(`/requirements/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body,
+  })
 }
 
 export async function getRequirementOutcome(id: string): Promise<RequirementOutcome> {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"pieqi/internal/model"
+	"pieqi/internal/workflow"
 
 	"github.com/google/uuid"
 )
@@ -37,6 +38,7 @@ func (s *RequirementStore) PutProposal(requirementID string, nodes []model.Propo
 	if err := ValidateSplitProposal(r, p); err != nil {
 		return nil, err
 	}
+	// Pack 闸门在 Confirm 时 enforce（超节点可 force）；暂存提案只做结构校验。
 	s.mu.Lock()
 	if s.proposals == nil {
 		s.proposals = make(map[string]*model.SplitProposal)
@@ -46,6 +48,17 @@ func (s *RequirementStore) PutProposal(requirementID string, nodes []model.Propo
 	cp := *p
 	cp.Nodes = append([]model.ProposedTaskNode(nil), p.Nodes...)
 	return &cp, nil
+}
+
+func (s *RequirementStore) validatePackGates(r *model.Requirement, nodes []model.ProposedTaskNode, forceSkipMaxNodes bool) error {
+	if s == nil || r == nil {
+		return nil
+	}
+	p, err := s.PackFor(r)
+	if err != nil || p == nil {
+		return nil // 无 Registry 不拦
+	}
+	return workflow.ValidateProposalGatesOpts(p, nodes, forceSkipMaxNodes)
 }
 
 // GetProposal 返回当前暂存提案。
@@ -86,12 +99,17 @@ type ConfirmResult struct {
 //
 // nodes 非空则先替换暂存提案再确认；为空则用已 Put 的提案。
 func (s *RequirementStore) Confirm(requirementID string, nodes []model.ProposedTaskNode) (*ConfirmResult, error) {
-	return s.applyProposal(requirementID, nodes, false)
+	return s.applyProposal(requirementID, nodes, false, false)
+}
+
+// ConfirmForce 同 Confirm，但 forceSkipMaxNodes 跳过 Pack max_nodes 硬拦。
+func (s *RequirementStore) ConfirmForce(requirementID string, nodes []model.ProposedTaskNode, forceSkipMaxNodes bool) (*ConfirmResult, error) {
+	return s.applyProposal(requirementID, nodes, false, forceSkipMaxNodes)
 }
 
 // Expand 渐进追加 planned Task（ADR-0021）：DependsOn 可挂已有 Task；事件类型 expand。
 func (s *RequirementStore) Expand(requirementID string, nodes []model.ProposedTaskNode) (*ConfirmResult, error) {
-	return s.applyProposal(requirementID, nodes, true)
+	return s.applyProposal(requirementID, nodes, true, false)
 }
 
 // WorkTaskIDs 同需求下尚未废弃的工作任务 id（不含拆分会话、不含已 cancelled）。
@@ -172,7 +190,7 @@ func (s *RequirementStore) ConfirmReplace(requirementID string, nodes []model.Pr
 	if err != nil {
 		return nil, err
 	}
-	out, err := s.applyProposal(requirementID, nodes, false)
+	out, err := s.applyProposal(requirementID, nodes, false, force)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +198,7 @@ func (s *RequirementStore) ConfirmReplace(requirementID string, nodes []model.Pr
 	return out, nil
 }
 
-func (s *RequirementStore) applyProposal(requirementID string, nodes []model.ProposedTaskNode, expand bool) (*ConfirmResult, error) {
+func (s *RequirementStore) applyProposal(requirementID string, nodes []model.ProposedTaskNode, expand bool, forceSkipMaxNodes bool) (*ConfirmResult, error) {
 	if s == nil || s.backend == nil {
 		return nil, fmt.Errorf("requirement store not wired")
 	}
@@ -222,6 +240,9 @@ func (s *RequirementStore) applyProposal(requirementID string, nodes []model.Pro
 		if err := ValidateSplitProposal(r, p); err != nil {
 			return nil, err
 		}
+		if err := s.validatePackGates(r, p.Nodes, forceSkipMaxNodes); err != nil {
+			return nil, err
+		}
 	}
 
 	existingIDs := make(map[string]struct{}, len(existing))
@@ -254,6 +275,10 @@ func (s *RequirementStore) applyProposal(requirementID string, nodes []model.Pro
 		if title == "" {
 			title = truncateRunes(n.Prompt, 40)
 		}
+		dodImpl, dodTest := "", ""
+		if pack, err := s.PackFor(r); err == nil && pack != nil {
+			dodImpl, dodTest = pack.DoDImplement, pack.DoDTest
+		}
 		task := &model.Task{
 			ID:            idMap[n.TempID],
 			Source:        model.SourceHTTP,
@@ -261,7 +286,7 @@ func (s *RequirementStore) applyProposal(requirementID string, nodes []model.Pro
 			RequirementID: requirementID,
 			ProjectID:     r.ProjectID,
 			ProjectPath:   r.ProjectPath,
-			Prompt:        AppendDeliveryDoD(n.Role, n.Prompt),
+			Prompt:        AppendDeliveryDoDFrom(n.Role, n.Prompt, dodImpl, dodTest),
 			Title:         title,
 			Role:          n.Role,
 			Skills:        append([]string(nil), n.Skills...),

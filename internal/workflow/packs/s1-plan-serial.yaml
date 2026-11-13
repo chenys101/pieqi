@@ -1,0 +1,51 @@
+id: s1-plan-serial
+version: "1"
+label: "S1 · plan then serial"
+short_label: S1
+description: "Optional design → 1–2 serial implement tickets → optional verify. No FE/BE hard split."
+tags: [few tickets, serial, no FE/BE split]
+ui_steps:
+  - { id: design, label: Design }
+  - { id: implement, label: Implement }
+  - { id: verify, label: Verify }
+  - { id: outcome, label: Close }
+gates:
+  max_nodes: 5
+  max_parallel_implement: 1
+  forbid_fe_be_hard_split: true
+  require_ac_evidence_to_done: true
+  path_bias: light_req
+  require_brief_in_prompt: true
+split_instructions: |
+  3. **Split philosophy (S1)**: Prefer few tickets:
+     - 0–1 design (omit if design doc already exists)
+     - 1–2 implement tickets (role=other or by module; **do not** split frontend+backend as craft tickets)
+     - 0–1 test (depends_on all implements)
+     Same-requirement implement tickets must chain via depends_on; no parallel first-wave implements.
+     Only split further when context degrades or file sets are disjoint; state the reason in the prompt.
+  4. No empty prompts; each must be runnable and include Done=.
+  5. **Delivery**: implement merges to req branch; unit tests only on implement; test waits on depends_on.
+brief_header: |
+  Stakes: low | high
+  Hypothesis: ...
+  Goal / out of scope: ...
+  Done = <command or AC id + how to verify>
+  Mode: do-it
+  Handoff: read docs/handoff/req-<id8>.md if present; write back conclusions + evidence only
+dod_implement: |
+
+  ## pieqi delivery (implement)
+
+  1. Work in this task worktree; **merge into the requirement integration branch** when done.
+  2. Self-test = unit/component tests only. Do not start pieqi service as completion criteria.
+  3. Sandbox/test failures => do not mark completed; leave evidence.
+  4. Ticket completed means merged to req branch, not "session finished".
+  5. Read req handoff if present; write back conclusions + evidence.
+dod_test: |
+
+  ## pieqi delivery (test)
+
+  1. Wait until depends_on are done and merged to req branch before functional tests.
+  2. Functional test: checkout req branch → build → **isolated instance** (separate PIEQI_HOME + port).
+  3. Report must include "总评：FAIL" on failure. Do not mark completed on FAIL.
+  4. Do not shorten approval timeout or auto-approve to fake a green test.

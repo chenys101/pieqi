@@ -63,7 +63,7 @@ func (s *RequirementStore) StartSplitSuggest(requirementID, agentName, modelName
 		}
 	}
 
-	prompt := buildSplitSuggestPrompt(r)
+	prompt := buildSplitSuggestPrompt(r, s)
 	title := splitSuggestTitlePrefix + " " + truncateRunes(r.Title, 40)
 	task := &model.Task{
 		ID:            uuid.New().String(),
@@ -94,7 +94,7 @@ func (s *RequirementStore) StartSplitSuggest(requirementID, agentName, modelName
 	return got, nil
 }
 
-func buildSplitSuggestPrompt(r *model.Requirement) string {
+func buildSplitSuggestPrompt(r *model.Requirement, s *RequirementStore) string {
 	var b strings.Builder
 	b.WriteString("你是需求拆分助手。根据下面的需求，输出**可执行的 Task List 建议**。\n\n")
 	b.WriteString("## 需求\n")
@@ -120,24 +120,37 @@ func buildSplitSuggestPrompt(r *model.Requirement) string {
 2. 数组元素字段：
    - temp_id: 提案内唯一短 id（如 "design"、"fe-1"）
    - title: 短标题
-   - prompt: 交给 coding agent 的完整任务说明（中文可）；实现票写清「仅单测自测」；test 票写清「等合入需求分支后隔离起服务做功能测」
+   - prompt: 交给 coding agent 的完整任务说明（中文可）；实现票写清「仅单测自测」；test 票写清「等合入需求分支后隔离起服务做功能测」；每条须含 Done=（可执行检查）
    - role: 可选 design|frontend|backend|test|review|fix|other
    - covers_ac: 字符串数组，覆盖的 AC id（有未 deferred 的 AC 时，全部 AC 必须被至少一个节点覆盖）
    - depends_on: 本数组内其它 temp_id（可空；表达先后）
-3. 拆成合理粒度：能并行的不要串成一条；明显先后的用 depends_on。
-4. 不要创建"空话任务"；每条 prompt 必须可独立开跑。
-5. **交付与测试纪律（必须）**：
-   - 交付面是「需求分支」：实现票在 worktree 改完后合入需求分支才算交付；不要假设票 completed 即已进 main。
-   - 实现类（frontend/backend/fix/…）自测 = **仅单元/组件测试**；禁止把起服务/完整链路当实现票完成条件。
-   - test 票按波次拆：每个 test 必须 depends_on 本波全部相关实现票；禁止无依赖的 test 与实现并行。
-   - test 票做功能测试：基于已合入的需求分支编译，**另起隔离进程**（pieqi 用独立 PIEQI_HOME + 端口，勿占现网服务）。
-   - 不要给每个实现票复制一张空 test；终验可单独一张，depends_on 齐所有实现。
-
+`)
+	// Pack 策略段（少拆 / 并行哲学）；缺 Registry 则用内置默认少拆文案。
+	instr := defaultSplitInstructions
+	if s != nil {
+		if p, err := s.PackFor(r); err == nil && p != nil && strings.TrimSpace(p.SplitInstructions) != "" {
+			instr = p.SplitInstructions
+		}
+	}
+	b.WriteString(instr)
+	b.WriteString(`
 示例形态：
-[{"temp_id":"be-1","title":"...","prompt":"...","role":"backend","covers_ac":["ac1"],"depends_on":[]},{"temp_id":"test-1","title":"...","prompt":"...","role":"test","covers_ac":["ac1"],"depends_on":["be-1"]}]
+[{"temp_id":"be-1","title":"...","prompt":"... Done= go test ./...","role":"other","covers_ac":["ac1"],"depends_on":[]},{"temp_id":"test-1","title":"...","prompt":"...","role":"test","covers_ac":["ac1"],"depends_on":["be-1"]}]
 `)
 	return b.String()
 }
+
+// 无 Pack 时的少拆默认（替代旧「能并行的不要串成一条」）。
+const defaultSplitInstructions = `
+3. **拆分哲学（默认）**：少票。推荐 0～1 design + 1～2 实现（串行 depends_on）+ 0～1 test。
+   禁止按 frontend/backend 工种硬拆，除非文件集无交集且各有独立验收。
+   同需求实现票默认串行合入；不要为并行而并行。
+4. 不要创建空话任务；每条 prompt 必须可独立开跑。
+5. **交付与测试纪律（必须）**：
+   - 交付面是「需求分支」：实现票合入需求分支才算交付。
+   - 实现类自测 = 仅单元/组件测试；禁止起服务当完成条件。
+   - test 必须 depends_on 实现票；终验可单独一张。
+`
 
 var (
 	reJSONFence = regexp.MustCompile("(?s)```(?:json)?\\s*(\\[.*?\\])\\s*```")
@@ -180,8 +193,6 @@ func (s *RequirementStore) IngestSplitSuggestion(requirementID string, nodes []m
 		return nil, fmt.Errorf("requirement not found: %s", requirementID)
 	}
 	nodes = ensureProposalCoversAC(r, nodes)
-	// 重新拆分按「覆盖」语义：提案自洽（ValidateSplit），确认时再废弃旧工作任务。
-	// 不再走 expand（避免新提案挂旧 Task id，与覆盖确认矛盾）。
 	return s.PutProposal(requirementID, nodes)
 }
 
@@ -195,41 +206,6 @@ func filterOutSuggest(tasks []*model.Task) []*model.Task {
 	return out
 }
 
-// ensureProposalCoversAC 把仍未覆盖的未 deferred AC 挂到最后一个节点（fail-open 补全，避免 agent 漏标导致整单作废）。
-func ensureProposalCoversAC(req *model.Requirement, nodes []model.ProposedTaskNode) []model.ProposedTaskNode {
-	if req == nil || len(nodes) == 0 {
-		return nodes
-	}
-	need := map[string]struct{}{}
-	for _, ac := range req.Acceptance {
-		if ac.Deferred || strings.TrimSpace(ac.ID) == "" {
-			continue
-		}
-		need[ac.ID] = struct{}{}
-	}
-	if len(need) == 0 {
-		return nodes
-	}
-	covered := map[string]struct{}{}
-	for _, n := range nodes {
-		for _, id := range n.CoversAC {
-			covered[id] = struct{}{}
-		}
-	}
-	var missing []string
-	for id := range need {
-		if _, ok := covered[id]; !ok {
-			missing = append(missing, id)
-		}
-	}
-	if len(missing) == 0 {
-		return nodes
-	}
-	last := len(nodes) - 1
-	nodes[last].CoversAC = append(nodes[last].CoversAC, missing...)
-	return nodes
-}
-
 // tryIngestSplitSuggestFromTask 在任务完成时尝试写入提案。
 func (s *RequirementStore) tryIngestSplitSuggestFromTask(t *model.Task) {
 	if s == nil || t == nil || !IsSplitSuggestTask(t) || t.RequirementID == "" {
@@ -237,7 +213,6 @@ func (s *RequirementStore) tryIngestSplitSuggestFromTask(t *model.Task) {
 	}
 	text := t.Output
 	if text == "" {
-		// 从事件拼最后一轮助手文本（兜底）
 		var b strings.Builder
 		for _, ev := range t.Events {
 			if ev.Type == model.EventText && ev.Text != "" {
@@ -270,3 +245,35 @@ func (s *RequirementStore) tryIngestSplitSuggestFromTask(t *model.Task) {
 		return true
 	})
 }
+
+// ensureProposalCoversAC 把仍未覆盖的未 deferred AC 挂到最后一个节点（fail-open 补全，避免 agent 漏标导致整单作废）。
+func ensureProposalCoversAC(req *model.Requirement, nodes []model.ProposedTaskNode) []model.ProposedTaskNode {
+	if req == nil || len(nodes) == 0 {
+		return nodes
+	}
+	covered := map[string]struct{}{}
+	for _, n := range nodes {
+		for _, ac := range n.CoversAC {
+			ac = strings.TrimSpace(ac)
+			if ac != "" {
+				covered[ac] = struct{}{}
+			}
+		}
+	}
+	var missing []string
+	for _, ac := range req.Acceptance {
+		if ac.Deferred || strings.TrimSpace(ac.ID) == "" {
+			continue
+		}
+		if _, ok := covered[ac.ID]; !ok {
+			missing = append(missing, ac.ID)
+		}
+	}
+	if len(missing) == 0 {
+		return nodes
+	}
+	last := &nodes[len(nodes)-1]
+	last.CoversAC = append(last.CoversAC, missing...)
+	return nodes
+}
+

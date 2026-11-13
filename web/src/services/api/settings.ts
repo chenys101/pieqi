@@ -46,6 +46,8 @@ export interface AppSettings {
    * 存在的目录，前端猜一个（例如 '~'）只会在提交时换来一句 400。
    */
   default_project_path: string
+  /** 新建需求默认流程包 id；空 = 服务端 Registry 默认 */
+  default_workflow_id: string
   /**
    * Agent 启停与顺序。由设置页勾选管理，不要手改 settings.json。
    * GET 时空 enabled 已投影为全选。

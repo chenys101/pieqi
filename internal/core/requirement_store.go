@@ -9,6 +9,7 @@ import (
 
 	"pieqi/internal/model"
 	"pieqi/internal/store"
+	"pieqi/internal/workflow"
 
 	"github.com/google/uuid"
 )
@@ -20,11 +21,24 @@ type RequirementStore struct {
 	backend   store.Store
 	tasks     *TaskStore                      // confirm 时创建 planned Task
 	proposals map[string]*model.SplitProposal // requirementID → 暂存提案（不落盘）
+	workflows *workflow.Registry              // 流程包；nil = 拆分/DoD 走内置硬编码回落
 }
 
 // NewRequirementStore 包装已打开的 Store（通常来自 TaskStore.Backend()）。
 func NewRequirementStore(backend store.Store) *RequirementStore {
 	return &RequirementStore{backend: backend}
+}
+
+// ErrDuplicateRequirement 同文案 active/draft 已存在。
+type ErrDuplicateRequirement struct {
+	Existing *model.Requirement
+}
+
+func (e *ErrDuplicateRequirement) Error() string {
+	if e == nil || e.Existing == nil {
+		return "duplicate active requirement"
+	}
+	return fmt.Sprintf("duplicate active requirement %s (%q)", e.Existing.ID, e.Existing.Title)
 }
 
 // Create 新建 draft 需求并持久化。
@@ -38,8 +52,32 @@ func (s *RequirementStore) Create(r *model.Requirement) (*model.Requirement, err
 	if strings.TrimSpace(r.ProjectPath) == "" {
 		return nil, fmt.Errorf("project_path required")
 	}
+	if dup := s.FindDuplicateActive(r.ProjectPath, r.Title, r.Body, ""); dup != nil {
+		return nil, &ErrDuplicateRequirement{Existing: dup}
+	}
 	if r.ID == "" {
 		r.ID = uuid.New().String()
+	}
+	// 钉死流程包：有 Registry 时解析 version；S0 可不带 pack。
+	if r.Path == "" {
+		r.Path = model.PathS1
+	}
+	if r.Path != model.PathS0 {
+		if reg := s.WorkflowRegistry(); reg != nil {
+			wid := strings.TrimSpace(r.WorkflowID)
+			if wid == "" {
+				wid = reg.DefaultID()
+			}
+			p, err := reg.Get(wid)
+			if err != nil {
+				return nil, err
+			}
+			r.WorkflowID = p.ID
+			r.WorkflowVersion = p.EffectiveVersion()
+		}
+	} else {
+		r.WorkflowID = ""
+		r.WorkflowVersion = ""
 	}
 	now := time.Now()
 	r.Status = model.RequirementDraft

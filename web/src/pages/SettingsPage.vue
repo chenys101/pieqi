@@ -30,6 +30,14 @@ import {
   downloadDiagnostics,
   type AppSettings,
 } from '@/services/api/settings'
+import {
+  getWorkflow,
+  listWorkflows,
+  reloadWorkflows,
+  setDefaultWorkflow,
+  type WorkflowDetail,
+  type WorkflowSummary,
+} from '@/services/api/workflows'
 import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
 import SetGroup from '@/components/ui/SetGroup.vue'
@@ -63,6 +71,64 @@ function onThemeChange(v: string) {
 // ---------- ① 审批与自动化 + ④ 数据 ----------
 
 const settings = ref<AppSettings | null>(null)
+const workflows = ref<WorkflowSummary[]>([])
+const workflowDefaultId = ref('')
+const workflowUserDir = ref('')
+const workflowDetail = ref<WorkflowDetail | null>(null)
+const workflowDetailTab = ref<'knobs' | 'split' | 'brief' | 'dod'>('knobs')
+const workflowBusy = ref(false)
+
+async function loadWorkflows() {
+  try {
+    const data = await listWorkflows()
+    workflows.value = data.workflows
+    workflowDefaultId.value = data.default_id
+    workflowUserDir.value = data.user_dir
+  } catch {
+    workflows.value = []
+  }
+}
+
+async function openWorkflowDetail(id: string) {
+  try {
+    workflowDetail.value = await getWorkflow(id)
+    workflowDetailTab.value = 'knobs'
+  } catch (e) {
+    notify.error(e instanceof Error ? e.message : '加载流程包失败')
+  }
+}
+
+async function onSetDefaultWorkflow(id: string) {
+  workflowBusy.value = true
+  try {
+    const res = await setDefaultWorkflow(id)
+    workflowDefaultId.value = res.default_id
+    await loadWorkflows()
+    if (settings.value) settings.value = { ...settings.value, default_workflow_id: res.default_id }
+    notify.success('已设为新建需求默认流程包')
+  } catch (e) {
+    notify.error(e instanceof Error ? e.message : '设置默认失败')
+  } finally {
+    workflowBusy.value = false
+  }
+}
+
+async function onReloadWorkflows() {
+  workflowBusy.value = true
+  try {
+    const data = await reloadWorkflows()
+    workflows.value = data.workflows
+    workflowDefaultId.value = data.default_id
+    workflowUserDir.value = data.user_dir
+    notify.success('已重新扫描流程包')
+  } catch (e) {
+    notify.error(e instanceof Error ? e.message : '扫描失败')
+  } finally {
+    workflowBusy.value = false
+  }
+}
+
+const defaultWorkflow = computed(() => workflows.value.find((w) => w.id === workflowDefaultId.value) || workflows.value.find((w) => w.is_default))
 
 onMounted(async () => {
   try {
@@ -70,6 +136,7 @@ onMounted(async () => {
   } catch {
     // 后端未接线 / 网络失败：开关保持 disabled，不给"点了没反应"的控件
   }
+  await loadWorkflows()
 })
 
 /**
@@ -353,6 +420,128 @@ const appVersion = __APP_VERSION__
             />
           </div>
         </SettingRow>
+      </SetGroup>
+
+      <!-- ============ 流程包（一期：只读 + 设默认 + 扫描） ============ -->
+      <SetGroup title="流程包" why="拆分文案 / 并行 knobs · 创建时钉死版本">
+        <div class="space-y-3 px-3.5 py-3">
+          <div class="rounded-lg border border-accent/30 bg-accent/5 px-3 py-2.5">
+            <div class="text-[11px] text-muted">默认（之后新建）</div>
+            <div class="mt-1 flex flex-wrap items-center gap-2 text-sm font-medium">
+              <span>{{ defaultWorkflow?.label || workflowDefaultId || '—' }}</span>
+              <span v-if="defaultWorkflow" class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
+                {{ defaultWorkflow.gates.path_bias || 'pack' }}
+              </span>
+              <span v-if="defaultWorkflow?.builtin" class="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted">内置</span>
+            </div>
+            <div v-if="defaultWorkflow" class="mt-1 text-[11px] text-muted">
+              {{ defaultWorkflow.id }} @{{ defaultWorkflow.version }} · parallel={{ defaultWorkflow.gates.max_parallel_implement }} · nodes≤{{ defaultWorkflow.gates.max_nodes }}
+            </div>
+          </div>
+
+          <div class="space-y-1.5">
+            <div class="text-[11px] text-muted">已发布 / 本地</div>
+            <div
+              v-for="w in workflows"
+              :key="w.id"
+              class="flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-2"
+            >
+              <span class="min-w-0 flex-1 truncate text-sm">{{ w.label }} <span class="text-muted">@{{ w.version }}</span></span>
+              <span v-if="w.is_default || w.id === workflowDefaultId" class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">默认</span>
+              <span class="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{{ w.builtin ? '内置' : '本地' }}</span>
+              <button
+                type="button"
+                class="rounded border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-elevated"
+                @click="openWorkflowDetail(w.id)"
+              >
+                查看
+              </button>
+              <button
+                v-if="w.id !== workflowDefaultId"
+                type="button"
+                class="rounded border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-elevated"
+                :disabled="workflowBusy"
+                @click="onSetDefaultWorkflow(w.id)"
+              >
+                设为默认
+              </button>
+            </div>
+          </div>
+
+          <div
+            v-if="workflowDetail"
+            class="rounded-lg border border-border bg-elevated/40 px-3 py-2.5"
+          >
+            <div class="mb-2 flex items-center gap-2">
+              <span class="text-sm font-medium">{{ workflowDetail.label }} @{{ workflowDetail.version }}</span>
+              <button type="button" class="ml-auto text-[11px] text-muted hover:text-text" @click="workflowDetail = null">关闭</button>
+            </div>
+            <div class="mb-2 flex flex-wrap gap-1">
+              <button
+                v-for="tab in ([
+                  ['knobs', 'Knobs'],
+                  ['split', '拆分'],
+                  ['brief', 'Brief'],
+                  ['dod', 'DoD'],
+                ] as const)"
+                :key="tab[0]"
+                type="button"
+                class="rounded px-2 py-1 text-[11px]"
+                :class="workflowDetailTab === tab[0] ? 'bg-accent/15 font-semibold text-accent' : 'text-muted hover:bg-elevated'"
+                @click="workflowDetailTab = tab[0]"
+              >
+                {{ tab[1] }}
+              </button>
+            </div>
+            <pre
+              v-if="workflowDetailTab === 'knobs'"
+              class="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-surface p-2 font-mono text-[11px] text-text-secondary"
+            >max_parallel_implement = {{ workflowDetail.gates.max_parallel_implement }}
+suggest_max_nodes = {{ workflowDetail.gates.max_nodes }}
+path_bias = {{ workflowDetail.gates.path_bias || '—' }}
+require_brief_in_prompt = {{ workflowDetail.gates.require_brief_in_prompt }}
+forbid_fe_be_hard_split = {{ workflowDetail.gates.forbid_fe_be_hard_split }}
+require_ac_evidence_to_done = {{ workflowDetail.gates.require_ac_evidence_to_done }}
+
+变量白名单：title, body, project_path, acceptance[], role, covers_ac, integration_branch, handoff_path, id/id8, temp_ids…</pre>
+            <pre
+              v-else-if="workflowDetailTab === 'split'"
+              class="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-surface p-2 font-mono text-[11px]"
+            >{{ workflowDetail.split_instructions || '（空）' }}</pre>
+            <pre
+              v-else-if="workflowDetailTab === 'brief'"
+              class="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-surface p-2 font-mono text-[11px]"
+            >{{ workflowDetail.brief_header || '（空）' }}</pre>
+            <pre
+              v-else
+              class="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-surface p-2 font-mono text-[11px]"
+            >{{ (workflowDetail.dod_implement || '') + '\n---\n' + (workflowDetail.dod_test || '') }}</pre>
+            <div class="mt-2">
+              <button
+                type="button"
+                class="rounded border border-border px-2 py-0.5 text-[11px]"
+                :disabled="workflowBusy || workflowDetail.id === workflowDefaultId"
+                @click="onSetDefaultWorkflow(workflowDetail.id)"
+              >
+                设为默认
+              </button>
+            </div>
+          </div>
+
+          <SettingRow
+            desc="提案 JSON 校验 · test 必须 depends · L3 删除 · 软完成否决 · 零 AC 容器语义。改这些必须发版 + ADR。"
+            locked
+          >
+            <template #label>L0 契约（不可热改）</template>
+          </SettingRow>
+
+          <div class="flex flex-wrap items-center gap-2 pt-1">
+            <Button size="sm" variant="ghost" :disabled="workflowBusy" @click="onReloadWorkflows">
+              重新扫描 {{ workflowUserDir || '~/.pieqi/workflows' }}
+            </Button>
+            <span class="text-[11px] text-muted">一期：模板只读；编辑靠盘文件 + 扫描。</span>
+          </div>
+        </div>
       </SetGroup>
 
       <!-- ============ ② 连接与账号 ============ -->

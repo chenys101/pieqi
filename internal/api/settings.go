@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"pieqi/internal/agent"
 	"pieqi/internal/core"
@@ -30,6 +31,8 @@ type settingsDto struct {
 	// DefaultProjectPath 新建任务的缺省工作目录（绝对路径）。空 = 未配置，
 	// 此时建任务必须显式带 project_path（见 api.resolveTaskPath）。
 	DefaultProjectPath string `json:"default_project_path"`
+	// DefaultWorkflowID 新建需求默认流程包 id；空 = Registry 默认。
+	DefaultWorkflowID string `json:"default_workflow_id"`
 	// Agents agent 的运行期选择（2026-10-22）。只含**用户意图**：
 	// 开不开、装在哪、claude 走哪条传输。代码事实（agent_type / 默认 spawn /
 	// 能力声明）在 internal/agent/manifest.go，**不在**这里下发 —— 那是只读的。
@@ -59,6 +62,7 @@ func toSettingsDTO(s core.Settings) settingsDto {
 		// 空串也必须下发（不能 omitempty）：前端要用它区分"没配"与"配了"，
 		// 决定新建任务页项目选择器的默认形态。
 		DefaultProjectPath: s.DefaultProjectPath,
+		DefaultWorkflowID:  s.DefaultWorkflowID,
 		Agents:             agents,
 	}
 }
@@ -135,6 +139,7 @@ func (s *Server) patchSettings(c *gin.Context) {
 		// DefaultProjectPath 新建任务的缺省工作目录（nil = 不修改）。
 		// 传空串 = 显式清空（此后新建任务必须带路径），与"没传"是两件事。
 		DefaultProjectPath *string `json:"default_project_path"`
+		DefaultWorkflowID  *string `json:"default_workflow_id"`
 		// Agents nil = 不修改；非 nil = **整体替换**。
 		// 用整体替换而不是逐字段补丁：agent 列表本质是一个集合，
 		// "加一个/删一个"的补丁在并发下会互相覆盖（两人同时开关不同 agent 会丢改动）。
@@ -160,11 +165,18 @@ func (s *Server) patchSettings(c *gin.Context) {
 		EventRetention:          body.EventRetention,
 		TrustedRecipes:          body.TrustedRecipes,
 		DefaultProjectPath:      body.DefaultProjectPath,
+		DefaultWorkflowID:       body.DefaultWorkflowID,
 		Agents:                  body.Agents,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+	if body.DefaultWorkflowID != nil && s.workflows != nil {
+		id := strings.TrimSpace(*body.DefaultWorkflowID)
+		if id != "" {
+			_ = s.workflows.SetDefaultID(id)
+		}
 	}
 	c.JSON(http.StatusOK, toSettingsDTO(next))
 }

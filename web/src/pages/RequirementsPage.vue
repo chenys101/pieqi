@@ -64,6 +64,13 @@ const statusLabel: Record<string, string> = {
             >
               <div class="flex items-center gap-2">
                 <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ r.title || '（无标题）' }}</span>
+                <span
+                  v-if="r.path || r.workflow_id"
+                  class="shrink-0 rounded bg-elevated px-1.5 py-0.5 text-[10px] font-semibold text-accent"
+                  :title="r.workflow_id ? `${r.workflow_id}@${r.workflow_version || '?'}` : ''"
+                >
+                  {{ (r.path || r.workflow_id || '').toString().toUpperCase().slice(0, 2) }}
+                </span>
                 <span class="shrink-0 text-[11px] text-muted">{{ statusLabel[r.status] || r.status }}</span>
               </div>
               <div class="mt-1 truncate text-[11px] text-muted" :title="r.project_path">{{ r.project_path }}</div>

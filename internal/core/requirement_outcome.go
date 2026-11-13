@@ -1,10 +1,15 @@
 package core
 
 import (
+	"strings"
+
 	"pieqi/internal/model"
 )
 
-// DeriveRequirementOutcome 按 covers_ac / Issue / 人验汇总 AC 矩阵（ADR-0021 §3.5）。
+// DeriveRequirementOutcome 按 covers_ac / Issue / 人验 / 证据汇总 AC 矩阵（ADR-0021 §3.5）。
+//
+// 证据闸（workflow-execution-efficiency §9）：有非 deferred AC 时，票绿 alone 不够；
+// 须 human_result=pass 或非空 evidence_ref。零 AC 容器：无开放 Issue 即可 done。
 func DeriveRequirementOutcome(req *model.Requirement, tasks []*model.Task) *model.RequirementOutcome {
 	if req == nil {
 		return nil
@@ -40,12 +45,14 @@ func DeriveRequirementOutcome(req *model.Requirement, tasks []*model.Task) *mode
 		OpenIssues:    openIssues,
 	}
 	allGreen := true
+	var missingEv []string
 	for _, ac := range req.Acceptance {
 		row := model.ACOutcome{
 			ID:            ac.ID,
 			Text:          ac.Text,
 			CoveringTasks: taskIDs(byAC[ac.ID]),
 			OpenIssueIDs:  openByAC[ac.ID],
+			HasEvidence:   acHasEvidence(ac),
 		}
 		switch {
 		case ac.Deferred:
@@ -56,13 +63,17 @@ func DeriveRequirementOutcome(req *model.Requirement, tasks []*model.Task) *mode
 		case ac.HumanResult == "fail":
 			row.State = model.ACRed
 			allGreen = false
-		case ac.HumanResult == "pass":
+		case acHasEvidence(ac):
 			row.State = model.ACGreen
 		case hasCompletedCover(byAC[ac.ID]):
-			row.State = model.ACGreen
+			// 票绿是主张不是证据：展示 pending，计入证据缺口。
+			row.State = model.ACPending
+			allGreen = false
+			missingEv = append(missingEv, ac.ID)
 		default:
 			row.State = model.ACPending
 			allGreen = false
+			missingEv = append(missingEv, ac.ID)
 		}
 		out.Acceptance = append(out.Acceptance, row)
 	}
@@ -70,8 +81,16 @@ func DeriveRequirementOutcome(req *model.Requirement, tasks []*model.Task) *mode
 	if len(req.Acceptance) == 0 {
 		allGreen = len(openIssues) == 0
 	}
+	out.MissingEvidence = missingEv
 	out.CanMarkDone = allGreen && len(openIssues) == 0 && req.Status != model.RequirementCancelled
 	return out
+}
+
+func acHasEvidence(ac model.AcceptanceItem) bool {
+	if ac.HumanResult == "pass" {
+		return true
+	}
+	return strings.TrimSpace(ac.EvidenceRef) != ""
 }
 
 func hasCompletedCover(tasks []*model.Task) bool {

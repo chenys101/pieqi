@@ -104,6 +104,8 @@ func (s *Server) confirmRequirement(c *gin.Context) {
 		if result != nil && result.Abandoned < len(oldIDs) {
 			result.Abandoned = len(oldIDs)
 		}
+	} else if req.Force {
+		result, err = s.requirements.ConfirmForce(rid, req.Nodes, true)
 	} else {
 		result, err = s.requirements.Confirm(rid, req.Nodes)
 	}

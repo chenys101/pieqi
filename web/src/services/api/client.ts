@@ -65,6 +65,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    /** 服务端 JSON 全文（409 duplicate 等场景需要 code / existing_id） */
+    public body?: Record<string, unknown>,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -109,7 +111,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
     json = { error: text }
   }
   if (!res.ok) {
-    throw new ApiError(String(json.error ?? `${path}: ${res.status}`), res.status)
+    throw new ApiError(String(json.error ?? `${path}: ${res.status}`), res.status, json)
   }
   return json as T
 }

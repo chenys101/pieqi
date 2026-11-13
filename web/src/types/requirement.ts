@@ -6,12 +6,15 @@ export type IssueSeverity = 'blocker' | 'major' | 'minor'
 export type IssueStatus = 'open' | 'fixing' | 'resolved'
 export type ACState = 'pending' | 'green' | 'red' | 'deferred'
 
+export type ExecutionPath = 's0' | 's1' | 's2'
+
 export interface AcceptanceItem {
   id: string
   text: string
   verifiable?: boolean
   deferred?: boolean
   human_result?: string
+  evidence_ref?: string
 }
 
 export interface Issue {
@@ -36,6 +39,10 @@ export interface Requirement {
   project_path: string
   /** confirm 后创建的集成分支，如 req/<id8> */
   integration_branch?: string
+  /** s0 | s1 | s2 */
+  path?: ExecutionPath
+  workflow_id?: string
+  workflow_version?: string
   status: RequirementStatus
   acceptance?: AcceptanceItem[]
   issues?: Issue[]
@@ -50,6 +57,7 @@ export interface ACOutcome {
   state: ACState
   open_issue_ids?: string[]
   covering_tasks?: string[]
+  has_evidence?: boolean
 }
 
 export interface RequirementOutcome {
@@ -58,6 +66,7 @@ export interface RequirementOutcome {
   acceptance: ACOutcome[]
   open_issues?: Issue[]
   can_mark_done: boolean
+  missing_evidence?: string[]
 }
 
 export interface ProposedTaskNode {

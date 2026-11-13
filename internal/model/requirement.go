@@ -34,6 +34,15 @@ const (
 	VerifyEither VerifyMode = "either"
 )
 
+// ExecutionPath 需求执行路径分级（workflow-execution-efficiency §4）。
+type ExecutionPath string
+
+const (
+	PathS0 ExecutionPath = "s0" // 短路径 Task（一般不进需求图；若误入则无 pack）
+	PathS1 ExecutionPath = "s1" // 轻量 Requirement
+	PathS2 ExecutionPath = "s2" // 完整 Collaboration Plane
+)
+
 // Requirement 协作平面的需求容器（文件夹 + 验收总账）。ADR-0021。
 type Requirement struct {
 	ID           string            `json:"id"`
@@ -49,6 +58,11 @@ type Requirement struct {
 	// IntegrationBranch 需求集成分支（confirm 后从默认基线拉出，如 req/<id8>）。
 	// 各实现/test 票 worktree 以此为 base；合入目标也是它，不是 main。
 	IntegrationBranch string `json:"integration_branch,omitempty"`
+	// Path 执行路径 S0/S1/S2；空 = 历史需求，按 S2 行为兼容。
+	Path ExecutionPath `json:"path,omitempty"`
+	// WorkflowID / WorkflowVersion 创建时钉死的流程包；跑中不可偷换。
+	WorkflowID      string `json:"workflow_id,omitempty"`
+	WorkflowVersion string `json:"workflow_version,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
@@ -61,6 +75,8 @@ type AcceptanceItem struct {
 	Deferred   bool   `json:"deferred,omitempty"`
 	// HumanResult 人验结论："" | "pass" | "fail"（verify=human 时写入）。
 	HumanResult string `json:"human_result,omitempty"`
+	// EvidenceRef 命令 + 退出码 + 摘要/日志路径（agent 写，人可改）。P0 人验 pass 也算证据。
+	EvidenceRef string `json:"evidence_ref,omitempty"`
 }
 
 // IssueSeverity 缺陷严重度；回流分流依据（ADR-0021）。
@@ -115,6 +131,8 @@ type ACOutcome struct {
 	State         ACState  `json:"state"`
 	OpenIssueIDs  []string `json:"open_issue_ids,omitempty"`
 	CoveringTasks []string `json:"covering_tasks,omitempty"`
+	// HasEvidence 人验 pass 或非空 evidence_ref。
+	HasEvidence bool `json:"has_evidence,omitempty"`
 }
 
 // RequirementOutcome 需求级总账（派生，不单独落盘；ADR-0021 §3.5）。
@@ -124,6 +142,8 @@ type RequirementOutcome struct {
 	Acceptance    []ACOutcome `json:"acceptance"`
 	OpenIssues    []Issue     `json:"open_issues,omitempty"` // open + fixing
 	CanMarkDone   bool        `json:"can_mark_done"`
+	// MissingEvidence 非 deferred 且无证据的 AC id（票绿 alone 不算）。
+	MissingEvidence []string `json:"missing_evidence,omitempty"`
 }
 
 // RequirementEventType 需求级审计事件。

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"pieqi/internal/model"
+	"pieqi/internal/workflow"
 
 	"go.uber.org/zap"
 )
@@ -68,9 +69,23 @@ func (s *TaskStore) ActivatePlanned(id string) (*model.Task, error) {
 // StartReadyInRequirement 激活并启动某需求下所有依赖已满足的 planned（confirm/expand 后调用）。
 //
 // 缺 Agent 的 planned 跳过：planned 允许空 agent，启动前必须指定（见 startPlannedTask）。
+// 同需求实现并行受 Pack max_parallel_implement 限制；高风险待审 ≥2 时不 Start 新实现票。
 func (tr *TaskRunner) StartReadyInRequirement(requirementID string) {
 	if tr == nil || requirementID == "" {
 		return
+	}
+	highStakes := CountHighStakesApprovals(tr.store)
+	maxImpl := 1
+	if tr.requirements != nil {
+		if r, ok := tr.requirements.Get(requirementID); ok {
+			if p, err := tr.requirements.PackFor(r); err == nil && p != nil && p.Gates.MaxParallelImplement > 0 {
+				maxImpl = p.Gates.MaxParallelImplement
+			}
+		}
+	}
+	activeImpl := 0
+	if tr.requirements != nil {
+		activeImpl = tr.requirements.CountActiveImplement(requirementID)
 	}
 	for _, ready := range ReadyPlannedTasks(tr.store, requirementID) {
 		if strings.TrimSpace(ready.Agent) == "" {
@@ -79,6 +94,32 @@ func (tr *TaskRunner) StartReadyInRequirement(requirementID string) {
 				zap.String("requirement", requirementID))
 			continue
 		}
+		impl := false
+		if tr.requirements != nil {
+			impl = workflow.IsImplementRole(ready.Role)
+		} else {
+			switch ready.Role {
+			case model.RoleDesign, model.RoleReview, model.RoleTest:
+				impl = false
+			default:
+				impl = true
+			}
+		}
+		if impl {
+			if highStakes >= 2 {
+				tr.logger.Info("start ready planned skipped: review capacity",
+					zap.String("task", ready.ID),
+					zap.Int("high_stakes", highStakes))
+				continue
+			}
+			if activeImpl >= maxImpl {
+				tr.logger.Info("start ready planned skipped: implement parallel cap",
+					zap.String("task", ready.ID),
+					zap.Int("active", activeImpl),
+					zap.Int("max", maxImpl))
+				continue
+			}
+		}
 		act, err := tr.store.ActivatePlanned(ready.ID)
 		if err != nil {
 			tr.logger.Warn("start ready planned", zap.String("task", ready.ID), zap.Error(err))
@@ -86,5 +127,8 @@ func (tr *TaskRunner) StartReadyInRequirement(requirementID string) {
 		}
 		tr.bus.Publish(Event{Type: "task_updated", TaskID: act.ID, Task: act})
 		tr.Start(context.Background(), act)
+		if impl {
+			activeImpl++
+		}
 	}
 }

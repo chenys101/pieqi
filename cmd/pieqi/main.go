@@ -31,6 +31,7 @@ import (
 	"pieqi/internal/core"
 	"pieqi/internal/larkreg"
 	"pieqi/internal/logging"
+	"pieqi/internal/workflow"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -571,8 +572,16 @@ func main() {
 		// Collaboration Plane：与 Task 同库（ADR-0022），禁止另开连接。
 		reqStore := core.NewRequirementStore(store.Backend())
 		reqStore.SetTaskStore(store) // confirm 落地 planned Task
+		// 流程包：内置 embed + <dataRoot>/workflows 覆盖；默认来自 settings。
+		wfDefault := settingsStore.Get().DefaultWorkflowID
+		wfReg, wfErr := workflow.NewRegistry(filepath.Join(dataRoot, "workflows"), wfDefault)
+		if wfErr != nil {
+			logger.Fatal("workflow registry", zap.Error(wfErr))
+		}
+		reqStore.SetWorkflowRegistry(wfReg)
 		runner.SetRequirementStore(reqStore)
 		apiServer.SetRequirementStore(reqStore)
+		apiServer.SetWorkflowRegistry(wfReg)
 		apiServer.SetFeedback(feedbackStore, previewMgr)
 		apiServer.SetCheckRunner(checkRunner)
 		apiServer.SetPushRegistry(pushRegistry)
