@@ -1,9 +1,11 @@
 import { request } from './client'
 import type {
+  AcceptanceItem,
   ConfirmResult,
   ProposedTaskNode,
   Requirement,
   RequirementOutcome,
+  SuggestOutcome,
 } from '@/types/requirement'
 import type { TaskDto, TaskGroupDto } from '@/types/api'
 import { adaptTask } from './client'
@@ -31,7 +33,14 @@ export async function createRequirement(body: {
 
 export async function patchRequirement(
   id: string,
-  body: { workflow_id?: string; path?: 's0' | 's1' | 's2'; title?: string; body?: string },
+  body: {
+    workflow_id?: string
+    path?: 's0' | 's1' | 's2'
+    title?: string
+    body?: string
+    integration_branch?: string
+    acceptance?: AcceptanceItem[]
+  },
 ): Promise<Requirement> {
   return request<Requirement>(`/requirements/${encodeURIComponent(id)}`, {
     method: 'PATCH',
@@ -71,7 +80,12 @@ export async function getProposal(id: string): Promise<{
   }
 }
 
-/** 启动 agent 拆分；完成后提案出现在 getProposal。agent/model 与建任务同口径。 */
+/** 详情页轮询：proposal | blocked | none。 */
+export async function getSuggestOutcome(id: string): Promise<SuggestOutcome> {
+  return request<SuggestOutcome>(`/requirements/${encodeURIComponent(id)}/suggest-outcome`)
+}
+
+/** 启动 agent 拆分；完成后看 getSuggestOutcome。无 branch 时抛 ApiError 409 + code。 */
 export async function suggestSplit(
   id: string,
   opts?: { agent?: string; model?: string },
@@ -85,8 +99,9 @@ export async function suggestSplit(
   })
 }
 
+/** 清 proposal + block。 */
 export async function discardProposal(id: string): Promise<void> {
-  await request(`/requirements/${encodeURIComponent(id)}/proposal`, { method: 'DELETE' })
+  await request(`/requirements/${encodeURIComponent(id)}/suggest-outcome`, { method: 'DELETE' })
 }
 
 export async function expandRequirement(

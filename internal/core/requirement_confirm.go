@@ -21,6 +21,7 @@ func (s *RequirementStore) SetTaskStore(ts *TaskStore) {
 }
 
 // PutProposal 校验并暂存提案（内存；拒确认则丢弃，ADR-0021）。
+// 写入时清掉同需求的 SplitBlock（互斥）。
 func (s *RequirementStore) PutProposal(requirementID string, nodes []model.ProposedTaskNode) (*model.SplitProposal, error) {
 	if s == nil || s.backend == nil {
 		return nil, fmt.Errorf("requirement store not wired")
@@ -44,6 +45,7 @@ func (s *RequirementStore) PutProposal(requirementID string, nodes []model.Propo
 		s.proposals = make(map[string]*model.SplitProposal)
 	}
 	s.proposals[requirementID] = p
+	delete(s.blocks, requirementID)
 	s.mu.Unlock()
 	cp := *p
 	cp.Nodes = append([]model.ProposedTaskNode(nil), p.Nodes...)
@@ -85,6 +87,107 @@ func (s *RequirementStore) DiscardProposal(requirementID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.proposals, requirementID)
+}
+
+// PutBlock 写入 blocked 打磨结果；清掉同需求 proposal（互斥）。
+func (s *RequirementStore) PutBlock(requirementID string, block *model.SplitBlock) (*model.SplitBlock, error) {
+	if s == nil || s.backend == nil {
+		return nil, fmt.Errorf("requirement store not wired")
+	}
+	if _, ok := s.Get(requirementID); !ok {
+		return nil, fmt.Errorf("requirement not found: %s", requirementID)
+	}
+	if block == nil {
+		return nil, fmt.Errorf("nil block")
+	}
+	now := time.Now()
+	out := &model.SplitBlock{
+		ID:            block.ID,
+		RequirementID: requirementID,
+		Summary:       strings.TrimSpace(block.Summary),
+		Reasons:       append([]string(nil), block.Reasons...),
+		Questions:     append([]string(nil), block.Questions...),
+		Missing:       append([]string(nil), block.Missing...),
+		CreatedAt:     block.CreatedAt,
+	}
+	if out.ID == "" {
+		out.ID = uuid.New().String()
+	}
+	if out.CreatedAt.IsZero() {
+		out.CreatedAt = now
+	}
+	if out.Summary == "" {
+		out.Summary = "需求不够明确，不能硬拆"
+	}
+	s.mu.Lock()
+	if s.blocks == nil {
+		s.blocks = make(map[string]*model.SplitBlock)
+	}
+	s.blocks[requirementID] = out
+	delete(s.proposals, requirementID)
+	s.mu.Unlock()
+	cp := *out
+	cp.Reasons = append([]string(nil), out.Reasons...)
+	cp.Questions = append([]string(nil), out.Questions...)
+	cp.Missing = append([]string(nil), out.Missing...)
+	return &cp, nil
+}
+
+// GetBlock 返回当前 blocked 打磨。
+func (s *RequirementStore) GetBlock(requirementID string) (*model.SplitBlock, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, ok := s.blocks[requirementID]
+	if !ok || b == nil {
+		return nil, false
+	}
+	cp := *b
+	cp.Reasons = append([]string(nil), b.Reasons...)
+	cp.Questions = append([]string(nil), b.Questions...)
+	cp.Missing = append([]string(nil), b.Missing...)
+	return &cp, true
+}
+
+// DiscardBlock 丢弃 blocked。
+func (s *RequirementStore) DiscardBlock(requirementID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.blocks, requirementID)
+}
+
+// DiscardSuggestOutcome 清 proposal + block。
+func (s *RequirementStore) DiscardSuggestOutcome(requirementID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.proposals, requirementID)
+	delete(s.blocks, requirementID)
+}
+
+// SuggestOutcome 详情页轮询用。
+type SuggestOutcome struct {
+	Kind     model.SuggestOutcomeKind `json:"kind"`
+	Proposal *model.SplitProposal     `json:"proposal,omitempty"`
+	Block    *model.SplitBlock        `json:"block,omitempty"`
+}
+
+// GetSuggestOutcome 返回当前拆分结局（互斥：proposal | blocked | none）。
+func (s *RequirementStore) GetSuggestOutcome(requirementID string) SuggestOutcome {
+	if p, ok := s.GetProposal(requirementID); ok && p != nil && len(p.Nodes) > 0 {
+		return SuggestOutcome{Kind: model.SuggestOutcomeProposal, Proposal: p}
+	}
+	if b, ok := s.GetBlock(requirementID); ok && b != nil {
+		return SuggestOutcome{Kind: model.SuggestOutcomeBlocked, Block: b}
+	}
+	return SuggestOutcome{Kind: model.SuggestOutcomeNone}
 }
 
 // ConfirmResult confirm 产物。
@@ -347,7 +450,7 @@ func (s *RequirementStore) applyProposal(requirementID string, nodes []model.Pro
 		return nil, err
 	}
 
-	s.DiscardProposal(requirementID)
+	s.DiscardSuggestOutcome(requirementID)
 	return &ConfirmResult{Requirement: updated, Tasks: created}, nil
 }
 
@@ -377,6 +480,7 @@ func (s *RequirementStore) putExpandProposal(requirementID string, nodes []model
 		s.proposals = make(map[string]*model.SplitProposal)
 	}
 	s.proposals[requirementID] = p
+	delete(s.blocks, requirementID)
 	s.mu.Unlock()
 	cp := *p
 	cp.Nodes = append([]model.ProposedTaskNode(nil), p.Nodes...)

@@ -17,12 +17,15 @@ gates:
   path_bias: full_dag
   require_brief_in_prompt: true
 split_instructions: |
-  3. **Split philosophy (S2)**: Reasonable grain; use depends_on for order.
+  4. **Split philosophy (S2)**: Reasonable grain; use depends_on for order.
      Parallel only when file/module sets are disjoint with independent acceptance.
      Do not split solely because "there is FE and BE". Prefer delivery slices over org roles.
-  4. No empty prompts; each must be runnable.
-  5. **Delivery**: implement merges to req branch; unit tests only on implement;
+  5. No empty prompts; each must be runnable.
+  6. **Delivery**: implement merges to req branch; unit tests only on implement;
      test waves depend_on implements; isolate functional tests; one final verify ok.
+  7. **Must blocked when unclear**: If scope / integration branch / acceptance is unclear, output kind=blocked
+     (summary + reasons + questions + missing). Do NOT guess a branch. Do NOT use pieqi/ worktree branches
+     as the merge target. Never invent a hard-split proposal when blocked.
 brief_header: |
   Stakes: low | high
   Hypothesis: ...

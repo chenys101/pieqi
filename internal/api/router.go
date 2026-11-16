@@ -223,6 +223,8 @@ func (s *Server) Register(r gin.IRouter) {
 		api.PUT("/requirements/:id/proposal", s.putRequirementProposal)
 		api.GET("/requirements/:id/proposal", s.getRequirementProposal)
 		api.DELETE("/requirements/:id/proposal", s.deleteRequirementProposal)
+		api.GET("/requirements/:id/suggest-outcome", s.getRequirementSuggestOutcome)
+		api.DELETE("/requirements/:id/suggest-outcome", s.deleteRequirementSuggestOutcome)
 		api.POST("/requirements/:id/confirm", s.confirmRequirement)
 		api.POST("/requirements/:id/suggest", s.suggestRequirementSplit)
 		api.POST("/requirements/:id/expand", s.expandRequirement)

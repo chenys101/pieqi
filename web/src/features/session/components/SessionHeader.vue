@@ -21,7 +21,7 @@
 // 且顶部那个在手机上还紧挨着「返回」，误触成本高。中止的唯一入口 = 输入框内那枚按钮
 // （InterveneInput 的 canCancel 双态按钮），它就在拇指区、且与发送同位。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAgentStore } from '@/stores/agent'
 import { useTaskStore } from '@/stores/task'
 import StatusBadge from '@/components/task/StatusBadge.vue'
@@ -58,6 +58,7 @@ const props = withDefaults(
 )
 const emit = defineEmits<{ cancel: []; remove: []; feedback: [] }>()
 const router = useRouter()
+const route = useRoute()
 const agentStore = useAgentStore()
 const taskStore = useTaskStore()
 
@@ -154,11 +155,21 @@ function goAllTasks() {
  * 一律 push('/dashboard') 会跳到另一个页面，还丢掉列表的滚动位置（只有 popstate 会还原
  * Vue Router 的 savedPosition）。
  *
+ * 从需求拆分「查看会话」进来（?from=requirement&requirement_id=…）时固定回需求详情打磨，
+ * 不靠 history（窄屏 push 后 back 虽通常可用，但深链/刷新仍要落到需求页）。
+ *
  * 兜底给 dashboard：飞书深链/冷启动直达时站内没有上一页，router.back() 会没反应。
  * 读 history.state.back（vue-router 自己写的上一页 full path），比 history.length 可靠 ——
  * 后者在 PWA 里几乎总是 >1，判不出"上一页是不是站内页"。
  */
 function goBack() {
+  if (route.query.from === 'requirement') {
+    const rid = String(route.query.requirement_id || props.task.requirementId || '').trim()
+    if (rid) {
+      void router.push(`/requirements/${encodeURIComponent(rid)}`)
+      return
+    }
+  }
   if (window.history.state?.back) router.back()
   else router.push('/dashboard')
 }

@@ -17,14 +17,17 @@ gates:
   path_bias: light_req
   require_brief_in_prompt: true
 split_instructions: |
-  3. **Split philosophy (S1)**: Prefer few tickets:
+  4. **Split philosophy (S1)**: Prefer few tickets:
      - 0–1 design (omit if design doc already exists)
      - 1–2 implement tickets (role=other or by module; **do not** split frontend+backend as craft tickets)
      - 0–1 test (depends_on all implements)
      Same-requirement implement tickets must chain via depends_on; no parallel first-wave implements.
      Only split further when context degrades or file sets are disjoint; state the reason in the prompt.
-  4. No empty prompts; each must be runnable and include Done=.
-  5. **Delivery**: implement merges to req branch; unit tests only on implement; test waits on depends_on.
+  5. No empty prompts; each must be runnable and include Done=.
+  6. **Delivery**: implement merges to req branch; unit tests only on implement; test waits on depends_on.
+  7. **Must blocked when unclear**: If scope / integration branch / acceptance is unclear, output kind=blocked
+     (summary + reasons + questions + missing). Do NOT guess a branch. Do NOT use pieqi/ worktree branches
+     as the merge target. Never invent a hard-split proposal when blocked.
 brief_header: |
   Stakes: low | high
   Hypothesis: ...

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -21,12 +22,13 @@ type createRequirementReq struct {
 }
 
 type patchRequirementReq struct {
-	Title      *string                 `json:"title"`
-	Body       *string                 `json:"body"`
-	Status     *model.RequirementStatus `json:"status"`
-	Acceptance *[]model.AcceptanceItem `json:"acceptance"`
-	WorkflowID *string                 `json:"workflow_id"`
-	Path       *model.ExecutionPath    `json:"path"`
+	Title             *string                  `json:"title"`
+	Body              *string                  `json:"body"`
+	Status            *model.RequirementStatus `json:"status"`
+	Acceptance        *[]model.AcceptanceItem  `json:"acceptance"`
+	WorkflowID        *string                  `json:"workflow_id"`
+	Path              *model.ExecutionPath     `json:"path"`
+	IntegrationBranch *string                  `json:"integration_branch"`
 }
 
 // listRequirements GET /api/requirements
@@ -101,6 +103,25 @@ func (s *Server) patchRequirement(c *gin.Context) {
 		return
 	}
 	rid := c.Param("id")
+	if req.IntegrationBranch != nil {
+		br := strings.TrimSpace(*req.IntegrationBranch)
+		if br == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "integration_branch required", "code": "integration_branch_required"})
+			return
+		}
+		cur, ok := s.requirements.Get(rid)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		if !core.GitRefExists(context.Background(), cur.ProjectPath, br) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "integration_branch does not exist in repo",
+				"code":  "integration_branch_missing",
+			})
+			return
+		}
+	}
 	if req.WorkflowID != nil {
 		allow, _, reason := s.requirements.CanChangeWorkflow(rid)
 		if !allow {
@@ -140,6 +161,9 @@ func (s *Server) patchRequirement(c *gin.Context) {
 				if req.Acceptance != nil {
 					r.Acceptance = *req.Acceptance
 				}
+				if req.IntegrationBranch != nil {
+					r.IntegrationBranch = strings.TrimSpace(*req.IntegrationBranch)
+				}
 				return true
 			})
 			if err != nil {
@@ -170,6 +194,10 @@ func (s *Server) patchRequirement(c *gin.Context) {
 		}
 		if req.Path != nil {
 			r.Path = *req.Path
+			changed = true
+		}
+		if req.IntegrationBranch != nil {
+			r.IntegrationBranch = strings.TrimSpace(*req.IntegrationBranch)
 			changed = true
 		}
 		return changed

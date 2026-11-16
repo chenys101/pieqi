@@ -61,12 +61,32 @@ func (s *Server) getRequirementProposal(c *gin.Context) {
 }
 
 // deleteRequirementProposal DELETE /api/requirements/:id/proposal
+// 同时清 proposal + block（与 DELETE suggest-outcome 同义）。
 func (s *Server) deleteRequirementProposal(c *gin.Context) {
 	if s.requirements == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "requirements not wired"})
 		return
 	}
-	s.requirements.DiscardProposal(c.Param("id"))
+	s.requirements.DiscardSuggestOutcome(c.Param("id"))
+	c.Status(http.StatusNoContent)
+}
+
+// getRequirementSuggestOutcome GET /api/requirements/:id/suggest-outcome
+func (s *Server) getRequirementSuggestOutcome(c *gin.Context) {
+	if s.requirements == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "requirements not wired"})
+		return
+	}
+	c.JSON(http.StatusOK, s.requirements.GetSuggestOutcome(c.Param("id")))
+}
+
+// deleteRequirementSuggestOutcome DELETE /api/requirements/:id/suggest-outcome
+func (s *Server) deleteRequirementSuggestOutcome(c *gin.Context) {
+	if s.requirements == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "requirements not wired"})
+		return
+	}
+	s.requirements.DiscardSuggestOutcome(c.Param("id"))
 	c.Status(http.StatusNoContent)
 }
 
@@ -174,6 +194,14 @@ func (s *Server) suggestRequirementSplit(c *gin.Context) {
 	}
 	task, err := s.requirements.StartSplitSuggest(c.Param("id"), agentName, strings.TrimSpace(body.Model))
 	if err != nil {
+		if br, ok := err.(*core.ErrIntegrationBranchRequired); ok {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":            br.Error(),
+				"code":             "integration_branch_required",
+				"candidate_branch": br.CandidateBranch,
+			})
+			return
+		}
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -187,7 +215,7 @@ func (s *Server) suggestRequirementSplit(c *gin.Context) {
 	}
 	c.JSON(http.StatusAccepted, gin.H{
 		"task":    task,
-		"message": "split suggest running; poll GET /proposal when task completes",
+		"message": "split suggest running; poll GET /suggest-outcome when task completes",
 	})
 }
 

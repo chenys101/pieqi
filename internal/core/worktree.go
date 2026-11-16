@@ -137,6 +137,11 @@ func gitRefExists(ctx context.Context, repoPath, ref string) bool {
 	return err == nil
 }
 
+// GitRefExists 导出给 API：登记 integration_branch 前校验 ref 存在。
+func GitRefExists(ctx context.Context, repoPath, ref string) bool {
+	return gitRefExists(ctx, repoPath, ref)
+}
+
 // Cleanup 删除 worktree 及其分支。对已删除的 worktree 幂等（吞 not found）。
 // 硬边界：path 不得等于或落在「会删掉整个 RepoPath」——拒绝清理项目根。
 func (wm *WorktreeManager) Cleanup(ctx context.Context, project *model.Project, taskID, worktreePath string) error {

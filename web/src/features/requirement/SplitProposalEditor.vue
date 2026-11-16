@@ -303,6 +303,7 @@ function onConfirm() {
 <template>
   <div class="space-y-3">
     <p class="text-[11px] leading-relaxed text-muted">
+      打磨执行方案（改票 / 依赖 / Agent）→ 确认落地。
       按 <code class="rounded bg-elevated px-1">design → fe → be → test</code> 分组；
       planned 可空 agent/model；点徽章改执行配置；组末「+」添加；✎ 与添加共用弹窗。
     </p>
@@ -529,7 +530,7 @@ function onConfirm() {
       <Button variant="primary" :disabled="busy || !draft.length" @click="onConfirm">
         {{ confirmLabel || '落地为 planned' }}
       </Button>
-      <Button size="sm" variant="ghost" :disabled="busy" @click="emit('discard')">丢弃建议</Button>
+      <Button size="sm" variant="ghost" :disabled="busy" @click="emit('discard')">丢弃方案</Button>
     </div>
 
     <!-- 添加 / 编辑共用弹窗 -->

@@ -28,6 +28,8 @@ vi.mock('vue-router', () => ({
 
 vi.mock('@/services/api/requirements', () => ({
   getProposal: vi.fn(async () => null),
+  getSuggestOutcome: vi.fn(async () => ({ kind: 'none' })),
+  patchRequirement: vi.fn(),
   suggestSplit: vi.fn(),
   confirmRequirement: vi.fn(),
   discardProposal: vi.fn(),
@@ -41,6 +43,14 @@ vi.mock('@/services/api/requirements', () => ({
   getRequirementOutcome: vi.fn(),
   listTasksForRequirement: vi.fn(),
   listRequirements: vi.fn(),
+}))
+
+vi.mock('@/composables/useResponsive', () => ({
+  useResponsive: () => ({ isMobile: { value: false }, isWide: { value: true } }),
+}))
+
+vi.mock('@/composables/useWebSocket', () => ({
+  onRealtimeResync: () => () => {},
 }))
 
 vi.mock('@/stores/agent', () => ({

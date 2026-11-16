@@ -21,6 +21,7 @@ type RequirementStore struct {
 	backend   store.Store
 	tasks     *TaskStore                      // confirm 时创建 planned Task
 	proposals map[string]*model.SplitProposal // requirementID → 暂存提案（不落盘）
+	blocks    map[string]*model.SplitBlock    // requirementID → blocked 打磨（不落盘；与 proposal 互斥）
 	workflows *workflow.Registry              // 流程包；nil = 拆分/DoD 走内置硬编码回落
 }
 

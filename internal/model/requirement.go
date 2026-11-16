@@ -177,6 +177,26 @@ type SplitProposal struct {
 	CreatedAt     time.Time           `json:"created_at"`
 }
 
+// SplitBlock 拆分助手判定「需求不够明确、禁止硬拆」时的内存结果（与 SplitProposal 互斥）。
+type SplitBlock struct {
+	ID            string    `json:"id"`
+	RequirementID string    `json:"requirement_id"`
+	Summary       string    `json:"summary"`
+	Reasons       []string  `json:"reasons,omitempty"`
+	Questions     []string  `json:"questions,omitempty"`
+	Missing       []string  `json:"missing,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// SuggestOutcomeKind GET suggest-outcome 的 kind。
+type SuggestOutcomeKind string
+
+const (
+	SuggestOutcomeNone     SuggestOutcomeKind = "none"
+	SuggestOutcomeProposal SuggestOutcomeKind = "proposal"
+	SuggestOutcomeBlocked  SuggestOutcomeKind = "blocked"
+)
+
 // ProposedTaskNode 提案里的一格；DependsOn 引用同提案内其它节点的 TempID。
 type ProposedTaskNode struct {
 	TempID    string     `json:"temp_id"` // 提案内稳定 id，confirm 时映射成真实 Task.ID

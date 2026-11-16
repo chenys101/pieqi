@@ -7,8 +7,11 @@ import Input from '@/components/ui/Input.vue'
 import Select from '@/components/ui/Select.vue'
 import Textarea from '@/components/ui/Textarea.vue'
 import Spinner from '@/components/ui/Spinner.vue'
+import { useResponsive } from '@/composables/useResponsive'
 import ModelPicker from '@/features/session/components/ModelPicker.vue'
+import SplitBlockedPanel from '@/features/requirement/SplitBlockedPanel.vue'
 import SplitProposalEditor from '@/features/requirement/SplitProposalEditor.vue'
+import SplitSuggestSessionEmbed from '@/features/requirement/SplitSuggestSessionEmbed.vue'
 import { newRequirementTarget } from '@/features/requirement/newRequirementTarget'
 import * as api from '@/services/api/requirements'
 import { getSettings } from '@/services/api/settings'
@@ -22,7 +25,7 @@ import {
 import { useAgentStore } from '@/stores/agent'
 import { useNotificationStore } from '@/stores/notification'
 import { useRequirementStore } from '@/stores/requirement'
-import type { ProposedTaskNode } from '@/types/requirement'
+import type { AcceptanceItem, ProposedTaskNode, SplitBlock, SuggestOutcomeKind } from '@/types/requirement'
 import { ApiError } from '@/services/api/client'
 
 const route = useRoute()
@@ -30,10 +33,16 @@ const router = useRouter()
 const store = useRequirementStore()
 const agentStore = useAgentStore()
 const notify = useNotificationStore()
+const { isWide } = useResponsive()
 
 const id = computed(() => String(route.params.id || ''))
 
 const proposal = ref<{ nodes: ProposedTaskNode[] } | null>(null)
+const block = ref<SplitBlock | null>(null)
+const outcomeKind = ref<SuggestOutcomeKind>('none')
+/** 入口闸（缺分支 409）；与 agent blocked 共用 SplitBlockedPanel */
+const gateOpen = ref(false)
+const candidateBranch = ref('')
 const suggestTaskId = ref('')
 const suggesting = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -82,6 +91,15 @@ const suggestTasks = computed(() => store.tasks.filter((t) => isSplitSuggestTitl
 const suggestRunning = computed(() =>
   suggestTasks.value.some((t) => t.status === 'pending' || t.status === 'running' || t.status === 'waiting_input'),
 )
+const showGate = computed(
+  () =>
+    gateOpen.value ||
+    (!store.current?.integration_branch && outcomeKind.value === 'none' && !suggestRunning.value && !suggesting.value),
+)
+const showBlocked = computed(() => outcomeKind.value === 'blocked' && !!block.value)
+const showProposal = computed(() => outcomeKind.value === 'proposal' && !!proposal.value?.nodes?.length)
+const embedTaskId = computed(() => suggestTaskId.value || suggestTasks.value[0]?.id || '')
+const showEmbed = computed(() => isWide.value && (suggestRunning.value || suggesting.value) && !!embedTaskId.value)
 const bodyExpanded = ref(false)
 const bodyText = computed(() => (store.current?.body || '').trim())
 const bodyPreview = computed(() => {
@@ -181,7 +199,12 @@ const acColor: Record<string, string> = {
 async function reload() {
   if (!id.value) return
   await store.loadDetail(id.value)
-  proposal.value = await api.getProposal(id.value)
+  const outcome = await api.getSuggestOutcome(id.value)
+  outcomeKind.value = outcome.kind
+  proposal.value = outcome.proposal?.nodes?.length ? outcome.proposal : null
+  block.value = outcome.block ?? null
+  if (outcome.kind === 'blocked') gateOpen.value = false
+  if (store.current?.integration_branch) gateOpen.value = false
   await Promise.all([refreshPackMeta(), refreshCapacityAndNudge()])
 }
 
@@ -196,12 +219,22 @@ function startPoll() {
   stopPoll()
   pollTimer = setInterval(async () => {
     await reload()
-    if (proposal.value?.nodes?.length || !suggestRunning.value) {
+    const hasOutcome = outcomeKind.value === 'proposal' || outcomeKind.value === 'blocked'
+    if (hasOutcome || !suggestRunning.value) {
       suggesting.value = false
-      if (proposal.value?.nodes?.length) stopPoll()
-      if (!suggestRunning.value && !proposal.value) stopPoll()
+      if (hasOutcome || !suggestRunning.value) stopPoll()
     }
   }, 2500)
+}
+
+function openSessionForSuggest() {
+  const tid = embedTaskId.value
+  if (!tid) return
+  if (isWide.value) return
+  void router.push({
+    path: `/sessions/${encodeURIComponent(tid)}`,
+    query: { from: 'requirement', requirement_id: id.value },
+  })
 }
 
 async function runSuggest() {
@@ -219,6 +252,7 @@ async function runSuggest() {
       model: suggestModel.value || undefined,
     })
     suggestTaskId.value = res.task?.id || ''
+    gateOpen.value = false
     notify.success(
       willReplaceOnConfirm.value
         ? 'Agent 正在重新拆分；确认后将覆盖并废弃现有任务'
@@ -228,7 +262,41 @@ async function runSuggest() {
     startPoll()
   } catch (e) {
     suggesting.value = false
+    if (e instanceof ApiError && e.status === 409 && e.body?.code === 'integration_branch_required') {
+      gateOpen.value = true
+      candidateBranch.value = String(e.body.candidate_branch || '')
+      notify.success('先登记合入分支再拆')
+      return
+    }
     notify.error(e instanceof Error ? e.message : '启动拆分失败')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function onPolishSave(payload: {
+  integration_branch: string
+  body: string
+  acceptance: AcceptanceItem[]
+  resuggest: boolean
+}) {
+  busy.value = true
+  try {
+    await api.patchRequirement(id.value, {
+      integration_branch: payload.integration_branch,
+      body: payload.body,
+      acceptance: payload.acceptance,
+    })
+    gateOpen.value = false
+    await reload()
+    notify.success(payload.resuggest ? '已保存，开始重新拆分' : '已保存')
+    if (payload.resuggest) {
+      busy.value = false
+      await runSuggest()
+      return
+    }
+  } catch (e) {
+    notify.error(e instanceof Error ? e.message : '保存失败')
   } finally {
     busy.value = false
   }
@@ -289,6 +357,8 @@ async function confirmProposal(nodes?: ProposedTaskNode[]) {
       }
     }
     proposal.value = null
+    block.value = null
+    outcomeKind.value = 'none'
     await reload()
     if (result.abandoned && result.abandoned > 0) {
       notify.success(`已覆盖落地 ${result.tasks?.length ?? 0} 票，废弃旧任务 ${result.abandoned} 个`)
@@ -307,6 +377,9 @@ async function discardProposal() {
   try {
     await api.discardProposal(id.value)
     proposal.value = null
+    block.value = null
+    outcomeKind.value = 'none'
+    gateOpen.value = false
   } catch (e) {
     notify.error(e instanceof Error ? e.message : '丢弃失败')
   } finally {
@@ -469,7 +542,14 @@ onUnmounted(stopPoll)
       </ContentColumn>
     </header>
 
-    <div class="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-4">
+    <div
+      class="min-h-0 flex-1"
+      :class="store.current && isWide && showEmbed ? 'grid grid-cols-1 md:grid-cols-2' : 'overflow-y-auto px-3 py-4 md:px-4'"
+    >
+      <div
+        class="min-h-0"
+        :class="store.current && isWide && showEmbed ? 'overflow-y-auto border-r border-border px-3 py-4 md:px-4' : ''"
+      >
       <ContentColumn :resizable="false">
         <div v-if="store.loading && !store.current" class="flex justify-center py-12"><Spinner /></div>
         <p v-else-if="store.error" class="text-sm text-error">{{ store.error }}</p>
@@ -571,12 +651,16 @@ onUnmounted(stopPoll)
             <p v-else class="text-xs text-muted">未填写正文（仅有标题）</p>
           </section>
 
-          <!-- Agent 拆分（刚需主路径） -->
-          <section class="space-y-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
+          <!-- Agent 拆分（刚需主路径）：三态互斥 — gate/blocked | proposal | empty -->
+          <section
+            class="space-y-3 rounded-lg border p-3"
+            :class="showGate || showBlocked ? 'border-warning/40 bg-warning/5' : 'border-accent/30 bg-accent/5'"
+          >
             <div class="flex flex-wrap items-center gap-2">
               <h2 class="text-xs font-semibold text-text-secondary">Agent 拆分建议</h2>
               <span class="text-[11px] text-muted">
-                按流程包「{{ packDetail?.short_label || store.current.workflow_id || '默认' }}@{{ store.current.workflow_version || packDetail?.version || '?' }}」生成 · 你确认 → 一键生成
+                钉死合入面 → 出方案或说明缺口 → 打磨后落地 ·
+                {{ packDetail?.short_label || store.current.workflow_id || '默认' }}@{{ store.current.workflow_version || packDetail?.version || '?' }}
               </span>
             </div>
             <p
@@ -624,42 +708,70 @@ onUnmounted(stopPoll)
                 :disabled="busy || suggesting || suggestRunning || !suggestAgent"
                 @click="runSuggest"
               >
-                {{ suggestRunning || suggesting ? '拆分中…' : proposal ? '重新生成建议' : '让 Agent 拆分' }}
+                {{ suggestRunning || suggesting ? '拆分中…' : showProposal || showBlocked ? '重新生成建议' : '让 Agent 拆分' }}
               </Button>
             </div>
             <p v-if="suggestRunning || suggesting" class="flex items-center gap-2 text-xs text-muted">
               <Spinner class="h-3.5 w-3.5" />
               Agent 正在生成 Task List
-              <RouterLink
-                v-if="suggestTaskId || suggestTasks[0]"
-                class="text-accent"
-                :to="`/sessions/${suggestTaskId || suggestTasks[0].id}`"
-              >
-                查看会话
-              </RouterLink>
+              <template v-if="embedTaskId">
+                <span v-if="isWide" class="text-muted">会话在右侧</span>
+                <button
+                  v-else
+                  type="button"
+                  class="text-accent hover:underline"
+                  data-testid="suggest-view-session"
+                  @click="openSessionForSuggest"
+                >
+                  查看会话
+                </button>
+              </template>
             </p>
-            <p
-              v-if="proposal?.nodes?.length && willReplaceOnConfirm && !hasProgressedWork"
-              class="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-warning"
-              role="status"
-            >
-              确认落地将废弃现有任务列表，以本提案替换。请核对后再点确认。
-            </p>
-            <p
-              v-else-if="proposal?.nodes?.length && hasProgressedWork"
-              class="rounded-md border border-error/40 bg-error/10 px-2.5 py-2 text-[11px] leading-relaxed text-error"
-              role="status"
-            >
-              已有任务开跑或完成。覆盖需二次确认（force）；未合入需求分支的施工会被废弃。
-            </p>
-            <SplitProposalEditor
-              v-if="proposal?.nodes?.length"
-              :nodes="proposal.nodes"
+            <SplitBlockedPanel
+              v-if="showGate && !showBlocked"
+              mode="gate"
+              :candidate-branch="candidateBranch || store.current.integration_branch"
+              :integration-branch="store.current.integration_branch"
+              :body="store.current.body"
+              :acceptance="store.current.acceptance"
               :busy="busy"
-              :confirm-label="willReplaceOnConfirm ? '覆盖并落地（废弃旧任务）' : '落地为 planned'"
-              @confirm="confirmProposal"
+              @save="onPolishSave"
+            />
+            <SplitBlockedPanel
+              v-else-if="showBlocked"
+              mode="blocked"
+              :block="block"
+              :candidate-branch="candidateBranch"
+              :integration-branch="store.current.integration_branch"
+              :body="store.current.body"
+              :acceptance="store.current.acceptance"
+              :busy="busy"
+              @save="onPolishSave"
               @discard="discardProposal"
             />
+            <template v-else-if="showProposal">
+              <p
+                v-if="willReplaceOnConfirm && !hasProgressedWork"
+                class="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-2 text-[11px] leading-relaxed text-warning"
+                role="status"
+              >
+                确认落地将废弃现有任务列表，以本提案替换。请核对后再点确认。
+              </p>
+              <p
+                v-else-if="hasProgressedWork"
+                class="rounded-md border border-error/40 bg-error/10 px-2.5 py-2 text-[11px] leading-relaxed text-error"
+                role="status"
+              >
+                已有任务开跑或完成。覆盖需二次确认（force）；未合入需求分支的施工会被废弃。
+              </p>
+              <SplitProposalEditor
+                :nodes="proposal!.nodes"
+                :busy="busy"
+                :confirm-label="willReplaceOnConfirm ? '覆盖并落地（废弃旧任务）' : '落地为 planned'"
+                @confirm="confirmProposal"
+                @discard="discardProposal"
+              />
+            </template>
           </section>
 
           <section
@@ -799,6 +911,12 @@ onUnmounted(stopPoll)
           </section>
         </div>
       </ContentColumn>
+      </div>
+      <SplitSuggestSessionEmbed
+        v-if="store.current && showEmbed && embedTaskId"
+        :task-id="embedTaskId"
+        :requirement-id="id"
+      />
     </div>
   </div>
 </template>

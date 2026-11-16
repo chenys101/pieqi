@@ -84,6 +84,31 @@ export interface ProposedTaskNode {
   depends_on?: string[]
 }
 
+export type SuggestOutcomeKind = 'none' | 'proposal' | 'blocked'
+
+export interface SplitBlock {
+  id: string
+  requirement_id: string
+  summary: string
+  reasons?: string[]
+  questions?: string[]
+  missing?: string[]
+  created_at: string
+}
+
+export interface SplitProposal {
+  id: string
+  requirement_id: string
+  nodes: ProposedTaskNode[]
+  created_at: string
+}
+
+export interface SuggestOutcome {
+  kind: SuggestOutcomeKind
+  proposal?: SplitProposal
+  block?: SplitBlock
+}
+
 export interface ConfirmResult {
   requirement: Requirement
   tasks: Array<{ id: string; title?: string; status: string; prompt: string }>
