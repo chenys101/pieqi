@@ -53,19 +53,15 @@ func TestEmbeddedDoD_NoPIEQIHomeAsUniversal(t *testing.T) {
 			t.Fatalf("%s: dod_test must keep isolation discipline", id)
 		}
 		if !strings.Contains(p.DoDTest, "target project") {
-			t.Fatalf("%s: dod_test must defer port/HOME to target project", id)
+			t.Fatalf("%s: dod_test must defer port/data dirs to target project", id)
 		}
-		// 旧通项写法：isolated instance (separate PIEQI_HOME + port)
-		if strings.Contains(p.DoDTest, "isolated instance** (separate PIEQI_HOME") ||
-			strings.Contains(p.DoDTest, "isolated instance (separate PIEQI_HOME") {
-			t.Fatalf("%s: PIEQI_HOME must not be the universal isolation example: %s", id, p.DoDTest)
-		}
-		if !strings.Contains(p.DoDTest, "If this repo is pieqi") || !strings.Contains(p.DoDTest, "PIEQI_HOME") {
-			t.Fatalf("%s: pieqi self-test conditional guidance missing", id)
-		}
-		if strings.Contains(p.DoDImplement, "Do not start pieqi service as completion criteria.") &&
-			!strings.Contains(p.DoDImplement, "system under test") {
-			t.Fatalf("%s: implement DoD still hardcodes pieqi-only service ban", id)
+		for _, banned := range []string{
+			"PIEQI_HOME", "PIEQI_SERVER_PORT", ":3000", "~/.pieqi",
+			"If this repo is pieqi", "pieqi service",
+		} {
+			if strings.Contains(p.DoDTest, banned) || strings.Contains(p.DoDImplement, banned) {
+				t.Fatalf("%s: DoD must not contain project-specific %q", id, banned)
+			}
 		}
 	}
 }

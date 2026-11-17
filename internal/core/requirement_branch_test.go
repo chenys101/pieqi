@@ -56,6 +56,13 @@ func TestFormatAndAppendRequirementContext(t *testing.T) {
 	if AppendRequirementContext(p, block) != p {
 		t.Fatal("append should be idempotent")
 	}
+	legacy := "old\n\n## pieqi 需求上下文\n- 需求 id：x"
+	if got := AppendRequirementContext(legacy, block); got != legacy {
+		t.Fatalf("legacy marker should skip re-inject: %q", got)
+	}
+	if !strings.Contains(block, "## 需求上下文") {
+		t.Fatalf("new marker heading missing: %s", block)
+	}
 }
 
 func TestWorktreeCreate_UsesBaseRef(t *testing.T) {

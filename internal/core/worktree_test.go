@@ -91,8 +91,8 @@ func TestWorktreeManager_CreateAndCleanup(t *testing.T) {
 	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
 		t.Fatalf("worktree path not created: %s", wtPath)
 	}
-	if !branchExists(t, repo, "pieqi/task-1") {
-		t.Fatal("branch pieqi/task-1 not found")
+	if !branchExists(t, repo, "task/task-1") {
+		t.Fatal("branch task/task-1 not found")
 	}
 	if _, err := os.Stat(filepath.Join(wtPath, "README.md")); err != nil {
 		t.Fatal("worktree missing README.md")
@@ -104,8 +104,28 @@ func TestWorktreeManager_CreateAndCleanup(t *testing.T) {
 	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
 		t.Fatal("worktree dir should be removed after cleanup")
 	}
-	if branchExists(t, repo, "pieqi/task-1") {
+	if branchExists(t, repo, "task/task-1") {
 		t.Fatal("branch should be deleted after cleanup")
+	}
+}
+
+func TestWorktreeManager_CleanupLegacyPieqiBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	repo := initRepo(t, dir, "main")
+	wm := NewWorktreeManager(zap.NewNop(), filepath.Join(dir, "wt"))
+	project := &model.Project{ID: "cb", RepoPath: repo}
+	ctx := context.Background()
+
+	// 模拟旧版分支名仍在仓内：Cleanup 须一并删掉 pieqi/<id>。
+	mustGit(t, repo, "branch", "pieqi/legacy-1")
+	if err := wm.Cleanup(ctx, project, "legacy-1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if branchExists(t, repo, "pieqi/legacy-1") {
+		t.Fatal("legacy pieqi/ branch should be deleted")
 	}
 }
 
@@ -155,8 +175,8 @@ func TestWorktreeManager_ConcurrentCreatesSerialize(t *testing.T) {
 		t.Fatalf("concurrent create failed: %v", err)
 	}
 	for i := 0; i < n; i++ {
-		if !branchExists(t, repo, "pieqi/task-c-"+strconv.Itoa(i)) {
-			t.Fatalf("branch pieqi/task-c-%d missing after concurrent creates", i)
+		if !branchExists(t, repo, "task/task-c-"+strconv.Itoa(i)) {
+			t.Fatalf("branch task/task-c-%d missing after concurrent creates", i)
 		}
 	}
 }

@@ -80,7 +80,7 @@ func TestOnAgentSessionClosed_ReaperKeepsFailedWorktree(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("worktree should survive reaper close: %v", err)
 	}
-	if !branchExists(t, repo, "pieqi/task-keep") {
+	if !branchExists(t, repo, "task/task-keep") {
 		t.Fatal("branch should survive reaper close")
 	}
 	foundSkip := false

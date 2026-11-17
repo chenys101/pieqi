@@ -18,9 +18,21 @@ import (
 // pieqi 只建议路径，不代替 Cursor/dsh 等宿主的 worktree 策略；须在项目树内以免拖出沙箱。
 const projectWorktreeRel = ".worktrees"
 
+// 任务 worktree 分支：task/<taskID>（中性前缀，不带产品名）。
+// legacyTaskWorktreeBranchPrefix 仅 Cleanup 兼容旧分支。
+const (
+	taskWorktreeBranchPrefix       = "task/"
+	legacyTaskWorktreeBranchPrefix = "pieqi/"
+)
+
+// TaskWorktreeBranch 任务隔离分支名。
+func TaskWorktreeBranch(taskID string) string {
+	return taskWorktreeBranchPrefix + strings.TrimSpace(taskID)
+}
+
 // WorktreeManager 为每个任务在项目 repo 下创建并管理 git worktree。
 //
-// 每任务一个 worktree + 新分支 pieqi/<taskID>，让多个编码任务在同一 repo 上并行隔离。
+// 每任务一个 worktree + 新分支 task/<taskID>，让多个编码任务在同一 repo 上并行隔离。
 // git worktree 操作碰 .git/worktrees/ 不并发安全，单个 sync.Mutex 串行所有 Create。
 type WorktreeManager struct {
 	logger *zap.Logger
@@ -63,10 +75,10 @@ func WorktreePathFor(worktreeBase string, project *model.Project, taskID string)
 	return filepath.Join(repo, filepath.FromSlash(projectWorktreeRel), taskID), nil
 }
 
-// Create 在 project 的 repo 下建一个 worktree + 新分支 pieqi/<taskID>。
+// Create 在 project 的 repo 下建一个 worktree + 新分支 task/<taskID>。
 // 返回 worktree 绝对路径。
 func (wm *WorktreeManager) Create(ctx context.Context, project *model.Project, taskID string) (string, error) {
-	branch := "pieqi/" + taskID
+	branch := TaskWorktreeBranch(taskID)
 	worktreePath, err := WorktreePathFor(wm.worktreeBase, project, taskID)
 	if err != nil {
 		return "", err
@@ -144,8 +156,12 @@ func GitRefExists(ctx context.Context, repoPath, ref string) bool {
 
 // Cleanup 删除 worktree 及其分支。对已删除的 worktree 幂等（吞 not found）。
 // 硬边界：path 不得等于或落在「会删掉整个 RepoPath」——拒绝清理项目根。
+// 分支：删 task/<id>，并兼容旧 pieqi/<id>。
 func (wm *WorktreeManager) Cleanup(ctx context.Context, project *model.Project, taskID, worktreePath string) error {
-	branch := "pieqi/" + taskID
+	branches := []string{
+		TaskWorktreeBranch(taskID),
+		legacyTaskWorktreeBranchPrefix + strings.TrimSpace(taskID),
+	}
 
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
@@ -167,10 +183,14 @@ func (wm *WorktreeManager) Cleanup(ctx context.Context, project *model.Project, 
 			wm.logger.Warn("git worktree remove", zap.Error(err), zap.String("out", out))
 		}
 	}
-	// 再删分支
-	out, err := runGit(ctx, project.RepoPath, "branch", "-D", branch)
-	if err != nil && !isNotFound(out, err) {
-		wm.logger.Warn("git branch delete", zap.Error(err), zap.String("out", out))
+	for _, branch := range branches {
+		if branch == "" || branch == taskWorktreeBranchPrefix || branch == legacyTaskWorktreeBranchPrefix {
+			continue
+		}
+		out, err := runGit(ctx, project.RepoPath, "branch", "-D", branch)
+		if err != nil && !isNotFound(out, err) {
+			wm.logger.Warn("git branch delete", zap.Error(err), zap.String("out", out))
+		}
 	}
 	return nil
 }

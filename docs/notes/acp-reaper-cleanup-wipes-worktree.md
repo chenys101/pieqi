@@ -9,7 +9,7 @@
 ## 现象
 
 任务因 Cursor ACP `account quota exhausted` 失败后，隔一段时间再「继续」：
-worktree 目录不存在、`pieqi/<taskID>` 分支也被删；未提交改动随目录一起没了。
+worktree 目录不存在、`task/<taskID>` 分支也被删；未提交改动随目录一起没了。
 
 ## 根因
 
@@ -27,7 +27,7 @@ ACP 保活：`failTask` 不关会话；idle 超过 `idle_timeout` 才 reaper `Cl
 2. `ensureTaskWorktree`：已登记路径但目录不存在 → 重建或明确失败，禁止静默用死 cwd。
 3. 可观测性：Cleanup 成功也打 INFO（task / path / 触发方：`reaper` | `cancel` | `delete`）。
 
-代价：跳过 Cleanup 会留下更多 `.worktrees/` 与 `pieqi/*` 分支，需另有回收策略
+代价：跳过 Cleanup 会留下更多 `.worktrees/` 与 `task/*` 分支，需另有回收策略
 （按任务终态+TTL，或仅 cancelled/deleted 立即清）。
 
 ## 非目标

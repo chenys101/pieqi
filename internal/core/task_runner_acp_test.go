@@ -46,7 +46,7 @@ type fakeAgentRunner struct {
 	busyN             int // 接下来 N 次 Run 返回 ErrSessionBusy（模拟并发提交撞上"已有轮次在跑"）
 	imagesN           int // 最近一次 RunRich 收到的图片数（0 = 纯文本）；读用 lastImages()
 	sessSeq           int
-	onClosed          func(taskID string) // SetOnSessionClosed 注册；Close 时触发（镜像 AgentManager）
+	onClosed          func(taskID, reason string) // SetOnSessionClosed 注册；Close 时触发（镜像 AgentManager）
 }
 
 // fakeScript 描述每次 Open 新建 adapter 的 SendPrompt 行为（从 runner 复制到 adapter）。
@@ -190,6 +190,10 @@ func (f *fakeAgentRunner) Cancel(ctx context.Context, taskID string) error {
 }
 
 func (f *fakeAgentRunner) Close(taskID string) error {
+	return f.CloseWithReason(taskID, agent.SessionCloseOther)
+}
+
+func (f *fakeAgentRunner) CloseWithReason(taskID, reason string) error {
 	f.mu.Lock()
 	a := f.adapters[taskID]
 	cancel := f.runCancels[taskID]
@@ -207,13 +211,16 @@ func (f *fakeAgentRunner) Close(taskID string) error {
 	}
 	_ = a.Close(context.Background())
 	if onClosed != nil {
-		onClosed(taskID)
+		if reason == "" {
+			reason = agent.SessionCloseOther
+		}
+		onClosed(taskID, reason)
 	}
 	return nil
 }
 
 // SetOnSessionClosed 注册会话关闭回调（镜像 AgentManager；测试断言时可通过 onClosed 计数）。
-func (f *fakeAgentRunner) SetOnSessionClosed(fn func(taskID string)) {
+func (f *fakeAgentRunner) SetOnSessionClosed(fn func(taskID, reason string)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.onClosed = fn

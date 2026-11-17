@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	splitSuggestTitlePrefix = "[pieqi-split]"
-	splitSuggestSkill       = "pieqi.split_suggest"
+	splitSuggestTitlePrefix       = "[split]"
+	splitSuggestTitlePrefixLegacy = "[pieqi-split]" // 旧票兼容
+	splitSuggestSkill             = "split_suggest"
+	splitSuggestSkillLegacy       = "pieqi.split_suggest" // 旧票兼容
 )
 
 // ErrIntegrationBranchRequired StartSplitSuggest 入口闸：未登记合入分支。
@@ -38,11 +40,12 @@ func IsSplitSuggestTask(t *model.Task) bool {
 	if t == nil {
 		return false
 	}
-	if strings.HasPrefix(t.Title, splitSuggestTitlePrefix) {
+	if strings.HasPrefix(t.Title, splitSuggestTitlePrefix) ||
+		strings.HasPrefix(t.Title, splitSuggestTitlePrefixLegacy) {
 		return true
 	}
 	for _, s := range t.Skills {
-		if s == splitSuggestSkill {
+		if s == splitSuggestSkill || s == splitSuggestSkillLegacy {
 			return true
 		}
 	}
@@ -69,7 +72,7 @@ func CandidateIntegrationBranch(repoPath string) string {
 // StartSplitSuggest 创建并返回拆分建议 Task（调用方负责 Start）。
 // agentName / modelName 与建任务同口径：agent 已由调用方 resolve；model 空 = agent 默认。
 // 无 integration_branch → ErrIntegrationBranchRequired（不开 Agent）。
-// 拆分会话 WorktreePath=ProjectPath（不建 pieqi/ worktree）。
+// 拆分会话 WorktreePath=ProjectPath（不建 task/ worktree）。
 // 跑完后 OnTaskCompleted → 解析正文 → PutProposal 或 PutBlock。
 func (s *RequirementStore) StartSplitSuggest(requirementID, agentName, modelName string) (*model.Task, error) {
 	if s == nil || s.backend == nil {
@@ -110,7 +113,7 @@ func (s *RequirementStore) StartSplitSuggest(requirementID, agentName, modelName
 		RequirementID: requirementID,
 		ProjectID:     r.ProjectID,
 		ProjectPath:   r.ProjectPath,
-		WorktreePath:  r.ProjectPath, // 与「当前分支」语义一致；不建 pieqi/ worktree
+		WorktreePath:  r.ProjectPath, // 与「当前分支」语义一致；不建 task/ worktree
 		Prompt:        prompt,
 		Title:         title,
 		Role:          model.RoleDesign,
@@ -144,7 +147,7 @@ func buildSplitSuggestPrompt(r *model.Requirement, s *RequirementStore) string {
 	b.WriteString("项目路径（cwd，禁止猜仓库）：" + r.ProjectPath + "\n")
 	if br := strings.TrimSpace(r.IntegrationBranch); br != "" {
 		b.WriteString("**合入目标（已登记，禁止改猜）**：`" + br + "`\n")
-		b.WriteString("禁止把 `pieqi/` 任务 worktree 分支当作合入目标。\n")
+		b.WriteString("禁止把 `task/` 任务 worktree 分支当作合入目标。\n")
 	}
 	b.WriteString("\n")
 	if len(r.Acceptance) > 0 {
@@ -171,7 +174,7 @@ func buildSplitSuggestPrompt(r *model.Requirement, s *RequirementStore) string {
    - role: 可选 design|frontend|backend|test|review|fix|other
    - covers_ac: 字符串数组，覆盖的 AC id（有未 deferred 的 AC 时，全部 AC 必须被至少一个节点覆盖）
    - depends_on: 本数组内其它 temp_id（可空；表达先后）
-3. **何时必须 blocked（禁止猜）**：范围 / 合入面 / AC 不清时必须 blocked；禁止猜分支；禁止用 pieqi/ 当合入目标；禁止硬给可落地拆分。
+3. **何时必须 blocked（禁止猜）**：范围 / 合入面 / AC 不清时必须 blocked；禁止猜分支；禁止用 task/ 当合入目标；禁止硬给可落地拆分。
 `)
 	// Pack 策略段（少拆 / 并行哲学）；缺 Registry 则用内置默认少拆文案。
 	instr := defaultSplitInstructions

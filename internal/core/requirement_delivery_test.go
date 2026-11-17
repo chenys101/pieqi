@@ -22,12 +22,11 @@ func TestAppendDeliveryDoD_ImplementAndTest(t *testing.T) {
 	if !strings.Contains(te, "该项目自己的隔离运行环境") {
 		t.Fatalf("test DoD should require project-owned isolation: %s", te)
 	}
-	// PIEQI_* 仅作「若本仓库即 pieqi」特例，不得写成无条件通项（括号「pieqi：独立…」）。
-	if strings.Contains(te, "（pieqi：独立 PIEQI_HOME") {
-		t.Fatalf("test DoD must not treat PIEQI_HOME as unconditional example: %s", te)
-	}
-	if !strings.Contains(te, "若本仓库即 pieqi") || !strings.Contains(te, "PIEQI_HOME") {
-		t.Fatalf("pieqi self-test still needs conditional PIEQI_HOME guidance: %s", te)
+	// DoD 不得写死编排层项目术语（PIEQI_HOME / :3000 / ~/.pieqi）。
+	for _, banned := range []string{"PIEQI_HOME", "PIEQI_SERVER_PORT", ":3000", "~/.pieqi", "若本仓库即 pieqi"} {
+		if strings.Contains(te, banned) || strings.Contains(be, banned) {
+			t.Fatalf("DoD must not contain project-specific %q: implement=%q test=%q", banned, be, te)
+		}
 	}
 	// 幂等（新标记）
 	again := AppendDeliveryDoD(model.RoleBackend, be)

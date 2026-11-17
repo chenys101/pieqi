@@ -94,7 +94,8 @@ watch(
   { immediate: true },
 )
 
-const isSplitSuggestTitle = (title: string) => title.startsWith('[pieqi-split]')
+const isSplitSuggestTitle = (title: string) =>
+  title.startsWith('[split]') || title.startsWith('[pieqi-split]')
 /** 全部非拆分会话任务（含已废弃 cancelled） */
 const workTasks = computed(() => store.tasks.filter((t) => !isSplitSuggestTitle(t.title)))
 /** 当前有效任务图（覆盖确认后旧票为 cancelled，不进主列表） */
@@ -800,7 +801,7 @@ onUnmounted(stopPoll)
             <ul class="mt-1 list-disc space-y-0.5 pl-4">
               <li>交付面是<strong class="font-medium text-text">需求分支</strong>：实现票 worktree 改完后合入该分支才算交付。</li>
               <li>实现票自测<strong class="font-medium text-text">仅单元/组件测试</strong>；功能测由 test 票在依赖合入后、隔离起服务执行。</li>
-              <li>pieqi 功能测须另起实例（独立 PIEQI_HOME + 端口），勿占用现网面板。</li>
+              <li>功能测须另起该项目自己的隔离运行环境，勿占用现网实例。</li>
               <li>票面 completed ≠ 已进 main；test 失败会自动开 Issue（blocker）派修。</li>
             </ul>
           </section>

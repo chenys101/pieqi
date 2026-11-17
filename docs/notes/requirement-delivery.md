@@ -23,8 +23,8 @@ Confirm 拆分 → 从默认基线拉「需求分支」req/<id8>，写入 Requir
 - **分支创建时机**：首次 Confirm（不是 Create、也不是 Start）。已有 `integration_branch` 则复用，不重建。
 - 票 `completed` 应对齐「已合入需求分支」，不是会话跑完。
 - AC / Requirement `done` 不认「票全绿」 alone。
-- 通用：test 票另起**目标项目自己的**隔离运行环境（端口/配置/HOME 由该项目决定）。
-- **仅当被测仓库是 pieqi**：禁止占用现网 `:3000` / `~/.pieqi`；用独立 `PIEQI_HOME` + `PIEQI_SERVER_PORT`（见 [dod-test-pieqi-home-leaks.md](dod-test-pieqi-home-leaks.md)）。
+- 通用：test 票另起**目标项目自己的**隔离运行环境（端口/配置/数据目录由该项目决定；勿占用现网实例）。
+- DoD / pack **不得**写死编排层项目术语（如 `PIEQI_HOME`、`:3000`）；见 [dod-test-pieqi-home-leaks.md](dod-test-pieqi-home-leaks.md)。
 
 ## 测试分层（硬）
 

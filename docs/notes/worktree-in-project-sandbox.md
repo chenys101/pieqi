@@ -22,7 +22,7 @@ pieqi 是编排层，不是 coding agent。旧默认把 git worktree 建在 `~/.
 | `worktree_base` 非空 | 覆盖根；仓外自负沙箱后果 |
 | `use_worktrees: false` | **不建** git worktree；`WorktreePath = ProjectPath` |
 | `~/.pieqi` | 只放 tasks / logs / db / settings，不当 agent 源码 cwd |
-| Cleanup | 不得删项目根；仅移除独立 worktree 路径与 `pieqi/<taskID>` 分支 |
+| Cleanup | 不得删项目根；仅移除独立 worktree 路径与 `task/<taskID>` 分支（兼容旧 `pieqi/<taskID>`） |
 
 ## 与编译权限
 

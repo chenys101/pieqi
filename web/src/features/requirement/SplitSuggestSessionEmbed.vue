@@ -73,7 +73,7 @@ function openFull() {
         aria-hidden="true"
       />
       <strong class="min-w-0 flex-1 truncate text-xs">
-        {{ task?.title || '[pieqi-split]' }}
+        {{ task?.title || '[split]' }}
       </strong>
       <span class="shrink-0 font-mono text-[10.5px] text-muted">{{ task?.status || '…' }}</span>
       <Button size="sm" variant="ghost" data-testid="split-embed-open-full" @click="openFull">

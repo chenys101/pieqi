@@ -2,35 +2,36 @@
 
 | 字段 | 值 |
 |---|---|
-| 状态 | **已落地**（2026-11-17） |
+| 状态 | **已收紧**（2026-11-18：通项与条件句均去产品术语） |
 | 相关 | [requirement-delivery.md](requirement-delivery.md)；Pack `dod_test` / `AppendDeliveryDoDFrom` |
 | 样本 | 外项目（如 viomi-warehouse）test 票 plan 出现「设置 PIEQI_HOME/port 并构建运行」 |
 
 ## 现象
 
-外项目 test 票 plan 把 pieqi 自测环境变量当通项照抄，与被测项目无关。
+外项目 test 票 plan 把编排层自测环境变量当通项照抄，与被测项目无关。
 
 注入路径：`AppendDeliveryDoDFrom` ← Pack `dod_test`（如 `s1-plan-serial.yaml`；空则回落 `deliveryDoDTest`）。
 
 ## 根因
 
-交付纪律「另起隔离实例」正确，但举例写死成「pieqi：独立 PIEQI_HOME + port」通项；agent 照抄进 plan。
+交付纪律「另起隔离实例」正确，但举例写死成「独立 PIEQI_HOME + port / :3000」；agent 照抄进 plan。
 
-## 目标
+## 目标（现行）
 
-1. 通用 DoD 只要求：检出需求分支 → 编译 → 另起**该项目自己的**隔离运行环境验收（端口/配置/HOME 由目标项目决定）。
-2. `PIEQI_HOME` / `PIEQI_SERVER_PORT` / `:3000` 仅作为「若本仓库即 pieqi」特例出现，不作外项目通项。
-3. implement DoD「禁止起 pieqi 服务当完成条件」同理：外项目写「禁止起被测服务」；pieqi 特例另标。
+1. 通用 DoD 只要求：检出需求分支 → 编译 → 另起**该项目自己的**隔离运行环境验收（端口/配置/数据目录由目标项目决定；勿占用现网实例）。
+2. DoD / pack **不得**出现 `PIEQI_HOME` / `PIEQI_SERVER_PORT` / `:3000` / `~/.pieqi` / 「若本仓库即 pieqi」等编排层定制术语——无论通项还是条件特例。
+3. implement DoD 只写「禁止起被测服务」，不点名具体产品服务。
 
-## 落点（本票：A + C）
+编排层自身的隔离验收约定写在运维文档 / AGENTS，**不**注入外项目票面。
 
-| 方案 | 做法 | 本票 |
+## 落点
+
+| 方案 | 做法 | 状态 |
 |---|---|---|
-| **A** | 改 packs + 内置回落：通项去 PIEQI_*；加「若本仓库即 pieqi，则用独立 PIEQI_HOME+port」 | ✅ |
-| B | 按 `project_path` 分支注入（加固） | 未做；需要时再加 |
-| **C** | 段名 `pieqi delivery` / `pieqi 交付纪律` → 中性 `delivery` / `交付纪律` | ✅ |
+| A′ | packs + 内置回落：通项与条件句均去 PIEQI_* / :3000 | ✅ |
+| C | 段名中性 `delivery` / `交付纪律` | ✅ |
 
-幂等：旧标记（`pieqi 交付纪律` / `pieqi delivery`）与新标记均视为已注入，不重复追加。旧票 prompt **不**自动改写。
+幂等：旧标记（`pieqi 交付纪律` / `pieqi delivery`）与新标记均视为已注入。旧票 prompt **不**自动改写。
 
 ## 非目标
 
@@ -40,6 +41,5 @@
 
 ## 验收
 
-1. 非 pieqi 项目新落地 test 票：通项不把 PIEQI_* / `:3000` 当必做步骤（仅条件特例句）
-2. pieqi 自测仍有独立 PIEQI_HOME+port 指引（条件句）
-3. 「隔离起服务 / isolated」纪律文案仍在
+1. 新落地 test/implement 票 DoD：无 `PIEQI_*` / `:3000` / `~/.pieqi` / 「本仓库即 pieqi」
+2. 「隔离起服务 / isolated / target project」纪律文案仍在

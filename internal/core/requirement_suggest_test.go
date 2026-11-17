@@ -2,10 +2,23 @@ package core
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"pieqi/internal/model"
 )
+
+func TestIsSplitSuggestTask_LegacyPrefix(t *testing.T) {
+	if !IsSplitSuggestTask(&model.Task{Title: "[pieqi-split] old"}) {
+		t.Fatal("legacy title prefix should match")
+	}
+	if !IsSplitSuggestTask(&model.Task{Title: "x", Skills: []string{"pieqi.split_suggest"}}) {
+		t.Fatal("legacy skill should match")
+	}
+	if IsSplitSuggestTask(&model.Task{Title: "normal"}) {
+		t.Fatal("plain title must not match")
+	}
+}
 
 func TestParseSplitSuggestion_Fence(t *testing.T) {
 	text := "如下：\n```json\n[{\"temp_id\":\"a\",\"prompt\":\"do a\",\"covers_ac\":[\"ac1\"]}]\n```\n"
@@ -164,6 +177,9 @@ func TestStartSplitSuggest_AndIngest(t *testing.T) {
 	}
 	if !IsSplitSuggestTask(task) {
 		t.Fatal("marker missing")
+	}
+	if !strings.HasPrefix(task.Title, "[split]") {
+		t.Fatalf("title=%q, want [split] prefix", task.Title)
 	}
 	if task.Agent != "qoder" || task.Model != "Qwen3.8-Flash" {
 		t.Fatalf("agent/model = %q/%q", task.Agent, task.Model)

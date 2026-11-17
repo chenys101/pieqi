@@ -8,7 +8,15 @@ import (
 	"pieqi/internal/model"
 )
 
-const reqContextMarker = "pieqi 需求上下文"
+const (
+	reqContextMarker       = "需求上下文"
+	reqContextMarkerLegacy = "pieqi 需求上下文" // 旧票幂等
+)
+
+func promptHasReqContext(prompt string) bool {
+	return strings.Contains(prompt, "## "+reqContextMarker) ||
+		strings.Contains(prompt, reqContextMarkerLegacy)
+}
 
 // IntegrationBranchName 需求集成分支名：req/<id前8位>（去连字符）。
 func IntegrationBranchName(requirementID string) string {
@@ -93,7 +101,7 @@ func AppendRequirementContext(prompt, ctxBlock string) string {
 	if ctxBlock == "" {
 		return prompt
 	}
-	if strings.Contains(prompt, reqContextMarker) {
+	if promptHasReqContext(prompt) {
 		return prompt
 	}
 	return prompt + "\n" + ctxBlock

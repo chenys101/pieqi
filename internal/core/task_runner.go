@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -135,6 +136,7 @@ type agentRunner interface {
 	RunRich(ctx context.Context, taskID, prompt, turnModel string, images []agent.ImageInput) error
 	Cancel(ctx context.Context, taskID string) error
 	Close(taskID string) error
+	CloseWithReason(taskID, reason string) error
 	Adapter(taskID string) agent.AgentAdapter
 	// SessionID 返回 task 的 sessionID（无则 ""）。runACP 持久化真实 session ID 时用它取
 	// NewSession 返回的句柄，喂给 adapter.RealSessionID 拿到真实协议/claude session ID。
@@ -143,8 +145,8 @@ type agentRunner interface {
 	// 无会话/对端没声明 → false。供 API 决定要不要把加图入口暴露给前端。
 	SupportsImagePrompt(taskID string) bool
 	// SetOnSessionClosed 注册会话关闭回调：reaper 空闲回收 / Cancel / 删任务 / 关停时触发，
-	// TaskRunner 借此清理会话级资源（unwire + 延迟 worktree 清理）。
-	SetOnSessionClosed(fn func(taskID string))
+	// TaskRunner 借此清理会话级资源（unwire + 延迟 worktree 清理）；reason 见 agent.SessionClose*。
+	SetOnSessionClosed(fn func(taskID, reason string))
 }
 
 // acpWires 一个 ACP 任务注册的 wire 句柄集合（runACP 注册，结束/取消时拆卸）。
@@ -225,12 +227,26 @@ func (tr *TaskRunner) SetUseWorktrees(v bool) {
 
 // ensureTaskWorktree 若尚无 WorktreePath：use_worktrees 开则 git worktree add（建议 .worktrees）；
 // 关则 cwd=项目根（WorktreePath=ProjectPath），不替 agent 定隔离目录。
+// 已登记路径但目录不存在：项目根 → 明确失败；独立 worktree → 重建，禁止静默用死 cwd。
 func (tr *TaskRunner) ensureTaskWorktree(ctx context.Context, task *model.Task, project *model.Project) (*model.Task, error) {
 	if task == nil {
 		return nil, fmt.Errorf("nil task")
 	}
 	if task.WorktreePath != "" {
-		return task, nil
+		if worktreeDirPresent(task.WorktreePath) {
+			return task, nil
+		}
+		projRoot := strings.TrimSpace(task.ProjectPath)
+		if projRoot == "" && project != nil {
+			projRoot = strings.TrimSpace(project.RepoPath)
+		}
+		sameAsProject := filepath.Clean(task.WorktreePath) == filepath.Clean(projRoot)
+		if !tr.useWorktrees || sameAsProject {
+			return nil, fmt.Errorf("task cwd missing: %s", task.WorktreePath)
+		}
+		tr.logger.Info("worktree path missing; recreating",
+			zap.String("task", task.ID), zap.String("path", task.WorktreePath))
+		// 落下去重建；旧分支可能已随 Cleanup 删掉。
 	}
 	var wtPath string
 	if !tr.useWorktrees {
@@ -241,6 +257,7 @@ func (tr *TaskRunner) ensureTaskWorktree(ctx context.Context, task *model.Task, 
 		if wtPath == "" {
 			return nil, fmt.Errorf("project path required when use_worktrees=false")
 		}
+		// 首次写入只记路径；已登记却丢目录的闸在上方 sameAsProject 分支。
 	} else {
 		if tr.wm == nil {
 			return nil, fmt.Errorf("worktree manager not wired")
@@ -252,13 +269,33 @@ func (tr *TaskRunner) ensureTaskWorktree(ctx context.Context, task *model.Task, 
 		wtPath = p
 	}
 	updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
+		if t.WorktreePath == wtPath {
+			return false
+		}
 		t.WorktreePath = wtPath
 		return true
 	})
 	if err != nil {
 		return nil, err
 	}
+	if updated == nil {
+		// 路径未变（重建到同一目录）仍返回当前 task。
+		if t, ok := tr.store.Get(task.ID); ok && t != nil {
+			return t, nil
+		}
+		return task, nil
+	}
 	return updated, nil
+}
+
+// worktreeDirPresent 任务 cwd / worktree 目录是否仍在磁盘上。
+func worktreeDirPresent(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	st, err := os.Stat(path)
+	return err == nil && st.IsDir()
 }
 
 // projectForTask 构造 WorktreeManager 用的 Project；需求票带上 IntegrationBranch 作 BaseRef。
@@ -280,7 +317,7 @@ func (tr *TaskRunner) ensureRequirementContext(task *model.Task) *model.Task {
 	if task == nil || task.RequirementID == "" || tr.requirements == nil {
 		return task
 	}
-	if strings.Contains(task.Prompt, reqContextMarker) {
+	if promptHasReqContext(task.Prompt) {
 		return task
 	}
 	req, ok := tr.requirements.Get(task.RequirementID)
@@ -293,7 +330,7 @@ func (tr *TaskRunner) ensureRequirementContext(task *model.Task) *model.Task {
 		return task
 	}
 	updated, err := tr.store.Update(task.ID, func(t *model.Task) bool {
-		if strings.Contains(t.Prompt, reqContextMarker) {
+		if promptHasReqContext(t.Prompt) {
 			return false
 		}
 		t.Prompt = AppendRequirementContext(t.Prompt, block)
@@ -1487,9 +1524,23 @@ func (tr *TaskRunner) flushDelta(taskID string) {
 	w.delta.Flush()
 }
 
+// shouldDiscardWorktreeOnSessionClose 会话关闭时是否立即 Cleanup worktree。
+// cancel/delete → 清；reaper/close 且任务仍可 Resume（非 cancelled）→ 保留。
+func shouldDiscardWorktreeOnSessionClose(task *model.Task, reason string) bool {
+	switch reason {
+	case agent.SessionCloseCancel, agent.SessionCloseDelete:
+		return true
+	}
+	if task == nil {
+		return true
+	}
+	return task.Status == model.TaskCancelled
+}
+
 // onAgentSessionClosed AgentManager 会话关闭回调：清除并 unwire 该 task 的 wire 句柄，
 // 并对保活会话补做延迟到关闭时刻的 worktree 清理（保活期间轮末不清理，避免续问 cwd 丢失）。
-func (tr *TaskRunner) onAgentSessionClosed(taskID string) {
+// reason 见 agent.SessionClose*；可 Resume 的任务跳过 Cleanup。
+func (tr *TaskRunner) onAgentSessionClosed(taskID, reason string) {
 	tr.wireMu.Lock()
 	w, ok := tr.wires[taskID]
 	if ok {
@@ -1506,12 +1557,29 @@ func (tr *TaskRunner) onAgentSessionClosed(taskID string) {
 		w.mode.Unwire()
 	}
 	// 非 worktree 任务（WorktreePath==ProjectPath，如生产直接跑原目录）不清理，避免误删原项目目录。
-	if tr.cleanupWorktrees {
-		if t, ok := tr.store.Get(taskID); ok && t != nil && t.WorktreePath != "" && t.WorktreePath != t.ProjectPath {
-			project := &model.Project{ID: t.ProjectID, RepoPath: t.ProjectPath}
-			_ = tr.wm.Cleanup(context.Background(), project, taskID, t.WorktreePath)
-		}
+	if !tr.cleanupWorktrees || tr.wm == nil {
+		return
 	}
+	t, ok := tr.store.Get(taskID)
+	if !ok || t == nil || t.WorktreePath == "" || t.WorktreePath == t.ProjectPath {
+		return
+	}
+	if !shouldDiscardWorktreeOnSessionClose(t, reason) {
+		tr.logger.Info("skip worktree cleanup: task still resumable",
+			zap.String("task", taskID), zap.String("trigger", reason),
+			zap.String("path", t.WorktreePath), zap.String("status", string(t.Status)))
+		return
+	}
+	project := &model.Project{ID: t.ProjectID, RepoPath: t.ProjectPath}
+	if err := tr.wm.Cleanup(context.Background(), project, taskID, t.WorktreePath); err != nil {
+		tr.logger.Warn("worktree cleanup failed",
+			zap.String("task", taskID), zap.String("trigger", reason),
+			zap.String("path", t.WorktreePath), zap.Error(err))
+		return
+	}
+	tr.logger.Info("worktree cleaned",
+		zap.String("task", taskID), zap.String("trigger", reason),
+		zap.String("path", t.WorktreePath))
 }
 
 // CloseAgentSession 关闭 task 的 agent 会话（删除任务时调用，避免保活会话残留为孤儿）。
@@ -1519,7 +1587,7 @@ func (tr *TaskRunner) CloseAgentSession(taskID string) {
 	if tr.agentMgr == nil {
 		return
 	}
-	_ = tr.agentMgr.Close(taskID)
+	_ = tr.agentMgr.CloseWithReason(taskID, agent.SessionCloseDelete)
 }
 
 // ApplyLiveMode 若该任务有活着的 ACP 会话且实现 ModeSetter，立刻 session/set_mode。
@@ -1560,6 +1628,16 @@ func (tr *TaskRunner) permWire(taskID string) *PermissionWire {
 	defer tr.wireMu.Unlock()
 	if w, ok := tr.wires[taskID]; ok {
 		return w.perm
+	}
+	return nil
+}
+
+// toolWire 返回 task 的 ToolCallHandle（ACP 轮末合成闭合用）；无则 nil。
+func (tr *TaskRunner) toolWire(taskID string) *ToolCallHandle {
+	tr.wireMu.Lock()
+	defer tr.wireMu.Unlock()
+	if w, ok := tr.wires[taskID]; ok {
+		return w.tool
 	}
 	return nil
 }
@@ -1799,7 +1877,7 @@ func (tr *TaskRunner) Cancel(taskID string) error {
 			return fmt.Errorf("task not cancellable: %s", taskID)
 		}
 		_ = tr.agentMgr.Cancel(context.Background(), taskID)
-		_ = tr.agentMgr.Close(taskID)
+		_ = tr.agentMgr.CloseWithReason(taskID, agent.SessionCloseCancel)
 		return nil
 	}
 	tr.mu.Lock()
