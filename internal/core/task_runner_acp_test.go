@@ -80,7 +80,7 @@ func (f *fakeAgentRunner) Open(ctx context.Context, taskID, projectID string, cf
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.openCalls = append(f.openCalls, fakeOpenCall{taskID: taskID, projectID: projectID, cwd: cfg.Cwd, resumeFrom: cfg.ResumeFrom})
-	if f.openErr != nil {
+	if f.openErr != nil && (!f.openErrOnlyResume || cfg.ResumeFrom != "") {
 		return nil, false, f.openErr
 	}
 	f.sessSeq++
@@ -253,11 +253,21 @@ func (f *fakeAgentRunner) openCallAt(i int) fakeOpenCall {
 	return f.openCalls[i]
 }
 
-// setOpenErr 设置后续 Open 返回的错误（模拟续问时原会话丢失：ACP load/resume 报错）。
+// setOpenErr 设置后续 Open 返回的错误（所有 Open 均失败）。
 func (f *fakeAgentRunner) setOpenErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.openErr = err
+	f.openErrOnlyResume = false
+}
+
+// setOpenErrIfResume 仅当 ResumeFrom 非空时 Open 失败（模拟 load/resume not found；
+// 清 sid 后的全新 Open 成功，覆盖 ensureACPSession 冷启动兜底）。
+func (f *fakeAgentRunner) setOpenErrIfResume(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.openErr = err
+	f.openErrOnlyResume = true
 }
 
 // setBusyN 让接下来 n 次 Run 返回 ErrSessionBusy（模拟并发提交撞上"已有轮次在跑"）。
@@ -974,9 +984,8 @@ func TestRunACP_Resume_PassesACPSessionID(t *testing.T) {
 	}
 }
 
-// TestRunACP_Resume_SessionLost 续问时原会话丢失（ACP load/resume 报错 / PrintAgent --resume
-// "No conversation found"）：Open 失败。断言由协议层 surface——追加 status 事件提示用户 +
-// failTask 带明确原因，不静默失败；且 Open 失败路径不登记 adapter，Close 不被调用（无资源泄漏）。
+// TestRunACP_Resume_SessionLost 冷启动续问撞 load/resume session not found：清死 sid 后
+// 开全新会话并完成，不反复 failed。status 提示「续问上下文已丢失，已用全新会话继续」。
 func TestRunACP_Resume_SessionLost(t *testing.T) {
 	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hi", realSessionID: "acp-real-sid"}, false)
 	task := createACPTestTask(t, store)
@@ -991,46 +1000,89 @@ func TestRunACP_Resume_SessionLost(t *testing.T) {
 	if err := tr.agentMgr.Close(task.ID); err != nil {
 		t.Fatalf("close (simulate reap): %v", err)
 	}
-	// 续问时模拟原会话丢失：Open（load/resume）报错。
-	fake.setOpenErr(errors.New("acp: load session acp-real-sid: session not found"))
-	closeBefore := fake.closeCount()
+	// resume Open 失败；ResumeFrom="" 的全新 Open 成功（openErrOnlyResume）。
+	fake.setOpenErrIfResume(errors.New("acp: load session acp-real-sid: session not found"))
 	openBefore := fake.openCount()
 	if err := tr.Resume(task.ID, "more", ""); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 
-	// 第二次 Open 已发起（fake 自身 mutex 保护，无 store 竞态）。Open 失败路径不创建 adapter、
-	// 不触发 Close，故不能用 closeCount 同步；改用 openCount++ + 终态 failed。
-	waitFor(t, 2*time.Second, "resume open attempt", func() bool {
-		return fake.openCount() > openBefore
-	})
-	// failTask 是 Open 失败路径最后的 store 写（其后仅 context cancel，无 store 写），
-	// 观察到 failed 即可安全 getTask（与文件内既有 getTask-after-wait 约定一致）。
-	waitFor(t, 2*time.Second, "task failed (session lost surfaced)", func() bool {
+	// 至少两次 Open：resume 失败一次 + 全新成功一次；终态 completed。
+	waitFor(t, 2*time.Second, "session-lost recover completed", func() bool {
 		tt, ok := store.Get(task.ID)
-		return ok && tt != nil && tt.Status == model.TaskFailed
+		return ok && tt != nil && tt.Status == model.TaskCompleted && fake.openCount() >= openBefore+2
 	})
 
 	got := getTask(t, store, task.ID)
-	if got.Status != model.TaskFailed {
-		t.Fatalf("status=%s, want failed (session lost must surface, not stay silent)", got.Status)
-	}
-	if !strings.Contains(got.Error, "agent open") {
-		t.Fatalf("error=%q, want contains 'agent open'", got.Error)
+	if got.Status != model.TaskCompleted {
+		t.Fatalf("status=%s error=%q, want completed after fresh session", got.Status, got.Error)
 	}
 	found := false
 	for _, ev := range got.Events {
-		if ev.Type == model.EventStatus && strings.Contains(ev.Text, "续问失败") {
+		if ev.Type == model.EventStatus && strings.Contains(ev.Text, "续问上下文已丢失，已用全新会话继续") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("events missing 续问失败 status event (session lost must be surfaced): %+v", got.Events)
+		t.Fatalf("events missing session-lost status: %+v", got.Events)
 	}
-	// Open 失败路径不登记 adapter，Close 不应被调用（防双重清理/资源泄漏）。
-	if fake.closeCount() != closeBefore {
-		t.Fatalf("closeCount %d -> %d; Open-fail path must not call Close", closeBefore, fake.closeCount())
+	// 第二次 Open（index openBefore）带死 sid；第三次（openBefore+1）ResumeFrom 为空。
+	resumeAttempt := fake.openCallAt(openBefore)
+	if resumeAttempt.resumeFrom != "acp-real-sid" {
+		t.Fatalf("resume open resumeFrom=%q, want acp-real-sid", resumeAttempt.resumeFrom)
+	}
+	fresh := fake.openCallAt(openBefore + 1)
+	if fresh.resumeFrom != "" {
+		t.Fatalf("fresh open resumeFrom=%q, want empty", fresh.resumeFrom)
+	}
+}
+
+// TestRunACP_Resume_KeepAliveSessionNotFound 保活复用活适配器但对端已不认 sid：
+// prompt 报 Session not found → Close 僵尸 → 清 ACPSessionID → 全新 Open → 重跑成功。
+func TestRunACP_Resume_KeepAliveSessionNotFound(t *testing.T) {
+	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hi", realSessionID: "acp-real-sid"}, false)
+	task := createACPTestTask(t, store)
+	tr.Start(context.Background(), task)
+
+	waitRunACPDone(t, store, task.ID)
+	a := fake.adapter(task.ID)
+	if a == nil {
+		t.Fatal("keepalive adapter missing after first run")
+	}
+	openBefore := fake.openCount()
+	closeBefore := fake.closeCount()
+
+	// 连接仍活（Done 未关），但 prompt 撞 Cursor JSON Session not found（无增量，纯失败）。
+	a.deltaText = ""
+	a.sendErr = errors.New(`acp: prompt: {"code":-32603,"message":"Internal error","data":{"details":"Session dead-sid not found"}}`)
+	if err := tr.Resume(task.ID, "继续", ""); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	waitFor(t, 2*time.Second, "keepalive session-not-found recover", func() bool {
+		tt, ok := store.Get(task.ID)
+		return ok && tt != nil && tt.Status == model.TaskCompleted &&
+			fake.openCount() > openBefore && fake.closeCount() > closeBefore
+	})
+
+	got := getTask(t, store, task.ID)
+	if got.Status != model.TaskCompleted {
+		t.Fatalf("status=%s error=%q, want completed", got.Status, got.Error)
+	}
+	found := false
+	for _, ev := range got.Events {
+		if ev.Type == model.EventStatus && strings.Contains(ev.Text, "续问上下文已丢失，已用全新会话继续") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("events missing session-lost status: %+v", got.Events)
+	}
+	fresh := fake.openCallAt(openBefore) // 首次全新 Open（保活路径不先 resume Open）
+	if fresh.resumeFrom != "" {
+		t.Fatalf("fresh open after keepalive miss resumeFrom=%q, want empty", fresh.resumeFrom)
 	}
 }
 
