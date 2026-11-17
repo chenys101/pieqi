@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"strings"
 	"testing"
 
 	"pieqi/internal/model"
@@ -28,6 +29,44 @@ func TestEmbeddedRegistry(t *testing.T) {
 	d, err := r.Detail(IDSingle)
 	if err != nil || d.SplitInstructions == "" {
 		t.Fatalf("detail=%+v err=%v", d, err)
+	}
+}
+
+// TestEmbeddedDoD_NoPIEQIHomeAsUniversal：外项目不得把 PIEQI_HOME 当隔离通项。
+func TestEmbeddedDoD_NoPIEQIHomeAsUniversal(t *testing.T) {
+	r, err := NewRegistry("", IDPlanSerial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{IDSingle, IDPlanSerial, IDDAG} {
+		p, err := r.Get(id)
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if strings.Contains(p.DoDTest, "pieqi delivery") {
+			t.Fatalf("%s: dod_test section still named pieqi delivery", id)
+		}
+		if !strings.Contains(p.DoDTest, "## delivery (test)") {
+			t.Fatalf("%s: dod_test missing neutral ## delivery (test)", id)
+		}
+		if !strings.Contains(p.DoDTest, "isolated") {
+			t.Fatalf("%s: dod_test must keep isolation discipline", id)
+		}
+		if !strings.Contains(p.DoDTest, "target project") {
+			t.Fatalf("%s: dod_test must defer port/HOME to target project", id)
+		}
+		// 旧通项写法：isolated instance (separate PIEQI_HOME + port)
+		if strings.Contains(p.DoDTest, "isolated instance** (separate PIEQI_HOME") ||
+			strings.Contains(p.DoDTest, "isolated instance (separate PIEQI_HOME") {
+			t.Fatalf("%s: PIEQI_HOME must not be the universal isolation example: %s", id, p.DoDTest)
+		}
+		if !strings.Contains(p.DoDTest, "If this repo is pieqi") || !strings.Contains(p.DoDTest, "PIEQI_HOME") {
+			t.Fatalf("%s: pieqi self-test conditional guidance missing", id)
+		}
+		if strings.Contains(p.DoDImplement, "Do not start pieqi service as completion criteria.") &&
+			!strings.Contains(p.DoDImplement, "system under test") {
+			t.Fatalf("%s: implement DoD still hardcodes pieqi-only service ban", id)
+		}
 	}
 }
 

@@ -11,20 +11,20 @@ import (
 
 const deliveryDoDImplement = `
 
-## pieqi 交付纪律（实现票 · 必须遵守）
+## 交付纪律（实现票 · 必须遵守）
 
 1. 在本任务 worktree 施工；完成后 **merge 进本需求的集成分支**（需求分支），不要只停在 worktree。
-2. **自测只允许单元/组件测试**（定向 go test / vitest）。禁止起 pieqi 服务、禁止完整链路/全包回归当完成本票条件。
+2. **自测只允许单元/组件测试**（定向 go test / vitest）。禁止起被测服务、禁止完整链路/全包回归当完成本票条件。若本仓库即 pieqi：禁止起 pieqi 服务当完成条件。
 3. 沙箱或测试环境失败 ⇒ 不得把任务标为 completed；留下失败证据。
 4. 票面 completed 应对齐「已合入需求分支」，不是「会话跑完」。
 `
 
 const deliveryDoDTest = `
 
-## pieqi 交付纪律（test 票 · 必须遵守）
+## 交付纪律（test 票 · 必须遵守）
 
 1. **等 depends_on 全部完成且改动已合入需求分支** 后再做功能测试；禁止与未完成的实现票并行开跑。
-2. 功能测试：检出需求分支 → 编译 → **另起隔离实例**验收（pieqi：独立 PIEQI_HOME + PIEQI_SERVER_PORT，禁止占用现网 :3000 / ~/.pieqi）。
+2. 功能测试：检出需求分支 → 编译 → **另起该项目自己的隔离运行环境**验收（端口/配置/HOME 由目标项目决定）。若本仓库即 pieqi，则用独立 PIEQI_HOME + PIEQI_SERVER_PORT，禁止占用现网 :3000 / ~/.pieqi。
 3. 本票不做「只跑单测就报完成」；发现缺陷应让任务 failed。报告须含「总评：FAIL」（系统据此标 failed 并开 Issue），禁止只写 FAIL 却标 completed。
 4. 不要用缩短审批超时、自动 approve 冒充修测试失败。
 `
@@ -34,11 +34,16 @@ func AppendDeliveryDoD(role model.TaskRole, prompt string) string {
 	return AppendDeliveryDoDFrom(role, prompt, deliveryDoDImplement, deliveryDoDTest)
 }
 
+// hasDeliveryDoDMarker 幂等：新段名 + 旧「pieqi …」标记均视为已注入。
+func hasDeliveryDoDMarker(prompt string) bool {
+	return strings.Contains(prompt, "交付纪律") ||
+		strings.Contains(prompt, "pieqi delivery") ||
+		strings.Contains(prompt, "## delivery (")
+}
+
 // AppendDeliveryDoDFrom 使用自定义实现/test 文案（来自 Workflow Pack）；空则回落内置。
 func AppendDeliveryDoDFrom(role model.TaskRole, prompt, dodImplement, dodTest string) string {
-	const markerCN = "pieqi 交付纪律"
-	const markerEN = "pieqi delivery"
-	if strings.Contains(prompt, markerCN) || strings.Contains(prompt, markerEN) {
+	if hasDeliveryDoDMarker(prompt) {
 		return prompt
 	}
 	prompt = strings.TrimSpace(prompt)

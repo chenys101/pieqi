@@ -37,13 +37,16 @@ type fakeAgentRunner struct {
 	script     fakeScript
 	fellBack   bool
 	openErr    error
-	openCalls  []fakeOpenCall
-	closeN     int
-	runN       int // Run（prompt turn）调用次数，断言保活复用时用
-	busyN      int // 接下来 N 次 Run 返回 ErrSessionBusy（模拟并发提交撞上"已有轮次在跑"）
-	imagesN    int // 最近一次 RunRich 收到的图片数（0 = 纯文本）；读用 lastImages()
-	sessSeq    int
-	onClosed   func(taskID string) // SetOnSessionClosed 注册；Close 时触发（镜像 AgentManager）
+	// openErrOnlyResume：openErr 仅在 ResumeFrom 非空时生效（冷启动 load/resume not found
+	// 后全新 Open 应成功）。false = 所有后续 Open 都失败。
+	openErrOnlyResume bool
+	openCalls         []fakeOpenCall
+	closeN            int
+	runN              int // Run（prompt turn）调用次数，断言保活复用时用
+	busyN             int // 接下来 N 次 Run 返回 ErrSessionBusy（模拟并发提交撞上"已有轮次在跑"）
+	imagesN           int // 最近一次 RunRich 收到的图片数（0 = 纯文本）；读用 lastImages()
+	sessSeq           int
+	onClosed          func(taskID string) // SetOnSessionClosed 注册；Close 时触发（镜像 AgentManager）
 }
 
 // fakeScript 描述每次 Open 新建 adapter 的 SendPrompt 行为（从 runner 复制到 adapter）。

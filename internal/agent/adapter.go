@@ -10,12 +10,40 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
 // ErrNotSupported 操作在当前 adapter 实现下不支持。
 // 例：ACPAgent.InjectToolResult 返回它——ACP 路径下工具由 agent 自行执行并报 ToolCallUpdate，
 // 客户端不注入 tool_result（仅 PrintAgent 回退路径需要写 stdin）。
 var ErrNotSupported = errors.New("operation not supported by this agent adapter")
+
+// ErrSessionNotFound 对端已不认该 session id（进程/stdio 可能仍活）。
+// ACP 保活复用死 sid 的 prompt、以及冷启动 load/resume 撞 not found 时抬此哨兵；
+// 调用方应 Close 僵尸适配器、清 ACPSessionID、开全新会话重跑（见 core.runACPTurn /
+// ensureACPSession）。Print 路径的 ErrNoConversation 由 IsSessionNotFound 一并识别。
+var ErrSessionNotFound = errors.New("agent: session not found")
+
+// IsSessionNotFound 统一识别「对端不认 sid」：
+//   - errors.Is(..., ErrSessionNotFound)（ACP promptOnce 抬哨兵）
+//   - errors.Is(..., ErrNoConversation)（Print --resume）
+//   - Cursor JSON-RPC details："Session <uuid> not found"
+//   - ACP load/resume 文案：含 "session"+"not found"
+//   - "No conversation found"
+func IsSessionNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoConversation) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "no conversation found") {
+		return true
+	}
+	// Cursor: {"data":{"details":"Session <uuid> not found"}}；load/resume: "session … not found"
+	return strings.Contains(msg, "session") && strings.Contains(msg, "not found")
+}
 
 // 权限选项种类常量（对齐 acp.PermissionOptionKind）。
 // ACP 协议用小写下划线串：allow_once / allow_always / reject_once / reject_always。
@@ -46,10 +74,10 @@ type SessionConfig struct {
 	MCP   []MCPServer // 可选 MCP servers
 	// ResumeFrom 非空时表示续问：复用已有会话上下文而非创建新会话。
 	//   ACPAgent：优先 session/load（agent 在 Initialize 声明 LoadSession 能力时），
-	//             否则 session/resume。会话丢失（agent 报错）返回错误，由调用方 surface。
+	//             否则 session/resume。会话丢失（IsSessionNotFound）由调用方清 sid 开新会话。
 	//   PrintAgent：预填 printSession.realSessionID=ResumeFrom 且 ran=true，
 	//               首次 SendPrompt 走 --resume <ResumeFrom>。若 claude 报 "No conversation found"，
-	//               SendPrompt 返回 ErrNoConversation（调用方可据此回退为新会话重跑）。
+	//               SendPrompt 返回 ErrNoConversation（IsSessionNotFound 覆盖；调用方回退新会话）。
 	ResumeFrom string
 	// TaskID 是拥有本会话的任务 id（空 = 非任务场景，如标题生成）。
 	//

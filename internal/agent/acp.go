@@ -670,7 +670,7 @@ func (a *ACPAgent) ensureStarted(ctx context.Context) error {
 //
 // cfg.ResumeFrom 非空时为续问路径：复用已有会话上下文而非新建。优先 session/load
 // （agent 在 Initialize 声明 LoadSession 能力时），否则 session/resume。会话丢失
-// （agent 报错）返回错误，由调用方 surface（不静默失败）。
+// （IsSessionNotFound）抬 ErrSessionNotFound，由调用方清 sid 开新会话。
 func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, error) {
 	// 先校验入参，避免无效请求也去 spawn 进程。
 	if cfg.Cwd == "" {
@@ -709,7 +709,7 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 				Meta:       modelMeta(cfg.Model),
 			})
 			if err != nil {
-				return "", fmt.Errorf("acp: load session %s: %w", cfg.ResumeFrom, err)
+				return "", wrapACPSessionOpenErr("load", cfg.ResumeFrom, err)
 			}
 			a.rememberCatalog(resp.ConfigOptions, resp.Meta)
 			a.rememberModes(resp.Modes)
@@ -721,7 +721,7 @@ func (a *ACPAgent) NewSession(ctx context.Context, cfg SessionConfig) (string, e
 				Meta:       modelMeta(cfg.Model),
 			})
 			if err != nil {
-				return "", fmt.Errorf("acp: resume session %s: %w", cfg.ResumeFrom, err)
+				return "", wrapACPSessionOpenErr("resume", cfg.ResumeFrom, err)
 			}
 			a.rememberCatalog(resp.ConfigOptions, resp.Meta)
 			a.rememberModes(resp.Modes)
@@ -1392,13 +1392,30 @@ func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, text string, block
 			a.logger.Warn("acp prompt peer disconnected; retrying once",
 				zap.String("agent", a.cmdName), zap.String("session", sessionID), zap.Error(err))
 			if _, err2 := a.conn.Prompt(ctx, req); err2 != nil {
-				return fmt.Errorf("acp: prompt (after peer-disconnect retry): %w", err2)
+				return wrapACPPromptErr("acp: prompt (after peer-disconnect retry)", err2)
 			}
 			return nil
 		}
-		return fmt.Errorf("acp: prompt: %w", err)
+		return wrapACPPromptErr("acp: prompt", err)
 	}
 	return nil
+}
+
+// wrapACPPromptErr 包装 Prompt 错误；对端不认 sid 时抬 ErrSessionNotFound。
+func wrapACPPromptErr(prefix string, err error) error {
+	if IsSessionNotFound(err) {
+		return fmt.Errorf("%w: %s: %v", ErrSessionNotFound, prefix, err)
+	}
+	return fmt.Errorf("%s: %w", prefix, err)
+}
+
+// wrapACPSessionOpenErr 包装 load/resume 错误；session not found 时抬 ErrSessionNotFound。
+func wrapACPSessionOpenErr(op, sid string, err error) error {
+	wrapped := fmt.Errorf("acp: %s session %s: %w", op, sid, err)
+	if IsSessionNotFound(err) || IsSessionNotFound(wrapped) {
+		return fmt.Errorf("%w: %v", ErrSessionNotFound, wrapped)
+	}
+	return wrapped
 }
 
 // 编译期断言：ACPAgent 支持图文 prompt / 模式 / plan 推送（可选能力）。

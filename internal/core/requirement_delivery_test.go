@@ -12,14 +12,36 @@ func TestAppendDeliveryDoD_ImplementAndTest(t *testing.T) {
 	if !strings.Contains(be, "仅单元") && !strings.Contains(be, "单元/组件") {
 		t.Fatalf("backend DoD missing unit-test rule: %s", be)
 	}
+	if !strings.Contains(be, "禁止起被测服务") {
+		t.Fatalf("implement DoD should ban SUT service generically: %s", be)
+	}
 	te := AppendDeliveryDoD(model.RoleTest, "做功能测")
 	if !strings.Contains(te, "隔离") || !strings.Contains(te, "需求分支") {
 		t.Fatalf("test DoD missing isolation/branch: %s", te)
 	}
-	// 幂等
+	if !strings.Contains(te, "该项目自己的隔离运行环境") {
+		t.Fatalf("test DoD should require project-owned isolation: %s", te)
+	}
+	// PIEQI_* 仅作「若本仓库即 pieqi」特例，不得写成无条件通项（括号「pieqi：独立…」）。
+	if strings.Contains(te, "（pieqi：独立 PIEQI_HOME") {
+		t.Fatalf("test DoD must not treat PIEQI_HOME as unconditional example: %s", te)
+	}
+	if !strings.Contains(te, "若本仓库即 pieqi") || !strings.Contains(te, "PIEQI_HOME") {
+		t.Fatalf("pieqi self-test still needs conditional PIEQI_HOME guidance: %s", te)
+	}
+	// 幂等（新标记）
 	again := AppendDeliveryDoD(model.RoleBackend, be)
 	if again != be {
 		t.Fatal("AppendDeliveryDoD should be idempotent")
+	}
+	// 幂等（旧标记）
+	legacy := "旧票\n\n## pieqi 交付纪律（test 票 · 必须遵守）\n旧文案"
+	if got := AppendDeliveryDoD(model.RoleTest, legacy); got != legacy {
+		t.Fatalf("legacy marker should skip re-inject: %q", got)
+	}
+	legacyEN := "old\n\n## pieqi delivery (test)\nold copy"
+	if got := AppendDeliveryDoD(model.RoleTest, legacyEN); got != legacyEN {
+		t.Fatalf("legacy EN marker should skip re-inject: %q", got)
 	}
 	design := AppendDeliveryDoD(model.RoleDesign, "只设计")
 	if design != "只设计" {

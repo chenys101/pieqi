@@ -32,6 +32,18 @@ import (
 	"go.uber.org/zap"
 )
 
+// 宿主账本合成闭合（方向 A / ACP tool hung）：
+// 批准后或轮末仍无匹配 tool_result 时，只修 pieqi 事件流，不假装写入 Cursor。
+// Result 文案是稳定检索锚点——单测钉死，实现票不得随意改。
+const (
+	errToolResultTimeoutAfterApproval = "tool result timeout after approval"
+	errToolResultMissingAtTurnEnd     = "tool result missing at turn end"
+)
+
+// DefaultToolResultTimeoutAfterApproval 批准后等待真实 tool_result 的看门狗默认时长。
+// 短于审批 30min；正常短工具秒级返回，远达不到此阈值。测试可 SetResultTimeout 缩短。
+const DefaultToolResultTimeoutAfterApproval = 2 * time.Minute
+
 // ToolCallHandle WireToolCall 返回的句柄，Unwire 可拆卸回调。幂等。
 type ToolCallHandle struct {
 	adapter agent.AgentAdapter
@@ -50,6 +62,7 @@ func (h *ToolCallHandle) Unwire() {
 		return
 	}
 	if h.wire != nil {
+		h.wire.stopAllWatchdogs()
 		h.wire.Flush()
 		h.wire = nil
 	}
@@ -71,6 +84,41 @@ func (h *ToolCallHandle) Flush() {
 	h.wire.Flush()
 }
 
+// MarkApproved 审批 settled(approve) 后启动该 toolCallID 的 result 看门狗。
+// ACP 下 reqID 通常等于 ToolCallID。未 settle 的仍走审批超时 / approval unresolved。
+// 幂等；已有 result / 已在计时则 no-op。tool_use 尚未落盘时先记 pendingApprove。
+func (h *ToolCallHandle) MarkApproved(toolCallID string) {
+	if h == nil || h.wire == nil || toolCallID == "" {
+		return
+	}
+	h.wire.markApproved(toolCallID)
+}
+
+// CloseHung 对仍无匹配 tool_result 的 in-flight id 追加合成失败 EventToolResult，并清空账本。
+// reason 写入 Result（稳定前缀）；典型：轮末用 errToolResultMissingAtTurnEnd。
+func (h *ToolCallHandle) CloseHung(reason string) {
+	if h == nil || h.wire == nil {
+		return
+	}
+	if reason == "" {
+		reason = errToolResultMissingAtTurnEnd
+	}
+	h.wire.closeHung(reason)
+}
+
+// SetResultTimeout 覆盖批准后看门狗时长（仅测试）；<=0 回退默认。
+func (h *ToolCallHandle) SetResultTimeout(d time.Duration) {
+	if h == nil || h.wire == nil {
+		return
+	}
+	h.wire.mu.Lock()
+	defer h.wire.mu.Unlock()
+	if d <= 0 {
+		d = DefaultToolResultTimeoutAfterApproval
+	}
+	h.wire.resultTimeout = d
+}
+
 // WireToolCall 把一个 AgentAdapter 的 OnToolCallUpdate 回调接到任务事件流。
 //
 // 注册后，adapter 每产出一个工具调用更新（ACP ToolCall/ToolCallUpdate），回调内：
@@ -81,9 +129,24 @@ func (h *ToolCallHandle) Flush() {
 //
 // 返回 *ToolCallHandle，调用方在任务结束/取消时 Unwire 拆卸（会先 Flush）。
 func WireToolCall(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore, taskID string) *ToolCallHandle {
-	w := &toolCallWire{bus: bus, store: store, taskID: taskID, flushWindow: FlushToolCallWindow}
+	w := &toolCallWire{
+		bus:           bus,
+		store:         store,
+		taskID:        taskID,
+		flushWindow:   FlushToolCallWindow,
+		resultTimeout: DefaultToolResultTimeoutAfterApproval,
+		inFlight:      make(map[string]*inFlightTool),
+		pendingApprove: make(map[string]struct{}),
+	}
 	adapter.OnToolCallUpdate(w.onUpdate)
 	return &ToolCallHandle{adapter: adapter, wire: w}
+}
+
+// inFlightTool 宿主侧一条尚未闭合的 tool_use（方向 A 账本条目）。
+type inFlightTool struct {
+	id    string
+	name  string
+	timer *time.Timer // 批准后看门狗；未批准前为 nil
 }
 
 // toolCallWire 持有 OnToolCallUpdate 回调所需的依赖。taskID 固定（一个 wire 对应一个 task）。
@@ -96,7 +159,10 @@ type toolCallWire struct {
 	// 由调用方显式 Flush（仅测试/特殊场景用，生产恒为 FlushToolCallWindow）。
 	flushWindow time.Duration
 
-	// mu 保护下面的待落盘队列。onUpdate 由 agent 适配器的 goroutine 调用，
+	// resultTimeout 批准后等待真实 tool_result 的看门狗时长。
+	resultTimeout time.Duration
+
+	// mu 保护下面的待落盘队列与 in-flight 账本。onUpdate 由 agent 适配器的 goroutine 调用，
 	// Flush 可能由任务结束路径（另一个 goroutine）调用，两者会并发。
 	//
 	// ⚠️ 锁顺序：**mu 先于 store.mu**。持 mu 期间会调用 store.Update（拿 store.mu），
@@ -112,6 +178,11 @@ type toolCallWire struct {
 	pending []agent.ToolCallUpdateInfo
 	// flushTimer 合并窗口的定时器；非 nil 表示已排定一次落盘。
 	flushTimer *time.Timer
+
+	// inFlight tool_use 落盘起登记；有匹配 tool_result（真实或合成）后摘除。
+	inFlight map[string]*inFlightTool
+	// pendingApprove 批准先于 tool_use 落盘时暂存；track 时补启看门狗。
+	pendingApprove map[string]struct{}
 
 	// flushN 累计**实际落盘次数**（测试与诊断用）。
 	//
@@ -172,36 +243,17 @@ func (w *toolCallWire) Flush() {
 	}
 	infos := w.pending
 	w.pending = nil
+	w.mu.Unlock()
 	if len(infos) == 0 {
-		w.mu.Unlock()
 		return
 	}
-	w.flushN.Add(1)
-
 	// 锁内只写内存；store.Update 返回的快照带出锁外再 Publish。
 	//
 	// ⚠️ imageSink 必须在 Update **之前**取（在写锁外拿一次 RLock 快照出附件依赖）：
 	// mutator 运行在 store 写锁内，若在 mutator 里再取读锁就是同一把 RWMutex
 	// 上的自死锁 —— 2026-10-24 线上事故：第一张真实工具图到达时 /api/tasks
 	// 全库冻结（详见 imageSink 与 agent_toolcall_deadlock_test.go 的注释）。
-	sink := w.store.imageSink()
-	updated, err := w.store.Update(w.taskID, func(t *model.Task) bool {
-		changed := false
-		for _, info := range infos {
-			if applyToolCallUpdate(w.store, sink, t, info) {
-				changed = true
-			}
-		}
-		return changed
-	})
-	w.mu.Unlock()
-
-	if err != nil || updated == nil {
-		return
-	}
-	// 工具事件是离散的，全量重绘合适（前端按 Seq 增量渲染），不用 delta。
-	// 一次批量只推一次 —— 中途的中间态对前端没有意义（它按 Seq 渲染最终集合）。
-	w.bus.Publish(Event{Type: "task_updated", TaskID: w.taskID, Task: updated})
+	w.flushInfos(infos)
 }
 
 // applyToolCallUpdate 把**一条** ToolCallUpdateInfo 施加到 t 上，返回是否改动了 t。
@@ -240,9 +292,13 @@ func applyToolCallUpdate(store *TaskStore, sink imageSink, t *model.Task, info a
 	if !ok {
 		// 中间态（pending / in_progress）不落事件是**设计**，但如果它带着图，
 		// 图片就再也回不来了（同一调用后面不会重发 Content）。必须可见。
-			if len(info.Images) > 0 {
-				sink.warnDropped(t.ID, info, "update status produced no event: "+info.Status)
-			}
+		if len(info.Images) > 0 {
+			sink.warnDropped(t.ID, info, "update status produced no event: "+info.Status)
+		}
+		return changed
+	}
+	// 晚到真实 completed/failed：账本已有匹配 tool_result（含合成）→ 幂等忽略。
+	if ev.Type == model.EventToolResult && hasToolResult(t.Events, info.ToolCallID) {
 		return changed
 	}
 	ev.At = time.Now()
@@ -514,4 +570,272 @@ func lookupToolName(events []model.TaskEvent, toolUseID string) string {
 		}
 	}
 	return ""
+}
+
+// hasToolResult 事件流是否已有匹配 ToolUseID 的 tool_result（真实或合成）。
+func hasToolResult(events []model.TaskEvent, toolUseID string) bool {
+	if toolUseID == "" {
+		return false
+	}
+	for _, ev := range events {
+		if ev.Type == model.EventToolResult && ev.ToolUseID == toolUseID {
+			return true
+		}
+	}
+	return false
+}
+
+// markApproved 批准后启动看门狗；tool_use 未登记时先记 pendingApprove。
+func (w *toolCallWire) markApproved(toolCallID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.inFlight == nil {
+		w.inFlight = make(map[string]*inFlightTool)
+	}
+	if e, ok := w.inFlight[toolCallID]; ok {
+		w.startWatchdogLocked(e)
+		return
+	}
+	if w.pendingApprove == nil {
+		w.pendingApprove = make(map[string]struct{})
+	}
+	w.pendingApprove[toolCallID] = struct{}{}
+}
+
+// trackInFlightLocked tool_use 落盘后登记；若已批准则立刻启看门狗。调用方持 w.mu。
+func (w *toolCallWire) trackInFlightLocked(id, name string) {
+	if id == "" {
+		return
+	}
+	if w.inFlight == nil {
+		w.inFlight = make(map[string]*inFlightTool)
+	}
+	e, ok := w.inFlight[id]
+	if !ok {
+		e = &inFlightTool{id: id, name: name}
+		w.inFlight[id] = e
+	} else if name != "" && e.name == "" {
+		e.name = name
+	}
+	if _, approved := w.pendingApprove[id]; approved {
+		delete(w.pendingApprove, id)
+		w.startWatchdogLocked(e)
+	}
+}
+
+// clearInFlightLocked 真实或合成 tool_result 到达后摘除并停表。调用方持 w.mu。
+func (w *toolCallWire) clearInFlightLocked(id string) {
+	if id == "" {
+		return
+	}
+	delete(w.pendingApprove, id)
+	e, ok := w.inFlight[id]
+	if !ok {
+		return
+	}
+	if e.timer != nil {
+		e.timer.Stop()
+		e.timer = nil
+	}
+	delete(w.inFlight, id)
+}
+
+// startWatchdogLocked 批准后看门狗；已在计时则 no-op。调用方持 w.mu。
+func (w *toolCallWire) startWatchdogLocked(e *inFlightTool) {
+	if e == nil || e.timer != nil {
+		return
+	}
+	timeout := w.resultTimeout
+	if timeout <= 0 {
+		timeout = DefaultToolResultTimeoutAfterApproval
+	}
+	id := e.id
+	e.timer = time.AfterFunc(timeout, func() {
+		w.onResultTimeout(id)
+	})
+}
+
+// onResultTimeout 批准后超时：合成失败 tool_result，只修宿主账本。
+func (w *toolCallWire) onResultTimeout(toolCallID string) {
+	w.mu.Lock()
+	e, ok := w.inFlight[toolCallID]
+	if !ok {
+		w.mu.Unlock()
+		return
+	}
+	// 定时器回调与 CloseHung 竞态：以账本为准，合成前再确认仍在 flight。
+	name := e.name
+	w.mu.Unlock()
+	w.synthesizeOne(toolCallID, name, errToolResultTimeoutAfterApproval)
+}
+
+// closeHung 轮末/显式闭合：对所有仍悬挂 id 合成失败 result。
+func (w *toolCallWire) closeHung(reason string) {
+	w.mu.Lock()
+	// 先落盘合并窗口，避免未 flush 的真实 result 被误合成。
+	if w.flushTimer != nil {
+		w.flushTimer.Stop()
+		w.flushTimer = nil
+	}
+	infos := w.pending
+	w.pending = nil
+	w.mu.Unlock()
+	if len(infos) > 0 {
+		w.flushInfos(infos)
+	}
+
+	w.mu.Lock()
+	type pair struct{ id, name string }
+	var hung []pair
+	for id, e := range w.inFlight {
+		name := ""
+		if e != nil {
+			name = e.name
+			if e.timer != nil {
+				e.timer.Stop()
+				e.timer = nil
+			}
+		}
+		hung = append(hung, pair{id: id, name: name})
+	}
+	// 也扫事件流：账本漏登记但末条仍悬挂的 id（防御）。
+	w.mu.Unlock()
+	if t, ok := w.store.Get(w.taskID); ok && t != nil {
+		seen := make(map[string]struct{}, len(hung))
+		for _, h := range hung {
+			seen[h.id] = struct{}{}
+		}
+		for _, ev := range orphanedToolUses(t.Events) {
+			if _, ok := seen[ev.ToolUseID]; ok {
+				continue
+			}
+			hung = append(hung, pair{id: ev.ToolUseID, name: ev.ToolName})
+		}
+	}
+	for _, h := range hung {
+		w.synthesizeOne(h.id, h.name, reason)
+	}
+}
+
+// flushInfos 是 Flush 的核心落盘体，供 closeHung 在已持有/拆出 pending 后复用。
+func (w *toolCallWire) flushInfos(infos []agent.ToolCallUpdateInfo) {
+	if len(infos) == 0 {
+		return
+	}
+	w.mu.Lock()
+	w.flushN.Add(1)
+	sink := w.store.imageSink()
+	var trackedUse, trackedResult []string
+	var trackedNames []string
+	updated, err := w.store.Update(w.taskID, func(t *model.Task) bool {
+		changed := false
+		for _, info := range infos {
+			before := len(t.Events)
+			if applyToolCallUpdate(w.store, sink, t, info) {
+				changed = true
+				for i := before; i < len(t.Events); i++ {
+					ev := t.Events[i]
+					switch ev.Type {
+					case model.EventToolUse:
+						if ev.ToolUseID != "" {
+							trackedUse = append(trackedUse, ev.ToolUseID)
+							trackedNames = append(trackedNames, ev.ToolName)
+						}
+					case model.EventToolResult:
+						if ev.ToolUseID != "" {
+							trackedResult = append(trackedResult, ev.ToolUseID)
+						}
+					}
+				}
+			}
+		}
+		return changed
+	})
+	for i, id := range trackedUse {
+		name := ""
+		if i < len(trackedNames) {
+			name = trackedNames[i]
+		}
+		w.trackInFlightLocked(id, name)
+	}
+	for _, id := range trackedResult {
+		w.clearInFlightLocked(id)
+	}
+	w.mu.Unlock()
+	if err != nil || updated == nil {
+		return
+	}
+	w.bus.Publish(Event{Type: "task_updated", TaskID: w.taskID, Task: updated})
+}
+
+// synthesizeOne 追加一条合成失败 tool_result 并清账本；已有 result 则幂等。
+func (w *toolCallWire) synthesizeOne(toolCallID, toolName, reason string) {
+	if toolCallID == "" {
+		return
+	}
+	w.mu.Lock()
+	updated, err := w.store.Update(w.taskID, func(t *model.Task) bool {
+		if hasToolResult(t.Events, toolCallID) {
+			return false
+		}
+		name := toolName
+		if name == "" {
+			name = lookupToolName(t.Events, toolCallID)
+		}
+		w.store.AppendEvent(t, model.TaskEvent{
+			Type:      model.EventToolResult,
+			ToolName:  name,
+			ToolUseID: toolCallID,
+			IsError:   true,
+			Result:    reason,
+			At:        time.Now(),
+		})
+		return true
+	})
+	w.clearInFlightLocked(toolCallID)
+	w.mu.Unlock()
+	if err != nil || updated == nil {
+		return
+	}
+	w.bus.Publish(Event{Type: "task_updated", TaskID: w.taskID, Task: updated})
+}
+
+// stopAllWatchdogs Unwire 时停掉全部看门狗，避免拆卸后写已终态 task。
+func (w *toolCallWire) stopAllWatchdogs() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, e := range w.inFlight {
+		if e != nil && e.timer != nil {
+			e.timer.Stop()
+			e.timer = nil
+		}
+	}
+	w.inFlight = make(map[string]*inFlightTool)
+	w.pendingApprove = make(map[string]struct{})
+}
+
+// orphanedToolUses 返回事件流中尚无匹配 tool_result 的 tool_use（按 id 去重，保留首次）。
+func orphanedToolUses(events []model.TaskEvent) []model.TaskEvent {
+	done := make(map[string]struct{})
+	for _, ev := range events {
+		if ev.Type == model.EventToolResult && ev.ToolUseID != "" {
+			done[ev.ToolUseID] = struct{}{}
+		}
+	}
+	var out []model.TaskEvent
+	seen := make(map[string]struct{})
+	for _, ev := range events {
+		if ev.Type != model.EventToolUse || ev.ToolUseID == "" {
+			continue
+		}
+		if _, ok := done[ev.ToolUseID]; ok {
+			continue
+		}
+		if _, ok := seen[ev.ToolUseID]; ok {
+			continue
+		}
+		seen[ev.ToolUseID] = struct{}{}
+		out = append(out, ev)
+	}
+	return out
 }

@@ -9,7 +9,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSessionPage } from '@/features/session/useSessionPage'
-import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput } from '@/features/session'
+import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput, PlannedStartPanel } from '@/features/session'
 import { FeedbackPanel, ArtifactViewer } from '@/features/feedback'
 import PlanList from '@/features/timeline/components/PlanList.vue'
 import Drawer from '@/components/ui/Drawer.vue'
@@ -138,7 +138,15 @@ const {
             </ContentColumn>
           </div>
 
+          <!-- planned：用启动条代替输入框（尚无会话可干预；补 agent 后走 /start） -->
+          <PlannedStartPanel
+            v-if="task.status === 'planned'"
+            :task-id="task.id"
+            :agent="task.agent"
+            :model="task.model"
+          />
           <InterveneInput
+            v-else
             :can-cancel="canCancel"
             :can-send="canSendPrompt || !!decision"
             :models="turnModels"

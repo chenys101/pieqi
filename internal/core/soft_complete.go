@@ -20,6 +20,9 @@ const (
 //
 // 在 completeTask 之前做中断探测；命中则 failTask（仍可 Resume）。
 // 路径 B（choice waiting_input）直接返回，行为不变。
+//
+// ACP 方向 A：先闭合悬挂 tool_use（合成失败 tool_result），再跑 toolHungWithoutResult，
+// 避免「事件仍悬挂却只报 tool hung」；print 无 tool wire 时行为与收紧定案一致。
 func (tr *TaskRunner) completeAfterTurn(taskID, output string) {
 	t, ok := tr.store.Get(taskID)
 	if !ok || t == nil {
@@ -28,6 +31,11 @@ func (tr *TaskRunner) completeAfterTurn(taskID, output string) {
 	// choice 路径 B：result 已拦截为 waiting_input(choice)，轮末兜底不得改写。
 	if t.Status == model.TaskWaitingInput && t.CurrentDecision != nil &&
 		t.CurrentDecision.Kind == model.DecisionKindChoice {
+		return
+	}
+	tr.closeHungToolsBeforeComplete(taskID)
+	t, ok = tr.store.Get(taskID)
+	if !ok || t == nil {
 		return
 	}
 	if reason := tr.softCompleteInterruptReason(taskID, t); reason != "" {
@@ -40,6 +48,17 @@ func (tr *TaskRunner) completeAfterTurn(taskID, output string) {
 		return
 	}
 	tr.completeTask(taskID, output)
+}
+
+// closeHungToolsBeforeComplete ACP tool wire 存在时：轮末对无 result 的 id 合成闭合。
+// 无 wire（print 路径）→ no-op，保留 tool hung without result 闸门。
+func (tr *TaskRunner) closeHungToolsBeforeComplete(taskID string) {
+	th := tr.toolWire(taskID)
+	if th == nil {
+		return
+	}
+	th.Flush()
+	th.CloseHung(errToolResultMissingAtTurnEnd)
 }
 
 // testReportDeclaresFail test 票正文/事件是否声明终验失败（交付纪律约定的人读标记）。

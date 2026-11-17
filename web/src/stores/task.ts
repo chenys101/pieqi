@@ -205,6 +205,13 @@ export const useTaskStore = defineStore('task', {
       return task
     },
 
+    /** planned → 启动：可选补写 agent/model；成功后 upsert 返回的任务 */
+    async startPlannedTask(id: string, opts?: { agent?: string; model?: string }): Promise<Task> {
+      const task = await api.startPlannedTask(id, opts)
+      this.upsertTask(task)
+      return task
+    },
+
     async cancelTask(id: string) {
       await api.cancelTask(id)
     },

@@ -9,9 +9,12 @@ import Textarea from '@/components/ui/Textarea.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useResponsive } from '@/composables/useResponsive'
 import ModelPicker from '@/features/session/components/ModelPicker.vue'
+import PlannedStartPanel from '@/features/session/components/PlannedStartPanel.vue'
 import SplitBlockedPanel from '@/features/requirement/SplitBlockedPanel.vue'
 import SplitProposalEditor from '@/features/requirement/SplitProposalEditor.vue'
 import SplitSuggestSessionEmbed from '@/features/requirement/SplitSuggestSessionEmbed.vue'
+import Modal from '@/components/ui/Modal.vue'
+import type { Task } from '@/types/task'
 import { newRequirementTarget } from '@/features/requirement/newRequirementTarget'
 import * as api from '@/services/api/requirements'
 import { getSettings } from '@/services/api/settings'
@@ -52,6 +55,21 @@ const nodePrompt = ref('')
 const nodeTitle = ref('')
 const issueTitle = ref('')
 const issueSeverity = ref<'blocker' | 'major' | 'minor'>('major')
+
+/** 任务图「缺 agent」→ 同款 PlannedStartPanel 弹窗 */
+const startTarget = ref<Task | null>(null)
+function openMissingAgent(t: Task, e: Event) {
+  e.preventDefault()
+  e.stopPropagation()
+  startTarget.value = t
+}
+function closeMissingAgent() {
+  startTarget.value = null
+}
+async function onPlannedStarted() {
+  startTarget.value = null
+  await reload()
+}
 
 /** 拆分会话用的 agent / model（与新建任务同口径；空 model = agent 默认） */
 const suggestAgent = ref('')
@@ -822,13 +840,17 @@ onUnmounted(stopPoll)
               <li v-for="t in activeWorkTasks" :key="t.id">
                 <RouterLink
                   class="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-elevated/60"
-                  :to="`/sessions/${t.id}`"
+                  :to="{ path: `/sessions/${t.id}`, query: { from: 'requirement', requirement_id: id } }"
                 >
                   <span class="min-w-0 flex-1 truncate">{{ t.title }}</span>
-                  <span
+                  <button
                     v-if="t.status === 'planned' && !t.agent"
-                    class="shrink-0 rounded-full border border-dashed border-warning/40 px-1.5 py-0.5 text-[10.5px] text-warning"
-                  >缺 agent</span>
+                    type="button"
+                    class="shrink-0 rounded-full border border-dashed border-warning/40 px-1.5 py-0.5 text-[10.5px] text-warning hover:border-warning hover:bg-warning/10"
+                    data-testid="missing-agent-badge"
+                    title="选择 Agent 并启动"
+                    @click="openMissingAgent(t, $event)"
+                  >缺 agent</button>
                   <span
                     v-else-if="t.agent"
                     class="shrink-0 truncate text-[11px] text-muted"
@@ -918,5 +940,21 @@ onUnmounted(stopPoll)
         :requirement-id="id"
       />
     </div>
+
+    <Modal
+      :open="!!startTarget"
+      :title="startTarget ? `启动：${startTarget.title}` : '启动'"
+      max-width="max-w-md"
+      @close="closeMissingAgent"
+    >
+      <PlannedStartPanel
+        v-if="startTarget"
+        :task-id="startTarget.id"
+        :agent="startTarget.agent"
+        :model="startTarget.model"
+        :docked="false"
+        @started="onPlannedStarted"
+      />
+    </Modal>
   </div>
 </template>

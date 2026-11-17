@@ -74,8 +74,8 @@ type AgentManager struct {
 	defaultAgent   string
 
 	// onSessionClosed 会话关闭回调（可选，调用方注入清理会话级资源，如 TaskRunner 的 wires）。
-	// 在 Close 的 closeOnce 内触发，恰好一次；reaper 空闲回收也会走 Close 触发。
-	onSessionClosed func(taskID string)
+	// 在 Close 的 closeOnce 内触发，恰好一次；reason 区分 reaper / cancel / delete / close。
+	onSessionClosed func(taskID, reason string)
 
 	mu       sync.Mutex
 	sessions map[string]*managedSession // taskID -> session
@@ -143,11 +143,19 @@ func (m *AgentManager) SetFallbackHook(fn func(taskID string, primaryErr error))
 	m.onFallback = fn
 }
 
+// 会话关闭触发方（onSessionClosed 的 reason；TaskRunner 据之决定是否 Cleanup worktree）。
+const (
+	SessionCloseReaper = "reaper" // 空闲回收
+	SessionCloseCancel = "cancel" // 用户取消
+	SessionCloseDelete = "delete" // 删任务
+	SessionCloseOther  = "close"  // 其它 Close / CloseAll
+)
+
 // SetOnSessionClosed 注入会话关闭回调（可选）。会话被 Close（含 reaper 空闲回收、Cancel、
-// 服务器关停 CloseAll）关闭时触发，参数为 taskID。调用方用它清理会话级资源——
-// TaskRunner 借此 Unwire 三个 wire handle，避免 reaper 关会话后 wires 残留对已关 adapter 的引用。
+// 删任务、服务器关停 CloseAll）关闭时触发；reason 见 SessionClose* 常量。
+// TaskRunner 借此 Unwire wires，并按 reason+任务态决定是否延迟 Cleanup worktree。
 // 幂等：同一会话的 closeOnce 只触发一次。
-func (m *AgentManager) SetOnSessionClosed(fn func(taskID string)) {
+func (m *AgentManager) SetOnSessionClosed(fn func(taskID, reason string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onSessionClosed = fn
@@ -442,9 +450,17 @@ func (m *AgentManager) Cancel(ctx context.Context, taskID string) error {
 	return sess.adapter.Cancel(ctx, sess.sessionID)
 }
 
-// Close 关闭 task 的会话：从登记表移除、中断 running turn、关 adapter、释放并发槽。幂等。
-// 无 session 时 no-op 返回 nil。会话关闭后触发 onSessionClosed 钩子（TaskRunner 清 wires）。
+// Close 关闭 task 的会话（reason=close）。幂等。详见 CloseWithReason。
 func (m *AgentManager) Close(taskID string) error {
+	return m.CloseWithReason(taskID, SessionCloseOther)
+}
+
+// CloseWithReason 关闭 task 的会话：从登记表移除、中断 running turn、关 adapter、释放并发槽。
+// 幂等。无 session 时 no-op。关闭后触发 onSessionClosed(taskID, reason)。
+func (m *AgentManager) CloseWithReason(taskID, reason string) error {
+	if reason == "" {
+		reason = SessionCloseOther
+	}
 	m.mu.Lock()
 	sess, ok := m.sessions[taskID]
 	if ok {
@@ -469,7 +485,7 @@ func (m *AgentManager) Close(taskID string) error {
 		fn := m.onSessionClosed
 		m.mu.Unlock()
 		if fn != nil {
-			fn(taskID)
+			fn(taskID, reason)
 		}
 	})
 	return nil
@@ -557,7 +573,7 @@ func (m *AgentManager) CloseIdle(now time.Time) {
 		idle := !sess.running && now.Sub(sess.lastActivity) >= m.cfg.IdleTimeout
 		sess.runMu.Unlock()
 		if idle {
-			_ = m.Close(id)
+			_ = m.CloseWithReason(id, SessionCloseReaper)
 		}
 	}
 }

@@ -404,3 +404,110 @@ func TestMergeToolUseIntoTask_EmptyObjectGetsPath(t *testing.T) {
 		t.Fatalf("path=%q, want web/src/a.vue (input=%s)", got, tt.Events[0].Input)
 	}
 }
+
+// TestWireToolCall_WatchdogAfterApproveSynthesizes：批准后丢 tool_call_update → ≤T 合成
+// error tool_result（稳定文案）；不得事件仍悬挂。
+func TestWireToolCall_WatchdogAfterApproveSynthesizes(t *testing.T) {
+	fa, _, _, store, taskID, h := setupToolCallWire(t)
+	defer h.Unwire()
+	h.SetResultTimeout(30 * time.Millisecond)
+
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "tc-wd", Title: "Shell", Status: "pending", IsNew: true,
+	})
+	h.Flush()
+	h.MarkApproved("tc-wd")
+	// 故意不发 completed。
+
+	deadline := time.Now().Add(2 * time.Second)
+	var got *model.Task
+	for time.Now().Before(deadline) {
+		tt, _ := store.Get(taskID)
+		for _, ev := range tt.Events {
+			if ev.Type == model.EventToolResult && ev.ToolUseID == "tc-wd" {
+				got = tt
+				break
+			}
+		}
+		if got != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got == nil {
+		t.Fatal("看门狗未在超时内合成 tool_result")
+	}
+	var res *model.TaskEvent
+	for i := range got.Events {
+		if got.Events[i].Type == model.EventToolResult && got.Events[i].ToolUseID == "tc-wd" {
+			res = &got.Events[i]
+		}
+	}
+	if res == nil || !res.IsError || res.Result != errToolResultTimeoutAfterApproval {
+		t.Fatalf("result=%+v, want IsError + %q", res, errToolResultTimeoutAfterApproval)
+	}
+}
+
+// TestWireToolCall_NormalResultBeatsWatchdog：正常短工具秒级真实 result，不被合成覆盖。
+func TestWireToolCall_NormalResultBeatsWatchdog(t *testing.T) {
+	fa, _, _, store, taskID, h := setupToolCallWire(t)
+	defer h.Unwire()
+	h.SetResultTimeout(time.Hour) // 远长于本用例
+
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "tc-ok", Title: "Read", Status: "pending", IsNew: true,
+	})
+	h.MarkApproved("tc-ok")
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "tc-ok", Status: "completed", IsNew: false, RawOutput: []byte("file contents"),
+	})
+	h.Flush()
+
+	tt, _ := store.Get(taskID)
+	var results int
+	for _, ev := range tt.Events {
+		if ev.Type == model.EventToolResult && ev.ToolUseID == "tc-ok" {
+			results++
+			if ev.IsError {
+				t.Fatalf("真实 result 被标成 error: %+v", ev)
+			}
+			if ev.Result != "file contents" {
+				t.Fatalf("Result=%q, want file contents", ev.Result)
+			}
+		}
+	}
+	if results != 1 {
+		t.Fatalf("tool_result 数=%d, want 1", results)
+	}
+}
+
+// TestWireToolCall_LateRealResultAfterSyntheticIgnored：合成后晚到真实 completed 幂等忽略。
+func TestWireToolCall_LateRealResultAfterSyntheticIgnored(t *testing.T) {
+	fa, _, _, store, taskID, h := setupToolCallWire(t)
+	defer h.Unwire()
+
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "tc-late", Title: "Shell", Status: "pending", IsNew: true,
+	})
+	h.Flush()
+	h.CloseHung(errToolResultTimeoutAfterApproval)
+
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "tc-late", Status: "completed", IsNew: false, RawOutput: []byte("late real"),
+	})
+	h.Flush()
+
+	tt, _ := store.Get(taskID)
+	var results []model.TaskEvent
+	for _, ev := range tt.Events {
+		if ev.Type == model.EventToolResult && ev.ToolUseID == "tc-late" {
+			results = append(results, ev)
+		}
+	}
+	if len(results) != 1 {
+		t.Fatalf("tool_result 数=%d, want 1（晚到真实应忽略）: %+v", len(results), results)
+	}
+	if !results[0].IsError || results[0].Result != errToolResultTimeoutAfterApproval {
+		t.Fatalf("应保留合成 result，got %+v", results[0])
+	}
+}

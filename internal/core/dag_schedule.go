@@ -74,6 +74,10 @@ func (tr *TaskRunner) StartReadyInRequirement(requirementID string) {
 	if tr == nil || requirementID == "" {
 		return
 	}
+	// 旧图兜底：Fix→重验后仍挂 failed 源测的边，按 Issue 改挂到重验票。
+	if tr.requirements != nil {
+		tr.requirements.RepairReverifyDeps(requirementID)
+	}
 	highStakes := CountHighStakesApprovals(tr.store)
 	maxImpl := 1
 	if tr.requirements != nil {

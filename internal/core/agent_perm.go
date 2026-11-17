@@ -142,6 +142,11 @@ type PermissionWire struct {
 	// timeoutCooldown 超时后的同指纹短冷却：指纹 → 冷却截止时刻。
 	// 打断"超时 deny → agent 立刻再挂同类 execute → 再等 30m"的连锁（一周日志主痛点）。
 	timeoutCooldown map[string]time.Time
+
+	// onApproved 审批 settled(approve) 后回调（含免审自动放行）。
+	// ACP 下 reqID≈ToolCallID，供 ToolCallHandle 启动 result 看门狗。
+	// 在释放 pw.mu 之后调用，避免与 tool wire 锁顺序纠缠。
+	onApproved func(toolCallID string)
 }
 
 // permissionTimeoutCooldown 超时后同指纹冷却窗口。
@@ -243,6 +248,13 @@ func (pw *PermissionWire) SetTrustedRecipes(recipes []string) {
 func (pw *PermissionWire) SetLocalExecuteAutoApprove(ok bool) {
 	pw.mu.Lock()
 	pw.localExecuteOK = ok
+	pw.mu.Unlock()
+}
+
+// SetOnApproved 登记批准后回调（方向 A：tool result 看门狗起算点）。nil 清除。
+func (pw *PermissionWire) SetOnApproved(fn func(toolCallID string)) {
+	pw.mu.Lock()
+	pw.onApproved = fn
 	pw.mu.Unlock()
 }
 
@@ -382,13 +394,18 @@ func (pw *PermissionWire) localExecuteCovers(req agent.PermissionRequest) bool {
 
 // rememberSettled 记下一条审批的最终结论（有界 FIFO）。调用方不持 pw.mu 或自行持锁 ——
 // 本函数自己加锁，内部调用点都在释放 pw.mu 之后。
+// 结论为 approved 时在放锁后触发 onApproved（看门狗起算；deny/timeout 不启）。
 func (pw *PermissionWire) rememberSettled(reqID, toolTitle, toolKind string, recipes []string, conclusion string, timed bool) {
 	if reqID == "" {
 		return
 	}
 	pw.mu.Lock()
-	defer pw.mu.Unlock()
 	pw.rememberSettledLocked(reqID, toolTitle, toolKind, recipes, conclusion, timed)
+	hook := pw.onApproved
+	pw.mu.Unlock()
+	if conclusion == PermResolveApproved && hook != nil {
+		hook(reqID)
+	}
 }
 
 // rememberSettledLocked 同 rememberSettled，但要求调用方已持 pw.mu。

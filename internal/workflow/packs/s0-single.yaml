@@ -28,17 +28,20 @@ brief_header: |
   Handoff: read docs/handoff/req-<id8>.md if present; write back conclusions + evidence only
 dod_implement: |
 
-  ## pieqi delivery (implement)
+  ## delivery (implement)
 
   1. Work in this task worktree; **merge into the requirement integration branch** when done.
-  2. Self-test = unit/component tests only. Do not start pieqi service as completion criteria.
+  2. Self-test = unit/component tests only. Do not start the system under test as completion criteria.
+     If this repo is pieqi: do not start the pieqi service as completion criteria.
   3. Sandbox/test failures => do not mark completed; leave evidence.
   4. Ticket completed means merged to req branch, not "session finished".
 dod_test: |
 
-  ## pieqi delivery (test)
+  ## delivery (test)
 
   1. Wait until depends_on are done and merged to req branch before functional tests.
-  2. Functional test: checkout req branch → build → **isolated instance** (separate PIEQI_HOME + port).
+  2. Functional test: checkout req branch → build → **isolated run environment for that project**
+     (port/config/HOME decided by the target project).
+     If this repo is pieqi, use a separate PIEQI_HOME + PIEQI_SERVER_PORT; do not occupy production :3000 / ~/.pieqi.
   3. Report must include "总评：FAIL" on failure. Do not mark completed on FAIL.
   4. Do not shorten approval timeout or auto-approve to fake a green test.

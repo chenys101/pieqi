@@ -1165,20 +1165,40 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 				zap.String("task", task.ID), zap.String("agent", task.Agent), zap.Bool("resume", resumeFrom != ""))
 			return false
 		}
-		// 续问路径 Open 失败多为原会话丢失（ACP load/resume 报错，或 PrintAgent --resume
-		// 报 "No conversation found"），也可能是任务记录的 agent 已被关闭/未注册
-		// （AgentManager 拒绝静默换 agent）。两种都由协议层 surface：追加 status 事件 +
-		// 置 failed 带明确原因，不静默失败。
-		if resumeFrom != "" {
+		// 冷启动 load/resume 撞 session not found：对端已不认 sid。清死 sid 后开全新会话
+		// （与 Print ErrNoConversation / 保活 prompt 死 sid 兜底对齐）。仍失败再 surface。
+		if resumeFrom != "" && agent.IsSessionNotFound(err) {
+			tr.logger.Info("agent open session not found; opening fresh",
+				zap.String("task", task.ID), zap.String("resume_from", resumeFrom), zap.Error(err))
+			tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
+				Text: "续问上下文已丢失，已用全新会话继续"})
+			tr.clearACPSessionID(task.ID)
+			cfg.ResumeFrom = ""
+			adapter, fellBack, err = tr.agentMgr.Open(ctx, task.ID, task.ProjectID, cfg)
+			if err != nil {
+				if errors.Is(err, agent.ErrSessionBusy) {
+					tr.logger.Debug("agent open (fresh after session-lost) skipped: session busy",
+						zap.String("task", task.ID))
+					return false
+				}
+				tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
+					Text: "续问失败：" + err.Error()})
+				tr.forceFailTask(task.ID, "agent open: "+err.Error())
+				return fellBack
+			}
+			// 全新 Open 成功：落到下方 wires / 持久化 sid。
+		} else if resumeFrom != "" {
+			// 续问 Open 失败且非 session-not-found（agent 关闭/未注册等）：surface，不静默。
 			tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
 				Text: "续问失败：" + err.Error()})
 			// 续问时 task 处终态（completed/failed/cancelled），failTask 经 transition 终态守卫为 no-op；
 			// 用 forceFailTask 强制置 failed，确保状态/Error/通知落库，明确 surface 不静默失败。
 			tr.forceFailTask(task.ID, "agent open: "+err.Error())
+			return fellBack
 		} else {
 			tr.failTask(task.ID, "agent open: "+err.Error())
+			return fellBack
 		}
-		return fellBack
 	}
 	if fellBack {
 		tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
@@ -1224,6 +1244,18 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 		})
 	}
 	return fellBack
+}
+
+// clearACPSessionID 丢掉已对端不认的续问句柄，避免下次冷启动 ResumeFrom 继续打死 sid。
+// worktree 改动保留；对端 transcript 随之断档（与 Print No conversation 兜底同语义）。
+func (tr *TaskRunner) clearACPSessionID(taskID string) {
+	_, _ = tr.store.Update(taskID, func(t *model.Task) bool {
+		if t.ACPSessionID == "" {
+			return false
+		}
+		t.ACPSessionID = ""
+		return true
+	})
 }
 
 // refreshResumeID 轮末刷新续问句柄：桥会话（sessionBackedAdapter）在 turn_end 后才带出
@@ -1278,12 +1310,13 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 	}
 
 	if runErr != nil {
-		// 续问会话丢失（PrintAgent --resume 找不到原 claude 会话）：提示上下文丢失，
-		// 以全新会话重跑一轮（镜像 Phase 1 run() 的 "No conversation found" 兜底）。
-		if errors.Is(runErr, agent.ErrNoConversation) {
+		// 对端不认 sid（保活 prompt 死 sid / Print No conversation）：Close 僵尸适配器、
+		// 清 ACPSessionID，开全新会话重跑本轮。代价：对端 transcript 断；worktree 改动保留。
+		if agent.IsSessionNotFound(runErr) {
 			tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
 				Text: "续问上下文已丢失，已用全新会话继续"})
 			_ = tr.agentMgr.Close(task.ID)
+			tr.clearACPSessionID(task.ID)
 			fellBack := tr.ensureACPSession(ctx, task, "") // resumeFrom="" → 全新会话
 			if tr.agentMgr.Adapter(task.ID) != nil {
 				tr.runACPTurn(ctx, task, prompt, !fellBack, turnModel, images)

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"pieqi/internal/agent"
 	"pieqi/internal/model"
 )
 
@@ -297,5 +298,96 @@ func TestCompleteAfterTurn_PlanDoesNotGate(t *testing.T) {
 	got, _ := store.Get(task.ID)
 	if got.Status != model.TaskCompleted {
 		t.Fatalf("status=%s error=%q: plan 不作闸，应 completed", got.Status, got.Error)
+	}
+}
+
+// TestCompleteAfterTurn_ACPClosesHungBeforeSoftComplete：有 tool wire 时轮末先合成闭合，
+// 不得再报纯 tool hung 且事件仍悬挂；任务可 completed（合成 error result 已入账）。
+func TestCompleteAfterTurn_ACPClosesHungBeforeSoftComplete(t *testing.T) {
+	tr, store, bus, _ := newTestTaskRunner(t)
+	task, err := store.Create(&model.Task{ID: "t-soft-acp-close", Prompt: "p", Output: "partial"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, _ = store.Update(task.ID, func(x *model.Task) bool {
+		x.Status = model.TaskRunning
+		return true
+	})
+
+	fa := newFakePermAdapter()
+	th := WireToolCall(fa, bus, store, task.ID)
+	defer th.Unwire()
+	tr.setWires(task.ID, nil, nil, th, nil, nil, nil, nil)
+
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "call-hung", Title: "Shell", Status: "pending", IsNew: true,
+	})
+	th.Flush()
+	// 故意不发 completed —— 模拟 Cursor 冲掉 tool_call_update。
+
+	tr.completeAfterTurn(task.ID, "partial")
+
+	got, _ := store.Get(task.ID)
+	if got.Status != model.TaskCompleted {
+		t.Fatalf("status=%s error=%q, want completed（合成闭合后不得 tool hung）", got.Status, got.Error)
+	}
+	var found bool
+	for _, ev := range got.Events {
+		if ev.Type == model.EventToolResult && ev.ToolUseID == "call-hung" {
+			found = true
+			if !ev.IsError {
+				t.Fatalf("synthetic result IsError=false, want true")
+			}
+			if ev.Result != errToolResultMissingAtTurnEnd {
+				t.Fatalf("Result=%q, want %q", ev.Result, errToolResultMissingAtTurnEnd)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("events 缺合成 tool_result: %+v", got.Events)
+	}
+	if toolHungWithoutResult(got.Events) {
+		t.Fatal("合成后 toolHungWithoutResult 仍为 true")
+	}
+}
+
+// TestCompleteAfterTurn_ACPClosedHungAllowsSecondTurn：历史合成闭合的 id 不得让下一轮
+// soft-complete 永久失败（Resume 场景）。
+func TestCompleteAfterTurn_ACPClosedHungAllowsSecondTurn(t *testing.T) {
+	tr, store, bus, _ := newTestTaskRunner(t)
+	task, err := store.Create(&model.Task{ID: "t-soft-resume", Prompt: "p", Output: "r1"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, _ = store.Update(task.ID, func(x *model.Task) bool {
+		x.Status = model.TaskRunning
+		return true
+	})
+	fa := newFakePermAdapter()
+	th := WireToolCall(fa, bus, store, task.ID)
+	defer th.Unwire()
+	tr.setWires(task.ID, nil, nil, th, nil, nil, nil, nil)
+
+	fa.emitToolCall(agent.ToolCallUpdateInfo{
+		ToolCallID: "old-hung", Title: "Shell", Status: "pending", IsNew: true,
+	})
+	th.Flush()
+	tr.completeAfterTurn(task.ID, "r1")
+	got, _ := store.Get(task.ID)
+	if got.Status != model.TaskCompleted {
+		t.Fatalf("round1 status=%s error=%q", got.Status, got.Error)
+	}
+
+	// Resume：回 running，再跑一轮无悬挂工具。
+	_, _ = store.Update(task.ID, func(x *model.Task) bool {
+		x.Status = model.TaskRunning
+		x.Error = ""
+		x.Events = append(x.Events, model.TaskEvent{Type: model.EventText, Text: "round2", At: time.Now()})
+		return true
+	})
+	tr.completeAfterTurn(task.ID, "round2")
+	got, _ = store.Get(task.ID)
+	if got.Status != model.TaskCompleted {
+		t.Fatalf("round2 status=%s error=%q：历史悬挂 id 不得永久拒绝", got.Status, got.Error)
 	}
 }

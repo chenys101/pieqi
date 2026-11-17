@@ -1,10 +1,38 @@
 package agent
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"pieqi/internal/config"
 )
+
+func TestIsSessionNotFound(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"unrelated", errors.New("timeout"), false},
+		{"sentinel", ErrSessionNotFound, true},
+		{"wrapped sentinel", fmt.Errorf("acp: prompt: %w", ErrSessionNotFound), true},
+		{"print no conversation", ErrNoConversation, true},
+		{"cursor json details", errors.New(`acp: prompt: {"code":-32603,"message":"Internal error","data":{"details":"Session dead-sid not found"}}`), true},
+		{"load session", errors.New("acp: load session acp-real-sid: session not found"), true},
+		{"resume session", errors.New("acp: resume session x: Session xyz not found"), true},
+		{"no conversation text", errors.New("print: No conversation found"), true},
+		{"session without not-found", errors.New("session busy"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsSessionNotFound(tc.err); got != tc.want {
+				t.Fatalf("IsSessionNotFound(%v)=%v want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
 
 // TestInterfaceCompileAssertions 编译期断言：ACPAgent 实现 AgentAdapter，
 // 且本包导出的 DTO/回调类型可被外部按接口契约使用。

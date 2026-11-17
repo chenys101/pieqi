@@ -176,6 +176,26 @@ export async function setTaskMode(taskId: string, mode: string): Promise<void> {
   await request(`/tasks/${encodeURIComponent(taskId)}/mode`, { method: 'POST', body: { mode } })
 }
 
+/**
+ * POST /api/tasks/:id/start：planned → pending 并开跑。
+ *
+ * Body 可选 agent/model —— 启动前补写（planned 阶段允许先前为空）。
+ * 最终仍无 agent 时后端 400 `agent required before start`。
+ */
+export async function startPlannedTask(
+  taskId: string,
+  opts?: { agent?: string; model?: string },
+): Promise<Task> {
+  const dto = await request<TaskDto>(`/tasks/${encodeURIComponent(taskId)}/start`, {
+    method: 'POST',
+    body: {
+      agent: opts?.agent || undefined,
+      model: opts?.model || undefined,
+    },
+  })
+  return adaptTask(dto)
+}
+
 /** POST /api/tasks/:id/cancel */
 export async function cancelTask(taskId: string): Promise<void> {
   await request(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: 'POST', body: {} })

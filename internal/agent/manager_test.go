@@ -687,7 +687,12 @@ func TestManagerReaper_ClosesIdleSession(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	closed := make(chan string, 1)
-	m.SetOnSessionClosed(func(taskID string) { closed <- taskID })
+	m.SetOnSessionClosed(func(taskID, reason string) {
+		if reason != SessionCloseReaper {
+			t.Errorf("reason=%q want %s", reason, SessionCloseReaper)
+		}
+		closed <- taskID
+	})
 
 	// 模拟会话已空闲超过阈值：把 lastActivity 拨回过去
 	sess := m.session("task-1")

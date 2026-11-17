@@ -379,6 +379,90 @@ func (s *RequirementStore) spawnReverify(r *model.Requirement, iss *model.Issue,
 		}
 		return false
 	})
+	// A：源测永久 failed；把仍挂 SourceTaskID 的下游边改挂到重验票，否则 DepsSatisfied 永假。
+	// 假绿门禁仍在：重验未 completed 前下游不得开跑。
+	if src := strings.TrimSpace(iss.SourceTaskID); src != "" {
+		retargetDependsOn(ts, r.ID, src, got.ID)
+	}
+}
+
+// retargetDependsOn 将同需求内 DependsOn 中的 fromID 替换为 toID（去重）。
+// 用于 Fix→重验回流：死源测边改挂到新重验票，使 DAG 可闭环。
+func retargetDependsOn(store *TaskStore, requirementID, fromID, toID string) int {
+	if store == nil || fromID == "" || toID == "" || fromID == toID {
+		return 0
+	}
+	n := 0
+	for _, t := range store.List() {
+		if requirementID != "" && t.RequirementID != requirementID {
+			continue
+		}
+		if !dependsOnContains(t.DependsOn, fromID) {
+			continue
+		}
+		id := t.ID
+		_, err := store.Update(id, func(x *model.Task) bool {
+			next := make([]string, 0, len(x.DependsOn))
+			seen := map[string]bool{}
+			changed := false
+			for _, d := range x.DependsOn {
+				if d == fromID {
+					d = toID
+					changed = true
+				}
+				if d == "" || seen[d] {
+					continue
+				}
+				seen[d] = true
+				next = append(next, d)
+			}
+			if !changed {
+				return false
+			}
+			x.DependsOn = next
+			return true
+		})
+		if err == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// RepairReverifyDeps 幂等：按 Issue 的 Source→Reverify 改挂依赖边（兜住旧图 / 漏改挂）。
+func (s *RequirementStore) RepairReverifyDeps(requirementID string) int {
+	if s == nil || requirementID == "" {
+		return 0
+	}
+	s.mu.Lock()
+	ts := s.tasks
+	s.mu.Unlock()
+	if ts == nil {
+		return 0
+	}
+	r, ok := s.Get(requirementID)
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, iss := range r.Issues {
+		src := strings.TrimSpace(iss.SourceTaskID)
+		rev := strings.TrimSpace(iss.ReverifyTaskID)
+		if src == "" || rev == "" {
+			continue
+		}
+		n += retargetDependsOn(ts, requirementID, src, rev)
+	}
+	return n
+}
+
+func dependsOnContains(deps []string, id string) bool {
+	for _, d := range deps {
+		if d == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *RequirementStore) buildFixTask(r *model.Requirement, iss *model.Issue) (*model.Task, error) {
