@@ -207,7 +207,7 @@ async function publish(materialize: boolean) {
             <option value="assumption">assumption</option>
             <option value="open_question">open_question</option>
           </Select>
-          <Textarea v-model="assertText" rows="2" class="min-w-[12rem] flex-1 text-sm" placeholder="断言" />
+          <Textarea v-model="assertText" :rows="2" class="min-w-[12rem] flex-1 text-sm" placeholder="断言" />
           <Button size="sm" :disabled="busy" @click="addAssertion">加断言</Button>
         </div>
       </div>
