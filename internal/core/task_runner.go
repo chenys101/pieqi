@@ -1367,6 +1367,16 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 	}
 
 	if runErr != nil {
+		// ACP stopReason=cancelled：对端已收轮（stall/取消），不是传输失败。
+		// 先清未决审批再 fail，避免 soft-complete 把孤儿 pending 打成 approval unresolved。
+		if errors.Is(runErr, agent.ErrPromptCancelled) {
+			tr.abandonPendingApprovals(task.ID)
+			tr.failTask(task.ID, errPromptCancelled)
+			if !keepAlive && tr.agentMgr.Adapter(task.ID) != nil {
+				_ = tr.agentMgr.Close(task.ID)
+			}
+			return
+		}
 		// 对端不认 sid（保活 prompt 死 sid / Print No conversation）：Close 僵尸适配器、
 		// 清 ACPSessionID，开全新会话重跑本轮。代价：对端 transcript 断；worktree 改动保留。
 		if agent.IsSessionNotFound(runErr) {
@@ -1655,6 +1665,13 @@ func (tr *TaskRunner) permWire(taskID string) *PermissionWire {
 		return w.perm
 	}
 	return nil
+}
+
+// abandonPendingApprovals 摘掉未 settle 的审批（Prompt cancelled / soft-fail 后清孤儿）。
+func (tr *TaskRunner) abandonPendingApprovals(taskID string) {
+	if ph := tr.permWire(taskID); ph != nil {
+		ph.AbandonAll()
+	}
 }
 
 // toolWire 返回 task 的 ToolCallHandle（ACP 轮末合成闭合用）；无则 nil。

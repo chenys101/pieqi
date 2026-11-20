@@ -15,10 +15,11 @@ import (
 // fakePermAdapter 测试用 AgentAdapter：存储 OnPermissionRequest/OnToolCallUpdate 回调供手动触发，
 // 并记录 Approve/Deny 调用。模拟 ACP RequestPermission/SessionUpdate 到达时触发已注册回调。
 type fakePermAdapter struct {
-	onDelta    agent.ContentDeltaFunc
-	onPerm     agent.PermissionRequestFunc
-	onToolCall agent.ToolCallUpdateFunc
-	done       chan struct{}
+	onDelta     agent.ContentDeltaFunc
+	onPerm      agent.PermissionRequestFunc
+	onPermEnded agent.PermissionEndedFunc
+	onToolCall  agent.ToolCallUpdateFunc
+	done        chan struct{}
 
 	mu           sync.Mutex
 	approveCalls []fakeApproveCall
@@ -41,6 +42,7 @@ func (f *fakePermAdapter) RealSessionID(sessionID string) string              { 
 func (f *fakePermAdapter) SendPrompt(context.Context, string, string) error   { return nil }
 func (f *fakePermAdapter) OnContentDelta(fn agent.ContentDeltaFunc)           { f.onDelta = fn }
 func (f *fakePermAdapter) OnPermissionRequest(fn agent.PermissionRequestFunc) { f.onPerm = fn }
+func (f *fakePermAdapter) OnPermissionEnded(fn agent.PermissionEndedFunc)     { f.onPermEnded = fn }
 func (f *fakePermAdapter) OnToolCallUpdate(fn agent.ToolCallUpdateFunc)       { f.onToolCall = fn }
 func (f *fakePermAdapter) Approve(_ context.Context, reqID, optionID string) error {
 	f.mu.Lock()

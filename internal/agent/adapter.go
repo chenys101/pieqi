@@ -24,6 +24,21 @@ var ErrNotSupported = errors.New("operation not supported by this agent adapter"
 // ensureACPSession）。Print 路径的 ErrNoConversation 由 IsSessionNotFound 一并识别。
 var ErrSessionNotFound = errors.New("agent: session not found")
 
+// ErrPromptCancelled ACP session/prompt 以 stopReason=cancelled 正常返回。
+// 不是传输错误：对端已收轮（stall/用户取消/内层 run abort）。调用方应清算未决
+// permission wire，勿走「有产出 → soft-complete」把孤儿 pending 打成 approval unresolved。
+var ErrPromptCancelled = errors.New("agent: prompt cancelled")
+
+// PermissionEndedFunc 权限 RPC 结束回调（reqID）；cancelled=true 表示对端/ctx 取消，
+// 客户端未收到 Approve/Deny。PermissionWire 用它摘掉 pending，避免 Prompt 先返回后假挂起。
+type PermissionEndedFunc func(reqID string, cancelled bool)
+
+// PermissionEndedNotifier 可选能力：adapter 在 RequestPermission 因 ctx/进程退出结束时通知。
+// 未实现则 WirePermission 只靠超时/Resolve/Unwire 清理（旧 Claude 路径不受影响）。
+type PermissionEndedNotifier interface {
+	OnPermissionEnded(fn PermissionEndedFunc)
+}
+
 // IsSessionNotFound 统一识别「对端不认 sid」：
 //   - errors.Is(..., ErrSessionNotFound)（ACP promptOnce 抬哨兵）
 //   - errors.Is(..., ErrNoConversation)（Print --resume）

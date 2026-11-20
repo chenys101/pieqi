@@ -14,6 +14,7 @@ const (
 	errApprovalUnresolved    = "approval unresolved"
 	errToolHungWithoutResult = "tool hung without result"
 	errTestReportFail        = "test report: FAIL"
+	errPromptCancelled       = "prompt cancelled"
 )
 
 // completeAfterTurn 是 ACP / print 轮末「有产出 → 终态」的唯一入口。
@@ -40,6 +41,8 @@ func (tr *TaskRunner) completeAfterTurn(taskID, output string) {
 	}
 	if reason := tr.softCompleteInterruptReason(taskID, t); reason != "" {
 		tr.failTask(taskID, reason)
+		// 摘掉孤儿 pending，避免 Resume/下一轮再撞同一条 approval unresolved。
+		tr.abandonPendingApprovals(taskID)
 		return
 	}
 	// test 票：报告写了「总评：FAIL」却仍有产出时，不得 completed（否则 OnTaskFailed 不开 Issue）。

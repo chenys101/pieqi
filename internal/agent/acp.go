@@ -128,6 +128,7 @@ type ACPAgent struct {
 	cbMu       sync.RWMutex
 	onDelta    ContentDeltaFunc
 	onPerm     PermissionRequestFunc
+	onPermEnded PermissionEndedFunc
 	onToolCall ToolCallUpdateFunc
 	onUsage    UsageUpdateFunc
 	onPlan     PlanUpdateFunc
@@ -1385,18 +1386,29 @@ func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, text string, block
 	} else {
 		req.Meta = modelMeta(turnModel)
 	}
-	if _, err := a.conn.Prompt(ctx, req); err != nil {
+	resp, err := a.conn.Prompt(ctx, req)
+	if err != nil {
 		// peer disconnected：同会话再试一次 Prompt（进程偶发抖动）；仍失败则冒泡。
 		// 不在这里重开 session —— 那属于上层编排；本层只做有限次同连接重试。
 		if isPeerDisconnected(err) {
 			a.logger.Warn("acp prompt peer disconnected; retrying once",
 				zap.String("agent", a.cmdName), zap.String("session", sessionID), zap.Error(err))
-			if _, err2 := a.conn.Prompt(ctx, req); err2 != nil {
-				return wrapACPPromptErr("acp: prompt (after peer-disconnect retry)", err2)
+			resp, err = a.conn.Prompt(ctx, req)
+			if err != nil {
+				return wrapACPPromptErr("acp: prompt (after peer-disconnect retry)", err)
 			}
-			return nil
+			return stopReasonErr(resp.StopReason)
 		}
 		return wrapACPPromptErr("acp: prompt", err)
+	}
+	return stopReasonErr(resp.StopReason)
+}
+
+// stopReasonErr 把 ACP PromptResponse.StopReason 映射为调用方可识别的错误。
+// end_turn / max_* / refusal 仍算「轮次正常结束」（nil）；cancelled 抬 ErrPromptCancelled。
+func stopReasonErr(reason acp.StopReason) error {
+	if reason == acp.StopReasonCancelled {
+		return fmt.Errorf("%w", ErrPromptCancelled)
 	}
 	return nil
 }
@@ -1440,6 +1452,22 @@ func (a *ACPAgent) OnPermissionRequest(fn PermissionRequestFunc) {
 	a.cbMu.Lock()
 	a.onPerm = fn
 	a.cbMu.Unlock()
+}
+
+// OnPermissionEnded 实现 PermissionEndedNotifier：RequestPermission 因 ctx/进程退出结束时通知。
+func (a *ACPAgent) OnPermissionEnded(fn PermissionEndedFunc) {
+	a.cbMu.Lock()
+	a.onPermEnded = fn
+	a.cbMu.Unlock()
+}
+
+func (a *ACPAgent) notifyPermissionEnded(reqID string, cancelled bool) {
+	a.cbMu.RLock()
+	fn := a.onPermEnded
+	a.cbMu.RUnlock()
+	if fn != nil && reqID != "" {
+		fn(reqID, cancelled)
+	}
 }
 
 // OnToolCallUpdate 注册工具调用更新回调。
@@ -1626,7 +1654,7 @@ func (a *ACPAgent) Close(ctx context.Context) error {
 		// 摘除全部回调：进程已结束，留着只会让后续（迟到/重放）的更新
 		// 继续写进已收尾的 task。与 toolInputs 同步置 nil，理由同上。
 		a.cbMu.Lock()
-		a.onDelta, a.onPerm, a.onToolCall, a.onUsage = nil, nil, nil, nil
+		a.onDelta, a.onPerm, a.onPermEnded, a.onToolCall, a.onUsage = nil, nil, nil, nil, nil
 		a.cbMu.Unlock()
 		a.markDone()
 		// 释放自持 lifeCtx（最后一步）：若上面优雅等待超时且进程仍在，此处经 CommandContext
@@ -2129,10 +2157,12 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 		return acp.RequestPermissionResponse{Outcome: toACPOutcome(resp, opts)}, nil
 	case <-ctx.Done():
 		a.takePending(reqID)
+		a.notifyPermissionEnded(reqID, true)
 		a.logger.Debug("acp permission cancelled by ctx", zap.String("req_id", reqID), zap.Error(ctx.Err()))
 		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, ctx.Err()
 	case <-a.done:
 		a.takePending(reqID)
+		a.notifyPermissionEnded(reqID, true)
 		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, errors.New("acp: agent exited during permission request")
 	}
 }

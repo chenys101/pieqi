@@ -225,7 +225,91 @@ func WirePermission(adapter agent.AgentAdapter, bus *EventBus, store *TaskStore,
 	}
 	pw.setAutoApprove(autoApprove)
 	adapter.OnPermissionRequest(pw.onPermissionRequest)
+	// Cursor ACP：Prompt 可能先以 cancelled 收轮，RequestPermission 经 ctx 取消；
+	// 若不摘 pending，soft-complete 会把孤儿卡打成 approval unresolved。
+	if n, ok := adapter.(agent.PermissionEndedNotifier); ok {
+		n.OnPermissionEnded(pw.onPermissionEnded)
+	}
 	return pw
+}
+
+// onPermissionEnded RequestPermission 因 ctx/进程退出结束（未走 Approve/Deny）时摘 pending。
+// cancelled=false 预留；当前 ACP 路径只在取消时回调。
+func (pw *PermissionWire) onPermissionEnded(reqID string, cancelled bool) {
+	if reqID == "" {
+		return
+	}
+	_ = cancelled
+	pw.Abandon(reqID)
+}
+
+// Abandon 摘掉未 settle 的 pending（不调 adapter.Deny：RPC 侧已 cancelled）。
+// 用于 Prompt cancelled / permission ctx 取消后避免孤儿卡与 Resume 连环 unresolved。
+// 幂等；不存在的 reqID 为 no-op。
+func (pw *PermissionWire) Abandon(reqID string) {
+	if pw == nil || reqID == "" {
+		return
+	}
+	pw.mu.Lock()
+	if pw.closed {
+		pw.mu.Unlock()
+		return
+	}
+	entry, ok := pw.pending[reqID]
+	if !ok || entry.done {
+		pw.mu.Unlock()
+		return
+	}
+	entry.done = true
+	delete(pw.pending, reqID)
+	if entry.timer != nil {
+		entry.timer.Stop()
+	}
+	for i, r := range pw.queue {
+		if r == reqID {
+			pw.queue = append(pw.queue[:i], pw.queue[i+1:]...)
+			break
+		}
+	}
+	wasDisplayed := pw.displayed == reqID
+	if wasDisplayed {
+		// 假装仍是 displayed，让 advance 提升队列或回 running（与 timeout/Resolve 同路径）。
+		pw.rememberSettledLocked(reqID, entry.toolTitle, entry.toolKind, entry.recipes, PermResolveDenied, false)
+		pw.mu.Unlock()
+		pw.logger.Info("approval abandoned (permission RPC ended without settle)",
+			zap.String("task", pw.taskID),
+			zap.String("req", reqID),
+			zap.Bool("was_displayed", true),
+		)
+		if _, ok := pw.advance(reqID); !ok {
+			_, _ = pw.forceClearDecision(reqID)
+		}
+		return
+	}
+	pw.rememberSettledLocked(reqID, entry.toolTitle, entry.toolKind, entry.recipes, PermResolveDenied, false)
+	pw.mu.Unlock()
+
+	pw.logger.Info("approval abandoned (permission RPC ended without settle)",
+		zap.String("task", pw.taskID),
+		zap.String("req", reqID),
+		zap.Bool("was_displayed", false),
+	)
+}
+
+// AbandonAll 摘掉全部未 settle pending（Prompt cancelled / soft-fail 后清孤儿）。
+func (pw *PermissionWire) AbandonAll() {
+	if pw == nil {
+		return
+	}
+	pw.mu.Lock()
+	ids := make([]string, 0, len(pw.pending))
+	for id := range pw.pending {
+		ids = append(ids, id)
+	}
+	pw.mu.Unlock()
+	for _, id := range ids {
+		pw.Abandon(id)
+	}
 }
 
 // SetTrustedRecipes 写入跨会话可信配方（建会话时由 TaskRunner 调用）。
@@ -1280,6 +1364,9 @@ func (pw *PermissionWire) Unwire() {
 		cancel()
 	}
 	pw.adapter.OnPermissionRequest(nil)
+	if n, ok := pw.adapter.(agent.PermissionEndedNotifier); ok {
+		n.OnPermissionEnded(nil)
+	}
 }
 
 // --- IM 通知文案（仿 TaskRunner.notifyWaitingInput 的 approval 分支） ---
