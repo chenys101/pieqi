@@ -10,6 +10,7 @@
     **短路径**；协作平面是超集，不是另起炉灶。
   - **不推翻** ADR-0001～0005（TaskEvent 事实源、Baseline、Turn、Evidence、Checks）。
   - **存储实现** 拆到 [ADR-0022](0022-store-sqlite-task-migration.md)；本 ADR 只定产品/领域与「Store + SQLite、禁止双真相」。
+  - **计划质量升级** 见 [ADR-0023](0023-plan-engineering-runtime.md)（Plan Engineering / PlanRevision；Proposed）。
 - 相关讨论：dsh-superagent（借 Gate/人审/结构化报告，不借 Assignment）、
   冯若航评文（显式 Context）、存储（Store → SQLite → 可选 PG）、
   方案抉择：**B = planned Task 即计划格**（见 §3.1）。

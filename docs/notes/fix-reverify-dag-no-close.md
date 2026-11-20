@@ -2,7 +2,7 @@
 
 | 字段 | 值 |
 |---|---|
-| 状态 | **已定案 / 已落地**（方案 A） |
+| 状态 | **已落地（临时兜底）**；终态解见 [failure-rework-model.md](failure-rework-model.md)；产品主升级见 [plan-engineering.md](plan-engineering.md) |
 | 相关 | ADR-0021；`requirement-delivery.md`；另票 [planned-missing-agent-no-ui.md](planned-missing-agent-no-ui.md) |
 | 代码 | `retargetDependsOn` / `RepairReverifyDeps`（`requirement_issue.go`）；调度入口幂等 repair |
 

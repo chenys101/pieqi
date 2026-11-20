@@ -63,8 +63,15 @@ type Requirement struct {
 	// WorkflowID / WorkflowVersion 创建时钉死的流程包；跑中不可偷换。
 	WorkflowID      string `json:"workflow_id,omitempty"`
 	WorkflowVersion string `json:"workflow_version,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+
+	// Plan Engineering（ADR-0023；空 = 未启用 PE）
+	PlanDraft     *PlanDraft     `json:"plan_draft,omitempty"`
+	PlanRevisions []PlanRevision `json:"plan_revisions,omitempty"`
+	ExecutionPin  *ExecutionPin  `json:"execution_pin,omitempty"`
+	PlanChanges   []PlanChange   `json:"plan_changes,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // AcceptanceItem 需求上的一条验收标准。
@@ -157,6 +164,7 @@ const (
 	ReqEventPromote  RequirementEventType = "promote"
 	ReqEventIssue    RequirementEventType = "issue"
 	ReqEventStatus   RequirementEventType = "status"
+	ReqEventPlan     RequirementEventType = "plan"
 )
 
 // RequirementEvent append-only 需求事件（审计 / graph 快照）。

@@ -229,6 +229,14 @@ func (s *Server) Register(r gin.IRouter) {
 		api.POST("/requirements/:id/suggest", s.suggestRequirementSplit)
 		api.POST("/requirements/:id/expand", s.expandRequirement)
 		api.POST("/requirements/:id/promote", s.promoteRequirement)
+		// Plan Engineering（ADR-0023）
+		api.GET("/requirements/:id/plan", s.getRequirementPlan)
+		api.PUT("/requirements/:id/plan/draft", s.putRequirementPlanDraft)
+		api.POST("/requirements/:id/plan/publish", s.publishRequirementPlan)
+		api.GET("/requirements/:id/plan/revisions", s.listRequirementPlanRevisions)
+		api.POST("/requirements/:id/plan/pin", s.pinRequirementPlan)
+		api.POST("/requirements/:id/plan/materialize", s.materializeRequirementPlan)
+		api.POST("/requirements/:id/plan/changes", s.addRequirementPlanChange)
 		// P3：Outcome / Issue 回流
 		api.GET("/requirements/:id/outcome", s.getRequirementOutcome)
 		api.POST("/requirements/:id/done", s.markRequirementDone)

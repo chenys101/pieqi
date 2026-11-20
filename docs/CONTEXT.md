@@ -127,6 +127,10 @@ _Avoid_: 工单, ticket, 项目（Project 另有所指）, GraphNode
 已纳入需求图、尚未调度的 Task；**不跑 agent**。计划格 = planned Task，不再另建 GraphNode。仪表盘默认过滤 planned。
 _Avoid_: GraphNode, 子任务列表挂在单 Task 下
 
+**Plan Engineering（计划工程 Runtime）—— ADR-0023**:
+长路径计划质量层。`PlanDraft` → 门禁（Decision / SystemFact / Assumption / OpenQuestion）→ 不可变 `PlanRevision` + Execution Pin → 物化 planned Task。改图须新 Revision；禁止执行静默改 `depends_on`。Node/Attempt 见 `docs/notes/failure-rework-model.md`（另票）。
+_Avoid_: 单 Planner Agent 冒充整层；未过门禁即调度
+
 **SplitProposal（拆分/展开提案）**:
 split / expand 的短暂草案（内存）；confirm 前不进 Task 表。API：`PUT/GET/DELETE .../proposal`，`POST .../confirm`。校验 fail closed。
 _Avoid_: 计划（与 Plan Mode 冲突）, 未确认即落库的 Task

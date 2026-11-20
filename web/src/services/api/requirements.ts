@@ -2,6 +2,8 @@ import { request } from './client'
 import type {
   AcceptanceItem,
   ConfirmResult,
+  PlanDraft,
+  PlanView,
   ProposedTaskNode,
   Requirement,
   RequirementOutcome,
@@ -165,4 +167,41 @@ export async function listTasksForRequirement(requirementId: string): Promise<Ta
     }
   }
   return out
+}
+
+/** Plan Engineering（ADR-0023） */
+export async function getRequirementPlan(id: string): Promise<PlanView> {
+  return request<PlanView>(`/requirements/${encodeURIComponent(id)}/plan`)
+}
+
+export async function savePlanDraft(
+  id: string,
+  draft: Partial<PlanDraft> & {
+    stage?: string
+    nodes?: PlanDraft['nodes']
+    assertions?: PlanDraft['assertions']
+  },
+): Promise<{ draft: PlanDraft; publish_blocked?: string[] }> {
+  return request(`/requirements/${encodeURIComponent(id)}/plan/draft`, {
+    method: 'PUT',
+    body: draft,
+  })
+}
+
+export async function publishPlan(
+  id: string,
+  opts?: { materialize?: boolean; force?: boolean; actor?: string },
+): Promise<{ revision: unknown; materialize?: ConfirmResult }> {
+  const q = new URLSearchParams()
+  if (opts?.materialize) q.set('materialize', '1')
+  if (opts?.force) q.set('force', '1')
+  const qs = q.toString()
+  return request(`/requirements/${encodeURIComponent(id)}/plan/publish${qs ? `?${qs}` : ''}`, {
+    method: 'POST',
+    body: {
+      actor: opts?.actor ?? '',
+      materialize: !!opts?.materialize,
+      force: !!opts?.force,
+    },
+  })
 }

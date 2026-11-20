@@ -410,6 +410,10 @@ type Task struct {
 	Verify VerifyMode `json:"verify,omitempty"`
 	// DependsOn 同需求内前置 Task id（DAG）；短路径应为空。
 	DependsOn []string `json:"depends_on,omitempty"`
+	// NodeID 计划职责稳定身份（ADR-0023）；空 = 读路径视作自身 ID。
+	NodeID string `json:"node_id,omitempty"`
+	// Attempt 同一 Node 执行序号；0/缺省按 1。
+	Attempt int `json:"attempt,omitempty"`
 
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`

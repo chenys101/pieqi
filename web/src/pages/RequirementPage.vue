@@ -10,6 +10,7 @@ import Spinner from '@/components/ui/Spinner.vue'
 import { useResponsive } from '@/composables/useResponsive'
 import ModelPicker from '@/features/session/components/ModelPicker.vue'
 import PlannedStartPanel from '@/features/session/components/PlannedStartPanel.vue'
+import PlanEngineeringPanel from '@/features/requirement/PlanEngineeringPanel.vue'
 import SplitBlockedPanel from '@/features/requirement/SplitBlockedPanel.vue'
 import SplitProposalEditor from '@/features/requirement/SplitProposalEditor.vue'
 import SplitSuggestSessionEmbed from '@/features/requirement/SplitSuggestSessionEmbed.vue'
@@ -649,6 +650,13 @@ onUnmounted(stopPoll)
           >
             审不过来：全局高风险审批待处理 ≥ 2（当前 {{ capacityCount }}）。请先处理后再 Start 新实现票。design / 只读仍可开。
           </div>
+
+          <PlanEngineeringPanel
+            v-if="id"
+            :requirement-id="id"
+            class="mb-1"
+            @refreshed="reload"
+          />
 
           <!-- 原始需求正文 -->
           <section class="space-y-1.5">
