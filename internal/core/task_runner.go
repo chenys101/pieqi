@@ -726,15 +726,19 @@ func (tr *TaskRunner) ResumeRich(taskID, text, turnModel string, images []agent.
 	if tr.useACP && tr.agentMgr != nil {
 		// 双保险：上轮 adapter 若仍 open（ACP 保活复用），runACP 会直接复用同一会话跑下一轮，
 		// 不重新 Open/LoadSession；这里不拦（老代码拦过"use intervene"，已由保活复用取代）。
-		// 无活会话时续问需要 session id 才能 ResumeFrom；两者皆空则无法续问，明确报错。
-		if tr.agentMgr.Adapter(taskID) == nil && t.ACPSessionID == "" && t.ClaudeSessionID == "" {
+		//
+		// ⚠️ 不能用 Create 时预分配的 ClaudeSessionID 证明「有 ACP 会话」——它几乎恒非空，
+		// 会让首轮 Open 失败（从未落 ACPSessionID）的任务仍被当成可恢复，结果把裸「继续」
+		// 丢进全新空会话（实测串到别的 transcript）。无活 adapter 且无 ACPSessionID 时仍允许
+		// 续问（重试失败首轮），但 runACP 会走无历史锚点文案，而不是假装在恢复。
+		hasLive := tr.agentMgr.Adapter(taskID) != nil
+		hasACP := t.ACPSessionID != ""
+		if !hasLive && !hasACP && strings.TrimSpace(t.Prompt) == "" {
 			return fmt.Errorf("task missing session, cannot resume")
 		}
-		// 冷启动回执（本函数返回前，见 noteResuming）：无活会话 = 要重新 spawn agent 并
-		// session/load 重建上下文，实测可静默数十秒（2026-10-06：dsh 隔夜续问 spawn→
-		// initialize 耗时 79s）。intervene 是乐观 202，这段耗时若不落事件，界面就是
-		// "消息发出去了但永远转圈"，会被读成"无法续话"。
-		tr.noteResuming(taskID, tr.agentMgr.Adapter(taskID) == nil)
+		// 冷启动回执（本函数返回前，见 noteResuming）：无活会话 = 要重新 spawn agent；
+		// 有 ACPSessionID 才是真恢复，否则是无对端历史的新开。实测 spawn 可静默数十秒。
+		tr.noteResuming(taskID, !hasLive, hasACP)
 		// 排队提交（turn_queue.go）：上一轮还没跑完时排在它后面，而不是同时打进同一会话
 		// （并发第二个 Run 会被 AgentManager 拒掉，老代码据此 failTask 把任务打死）。
 		tr.noteQueued(taskID, tr.submitTurn(taskID, func(cur *model.Task) {
@@ -751,8 +755,8 @@ func (tr *TaskRunner) ResumeRich(taskID, text, turnModel string, images []agent.
 		return fmt.Errorf("task missing session, cannot resume")
 	}
 	// print 路径同样要 spawn 一个新进程 claude --resume 续上下文，冷启动照样静默，
-	// 回执口径与 ACP 路径一致（见上面 noteResuming）。
-	tr.noteResuming(taskID, true)
+	// 回执口径与 ACP 路径一致（见上面 noteResuming）。有 ClaudeSessionID 才是真恢复。
+	tr.noteResuming(taskID, true, t.ClaudeSessionID != "")
 	tr.noteQueued(taskID, tr.submitTurn(taskID, func(cur *model.Task) {
 		tr.run(context.Background(), cur, text)
 	}))
@@ -1141,6 +1145,7 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 
 	// ACP 保活复用：已有活会话（前一轮保活）时直接跑一轮，不重新 Open/LoadSession。
 	// 活会话进程若已死（adapter.Done 关闭），先摘除再走 open 路径。
+	// 热路径对端仍持有历史 → 用户原文原样转发，不加锚点。
 	if a := tr.agentMgr.Adapter(task.ID); a != nil {
 		if adapterDead(a) {
 			_ = tr.agentMgr.Close(task.ID)
@@ -1156,11 +1161,18 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 	if resumePrompt != "" && task.ACPSessionID != "" {
 		resumeFrom = task.ACPSessionID
 	}
-	fellBack := tr.ensureACPSession(ctx, task, resumeFrom)
+	fellBack, historyOK := tr.ensureACPSession(ctx, task, resumeFrom)
 	tr.logger.Debug("runACP: ensureACPSession done", zap.String("task", task.ID), zap.Bool("fell_back", fellBack),
-		zap.Bool("adapter", tr.agentMgr.Adapter(task.ID) != nil))
+		zap.Bool("history_ok", historyOK), zap.Bool("adapter", tr.agentMgr.Adapter(task.ID) != nil))
 	if tr.agentMgr.Adapter(task.ID) == nil {
 		return // Open 失败已 surface（failTask / 续问 status + forceFailTask）
+	}
+	// 对端历史不可用（无 sid / load 失败后新开）：钉本任务 Prompt+近期事件，禁止裸「继续」串台。
+	if resumePrompt != "" && !historyOK {
+		if cur, ok := tr.store.Get(task.ID); ok && cur != nil {
+			task = cur
+		}
+		prompt = continuePromptForFreshSession(task, prompt)
 	}
 	// ACP 路径保活（轮末不关，由空闲回收/取消/删任务/关停关）；PrintAgent 回退一次性（轮末关）
 	tr.runACPTurn(ctx, task, prompt, !fellBack, turnModel, images)
@@ -1171,10 +1183,15 @@ func (tr *TaskRunner) runACP(parentCtx context.Context, task *model.Task, resume
 //
 // resumeFrom 非空 = 续问复用已有会话上下文（ACP 走 session/load/resume；PrintAgent 走
 // --resume）。Open 失败会 surface（首轮 failTask；续问 status 事件 + forceFailTask），
-// 此时无会话登记，调用方应据此返回。返回是否走了 PrintAgent 回退（fellBack）。
-func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, resumeFrom string) bool {
+// 此时无会话登记，调用方应据此返回。
+//
+// 返回值：
+//   - fellBack：是否走了 PrintAgent 回退；
+//   - historyOK：对端是否带着可续历史（活会话复用 / load·resume 成功）。false 时调用方
+//     必须给续问 prompt 加本任务锚点，不能只发「继续」。
+func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, resumeFrom string) (fellBack bool, historyOK bool) {
 	if tr.agentMgr.Adapter(task.ID) != nil {
-		return false // 复用活会话（wires 已注册），无回退
+		return false, true // 复用活会话（wires 已注册），历史仍在
 	}
 	// TaskID 必须带上：它经 SessionConfig 一路传到 ACP spawn，成为子进程的
 	// PIEQI_TASK_ID。这是"会话能标识自己"的唯一途径，也是自重启后能把发起者
@@ -1191,6 +1208,8 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 			zap.String("task", task.ID), zap.String("agent", task.Agent),
 			zap.String("resume_from", resumeFrom))
 	}
+	// historyOK：仅当带着 ResumeFrom 且一次 Open 成功（未跌落到 session-lost 新开）才为 true。
+	historyOK = resumeFrom != ""
 	adapter, fellBack, err := tr.agentMgr.Open(ctx, task.ID, task.ProjectID, cfg)
 	if err != nil {
 		// 会话忙（同 task 已有会话/轮次在跑）：并发提交的信号，**不是**续问失败。
@@ -1200,7 +1219,7 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 		if errors.Is(err, agent.ErrSessionBusy) {
 			tr.logger.Debug("agent open skipped: session busy",
 				zap.String("task", task.ID), zap.String("agent", task.Agent), zap.Bool("resume", resumeFrom != ""))
-			return false
+			return false, true // 已有会话在册，历史仍在
 		}
 		// 冷启动 load/resume 撞 session not found：对端已不认 sid。清死 sid 后开全新会话
 		// （与 Print ErrNoConversation / 保活 prompt 死 sid 兜底对齐）。仍失败再 surface。
@@ -1211,17 +1230,18 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 				Text: "续问上下文已丢失，已用全新会话继续"})
 			tr.clearACPSessionID(task.ID)
 			cfg.ResumeFrom = ""
+			historyOK = false // 新开无对端历史，调用方必须加锚点
 			adapter, fellBack, err = tr.agentMgr.Open(ctx, task.ID, task.ProjectID, cfg)
 			if err != nil {
 				if errors.Is(err, agent.ErrSessionBusy) {
 					tr.logger.Debug("agent open (fresh after session-lost) skipped: session busy",
 						zap.String("task", task.ID))
-					return false
+					return false, true
 				}
 				tr.appendEvent(task.ID, model.TaskEvent{Type: model.EventStatus,
 					Text: "续问失败：" + err.Error()})
 				tr.forceFailTask(task.ID, "agent open: "+err.Error())
-				return fellBack
+				return fellBack, false
 			}
 			// 全新 Open 成功：落到下方 wires / 持久化 sid。
 		} else if resumeFrom != "" {
@@ -1231,10 +1251,10 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 			// 续问时 task 处终态（completed/failed/cancelled），failTask 经 transition 终态守卫为 no-op；
 			// 用 forceFailTask 强制置 failed，确保状态/Error/通知落库，明确 surface 不静默失败。
 			tr.forceFailTask(task.ID, "agent open: "+err.Error())
-			return fellBack
+			return fellBack, false
 		} else {
 			tr.failTask(task.ID, "agent open: "+err.Error())
-			return fellBack
+			return fellBack, false
 		}
 	}
 	if fellBack {
@@ -1280,7 +1300,7 @@ func (tr *TaskRunner) ensureACPSession(ctx context.Context, task *model.Task, re
 			return false
 		})
 	}
-	return fellBack
+	return fellBack, historyOK
 }
 
 // clearACPSessionID 丢掉已对端不认的续问句柄，避免下次冷启动 ResumeFrom 继续打死 sid。
@@ -1354,7 +1374,12 @@ func (tr *TaskRunner) runACPTurn(ctx context.Context, task *model.Task, prompt s
 				Text: "续问上下文已丢失，已用全新会话继续"})
 			_ = tr.agentMgr.Close(task.ID)
 			tr.clearACPSessionID(task.ID)
-			fellBack := tr.ensureACPSession(ctx, task, "") // resumeFrom="" → 全新会话
+			if cur, ok := tr.store.Get(task.ID); ok && cur != nil {
+				task = cur
+			}
+			// 对端历史已断：重跑本轮前钉本任务锚点，避免裸「继续」串台。
+			prompt = continuePromptForFreshSession(task, prompt)
+			fellBack, _ := tr.ensureACPSession(ctx, task, "") // resumeFrom="" → 全新会话
 			if tr.agentMgr.Adapter(task.ID) != nil {
 				tr.runACPTurn(ctx, task, prompt, !fellBack, turnModel, images)
 			}
@@ -2172,6 +2197,10 @@ func (tr *TaskRunner) failTask(taskID, errMsg string) {
 		now := time.Now()
 		t.FinishedAt = &now
 	})
+	// 时间线也要看见失败：只写 Error 字段时 UI 事件流几乎只剩用户那一句，
+	// 续问后看起来像「从没失败过」（c764d612 首轮未登录失败即如此）。
+	tr.appendEvent(taskID, model.TaskEvent{Type: model.EventStatus,
+		Text: "任务失败：" + truncateErr(errMsg)})
 	tr.logger.Error("task failed", zap.String("task", taskID), zap.String("err", errMsg))
 	tr.notifyFinished(updated, "❌ 任务失败: "+errMsg)
 	// 长路径：test 失败回流 Issue（与 completeTask 的 OnTaskCompleted 对称）。

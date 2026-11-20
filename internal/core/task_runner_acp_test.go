@@ -45,6 +45,7 @@ type fakeAgentRunner struct {
 	runN              int // Run（prompt turn）调用次数，断言保活复用时用
 	busyN             int // 接下来 N 次 Run 返回 ErrSessionBusy（模拟并发提交撞上"已有轮次在跑"）
 	imagesN           int // 最近一次 RunRich 收到的图片数（0 = 纯文本）；读用 lastImages()
+	prompts           []string // 每次 Run/RunRich 收到的 prompt（断言无历史锚点）
 	sessSeq           int
 	onClosed          func(taskID, reason string) // SetOnSessionClosed 注册；Close 时触发（镜像 AgentManager）
 }
@@ -125,6 +126,7 @@ func (f *fakeAgentRunner) RunRich(ctx context.Context, taskID, prompt, turnModel
 	f.mu.Lock()
 	a := f.adapters[taskID]
 	f.runN++
+	f.prompts = append(f.prompts, prompt)
 	if len(images) > 0 {
 		f.imagesN = len(images)
 	}
@@ -173,6 +175,24 @@ func (f *fakeAgentRunner) runCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.runN
+}
+
+func (f *fakeAgentRunner) lastPrompt() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.prompts) == 0 {
+		return ""
+	}
+	return f.prompts[len(f.prompts)-1]
+}
+
+func (f *fakeAgentRunner) promptAt(i int) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i < 0 || i >= len(f.prompts) {
+		return ""
+	}
+	return f.prompts[i]
 }
 
 func (f *fakeAgentRunner) Cancel(ctx context.Context, taskID string) error {
@@ -1090,6 +1110,97 @@ func TestRunACP_Resume_KeepAliveSessionNotFound(t *testing.T) {
 	fresh := fake.openCallAt(openBefore) // 首次全新 Open（保活路径不先 resume Open）
 	if fresh.resumeFrom != "" {
 		t.Fatalf("fresh open after keepalive miss resumeFrom=%q, want empty", fresh.resumeFrom)
+	}
+}
+
+// TestRunACP_Resume_NoACPSessionAnchorsPrompt 首轮从未建成 ACP 会话（无 ACPSessionID）时续问：
+// 允许重试，但发给 agent 的 prompt 必须钉本任务原文，且回执不能假装「正在恢复会话」。
+// 回归 c764d612：裸「继续」+ 预分配 ClaudeSessionID 放行 → 空会话串到别的 transcript。
+func TestRunACP_Resume_NoACPSessionAnchorsPrompt(t *testing.T) {
+	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "ok"}, false)
+	task := createACPTestTask(t, store)
+	_, err := store.Update(task.ID, func(tt *model.Task) bool {
+		tt.Status = model.TaskFailed
+		tt.Error = "agent open: Cursor 未登录"
+		tt.ACPSessionID = ""
+		tt.Prompt = "approval unresolved: 怎么导致 acp 中断"
+		return true
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	if err := tr.Resume(task.ID, "继续", ""); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if !hasEvent(t, store, task.ID, model.EventStatus, "无对端会话可恢复") {
+		t.Fatalf("want no-restore receipt, events=%+v", getTask(t, store, task.ID).Events)
+	}
+	if hasEvent(t, store, task.ID, model.EventStatus, "正在恢复会话") {
+		t.Fatalf("must not claim session restore when ACPSessionID empty")
+	}
+
+	// 任务进 Resume 前已是 failed，不能用 waitRunACPDone（它会立刻命中旧终态）。
+	waitFor(t, 2*time.Second, "fresh resume completed", func() bool {
+		tt, ok := store.Get(task.ID)
+		return ok && tt != nil && tt.Status == model.TaskCompleted && fake.runCount() >= 1
+	})
+	got := fake.lastPrompt()
+	if !strings.Contains(got, "approval unresolved") {
+		t.Fatalf("anchored prompt missing original task: %q", got)
+	}
+	if !strings.Contains(got, "不要查找其它会话") {
+		t.Fatalf("anchored prompt missing anti-wander head: %q", got)
+	}
+	if !strings.Contains(got, "当前请求：继续") {
+		t.Fatalf("anchored prompt missing current request: %q", got)
+	}
+}
+
+// TestRunACP_Resume_WarmBareContinueUnchanged 热保活有历史时，裸「继续」原样转发（不加锚点）。
+func TestRunACP_Resume_WarmBareContinueUnchanged(t *testing.T) {
+	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hello"}, false)
+	task := createACPTestTask(t, store)
+	tr.Start(context.Background(), task)
+	waitRunACPDone(t, store, task.ID)
+	if fake.adapter(task.ID) == nil {
+		t.Fatal("keepalive adapter missing")
+	}
+	if err := tr.Resume(task.ID, "继续", ""); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	waitFor(t, 2*time.Second, "warm resume done", func() bool {
+		tt, ok := store.Get(task.ID)
+		return ok && tt != nil && tt.Status == model.TaskCompleted && fake.runCount() >= 2
+	})
+	if got := fake.lastPrompt(); got != "继续" {
+		t.Fatalf("warm resume prompt=%q, want bare 继续", got)
+	}
+}
+
+// TestRunACP_Resume_SessionLostAnchorsPrompt load 失败新开后，发给 agent 的文案必须带本任务锚点。
+func TestRunACP_Resume_SessionLostAnchorsPrompt(t *testing.T) {
+	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hi", realSessionID: "acp-real-sid"}, false)
+	task := createACPTestTask(t, store)
+	tr.Start(context.Background(), task)
+	waitRunACPDone(t, store, task.ID)
+	if err := tr.agentMgr.Close(task.ID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	fake.setOpenErrIfResume(errors.New("acp: load session acp-real-sid: session not found"))
+	if err := tr.Resume(task.ID, "继续", ""); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	waitFor(t, 2*time.Second, "session-lost anchored", func() bool {
+		tt, ok := store.Get(task.ID)
+		return ok && tt != nil && tt.Status == model.TaskCompleted && fake.runCount() >= 2
+	})
+	got := fake.lastPrompt()
+	if !strings.Contains(got, "do something") {
+		t.Fatalf("session-lost fresh prompt missing task: %q", got)
+	}
+	if !strings.Contains(got, "当前请求：继续") {
+		t.Fatalf("session-lost fresh prompt missing request: %q", got)
 	}
 }
 
