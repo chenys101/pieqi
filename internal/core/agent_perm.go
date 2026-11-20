@@ -599,13 +599,24 @@ func (pw *PermissionWire) currentTurn() int {
 	return CurrentTurnCount(t.Events)
 }
 
-// recipesFromPermission 从权限请求的 RawInput 抽 shell 配方；无命令文本 → nil。
+// recipesFromPermission 从权限请求抽出配方指纹列表。
+//
+// 优先 shell 命令段（复合命令多段）；没有可执行文本时再退到 MCP/工具名
+//（ToolTitle，或 RawInput 里的 toolName）。无任何可记配方 → nil。
 func recipesFromPermission(req agent.PermissionRequest) []string {
 	cmd := commandFromPermRawInput(req.RawInput)
-	if cmd == "" {
-		return nil
+	if cmd != "" {
+		if rs := agent.ShellRecipes(cmd); len(rs) > 0 {
+			return rs
+		}
 	}
-	return agent.ShellRecipes(cmd)
+	if r := agent.ToolRecipe(req.ToolTitle); r != "" {
+		return []string{r}
+	}
+	if r := agent.ToolRecipeFromRawInput(req.RawInput); r != "" {
+		return []string{r}
+	}
+	return nil
 }
 
 // decisionSegmentsFromPermission 复合 shell 的分段风险；单段或非 shell → nil（UI 不渲染）。

@@ -1,7 +1,8 @@
 // Settings API：全局偏好（跨任务 / 跨项目 / 跨 agent）。
 //
 // ① 审批自动放行：L0 / L1 按档可配；整档 L2/L3 不可配。
-//    L2 仅两处窄口：trusted_recipes（枚举）与 auto_approve_local_execute（回环探活，ADR-0020）。
+//    L2 仅两处窄口：trusted_recipes（shell 命令或 MCP 工具名枚举）与
+//    auto_approve_local_execute（回环探活，ADR-0020）。
 // ④ 事件保留上限。免打扰同属 ①。
 
 import { request, requestBlob } from './client'
@@ -33,7 +34,8 @@ export interface AppSettings {
   /** 事件保留上限；0 = 全部保留 */
   event_retention: number
   /**
-   * 跨会话可信命令配方（如 `go test`、`curl`）。
+   * 跨会话可信配方：shell（如 `go test`、`curl`）或 MCP 工具名
+   *（如 `memory_recall`；`mcp__server__tool` 会规范成末段工具名）。
    * 不开放整档 L2；硬边界（删除/push/install）服务端拒绝写入。
    */
   trusted_recipes: string[]

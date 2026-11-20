@@ -25,7 +25,7 @@ type settingsDto struct {
 	DNDStart                string `json:"dnd_start"`
 	DNDEnd                  string `json:"dnd_end"`
 	EventRetention          int    `json:"event_retention"`
-	// TrustedRecipes 跨会话可信命令配方（如 go test）；空数组 = 未配。
+	// TrustedRecipes 跨会话可信配方（shell 如 go test，或 MCP 如 memory_recall）；空数组 = 未配。
 	// 始终下发数组（不用 omitempty），方便前端直接 v-for。
 	TrustedRecipes []string `json:"trusted_recipes"`
 	// DefaultProjectPath 新建任务的缺省工作目录（绝对路径）。空 = 未配置，

@@ -158,7 +158,17 @@ async function apply(patch: Partial<AppSettings>) {
 
 /** 可信配方输入草稿；回车/按钮提交整表替换 */
 const recipeDraft = ref('')
-const RECIPE_SUGGESTIONS = ['go test', 'go build', 'curl', 'npm run test', 'npx vitest'] as const
+const RECIPE_SUGGESTIONS = [
+  'go test',
+  'go build',
+  'curl',
+  'npm run test',
+  'npx vitest',
+  'memory_recall',
+  'memory_smart_search',
+  'memory_sessions',
+  'memory_save',
+] as const
 
 async function addTrustedRecipe(raw?: string) {
   if (!settings.value) return
@@ -326,8 +336,8 @@ const appVersion = __APP_VERSION__
         </SettingRow>
 
         <SettingRow
-          label="可信命令配方"
-          desc="跨任务免审个别 L2 命令（如 go test），不开放整档「执行命令」。删除 / 推送 / 装依赖等硬边界无法加入。只影响之后新建的会话。"
+          label="可信命令 / MCP 配方"
+          desc="跨任务免审个别 L2 命令或 MCP 工具（如 go test、memory_recall），不开放整档「执行命令」。删除 / 推送 / 装依赖等硬边界无法加入。只影响之后新建的会话。"
           stack
         >
           <div class="flex flex-wrap gap-1.5">
@@ -370,7 +380,7 @@ const appVersion = __APP_VERSION__
             <Input
               v-model="recipeDraft"
               class="flex-1"
-              placeholder="go test 或 curl -s …"
+              placeholder="go test / memory_recall / mcp__…__tool"
               :disabled="!settings"
               @keydown.enter.prevent="addTrustedRecipe()"
             />

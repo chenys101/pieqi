@@ -125,11 +125,12 @@ type Settings struct {
 	AutoApproveL0 bool `json:"auto_approve_l0"`
 	AutoApproveL1 bool `json:"auto_approve_l1"`
 
-	// TrustedRecipes 跨会话可信命令配方（如 `go test`、`curl`）。
+	// TrustedRecipes 跨会话可信配方：shell（如 `go test`、`curl`）或 MCP 工具名
+	//（如 `memory_recall`；`mcp__server__tool` 规范成末段工具名）。
 	//
 	// 与 sessionRecipes（单任务「同类免审」）同形，但落盘、跨任务。
-	// 只认「族+动词」配方；硬边界（删除 / push / install / go run…）写入时拒绝。
-	// 空 = 不额外放行任何 L2 命令。规范化见 agent.NormalizeTrustedRecipes。
+	// 硬边界（删除 / push / install / go run…）写入时拒绝。
+	// 空 = 不额外放行任何 L2。规范化见 agent.NormalizeTrustedRecipes。
 	TrustedRecipes []string `json:"trusted_recipes,omitempty"`
 
 	// AutoApproveLocalExecute 本机回环 HTTP 探活免审（ADR-0020）。

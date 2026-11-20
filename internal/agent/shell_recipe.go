@@ -218,7 +218,8 @@ var recipeHardDenyPrefix = []string{
 // NormalizeTrustedRecipes 规范化设置页「可信配方」列表。
 //
 // 规则：
-//   - 每项可以是完整命令（`go test ./...`）或已是配方（`go test`）；
+//   - 每项可以是完整命令（`go test ./...`）、已是配方（`go test`）、
+//     或 MCP/工具名（`memory_recall` / `mcp__agentmemory__memory_recall`）；
 //   - 复合命令（多段）拒绝 —— 必须一条条加，避免一次放行整条毒链；
 //   - 必须通过 RecipeRememberable（硬边界不可进表）；
 //   - 去重、保序；超过 maxTrustedRecipes 报错。
@@ -246,6 +247,28 @@ func normalizeOneTrustedRecipe(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", false
+	}
+	// MCP 命名空间 id 优先走 ToolRecipe（剥 mcp__server__ 前缀），避免整串进表后
+	// 与运行期「只记末段工具名」对不上。
+	if strings.Contains(raw, "__") {
+		r := ToolRecipe(raw)
+		if r == "" || !RecipeRememberable(r) {
+			return "", false
+		}
+		return r, true
+	}
+	// 纯工具 id（无空格）走 ToolRecipe：收 memory_recall，拒 callmcptool/pwsh。
+	// ToolRecipe 已拒绝的标识符不得再退回 ShellRecipes（否则宽壳名会被当成「命令名」进表）。
+	if !strings.ContainsAny(raw, " \t") {
+		if r := ToolRecipe(raw); r != "" {
+			if !RecipeRememberable(r) {
+				return "", false
+			}
+			return r, true
+		}
+		if isToolRecipeID(strings.ToLower(raw)) {
+			return "", false
+		}
 	}
 	recipes := ShellRecipes(raw)
 	var r string

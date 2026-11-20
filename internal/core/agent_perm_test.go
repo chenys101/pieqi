@@ -972,6 +972,59 @@ func TestWirePermission_TrustedRecipeAutoApproves(t *testing.T) {
 	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
 }
 
+// TestWirePermission_TrustedMCPRecipeAutoApproves MCP 工具名进可信配方后跨会话免审。
+// agentmemory 等 other(L2) 工具没有 shell 命令段，以前 recipesFromPermission 恒空，
+// 设置页加了 memory_recall 也不生效。
+func TestWirePermission_TrustedMCPRecipeAutoApproves(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+	pw.SetTrustedRecipes([]string{"memory_recall"})
+
+	fa.emitPerm(permReq("req-mcp1", "mcp__agentmemory__memory_recall", "other", standardOptions()))
+	if fa.approveCount() != 1 {
+		t.Fatalf("approveCount=%d, want 1（可信 MCP 配方应免审）", fa.approveCount())
+	}
+	if tt, _ := store.Get(taskID); tt.Status == model.TaskWaitingInput {
+		t.Fatal("trusted MCP recipe must not enter waiting_input")
+	}
+
+	// 同工具裸名也应命中（规范化后同为 memory_recall）
+	fa.emitPerm(permReq("req-mcp2", "memory_recall", "other", standardOptions()))
+	if fa.approveCount() != 2 {
+		t.Fatalf("approveCount=%d, want 2（裸名也应免审）", fa.approveCount())
+	}
+
+	// 未信任的 MCP 工具仍弹卡
+	fa.emitPerm(permReq("req-mcp3", "memory_governance_delete", "other", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+}
+
+// TestWirePermission_ApproveSessionRemembersMCPTool other 整类不进 sessionAlways，
+// 但应记住具体 MCP 工具配方，本会话同工具免审。
+func TestWirePermission_ApproveSessionRemembersMCPTool(t *testing.T) {
+	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-m1", "memory_smart_search", "other", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+	if err := pw.Resolve("req-m1", "approve_session"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+
+	fa.emitPerm(permReq("req-m2", "mcp__agentmemory__memory_smart_search", "other", standardOptions()))
+	if fa.approveCount() != 2 {
+		t.Fatalf("approveCount=%d, want 2（会话应记住 MCP 工具配方）", fa.approveCount())
+	}
+	if tt, _ := store.Get(taskID); tt.Status == model.TaskWaitingInput {
+		t.Fatal("remembered MCP recipe must not enter waiting_input")
+	}
+
+	// 不同 MCP 工具不该被误放行
+	fa.emitPerm(permReq("req-m3", "memory_save", "other", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+}
+
 // TestWirePermission_CompoundCommandCarriesSegments 复合 shell 审批卡带分段风险。
 func TestWirePermission_CompoundCommandCarriesSegments(t *testing.T) {
 	fa, _, _, store, taskID, pw, _ := setupPermWire(t, time.Minute)
