@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -381,6 +382,59 @@ func TestAuthenticateAfterInit_NonCursorNoop(t *testing.T) {
 		AuthMethods: []acp.AuthMethod{{Agent: &acp.AuthMethodAgent{Id: "x"}}},
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestClassifyCursorAuthError 鉴权失败必须分流：传输层问题报"连接失败"，
+// 只有真的鉴权拒绝才报"未登录"。2026-11-23 事故：代理节点 TLS 劣化导致
+// authenticate 报 [unavailable]，旧逻辑一律显示"未登录"，连误导三次排查。
+func TestClassifyCursorAuthError(t *testing.T) {
+	cases := []struct {
+		name    string
+		err     error
+		network bool
+	}{
+		{"grpc unavailable", errors.New(`{"code":-32603,"message":"Internal error","data":{"details":"[unavailable]"}}`), true},
+		{"deadline exceeded", errors.New(`{"code":-32603,"message":"Internal error","data":{"error":"context deadline exceeded"}}`), true},
+		{"dial timeout", errors.New("dial tcp 13.57.67.213:443: i/o timeout"), true},
+		{"connection reset", errors.New("read tcp 127.0.0.1:52100: connection reset by peer"), true},
+		{"tls handshake", errors.New("tls handshake timeout"), true},
+		{"pipe closed", errors.New("write |1: The pipe is being closed."), true},
+		{"peer disconnected", errors.New(`{"code":-32603,"message":"Internal error","data":{"error":"peer disconnected before response"}}`), true},
+		{"dns", errors.New("dial tcp: lookup agentn.global.api5.cursor.sh: no such host"), true},
+		{"auth required", errors.New("authentication required: please sign in"), false},
+		{"401", errors.New("401 Unauthorized"), false},
+	}
+	for _, c := range cases {
+		got := classifyCursorAuthError(c.err)
+		if got == nil {
+			t.Fatalf("%s: nil error", c.name)
+		}
+		isNetwork := strings.Contains(got.Error(), "连接失败")
+		isLogin := strings.Contains(got.Error(), "未登录")
+		if isNetwork == isLogin {
+			t.Fatalf("%s: got %q, must be exactly one of network/login", c.name, got.Error())
+		}
+		if isNetwork != c.network {
+			t.Fatalf("%s: got %q, want network=%v", c.name, got.Error(), c.network)
+		}
+		if strings.Contains(got.Error(), "\n") {
+			t.Fatalf("%s: message must be single line: %q", c.name, got.Error())
+		}
+	}
+	if err := classifyCursorAuthError(nil); err != nil {
+		t.Fatalf("nil must stay nil, got %v", err)
+	}
+}
+
+func TestCursorAuthBrief_Truncates(t *testing.T) {
+	long := strings.Repeat("错", 300)
+	got := cursorAuthBrief("line1\n line2\t  " + long)
+	if strings.Contains(got, "\n") || strings.Contains(got, "\t") {
+		t.Fatalf("must be single line: %q", got)
+	}
+	if n := len([]rune(got)); n > 170 {
+		t.Fatalf("too long: %d runes", n)
 	}
 }
 

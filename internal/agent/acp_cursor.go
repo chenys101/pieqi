@@ -21,6 +21,64 @@ import (
 // cursorAuthError 未登录时的固定文案（任务 failed 路径会原样 surface 给用户）。
 const cursorAuthError = "Cursor 未登录：请本机执行 agent login，或设置 CURSOR_API_KEY"
 
+// cursorNetworkError 鉴权调用**没走通**时的文案：这不是登录态问题，别让用户去重新 login。
+//
+// 2026-11-23 排查结论：代理节点 TLS/HTTP2 劣化时 authenticate 会以
+// `[unavailable]` / `context deadline exceeded` 失败，旧逻辑一律报成"未登录"，
+// 连续三次把排查方向带偏（实际账号有额度、auth.json token 也有效）。
+const cursorNetworkError = "Cursor 连接失败（网络不可达/超时），不是登录问题：请检查代理/网络后重试"
+
+// cursorTransportMarkers 传输层失败的指纹：gRPC UNAVAILABLE/DEADLINE_EXCEEDED、
+// 连接被拒/重置、DNS、TLS 握手、管道断开都算"没连上"，不能算"没登录"。
+var cursorTransportMarkers = []string{
+	"unavailable",
+	"deadline exceeded",
+	"timeout",
+	"timed out",
+	"connection refused",
+	"connection reset",
+	"econnreset",
+	"econnrefused",
+	"no such host",
+	"network is unreachable",
+	"i/o timeout",
+	"tls handshake",
+	"handshake failure",
+	"pipe is being closed",
+	"peer disconnected",
+	"broken pipe",
+	"unexpected eof",
+	"eof",
+}
+
+// classifyCursorAuthError 把 authenticate 失败分成「网络不通」和「真的没登录」。
+//
+// 只有**不命中**任何传输指纹的失败才回 cursorAuthError（例如服务端明确回
+// authentication required / 401）；否则回网络文案并附原始详情，便于一次定位。
+func classifyCursorAuthError(err error) error {
+	if err == nil {
+		return nil
+	}
+	low := strings.ToLower(err.Error())
+	for _, m := range cursorTransportMarkers {
+		if strings.Contains(low, m) {
+			return fmt.Errorf("%s（详情：%s）", cursorNetworkError, cursorAuthBrief(err.Error()))
+		}
+	}
+	return fmt.Errorf("%s", cursorAuthError)
+}
+
+// cursorAuthBrief 压成单行并截断，避免把整段 JSON-RPC 错误糊到 UI 上。
+func cursorAuthBrief(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	const max = 160
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}
+
 // cursorLoginMethodID 是 initialize.authMethods[].id 的实测值（docs/notes/cursor-acp-p0.md）。
 const cursorLoginMethodID = "cursor_login"
 
@@ -69,7 +127,8 @@ type acpAuthenticator interface {
 }
 
 // authenticateAfterInit Cursor：authMethods 空 ⇒ 已就绪；非空 ⇒ Authenticate(cursor_login)。
-// 失败返回固定可读错误，调用方应 failed 任务而不是挂起。
+// 失败按**网络/登录**分流返回可读错误（调用方应 failed 任务而不是挂起）：
+// 传输层失败报连接问题，别把用户引去重新登录。
 func (a *ACPAgent) authenticateAfterInit(ctx context.Context, initResp acp.InitializeResponse) error {
 	if !isCursorACP(a.cfg) {
 		return nil
@@ -90,7 +149,7 @@ func (a *ACPAgent) authenticateAfterInit(ctx context.Context, initResp acp.Initi
 	a.logger.Debug("acp cursor authenticate", zap.String("methodId", methodID), zap.Strings("authMethods", ids))
 	if _, err := auth.Authenticate(ctx, acp.AuthenticateRequest{MethodId: methodID}); err != nil {
 		a.logger.Warn("acp cursor authenticate failed", zap.Error(err))
-		return fmt.Errorf("%s", cursorAuthError)
+		return classifyCursorAuthError(err)
 	}
 	return nil
 }
