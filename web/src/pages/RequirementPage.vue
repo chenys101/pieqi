@@ -216,16 +216,24 @@ const acColor: Record<string, string> = {
   deferred: 'text-muted',
 }
 
-async function reload() {
+async function applySuggestOutcome() {
   if (!id.value) return
-  await store.loadDetail(id.value)
   const outcome = await api.getSuggestOutcome(id.value)
   outcomeKind.value = outcome.kind
   proposal.value = outcome.proposal?.nodes?.length ? outcome.proposal : null
   block.value = outcome.block ?? null
   if (outcome.kind === 'blocked') gateOpen.value = false
   if (store.current?.integration_branch) gateOpen.value = false
-  await Promise.all([refreshPackMeta(), refreshCapacityAndNudge()])
+}
+
+/** soft：轮询用——跳过 pack/capacity/settings，且 store 不挡 UI。 */
+async function reload(opts?: { soft?: boolean }) {
+  if (!id.value) return
+  const soft = !!opts?.soft
+  await Promise.all([store.loadDetail(id.value), applySuggestOutcome()])
+  if (!soft) {
+    await Promise.all([refreshPackMeta(), refreshCapacityAndNudge()])
+  }
 }
 
 function stopPoll() {
@@ -238,7 +246,7 @@ function stopPoll() {
 function startPoll() {
   stopPoll()
   pollTimer = setInterval(async () => {
-    await reload()
+    await reload({ soft: true })
     const hasOutcome = outcomeKind.value === 'proposal' || outcomeKind.value === 'blocked'
     if (hasOutcome || !suggestRunning.value) {
       suggesting.value = false

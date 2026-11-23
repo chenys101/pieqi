@@ -250,10 +250,15 @@ func (s *Server) listTasks(c *gin.Context) {
 	tasks, counts := s.store.ListSummaryEvents()
 	// ADR-0021 P2：planned 默认不进首页；?include_planned=1 才带上。
 	includePlanned := c.Query("include_planned") == "1" || c.Query("include_planned") == "true"
+	// 需求详情：?requirement_id= 服务端过滤，避免前端拉全库再筛。
+	reqFilter := strings.TrimSpace(c.Query("requirement_id"))
 	// 按 project_path 分组（REQ-01）
 	groups := map[string]*taskGroup{}
 	order := []string{}
 	for i, t := range tasks {
+		if reqFilter != "" && t.RequirementID != reqFilter {
+			continue
+		}
 		if !includePlanned && t.Status == model.TaskPlanned {
 			continue
 		}

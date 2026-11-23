@@ -6,10 +6,18 @@
 //   平板 768–1279 420px 侧栏，靠头部按钮开合
 //   移动端 <768  整屏，由头部那一行的反馈图标切换 时间线 / 变更反馈
 // 三档判据、详情加载、决策动作、模型切换都在 features/session/useSessionPage.ts。
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSessionPage } from '@/features/session/useSessionPage'
-import { SessionHeader, SessionTimeline, ApprovalBanner, InterveneInput, PlannedStartPanel } from '@/features/session'
+import {
+  SessionHeader,
+  SessionTimeline,
+  ApprovalBanner,
+  InterveneInput,
+  PlannedStartPanel,
+  PromoteToRequirementModal,
+  canPromoteToRequirement,
+} from '@/features/session'
 import { FeedbackPanel, ArtifactViewer } from '@/features/feedback'
 import PlanList from '@/features/timeline/components/PlanList.vue'
 import Drawer from '@/components/ui/Drawer.vue'
@@ -64,6 +72,9 @@ const {
   askRemove,
   doRemove,
 } = useSessionPage(taskId)
+
+const promoteOpen = ref(false)
+const showPromote = computed(() => canPromoteToRequirement(task.value))
 </script>
 
 <template>
@@ -138,6 +149,27 @@ const {
             </ContentColumn>
           </div>
 
+          <!-- 短路径未挂需求：升格常驻（PE 入口拍板；非所有任务） -->
+          <div
+            v-if="showPromote"
+            class="shrink-0 border-t border-border bg-surface/95 px-3 py-2 backdrop-blur md:px-4"
+            data-testid="session-promote-bar"
+          >
+            <ContentColumn :resizable="false">
+              <div class="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  data-testid="session-promote"
+                  @click="promoteOpen = true"
+                >
+                  升格为需求
+                </Button>
+                <span class="text-[11px] text-muted">短路径 · 未挂需求 · 打磨够了再点</span>
+              </div>
+            </ContentColumn>
+          </div>
+
           <!-- planned：用启动条代替输入框（尚无会话可干预；补 agent 后走 /start） -->
           <PlannedStartPanel
             v-if="task.status === 'planned'"
@@ -168,6 +200,13 @@ const {
             @switch-mode="switchMode"
           />
         </div>
+
+        <PromoteToRequirementModal
+          v-if="task"
+          :open="promoteOpen"
+          :task="task"
+          @close="promoteOpen = false"
+        />
 
         <!-- 移动端：整屏反馈。放在左列内部（而不是它的兄弟）是因为那唯一一行
              头部要一直留着 —— 否则切进反馈后就没有回时间线的路了。

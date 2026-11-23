@@ -33,6 +33,18 @@ export async function createRequirement(body: {
   return request<Requirement>('/requirements', { method: 'POST', body })
 }
 
+/** 把孤儿 Task 挂到需求下（ADR-0021 Promote；禁止自动调用）。 */
+export async function promoteTaskToRequirement(
+  requirementId: string,
+  taskId: string,
+): Promise<Task> {
+  const dto = await request<TaskDto>(
+    `/requirements/${encodeURIComponent(requirementId)}/promote`,
+    { method: 'POST', body: { task_id: taskId } },
+  )
+  return adaptTask(dto)
+}
+
 export async function patchRequirement(
   id: string,
   body: {
@@ -155,15 +167,17 @@ export async function humanVerifyAC(
   )
 }
 
-/** 含 planned，再按 requirement_id 过滤（列表默认排除 planned）。 */
+/** 含 planned；服务端按 requirement_id 过滤（勿拉全库再筛）。 */
 export async function listTasksForRequirement(requirementId: string): Promise<Task[]> {
-  const data = await request<{ projects: TaskGroupDto[] }>('/tasks?include_planned=1')
+  const q = new URLSearchParams({
+    include_planned: '1',
+    requirement_id: requirementId,
+  })
+  const data = await request<{ projects: TaskGroupDto[] }>(`/tasks?${q}`)
   const out: Task[] = []
   for (const g of data.projects ?? []) {
     for (const t of g.tasks ?? []) {
-      if (t.requirement_id === requirementId) {
-        out.push(adaptTask(t as TaskDto))
-      }
+      out.push(adaptTask(t as TaskDto))
     }
   }
   return out

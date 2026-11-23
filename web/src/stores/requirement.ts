@@ -13,7 +13,9 @@ export const useRequirementStore = defineStore('requirement', () => {
   const error = ref('')
 
   async function loadList() {
-    loading.value = true
+    // 有缓存时静默刷新，避免列表整页 Spinner 闪一下。
+    const soft = items.value.length > 0
+    if (!soft) loading.value = true
     error.value = ''
     try {
       items.value = await api.listRequirements()
@@ -25,7 +27,14 @@ export const useRequirementStore = defineStore('requirement', () => {
   }
 
   async function loadDetail(id: string) {
-    loading.value = true
+    // 同 id 再刷：保留 current，不挡首屏（轮询 / 操作后 reload）。
+    const soft = current.value?.id === id
+    if (!soft) {
+      loading.value = true
+      current.value = null
+      outcome.value = null
+      tasks.value = []
+    }
     error.value = ''
     try {
       const [r, o, ts] = await Promise.all([
@@ -38,7 +47,11 @@ export const useRequirementStore = defineStore('requirement', () => {
       tasks.value = ts
     } catch (e) {
       error.value = e instanceof Error ? e.message : '加载失败'
-      current.value = null
+      if (!soft) {
+        current.value = null
+        outcome.value = null
+        tasks.value = []
+      }
     } finally {
       loading.value = false
     }

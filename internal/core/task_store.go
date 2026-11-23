@@ -254,6 +254,27 @@ func (s *TaskStore) List() []*model.Task {
 	return out
 }
 
+// ListByRequirementSummary 按 requirement_id 过滤的轻量副本（Events 置 nil）。
+// 给需求 outcome / 列表过滤用：不需要事件流，避免 List() 克隆全库事件。
+func (s *TaskStore) ListByRequirementSummary(requirementID string) []*model.Task {
+	if s == nil || requirementID == "" {
+		return nil
+	}
+	s.mu.RLock()
+	out := make([]*model.Task, 0)
+	for _, t := range s.tasks {
+		if t.RequirementID != requirementID {
+			continue
+		}
+		cp := *t
+		cp.Events = nil
+		out = append(out, &cp)
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out
+}
+
 // Update 用 mutator 修改任务并持久化，返回更新后的副本。
 // 若 mutator 返回 false 表示无变更，跳过持久化。
 //

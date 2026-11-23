@@ -1,5 +1,7 @@
 // Session Feature 出口（方案 §6/§7）
 export { default as SessionHeader } from './components/SessionHeader.vue'
+export { default as PromoteToRequirementModal } from './components/PromoteToRequirementModal.vue'
+export { canPromoteToRequirement } from './canPromoteToRequirement'
 export { default as SessionTimeline } from './components/SessionTimeline.vue'
 export { default as TurnRail } from './components/TurnRail.vue'
 export { default as InterveneInput } from './components/InterveneInput.vue'

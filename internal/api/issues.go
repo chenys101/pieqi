@@ -129,11 +129,8 @@ func (s *Server) getRequirementOutcome(c *gin.Context) {
 	}
 	var tasks []*model.Task
 	if s.store != nil {
-		for _, t := range s.store.List() {
-			if t.RequirementID == r.ID {
-				tasks = append(tasks, t)
-			}
-		}
+		// 轻量：按需求过滤且不克隆 Events（outcome 只用 status / covers_ac）。
+		tasks = s.store.ListByRequirementSummary(r.ID)
 	}
 	c.JSON(http.StatusOK, core.DeriveRequirementOutcome(r, tasks))
 }

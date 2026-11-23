@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 新建需求页：路径 S0/S1/S2 + 流程包一行选用（workflow-execution-efficiency §4/§11.3）。
+// 新建需求：只服务「已有材料」。说明|AC 至少一侧；一句话走新建任务（入口分立）。
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ContentColumn from '@/components/layout/ContentColumn.vue'
@@ -32,8 +32,20 @@ const workflows = ref<WorkflowSummary[]>([])
 const workflowId = ref('')
 const showPackSheet = ref(false)
 const dupExisting = ref<{ id: string; title: string } | null>(null)
+const pathTouched = ref(false)
 
 const selectedPack = computed(() => workflows.value.find((w) => w.id === workflowId.value))
+
+const hasMaterial = computed(() => !!(body.value.trim() || acText.value.trim()))
+
+const newTaskQuery = computed(() => {
+  const q = new URLSearchParams()
+  if (title.value.trim()) q.set('title', title.value.trim())
+  if (body.value.trim()) q.set('prompt', body.value.trim())
+  if (projectPath.value.trim()) q.set('project_path', projectPath.value.trim())
+  const s = q.toString()
+  return s ? `/tasks/new?${s}` : '/tasks/new'
+})
 
 function recomputeHeuristic() {
   const acLines = acText.value.split('\n').map((l) => l.trim()).filter(Boolean)
@@ -46,16 +58,17 @@ function recomputeHeuristic() {
   if (acLines.length >= 5 || multi) {
     next = 's2'
     hint = 'AC≥5 或显式多角色/多仓 → 建议 S2（成本更高，可覆盖）'
-  } else if (acLines.length <= 3 && bodyLen < 200 && !multi) {
-    next = 's0'
-    hint = 'AC≤3 且正文短 → 可走 S0 短路径（可覆盖）'
+  } else if (!hasMaterial.value || (acLines.length <= 3 && bodyLen < 200 && !multi)) {
+    next = 's1'
+    hint = '材料偏短 → 仍可建需求；一句话意图更建议走「新建任务」打磨后再升格'
   }
   suggestedPath.value = next
   heuristicHint.value = hint
-  if (!pathTouched.value) path.value = next
+  if (!pathTouched.value) {
+    path.value = next
+  }
 }
 
-const pathTouched = ref(false)
 watch([acText, body, title], () => recomputeHeuristic())
 
 onMounted(async () => {
@@ -66,15 +79,30 @@ onMounted(async () => {
       projectPath.value = s.default_project_path
     }
     workflows.value = wf.workflows
-    workflowId.value = s.default_workflow_id || wf.default_id || wf.workflows.find((w) => w.is_default)?.id || 's1-plan-serial'
+    workflowId.value =
+      s.default_workflow_id || wf.default_id || wf.workflows.find((w) => w.is_default)?.id || 's1-plan-serial'
   } catch {
     /* 缺省空路径：提交时校验挡住 */
   }
 })
 
-const canSubmit = computed(() => title.value.trim() && projectPath.value.trim() && !submitting.value)
+const canSubmit = computed(
+  () =>
+    !!title.value.trim() &&
+    !!projectPath.value.trim() &&
+    hasMaterial.value &&
+    !submitting.value,
+)
 
-function pickPath(p: ExecutionPath) {
+const submitBlockReason = computed(() => {
+  if (submitting.value) return ''
+  if (!title.value.trim()) return '请先填写标题'
+  if (!projectPath.value.trim()) return '请先填写项目路径'
+  if (!hasMaterial.value) return '请填写说明或至少一条验收标准'
+  return ''
+})
+
+function pickPath(p: 's1' | 's2') {
   pathTouched.value = true
   path.value = p
   showPackSheet.value = false
@@ -82,15 +110,6 @@ function pickPath(p: ExecutionPath) {
 
 async function submit() {
   if (!canSubmit.value) return
-  if (path.value === 's0') {
-    // S0：短路径 Task，不进需求图
-    const q = new URLSearchParams()
-    if (title.value.trim()) q.set('title', title.value.trim())
-    if (body.value.trim()) q.set('prompt', body.value.trim())
-    if (projectPath.value.trim()) q.set('project_path', projectPath.value.trim())
-    await router.push({ path: '/tasks/new', query: Object.fromEntries(q) })
-    return
-  }
   submitting.value = true
   dupExisting.value = null
   try {
@@ -108,12 +127,17 @@ async function submit() {
       body: body.value.trim(),
       project_path: projectPath.value.trim(),
       acceptance: acceptance.length ? acceptance : undefined,
-      path: path.value,
+      path: path.value === 's2' ? 's2' : 's1',
       workflow_id: workflowId.value || undefined,
     })
-    await router.replace({ path: `/requirements/${r.id}`, query: { suggest: '1' } })
+    await router.replace({ path: `/requirements/${r.id}` })
   } catch (e) {
-    if (e instanceof ApiError && e.status === 409 && e.body?.code === 'duplicate_requirement' && e.body.existing_id) {
+    if (
+      e instanceof ApiError &&
+      e.status === 409 &&
+      e.body?.code === 'duplicate_requirement' &&
+      e.body.existing_id
+    ) {
       dupExisting.value = {
         id: String(e.body.existing_id),
         title: String(e.body.existing_title || '同文案需求'),
@@ -152,6 +176,12 @@ async function submit() {
     <div class="min-h-0 flex-1 overflow-y-auto px-3 py-4 md:px-4">
       <ContentColumn :resizable="false">
         <form class="mx-auto max-w-xl space-y-4" @submit.prevent="submit">
+          <p class="text-[12px] text-muted">
+            只服务已有材料。一句话意图请走
+            <RouterLink class="text-accent underline-offset-2 hover:underline" :to="newTaskQuery">新建任务</RouterLink>
+            打磨，会话里再升格。
+          </p>
+
           <label class="block space-y-1">
             <span class="text-xs text-muted">标题</span>
             <Input v-model="title" placeholder="这条需求叫什么" />
@@ -161,11 +191,11 @@ async function submit() {
             <Input v-model="projectPath" placeholder="D:\code\…" />
           </label>
           <label class="block space-y-1">
-            <span class="text-xs text-muted">说明（可选）</span>
-            <Textarea v-model="body" :rows="3" placeholder="背景 / 范围" />
+            <span class="text-xs text-muted">说明（背景 / 范围 / 非目标）</span>
+            <Textarea v-model="body" :rows="3" placeholder="背景 / 范围；与验收至少填一侧" />
           </label>
           <label class="block space-y-1">
-            <span class="text-xs text-muted">验收标准（每行一条，可空）</span>
+            <span class="text-xs text-muted">验收标准（每行一条）</span>
             <Textarea v-model="acText" :rows="4" placeholder="用户能登录&#10;列表分页正常" />
           </label>
 
@@ -174,31 +204,21 @@ async function submit() {
             <button
               type="button"
               class="block w-full rounded-lg border px-3 py-2.5 text-left transition-colors"
-              :class="path === 's0' ? 'border-accent bg-accent/5 shadow-[inset_3px_0_0_var(--color-accent,theme(colors.accent.DEFAULT))]' : 'border-border bg-surface hover:bg-elevated/60'"
-              @click="pickPath('s0')"
-            >
-              <div class="flex items-center gap-2 text-sm font-medium">
-                S0 短路径任务
-                <span v-if="suggestedPath === 's0'" class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">建议</span>
-              </div>
-              <div class="mt-0.5 text-[11px] text-muted">不进需求图 · 无流程包</div>
-            </button>
-            <button
-              type="button"
-              class="block w-full rounded-lg border px-3 py-2.5 text-left transition-colors"
               :class="path === 's1' ? 'border-accent bg-accent/5 shadow-[inset_3px_0_0_var(--color-accent,theme(colors.accent.DEFAULT))]' : 'border-border bg-surface hover:bg-elevated/60'"
+              data-testid="path-s1"
               @click="pickPath('s1')"
             >
               <div class="flex items-center gap-2 text-sm font-medium">
                 S1 轻量需求
                 <span v-if="suggestedPath === 's1'" class="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent">建议</span>
               </div>
-              <div class="mt-0.5 text-[11px] text-muted">先定案再串行实现</div>
+              <div class="mt-0.5 text-[11px] text-muted">先定案再串行实现 · 进 PE</div>
             </button>
             <button
               type="button"
               class="block w-full rounded-lg border px-3 py-2.5 text-left transition-colors"
               :class="path === 's2' ? 'border-accent bg-accent/5 shadow-[inset_3px_0_0_var(--color-accent,theme(colors.accent.DEFAULT))]' : 'border-border bg-surface hover:bg-elevated/60'"
+              data-testid="path-s2"
               @click="pickPath('s2')"
             >
               <div class="flex items-center gap-2 text-sm font-medium">
@@ -210,21 +230,22 @@ async function submit() {
             <p class="text-[11px] text-muted">{{ heuristicHint }}</p>
           </div>
 
-          <div
-            v-if="path !== 's0'"
-            class="flex flex-wrap items-center gap-2 border-y border-border py-2.5"
-          >
+          <div class="flex flex-wrap items-center gap-2 border-y border-border py-2.5">
             <span class="text-xs text-muted">流程包</span>
             <strong class="text-sm">
               {{ selectedPack?.label || workflowId || '…' }}
               <span v-if="selectedPack" class="font-normal text-muted">@{{ selectedPack.version }}</span>
             </strong>
-            <button type="button" class="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-elevated" @click="showPackSheet = !showPackSheet">
+            <button
+              type="button"
+              class="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted hover:bg-elevated"
+              @click="showPackSheet = !showPackSheet"
+            >
               更换
             </button>
             <RouterLink class="text-[11px] text-accent underline-offset-2 hover:underline" to="/settings">管理流程包…</RouterLink>
           </div>
-          <div v-if="showPackSheet && path !== 's0'" class="rounded-lg border border-border bg-surface p-2">
+          <div v-if="showPackSheet" class="rounded-lg border border-border bg-surface p-2">
             <p class="mb-1 px-1 text-[11px] text-muted">选用已发布包</p>
             <button
               v-for="w in workflows"
@@ -255,14 +276,35 @@ async function submit() {
             <div class="mt-1 text-[11px] text-muted">禁止再建一条空转图。</div>
           </div>
 
-          <div class="flex items-center gap-3 pt-2">
-            <Button type="submit" :disabled="!canSubmit">
-              {{ submitting ? '创建中…' : path === 's0' ? '改走新建任务' : '创建' }}
-            </Button>
-            <RouterLink class="text-xs text-muted hover:text-text" to="/tasks/new">改走短路径：新建任务</RouterLink>
-          </div>
+          <div class="h-16" aria-hidden="true" />
         </form>
       </ContentColumn>
     </div>
+
+    <footer class="sticky bottom-0 z-10 border-t border-border bg-surface/95 px-3 py-2.5 backdrop-blur md:px-4">
+      <ContentColumn :resizable="false">
+        <div class="mx-auto flex max-w-xl flex-wrap items-center gap-3">
+          <Button
+            type="button"
+            variant="primary"
+            data-testid="new-requirement-submit"
+            :disabled="!canSubmit"
+            :title="submitBlockReason || undefined"
+            @click="submit"
+          >
+            {{ submitting ? '创建中…' : '创建需求并启动 PE' }}
+          </Button>
+          <span v-if="submitBlockReason" class="text-[11px] text-muted" data-testid="new-requirement-block-reason">{{ submitBlockReason }}</span>
+          <RouterLink
+            v-else
+            class="text-xs text-muted hover:text-text"
+            data-testid="new-requirement-to-task"
+            :to="newTaskQuery"
+          >
+            材料不够？去新建任务打磨
+          </RouterLink>
+        </div>
+      </ContentColumn>
+    </footer>
   </div>
 </template>

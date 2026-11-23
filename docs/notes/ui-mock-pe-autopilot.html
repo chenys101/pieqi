@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pieqi · PE 统一轨 Autopilot（线框）</title>
+  <style>
+    :root {
+      --bg: 246 247 249; --surface: 255 255 255; --elevated: 248 249 251;
+      --border: 220 223 230; --text: 24 26 32; --muted: 130 136 150; --text2: 90 96 110;
+      --accent: 45 110 200; --warning: 180 120 20; --error: 180 50 50; --ok: 40 140 90;
+      --radius: 10px; --font: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", sans-serif;
+    }
+    [data-theme="dark"] {
+      --bg: 12 13 17; --surface: 20 22 27; --elevated: 26 29 35;
+      --border: 50 55 65; --text: 235 237 242; --muted: 120 126 140; --text2: 170 176 190;
+      --accent: 110 160 240;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: var(--font); background: rgb(var(--bg)); color: rgb(var(--text)); line-height: 1.45; font-size: 13px; }
+    .banner { background: rgb(var(--accent) / 0.1); border-bottom: 1px solid rgb(var(--accent) / 0.3); padding: 10px 16px; font-size: 12px; }
+    .banner strong { color: rgb(var(--accent)); }
+    .path { font-family: ui-monospace, Consolas, monospace; font-size: 11px; background: rgb(var(--elevated)); padding: 1px 5px; border-radius: 4px; }
+    .top { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid rgb(var(--border)); background: rgb(var(--surface)); position: sticky; top: 0; z-index: 5; }
+    .top button { border: 1px solid rgb(var(--border)); background: rgb(var(--surface)); color: rgb(var(--text)); border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+    .top button.on { border-color: rgb(var(--accent)); background: rgb(var(--accent) / 0.08); color: rgb(var(--accent)); font-weight: 600; }
+    .shell { max-width: 44rem; margin: 0 auto; padding: 16px 16px 88px; }
+    .screen { display: none; } .screen.on { display: block; }
+    h1 { font-size: 15px; margin: 0; }
+    .muted { color: rgb(var(--text2)); font-size: 12px; }
+    .tiny { color: rgb(var(--muted)); font-size: 11px; }
+    .page-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 12px; border-bottom: 1px solid rgb(var(--border)); margin-bottom: 14px; }
+    .page-h h1 { flex: 1; min-width: 8rem; }
+    .btn { border: none; border-radius: 8px; padding: 7px 12px; font-size: 12px; font-weight: 500; cursor: pointer; }
+    .btn-p { background: rgb(var(--accent)); color: #fff; }
+    .btn-g { background: transparent; color: rgb(var(--text2)); border: 1px solid rgb(var(--border)); }
+    .btn-w { background: rgb(var(--warning) / 0.15); color: rgb(var(--warning)); border: 1px solid rgb(var(--warning) / 0.4); }
+    .pill { font-size: 10px; font-weight: 600; color: rgb(var(--accent)); background: rgb(var(--accent) / 0.12); border-radius: 6px; padding: 1px 6px; }
+    .pill.ok { color: rgb(var(--ok)); background: rgb(var(--ok) / 0.12); }
+    .pill.warn { color: rgb(var(--warning)); background: rgb(var(--warning) / 0.14); }
+    .pill.mute { color: rgb(var(--text2)); background: rgb(var(--elevated)); }
+    .rail { display: flex; flex-wrap: wrap; gap: 4px 0; align-items: center; font-size: 11px; margin: 0 0 14px; padding: 10px 12px; border: 1px solid rgb(var(--border)); border-radius: var(--radius); background: rgb(var(--surface)); }
+    .rail .sep { color: rgb(var(--muted)); margin: 0 4px; }
+    .rail .done { color: rgb(var(--ok)); font-weight: 600; }
+    .rail .cur { color: rgb(var(--accent)); font-weight: 700; }
+    .rail .todo { color: rgb(var(--muted)); }
+    .card { border: 1px solid rgb(var(--border)); background: rgb(var(--surface)); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; }
+    .card.need { border-color: rgb(var(--warning) / 0.55); background: rgb(var(--warning) / 0.08); }
+    .card.quiet { border-color: rgb(var(--accent) / 0.35); background: rgb(var(--accent) / 0.05); }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .node { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid rgb(var(--border)); font-size: 12px; }
+    .node:last-child { border-bottom: 0; }
+    .node .st { width: 4.5rem; flex-shrink: 0; font-size: 10px; font-weight: 700; }
+    .node .st.run { color: rgb(var(--accent)); }
+    .node .st.done { color: rgb(var(--ok)); }
+    .node .st.wait { color: rgb(var(--muted)); }
+    .node .st.dec { color: rgb(var(--warning)); }
+    details.more { margin-top: 8px; font-size: 12px; color: rgb(var(--text2)); }
+    details.more summary { cursor: pointer; color: rgb(var(--accent)); }
+    .sticky-cta {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 8;
+      border-top: 1px solid rgb(var(--border)); background: rgb(var(--surface) / 0.96);
+      backdrop-filter: blur(8px); padding: 10px 16px;
+    }
+    .sticky-cta .inner { max-width: 44rem; margin: 0 auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .callout { font-size: 12px; padding: 8px 10px; border-radius: 8px; margin: 8px 0; border: 1px solid rgb(var(--border)); background: rgb(var(--elevated)); }
+    .q { font-weight: 600; margin: 4px 0 8px; }
+    .opt { display: block; width: 100%; text-align: left; margin: 4px 0; padding: 8px 10px; border-radius: 8px; border: 1px solid rgb(var(--border)); background: rgb(var(--surface)); cursor: pointer; }
+    .opt:hover { border-color: rgb(var(--accent)); background: rgb(var(--accent) / 0.06); }
+    ul.compact { margin: 6px 0 0; padding-left: 1.1rem; font-size: 12px; color: rgb(var(--text2)); }
+    .legend { font-size: 11px; color: rgb(var(--muted)); margin-top: 16px; padding-top: 12px; border-top: 1px dashed rgb(var(--border)); }
+    label.field { display: block; margin: 10px 0 4px; }
+    input.field, textarea.field {
+      width: 100%; padding: 8px 10px; border-radius: 8px;
+      border: 1px solid rgb(var(--border)); background: rgb(var(--elevated)); color: inherit; font: inherit;
+    }
+    textarea.field { resize: vertical; }
+  </style>
+</head>
+<body>
+  <div class="banner">
+    <strong>线框 · PE 统一轨 Autopilot</strong>
+    — 入口<strong>分立</strong>（新建任务 / 新建需求）；桥只在会话「升格」。规划默认一条会话。
+    笔记：<span class="path">docs/notes/pe-autopilot-ui.md</span>
+    · 本文件：<span class="path">docs/notes/ui-mock-pe-autopilot.html</span>
+  </div>
+  <div class="top">
+    <button type="button" class="on" data-s="entry">A 入口对照</button>
+    <button type="button" data-s="direct">A1 新建需求</button>
+    <button type="button" data-s="polish">A2 任务会话</button>
+    <button type="button" data-s="promote">A3 升格轻确认</button>
+    <button type="button" data-s="pe-run">B PE 自动推进</button>
+    <button type="button" data-s="pe-session">B2 规划会话</button>
+    <button type="button" data-s="pe-decide">C 必要决策卡</button>
+    <button type="button" data-s="exec">D 物化后节点推进</button>
+    <button type="button" data-s="compare">E 对照</button>
+    <button type="button" id="theme">深色</button>
+  </div>
+
+  <div class="shell">
+    <!-- A: two entries stay separate -->
+    <section id="entry" class="screen on">
+      <div class="page-h"><h1>入口对照（不合并）</h1></div>
+      <p class="muted" style="margin-top:-6px">一句话走<strong>新建任务</strong>；已有材料走<strong>新建需求</strong>。桥 = 会话里「升格为需求」。禁止「建需求页主 CTA 去建 Task」。</p>
+
+      <div class="card" style="border-left:3px solid rgb(var(--accent))">
+        <div class="row">
+          <strong>新建任务</strong>
+          <span class="pill">短路径 · 一句话 OK</span>
+        </div>
+        <div class="tiny" style="margin-top:6px">现有 <span class="path">/tasks/new</span> → <code>POST /tasks</code> → 跳转会话。打磨在会话里发生。</div>
+        <div class="row" style="margin-top:10px">
+          <button type="button" class="btn btn-p" data-s="polish">演示：进任务会话</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <strong>新建需求</strong>
+          <span class="pill mute">长路径 · 须说明或 AC</span>
+        </div>
+        <div class="tiny" style="margin-top:6px">现有 <span class="path">/requirements/new</span>：标题 + cwd + 说明|AC 门禁 → 创建并启动 PE。主 CTA <strong>不</strong>建 Task。</div>
+        <div class="row" style="margin-top:10px">
+          <button type="button" class="btn btn-g" data-s="direct">演示：新建需求表单</button>
+        </div>
+      </div>
+
+      <div class="callout">仪表盘继续两个入口。短意图用户点「新建任务」；有需求级材料才点「新建需求」。</div>
+      <p class="legend">已否决：统一「你想做什么」页把建需求主路径改成建 Task（心智冲突 + 与新建任务重复）。</p>
+    </section>
+
+    <!-- A1 New requirement only -->
+    <section id="direct" class="screen">
+      <div class="page-h">
+        <h1>新建需求</h1>
+        <span class="pill">S1 · PE</span>
+        <button type="button" class="btn btn-g" style="margin-left:auto" data-s="entry">返回对照</button>
+      </div>
+      <p class="muted" style="margin-top:-6px">只服务「已有材料」。说明或 AC 至少一侧非空。材料不够 → 去新建任务，会话里再升格。</p>
+
+      <label class="muted field">标题</label>
+      <input id="direct-title" class="field" value="登录页记住我" />
+      <label class="muted field">项目路径</label>
+      <input id="direct-cwd" class="field" value="D:\code\go\pieqi" />
+      <label class="muted field">说明（背景 / 范围 / 非目标）</label>
+      <textarea id="direct-body" class="field" rows="4">登录页增加可选「记住我」：默认关；勾选后本机 cookie 保持 7 天免登；清 cookie 后需重新登录。不改跨设备同步。</textarea>
+      <label class="muted field">验收标准（每行一条）</label>
+      <textarea id="direct-ac" class="field" rows="3">默认关闭记住我
+勾选后 7 天内免登
+清除 cookie 后必须重新登录</textarea>
+
+      <div class="callout" id="direct-gate">材料够用 · 可创建并启动 PE</div>
+      <div class="row" style="margin-top:8px">
+        <span class="tiny">流程包</span>
+        <strong style="font-size:12px">s1-plan-serial@1</strong>
+        <button type="button" class="btn btn-g" style="padding:4px 8px;font-size:11px">更换</button>
+      </div>
+
+      <div class="sticky-cta">
+        <div class="inner">
+          <button type="button" class="btn btn-p" id="direct-submit" data-s="pe-run">创建需求并启动 PE</button>
+          <button type="button" class="btn btn-g" data-s="polish">材料不够？去新建任务打磨</button>
+          <span class="tiny" id="direct-hint"></span>
+        </div>
+      </div>
+      <p class="legend">无打磨 Task。Intent 用本表种子；仍可能出 OpenQuestion。不在此页提供「开始任务打磨」主 CTA。</p>
+    </section>
+
+    <!-- A2 = existing SessionPage -->
+    <section id="polish" class="screen">
+      <div class="page-h">
+        <h1>会话 · 登录页记住我</h1>
+        <span class="pill">running</span>
+        <span class="pill mute">短路径 · 未挂需求</span>
+      </div>
+      <p class="tiny"><span class="path">/sessions/task-9c1e</span> · 来自<strong>新建任务</strong>（不是新建需求）· 同一套 Session UI</p>
+
+      <div class="callout">首 prompt / 系统姿态建议 discovery：先澄清范围与验收，勿默认开写。人随时可当普通短路径做完，不升格。</div>
+
+      <div class="card quiet">
+        <div class="row"><strong>会话时间线</strong><span class="tiny" style="margin-left:auto">Turn 3</span></div>
+        <ul class="compact">
+          <li>你：登录页加记住我</li>
+          <li>Agent：默认开还是关？只本机？N 天免登？</li>
+          <li>你：默认关；本机 cookie；7 天；合入 req 分支</li>
+          <li>Agent：整理了范围 / 非目标 / 验收草案</li>
+        </ul>
+      </div>
+
+      <div class="sticky-cta">
+        <div class="inner">
+          <button type="button" class="btn btn-p" data-s="promote">升格为需求</button>
+          <span class="tiny">短路径且未挂需求时<strong>常驻</strong>（不靠「系统判定够用」才出现）</span>
+          <span class="tiny">· 继续聊 / 当任务做完 = 原会话能力</span>
+        </div>
+      </div>
+      <p class="legend">「够用」= 人点升格。禁止自动 Promote。点后进轻确认，不另做打磨页。</p>
+    </section>
+
+    <!-- A3 light promote confirm -->
+    <section id="promote" class="screen">
+      <div class="page-h">
+        <h1>升格为需求</h1>
+        <span class="pill">轻确认</span>
+        <button type="button" class="btn btn-g" style="margin-left:auto" data-s="polish">返回会话</button>
+      </div>
+      <p class="muted" style="margin-top:-6px">编辑种子后一键确认。不是五步说明书页。</p>
+
+      <label class="muted field">标题</label>
+      <input class="field" value="登录页记住我" />
+      <label class="muted field">说明（可改）</label>
+      <textarea class="field" rows="3">登录页可选「记住我」，默认关，本机 cookie 7 天免登。不改跨设备。</textarea>
+      <label class="muted field">验收（可改 · 每行一条）</label>
+      <textarea class="field" rows="3">默认关闭记住我
+勾选后 7 天内免登
+清除 cookie 后必须重新登录</textarea>
+
+      <div class="card quiet">
+        <div class="tiny">确认后自动：建需求(S1) · Promote 挂靠 task-9c1e（不改 Timeline）· 停写打磨 Task · PlanDraft Intent 种子过门 · 进 PE（从 Business/Solution 续）</div>
+      </div>
+
+      <div class="sticky-cta">
+        <div class="inner">
+          <button type="button" class="btn btn-p" data-s="pe-run">确认并启动 PE</button>
+          <button type="button" class="btn btn-g" data-s="polish">取消</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- B PE auto -->
+    <section id="pe-run" class="screen">
+      <div class="page-h">
+        <h1>登录页记住我</h1>
+        <span class="pill ok">自动推进</span>
+        <span class="tiny">无需你操作</span>
+      </div>
+      <p class="tiny">D:\code\go\pieqi · 由 task-9c1e 升格 · 打磨 Task 已停写 · 规划会话 pe-sess-7f2a（一条）</p>
+
+      <div class="rail" aria-label="PE 阶段">
+        <span class="done">Intent ✓</span><span class="sep">→</span>
+        <span class="done">Business ✓</span><span class="sep">→</span>
+        <span class="cur">Solution ●</span><span class="sep">→</span>
+        <span class="todo">Engineering</span><span class="sep">→</span>
+        <span class="todo">Publish</span><span class="sep">→</span>
+        <span class="todo">Run</span>
+      </div>
+      <p class="tiny" style="margin:-8px 0 12px">升格路径：Intent 已由种子过门，不空转重问。进度条 = 门禁切章。</p>
+
+      <div class="card quiet">
+        <div class="row">
+          <strong>正在起草方案</strong>
+          <span class="pill">规划会话 · claude</span>
+          <span class="pill mute">设置默认</span>
+          <span class="tiny" style="margin-left:auto">约 40s</span>
+        </div>
+        <p class="tiny" style="margin:8px 0 0">Business 已过门。本阶段后进 Engineering → 门禁空则 Publish + 物化。实现票另开，≠ 打磨 Task。</p>
+        <details class="more">
+          <summary>本阶段摘要（可折叠）</summary>
+          <ul class="compact">
+            <li>种子：升格确认里编辑过的说明/AC</li>
+            <li>task-9c1e：挂靠 · role=discovery · 已停写 · 作证据源</li>
+            <li>草案节点预览：design → implement → test</li>
+          </ul>
+        </details>
+      </div>
+
+      <div class="callout">决策收件箱 · <strong>0</strong> · 你现在可以离开此页</div>
+      <div class="row">
+        <button type="button" class="btn btn-g">暂停自动推进</button>
+        <button type="button" class="btn btn-g" data-s="pe-session">打开规划会话</button>
+        <button type="button" class="btn btn-g" data-s="pe-decide">（演示）模拟卡决策</button>
+      </div>
+      <p class="legend">主路径不按阶段选 Agent。节点拆票只在 Publish 之后。</p>
+    </section>
+
+    <!-- B2 PE session -->
+    <section id="pe-session" class="screen">
+      <div class="page-h">
+        <h1>规划会话</h1>
+        <span class="pill">pe-sess-7f2a</span>
+        <span class="pill mute">claude · 设置默认</span>
+        <button type="button" class="btn btn-g" style="margin-left:auto" data-s="pe-run">返回进度</button>
+      </div>
+      <p class="muted" style="margin-top:-6px">≠ 打磨 Task 会话。章 = PE 门禁；升格热启动后 Intent 章可已折叠为种子摘要。</p>
+
+      <div class="card" style="padding-top:4px;padding-bottom:4px">
+        <div class="node">
+          <span class="st done">章</span>
+          <div>
+            <strong>Intent</strong>
+            <div class="tiny">种子过门 ✓ · 未再开聊</div>
+            <ul class="compact">
+              <li>Decision：默认关 remember-me · 本机 7 天</li>
+            </ul>
+          </div>
+        </div>
+        <div class="node">
+          <span class="st done">章</span>
+          <div>
+            <strong>Business</strong>
+            <div class="tiny">验收边界 · 过门 ✓</div>
+            <ul class="compact">
+              <li>SystemFact：已有 JWT cookie</li>
+            </ul>
+          </div>
+        </div>
+        <div class="node">
+          <span class="st run">章</span>
+          <div>
+            <strong>Solution ●</strong>
+            <div class="tiny">方案起草中 · 同一规划会话续写</div>
+          </div>
+        </div>
+        <div class="node">
+          <span class="st wait">章</span>
+          <div><strong>Engineering</strong><div class="tiny">待 Solution 过门后继续</div></div>
+        </div>
+      </div>
+      <p class="legend">非目标：每阶段各起 Agent。</p>
+    </section>
+
+    <!-- C Decision -->
+    <section id="pe-decide" class="screen">
+      <div class="page-h">
+        <h1>登录页记住我</h1>
+        <span class="pill warn">需要你决定 · 1</span>
+      </div>
+      <div class="rail">
+        <span class="done">Intent ✓</span><span class="sep">→</span>
+        <span class="done">Business ✓</span><span class="sep">→</span>
+        <span class="done">Solution ✓</span><span class="sep">→</span>
+        <span class="cur">Engineering ●</span><span class="sep">→</span>
+        <span class="todo">Publish</span><span class="sep">→</span>
+        <span class="todo">Run</span>
+      </div>
+      <div class="card need" role="alertdialog" aria-label="必要决策">
+        <div class="row">
+          <span class="pill warn">OpenQuestion</span>
+          <span class="tiny">阻断 Publish</span>
+        </div>
+        <p class="q">合入面要钉在需求分支 req/&lt;id&gt;，还是直接合 main？</p>
+        <button type="button" class="opt" data-s="exec"><strong>A · 需求分支</strong><div class="tiny">默认 · 对齐交付约定</div></button>
+        <button type="button" class="opt" data-s="exec"><strong>B · 直接 main</strong><div class="tiny">记为 Decision · 接受合入风险</div></button>
+        <div class="row" style="margin-top:8px">
+          <button type="button" class="btn btn-w">标 Assumption 并接受风险</button>
+          <button type="button" class="btn btn-g">稍后</button>
+        </div>
+      </div>
+      <p class="legend">不弹：阶段切章、选 Agent/模型、L0 免审探测。</p>
+    </section>
+
+    <!-- D Exec -->
+    <section id="exec" class="screen">
+      <div class="page-h">
+        <h1>登录页记住我</h1>
+        <span class="pill ok">执行中</span>
+      </div>
+      <div class="rail">
+        <span class="done">… Engineering ✓</span><span class="sep">→</span>
+        <span class="done">Publish ✓</span><span class="sep">→</span>
+        <span class="cur">Run ●</span>
+      </div>
+      <p class="tiny">Pin rev a1b2c3d4 · 规划会话已结束 · 物化执行票（≠ 已停写的 discovery 票）</p>
+
+      <div class="card">
+        <div class="row" style="margin-bottom:4px">
+          <strong>节点推进</strong>
+          <span class="tiny">串行 · 每票各自会话</span>
+        </div>
+        <div class="node">
+          <span class="st done">证据</span>
+          <div><strong>task-9c1e · 打磨</strong><div class="tiny">discovery · 已停写 · 仅证据源</div></div>
+        </div>
+        <div class="node">
+          <span class="st done">完成</span>
+          <div><strong>n1 · 定案</strong><div class="tiny">design</div></div>
+        </div>
+        <div class="node">
+          <span class="st run">进行中</span>
+          <div>
+            <strong>n2 · 实现记住我</strong>
+            <div class="tiny">implement · 执行会话</div>
+            <div class="row" style="margin-top:6px">
+              <button type="button" class="btn btn-g">打开执行会话</button>
+            </div>
+          </div>
+        </div>
+        <div class="node">
+          <span class="st wait">等待</span>
+          <div><strong>n3 · 功能测</strong><div class="tiny">test · depends n2</div></div>
+        </div>
+      </div>
+      <div class="row">
+        <button type="button" class="btn btn-g">暂停后续自动 Start</button>
+        <button type="button" class="btn btn-g">查看 Revision</button>
+        <button type="button" class="btn btn-g" data-s="pe-session">回看规划会话</button>
+      </div>
+    </section>
+
+    <!-- E Compare -->
+    <section id="compare" class="screen">
+      <div class="page-h"><h1>交互定案摘要</h1></div>
+      <div class="card">
+        <strong class="tiny">否决</strong>
+        <ul class="compact">
+          <li>新建需求页主 CTA 去建 Task / 统一「你想做什么」吞掉双入口</li>
+          <li>另做打磨页；自动升格；升格后再空聊 Intent</li>
+          <li>打磨 Task 升格后继续当实现票跑</li>
+        </ul>
+      </div>
+      <div class="card quiet">
+        <strong class="tiny">采用</strong>
+        <ul class="compact">
+          <li>入口分立：新建任务（一句话）↔ 新建需求（说明|AC）</li>
+          <li>桥：会话常驻「升格」→ 轻确认（可编辑种子）→ PE</li>
+          <li>升格：停写打磨 Task · Intent 种子过门 · 单规划会话续 Business+</li>
+          <li>PE 统一轨 + 决策收件箱空可离开</li>
+        </ul>
+      </div>
+      <p class="muted">确认后施工：会话升格 CTA · 新建需求门禁 · Promote+热启动 · PE runner · 需求页统一轨。</p>
+    </section>
+  </div>
+
+  <script>
+    const screens = [...document.querySelectorAll('.screen')]
+    const tabs = [...document.querySelectorAll('.top [data-s]')]
+    function show(id) {
+      screens.forEach((el) => el.classList.toggle('on', el.id === id))
+      tabs.forEach((b) => b.classList.toggle('on', b.getAttribute('data-s') === id))
+    }
+    document.querySelectorAll('[data-s]').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        if (b.id === 'direct-submit' && b.disabled) {
+          e.preventDefault()
+          return
+        }
+        show(b.getAttribute('data-s'))
+      })
+    })
+    document.getElementById('theme').addEventListener('click', () => {
+      const dark = document.documentElement.getAttribute('data-theme') === 'dark'
+      document.documentElement.setAttribute('data-theme', dark ? 'light' : 'dark')
+      document.getElementById('theme').textContent = dark ? '深色' : '浅色'
+    })
+
+    const bodyEl = document.getElementById('direct-body')
+    const acEl = document.getElementById('direct-ac')
+    const titleEl = document.getElementById('direct-title')
+    const cwdEl = document.getElementById('direct-cwd')
+    const gateEl = document.getElementById('direct-gate')
+    const submitEl = document.getElementById('direct-submit')
+    const hintEl = document.getElementById('direct-hint')
+    function syncDirectGate() {
+      const title = titleEl.value.trim()
+      const cwd = cwdEl.value.trim()
+      const body = bodyEl.value.trim()
+      const ac = acEl.value.trim()
+      let reason = ''
+      if (!title) reason = '请先填写标题'
+      else if (!cwd) reason = '请先填写项目路径'
+      else if (!body && !ac) reason = '请填写说明或至少一条验收标准'
+      const ok = !reason
+      submitEl.disabled = !ok
+      submitEl.style.opacity = ok ? '1' : '0.45'
+      hintEl.textContent = reason
+      gateEl.textContent = ok ? '材料够用 · 可创建并启动 PE' : '材料不足 · ' + reason
+    }
+    ;[bodyEl, acEl, titleEl, cwdEl].forEach((el) => el.addEventListener('input', syncDirectGate))
+    syncDirectGate()
+  </script>
+</body>
+</html>

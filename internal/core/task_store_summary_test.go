@@ -71,3 +71,31 @@ func TestListSummaryEvents_CountsWithoutCloning(t *testing.T) {
 		t.Fatalf("List() 的 b.Events=%d want 3（详情视图不能丢事件）", got)
 	}
 }
+
+func TestListByRequirementSummary_FiltersWithoutEvents(t *testing.T) {
+	s := newTestTaskStore(t)
+	now := time.Now()
+	if _, err := s.Create(&model.Task{
+		ID: "in", RequirementID: "req-1", ProjectPath: "G:/ws", Prompt: "p", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create(&model.Task{
+		ID: "out", RequirementID: "req-2", ProjectPath: "G:/ws", Prompt: "p", CreatedAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Update("in", func(tk *model.Task) bool {
+		tk.Events = append(tk.Events, model.TaskEvent{Seq: 1, Type: model.EventText, Text: "x"})
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.ListByRequirementSummary("req-1")
+	if len(got) != 1 || got[0].ID != "in" {
+		t.Fatalf("got %+v want only in", got)
+	}
+	if got[0].Events != nil {
+		t.Fatalf("Events should be nil for summary path")
+	}
+}

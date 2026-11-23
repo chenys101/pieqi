@@ -53,10 +53,10 @@ const statusLabel: Record<string, string> = {
           长路径：拆成多票、按依赖跑、Issue 回流。日常一票事请用
           <RouterLink class="text-accent underline-offset-2 hover:underline" to="/tasks/new">新建任务</RouterLink>。
         </p>
-        <div v-if="store.loading" class="flex justify-center py-12"><Spinner /></div>
-        <p v-else-if="store.error" class="text-sm text-error">{{ store.error }}</p>
+        <div v-if="store.loading && !store.items.length" class="flex justify-center py-12"><Spinner /></div>
+        <p v-else-if="store.error && !store.items.length" class="text-sm text-error">{{ store.error }}</p>
         <p v-else-if="!store.items.length" class="py-12 text-center text-sm text-muted">暂无需求</p>
-        <ul v-else class="space-y-2">
+        <ul v-else class="space-y-2" :class="store.loading ? 'opacity-70' : ''">
           <li v-for="r in store.items" :key="r.id">
             <button
               class="w-full rounded-lg border border-border bg-surface px-3 py-3 text-left transition-colors hover:bg-elevated/60"

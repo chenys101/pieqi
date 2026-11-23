@@ -228,6 +228,46 @@ func TestAPI_DeleteTask(t *testing.T) {
 	}
 }
 
+func TestAPI_ListTasks_RequirementIDFilter(t *testing.T) {
+	_, store, r := setupAPITest(t)
+	repoDir := t.TempDir()
+	a, err := store.Create(&model.Task{
+		ProjectPath: repoDir, Prompt: "a", RequirementID: "req-a", Status: model.TaskPending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(&model.Task{
+		ProjectPath: repoDir, Prompt: "b", RequirementID: "req-b", Status: model.TaskPending,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/api/tasks?include_planned=1&requirement_id=req-a", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var listResp struct {
+		Projects []struct {
+			Tasks []*model.TaskSummary `json:"tasks"`
+		} `json:"projects"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &listResp)
+	n := 0
+	for _, g := range listResp.Projects {
+		n += len(g.Tasks)
+		for _, tk := range g.Tasks {
+			if tk.ID != a.ID {
+				t.Fatalf("unexpected task %s", tk.ID)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("tasks=%d want 1", n)
+	}
+}
+
 func TestAPI_AuthMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store, _ := core.NewTaskStore(t.TempDir())
