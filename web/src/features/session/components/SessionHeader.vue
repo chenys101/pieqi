@@ -54,7 +54,7 @@ const props = withDefaults(
     /** 移动端：当前是否正看着变更反馈（图标按下态） */
     feedbackActive?: boolean
     /**
-     * 短路径未挂需求时可升格。入口是头部次要动作（桌面 ghost / 移动状态浮层），
+     * 短路径未挂需求时可升格。入口是头部次要动作（桌面 ghost / 移动标题旁文字），
      * 不占 composer 上方 sticky——多数任务会一直短路径收工。
      */
     canPromote?: boolean
@@ -203,6 +203,18 @@ function goBack() {
 
         <!-- ── 移动端：状态 / 任务列表 / 新建 / 反馈，四个独立入口 ─────────── -->
         <template v-if="compact">
+          <!-- 升格：标题旁次要文字，不进四图标簇、不 sticky；仅短路径未挂需求 -->
+          <button
+            v-if="canPromote"
+            type="button"
+            class="shrink-0 rounded-md px-1.5 py-1 text-[11px] text-muted transition-colors hover:bg-elevated hover:text-text"
+            title="升格为需求"
+            data-testid="session-promote"
+            @click="emit('promote')"
+          >
+            升格
+          </button>
+
           <!-- 当前状态：裸圆点；点开是这个任务的状态详情（浮层本体挂在 header 上，见后） -->
           <div class="shrink-0">
             <button
@@ -374,8 +386,6 @@ function goBack() {
       :task="task"
       :agent-label="agentLabel"
       :agent-title="agentTitle"
-      :can-promote="canPromote"
-      @promote="closePopovers(); emit('promote')"
     />
 
     <!-- 其他任务下拉：挂在 header 上、右对齐（不是挂在 28px 的按钮上，

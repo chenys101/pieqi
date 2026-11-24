@@ -82,19 +82,31 @@ describe('需求 2：中止入口唯一', () => {
     expect(host.textContent).not.toContain('升格')
   })
 
-  it('移动端：升格在状态浮层，不占顶栏拇指区', async () => {
+  it('移动端：标题旁次要「升格」，不进四图标簇、不进状态浮层', async () => {
     const { host } = mount(SessionHeader, {
       task: baseTask,
       canCancel: true,
       compact: true,
       canPromote: true,
     })
-    expect(host.querySelector('[data-testid="session-promote"]')).toBeNull()
-    host.querySelector<HTMLButtonElement>('[data-testid="session-status"]')!.click()
-    await nextTick()
     const promote = host.querySelector('[data-testid="session-promote"]')
     expect(promote).not.toBeNull()
-    expect(promote!.textContent).toContain('升格为需求')
+    expect(promote!.textContent?.trim()).toBe('升格')
+    host.querySelector<HTMLButtonElement>('[data-testid="session-status"]')!.click()
+    await nextTick()
+    const pop = host.querySelector('[data-testid="session-status-pop"]')
+    expect(pop).not.toBeNull()
+    expect(pop!.querySelector('[data-testid="session-promote"]')).toBeNull()
+  })
+
+  it('移动端：已挂需求不渲染升格', () => {
+    const { host } = mount(SessionHeader, {
+      task: { ...baseTask, requirementId: 'req-1' } as unknown as Task,
+      canCancel: true,
+      compact: true,
+      canPromote: false,
+    })
+    expect(host.querySelector('[data-testid="session-promote"]')).toBeNull()
   })
 
   it('移动端 compact 头部同样没有「中止」图标按钮', () => {
