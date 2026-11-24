@@ -1378,7 +1378,21 @@ func isBase64Char(c byte) bool {
 // blocks 非 nil 时用它作为 prompt 内容（图文混合）；nil 表示纯文本，用 text 组块。
 // 两个参数并存是为了让**模型选择逻辑只有这一份** —— 富文本路径若自己再实现一遍
 // 模型写回，日后改通道（如 bd0cd28 那种）必然漏掉一边。
-func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, text string, blocks []acp.ContentBlock) error {
+func (a *ACPAgent) promptOnce(ctx context.Context, sessionID, text string, blocks []acp.ContentBlock) (err error) {
+	// 本轮结束（无论成败）都要清掉残留的权限请求。
+	//
+	// 「prompt 返回」= 这一轮已经结束，那条工具调用不可能再执行，请求也就不可能有人答复。
+	// 失败的场景最典型：任务判 failed、审批卡从界面消失，但 RequestPermission 还在 `<-ch` 上
+	// 阻塞，直到会话空闲回收才被 ctx 连带清掉（2026-11-24 实测拖了 44 分钟）。
+	// 成功路径的残留理论上不存在，但真出现时同样是无人可答，一并清掉。
+	defer func() {
+		reason := "prompt done"
+		if err != nil {
+			reason = "prompt failed"
+		}
+		a.drainPendingPerms(reason)
+	}()
+
 	turnModel := a.takeTurnModel()
 	if blocks == nil {
 		blocks = []acp.ContentBlock{acp.TextBlock(text)}
@@ -1580,6 +1594,52 @@ func (a *ACPAgent) RespondPermission(ctx context.Context, reqID string, allow bo
 		return a.Approve(ctx, reqID, optionID)
 	}
 	return a.Deny(ctx, reqID)
+}
+
+// drainPendingPerms 以 cancelled 结局唤醒所有挂起的权限请求，并清空 pendingPerms。
+//
+// 为什么需要它：RequestPermission 阻塞在 `<-ch` 上，唤醒来源只有四个 ——
+// 用户批准 / 用户拒绝 / 会话 Close 时的 ctx 取消 / agent 进程退出。于是
+// **「prompt 已经失败返回、任务已判 failed」之后，那一轮里发出但没人接的请求会一直悬着**。
+// 2026-11-24 13:34:15 发出、13:35:42 任务就失败的那张审批卡，实际悬空了 44 分钟，
+// 直到空闲回收（15m）+ reaper 扫描间隔（5m）轮到会话 Close 才被 ctx 连带清掉。
+// 期间一个 goroutine 死在 `<-ch` 上，agent 侧也一直在等回音。
+//
+// 语义：能被 drain 到，说明本轮已经结束 —— 那条工具调用不可能再执行，
+// 回 Cancelled 是唯一正确的结局（与 Close 的处理完全一致：
+// PermissionResponse{Selected:false} → toACPOutcome → NewRequestPermissionOutcomeCancelled）。
+//
+// 返回值：实际唤醒的条数（>0 时会记一条 WARN，出问题能 grep 出来）。
+func (a *ACPAgent) drainPendingPerms(reason string) int {
+	// 先快照再逐个 takePending：takePending 自己会拿 permMu，
+	// 持锁调用会自锁（permMu 不是可重入的 —— 同 TaskStore.Update 那条教训）。
+	a.permMu.Lock()
+	ids := make([]string, 0, len(a.pendingPerms))
+	for id := range a.pendingPerms {
+		ids = append(ids, id)
+	}
+	a.permMu.Unlock()
+
+	drained := 0
+	for _, id := range ids {
+		ch, ok := a.takePending(id)
+		if !ok {
+			continue // 并发路径已先取走（用户刚好在这一瞬点了批准/拒绝）
+		}
+		select {
+		case ch <- PermissionResponse{Selected: false}:
+		default: // 缓冲已被填满：响应方已在处理，不阻塞自己
+		}
+		a.notifyPermissionEnded(id, true)
+		drained++
+	}
+	if drained > 0 && a.logger != nil {
+		a.logger.Warn("acp pending permission drained (turn ended without an answer)",
+			zap.Int("count", drained),
+			zap.String("reason", reason),
+		)
+	}
+	return drained
 }
 
 // takePending 取出并删除一个 pending channel（投递完后不再保留）。
