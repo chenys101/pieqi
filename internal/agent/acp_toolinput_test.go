@@ -341,3 +341,32 @@ func TestClose_ReleasesToolInputs(t *testing.T) {
 		t.Fatal("Close 后应释放 toolInputs")
 	}
 }
+
+// TestPermissionTitleFromRawInput 校验 fetch 类权限卡的标题兜底。
+//
+// 背景（2026-11-23 23:28）：cursor 的 fetch 请求既无 ToolTitle 也无 tool_call 记忆，
+// 卡片上只剩 kind="fetch"，人无法判断批的是哪个 URL。兜底只补展示、不参与分级。
+func TestPermissionTitleFromRawInput(t *testing.T) {
+	cases := []struct {
+		name string
+		kind string
+		raw  string
+		want string
+	}{
+		{"fetch url", "fetch", `{"url":"https://304456.xyz/sessions/abc"}`, "Fetch https://304456.xyz/sessions/abc"},
+		{"fetch uri fallback", "fetch", `{"uri":"https://example.com/a"}`, "Fetch https://example.com/a"},
+		{"fetch query fallback", "fetch", `{"query":"weather tokyo"}`, "Fetch weather tokyo"},
+		{"fetch url trimmed", "fetch", `{"url":"  https://a.b  "}`, "Fetch https://a.b"},
+		{"fetch no url", "fetch", `{"prompt":"x"}`, ""},
+		{"execute untouched", "execute", `{"url":"https://a.b"}`, ""},
+		{"empty raw", "fetch", ``, ""},
+		{"invalid json", "fetch", `not-json`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := permissionTitleFromRawInput(tc.kind, []byte(tc.raw)); got != tc.want {
+				t.Fatalf("permissionTitleFromRawInput(%q, %q)=%q want %q", tc.kind, tc.raw, got, tc.want)
+			}
+		})
+	}
+}

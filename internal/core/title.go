@@ -71,9 +71,22 @@ func cleanTitle(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	// 拒绝"模型没理解任务"的元回复（如"你的消息里没有附带要概括的开发任务内容"）。
 	// 这类文本不是标题，命中则返回空串，调用方保留前端启发式标题，避免污染任务列表。
-	for _, phrase := range []string{"没有附带", "请把", "请提供", "请说明", "请告诉我", "无法概括", "发给我", "undefined"} {
+	//
+	// 2026-11-23 实例：cursor 回了一句"把任务描述贴给我，我就按要求只回一个 20 字以内
+	// 的标题。"——它既没命中原词表（原文用的是"贴给我"而不是"发给我"，且没有"请"字），
+	// 又短到能过限长，于是原样上了任务列表。补两条判据：
+	//  1) 祈使/索取口吻：贴给我 / 再给一次；
+	//  2) 复述标题要求本身：含"标题"且含"字以内/字内/只回/只输出"（真标题几乎不会这样写）。
+	for _, phrase := range []string{"没有附带", "请把", "请提供", "请说明", "请告诉我", "无法概括", "发给我", "贴给我", "再给一次", "undefined"} {
 		if strings.Contains(s, phrase) {
 			return ""
+		}
+	}
+	if strings.Contains(s, "标题") {
+		for _, p := range []string{"字以内", "字内", "只回", "只输出"} {
+			if strings.Contains(s, p) {
+				return ""
+			}
 		}
 	}
 	runes := []rune(s)

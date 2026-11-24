@@ -45,6 +45,7 @@ type PermissionEndedNotifier interface {
 //   - Cursor JSON-RPC details："Session <uuid> not found"
 //   - ACP load/resume 文案：含 "session"+"not found"
 //   - "No conversation found"
+//   - Cursor prompt 阶段的 "Internal error: session lost"（见下）
 func IsSessionNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -55,6 +56,21 @@ func IsSessionNotFound(err error) bool {
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "no conversation found") {
 		return true
+	}
+	// Cursor 的 prompt 阶段不用 "not found"，而是
+	// {"code":-32603,"message":"Internal error: session lost"}（2026-11-23 23:33/23:38
+	// 实测两次）。语义与 not found 相同：对端已不认这个 sid，进程可能还活着。
+	//
+	// 这里必须识别：core.runACPTurn 的恢复分支（清 ACPSessionID → 全新会话重跑本轮）
+	// 就挂在本函数上。漏掉它，任务会直接 failed，而用户看到的是"cursor 又断了"——
+	// 一周内 5 次失败里有 2 次是这个原因。
+	for _, p := range []string{
+		"session lost", "session was lost", "session has been lost",
+		"session expired", "session no longer exists",
+	} {
+		if strings.Contains(msg, p) {
+			return true
+		}
 	}
 	// Cursor: {"data":{"details":"Session <uuid> not found"}}；load/resume: "session … not found"
 	return strings.Contains(msg, "session") && strings.Contains(msg, "not found")

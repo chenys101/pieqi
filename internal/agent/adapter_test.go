@@ -24,6 +24,16 @@ func TestIsSessionNotFound(t *testing.T) {
 		{"resume session", errors.New("acp: resume session x: Session xyz not found"), true},
 		{"no conversation text", errors.New("print: No conversation found"), true},
 		{"session without not-found", errors.New("session busy"), false},
+		// Cursor prompt 阶段用 "session lost" 而不是 "not found"（2026-11-23 实测）：
+		// 认不出来的代价是任务直接 failed，而不是清 sid 重跑本轮。
+		{"cursor session lost", errors.New(`acp: prompt: {"code":-32603,"message":"Internal error: session lost"}`), true},
+		{"cursor session lost capital", errors.New("Internal error: Session Lost"), true},
+		{"session was lost", errors.New("acp: prompt: session was lost by peer"), true},
+		{"session expired", errors.New("acp: load session sid-1: session expired"), true},
+		{"session no longer exists", errors.New("acp: prompt: session no longer exists"), true},
+		// 反向：prompt cancelled / 普通超时不得被当成 sid 丢失（否则会白重跑一轮）。
+		{"prompt cancelled", ErrPromptCancelled, false},
+		{"deadline exceeded", errors.New(`{"code":-32603,"message":"Internal error","data":{"error":"context deadline exceeded"}}`), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

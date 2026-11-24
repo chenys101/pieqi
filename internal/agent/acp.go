@@ -2020,6 +2020,34 @@ func (a *ACPAgent) toolInputWait(toolCallID string) (toolCallMemo, bool) {
 	}
 }
 
+// permissionTitleFromRawInput 在 agent 没给 ToolTitle 时，从 RawInput 的结构化字段
+// 补一个可读标题。当前只覆盖 fetch（url/uri/query）。
+//
+// 为什么不覆盖 execute：那一路已有 commandFromRawInput 回填链（只读降级也依赖它）；
+// fetch 没有 command 可查，此前只能显示裸 kind。补 URL 的收益最大，且这段结果
+// 不进入任何分级判定——判错的代价只是卡片文字不准，不会影响放行。
+func permissionTitleFromRawInput(kind string, raw []byte) string {
+	if kind != "fetch" || len(raw) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ""
+	}
+	for _, k := range []string{"url", "uri", "query"} {
+		s, _ := m[k].(string)
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		const maxRunes = 160
+		if r := []rune(s); len(r) > maxRunes {
+			s = string(r[:maxRunes]) + "…"
+		}
+		return "Fetch " + s
+	}
+	return ""
+}
+
 // RequestPermission 处理 agent 的权限请求（M3 启用；M1 无回调时自动放行）。
 //
 // 流程：
@@ -2105,6 +2133,13 @@ func (a *ACPAgent) RequestPermission(ctx context.Context, params acp.RequestPerm
 				zap.Duration("waited", toolInputWaitTimeout),
 			)
 		}
+	}
+	// 卡片信息兜底（2026-11-23 23:28 实例）：cursor 的 fetch 请求只带 RawInput，
+	// 既没有 ToolTitle，也没有可回查的 tool_call 记忆（fetch 没有 command 字段），
+	// 于是等满 300ms 后卡片上只剩一个 kind，人无法判断批的是哪个 URL。
+	// 只补**展示**用的标题，不参与分级判定。
+	if strings.TrimSpace(title) == "" {
+		title = permissionTitleFromRawInput(toolKindString(params.ToolCall.Kind), rawInput)
 	}
 	perm := PermissionRequest{
 		ReqID:       reqID,

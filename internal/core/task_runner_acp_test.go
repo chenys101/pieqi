@@ -1113,6 +1113,54 @@ func TestRunACP_Resume_KeepAliveSessionNotFound(t *testing.T) {
 	}
 }
 
+// TestRunACP_Resume_KeepAliveSessionLost cursor 不用 "not found"，prompt 阶段报的是
+// {"code":-32603,"message":"Internal error: session lost"}。识别不出来时这条链路会直接
+// failTask（一周内 5 次失败里 2 次就是这个），行为契约与 SessionNotFound 完全一致：
+// Close 僵尸 → 清 ACPSessionID → 全新 Open → 重跑本轮成功。
+func TestRunACP_Resume_KeepAliveSessionLost(t *testing.T) {
+	tr, store, _, fake := newACPTestRunner(t, fakeScript{deltaText: "hi", realSessionID: "acp-real-sid"}, false)
+	task := createACPTestTask(t, store)
+	tr.Start(context.Background(), task)
+
+	waitRunACPDone(t, store, task.ID)
+	a := fake.adapter(task.ID)
+	if a == nil {
+		t.Fatal("keepalive adapter missing after first run")
+	}
+	openBefore := fake.openCount()
+	closeBefore := fake.closeCount()
+
+	a.deltaText = ""
+	a.sendErr = errors.New(`acp: prompt: {"code":-32603,"message":"Internal error: session lost"}`)
+	if err := tr.Resume(task.ID, "继续", ""); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	waitFor(t, 2*time.Second, "keepalive session-lost recover", func() bool {
+		tt, ok := store.Get(task.ID)
+		return ok && tt != nil && tt.Status == model.TaskCompleted &&
+			fake.openCount() > openBefore && fake.closeCount() > closeBefore
+	})
+
+	got := getTask(t, store, task.ID)
+	if got.Status != model.TaskCompleted {
+		t.Fatalf("status=%s error=%q, want completed", got.Status, got.Error)
+	}
+	found := false
+	for _, ev := range got.Events {
+		if ev.Type == model.EventStatus && strings.Contains(ev.Text, "续问上下文已丢失，已用全新会话继续") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("events missing session-lost status: %+v", got.Events)
+	}
+	if fresh := fake.openCallAt(openBefore); fresh.resumeFrom != "" {
+		t.Fatalf("fresh open after session lost resumeFrom=%q, want empty", fresh.resumeFrom)
+	}
+}
+
 // TestRunACP_Resume_NoACPSessionAnchorsPrompt 首轮从未建成 ACP 会话（无 ACPSessionID）时续问：
 // 允许重试，但发给 agent 的 prompt 必须钉本任务原文，且回执不能假装「正在恢复会话」。
 // 回归 c764d612：裸「继续」+ 预分配 ClaudeSessionID 放行 → 空会话串到别的 transcript。
