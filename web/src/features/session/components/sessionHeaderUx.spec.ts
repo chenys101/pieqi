@@ -22,6 +22,7 @@ vi.mock('@/stores/app', () => ({
 // 缺了会刷一屏 injection "Symbol(router)" not found 警告（测试仍会过，只是噪音）。
 vi.mock('vue-router', () => ({
   useRouter: () => ({ back: vi.fn(), push: vi.fn() }),
+  useRoute: () => ({ query: {} }),
 }))
 
 function mount(comp: Component, props: Record<string, unknown> = {}) {
@@ -56,6 +57,44 @@ describe('需求 2：中止入口唯一', () => {
     // 反馈与删除仍在（只摘掉中止这一个）
     expect(host.textContent).toContain('反馈')
     expect(host.textContent).toContain('删除')
+  })
+
+  it('桌面：短路径可升格时头部有次要「升格」，无 sticky 文案', () => {
+    const { host } = mount(SessionHeader, {
+      task: baseTask,
+      canCancel: true,
+      showFeedback: true,
+      canPromote: true,
+    })
+    const btn = host.querySelector('[data-testid="session-promote"]')
+    expect(btn).not.toBeNull()
+    expect(btn!.textContent?.trim()).toBe('升格')
+    expect(host.textContent).not.toContain('打磨够了再点')
+  })
+
+  it('桌面：已挂需求（canPromote=false）不渲染升格入口', () => {
+    const { host } = mount(SessionHeader, {
+      task: { ...baseTask, requirementId: 'req-1' } as unknown as Task,
+      canCancel: true,
+      canPromote: false,
+    })
+    expect(host.querySelector('[data-testid="session-promote"]')).toBeNull()
+    expect(host.textContent).not.toContain('升格')
+  })
+
+  it('移动端：升格在状态浮层，不占顶栏拇指区', async () => {
+    const { host } = mount(SessionHeader, {
+      task: baseTask,
+      canCancel: true,
+      compact: true,
+      canPromote: true,
+    })
+    expect(host.querySelector('[data-testid="session-promote"]')).toBeNull()
+    host.querySelector<HTMLButtonElement>('[data-testid="session-status"]')!.click()
+    await nextTick()
+    const promote = host.querySelector('[data-testid="session-promote"]')
+    expect(promote).not.toBeNull()
+    expect(promote!.textContent).toContain('升格为需求')
   })
 
   it('移动端 compact 头部同样没有「中止」图标按钮', () => {

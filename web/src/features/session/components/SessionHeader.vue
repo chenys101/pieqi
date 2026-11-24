@@ -53,10 +53,15 @@ const props = withDefaults(
     compact?: boolean
     /** 移动端：当前是否正看着变更反馈（图标按下态） */
     feedbackActive?: boolean
+    /**
+     * 短路径未挂需求时可升格。入口是头部次要动作（桌面 ghost / 移动状态浮层），
+     * 不占 composer 上方 sticky——多数任务会一直短路径收工。
+     */
+    canPromote?: boolean
   }>(),
-  { showFeedback: true, compact: false, feedbackActive: false },
+  { showFeedback: true, compact: false, feedbackActive: false, canPromote: false },
 )
-const emit = defineEmits<{ cancel: []; remove: []; feedback: [] }>()
+const emit = defineEmits<{ cancel: []; remove: []; feedback: []; promote: [] }>()
 const router = useRouter()
 const route = useRoute()
 const agentStore = useAgentStore()
@@ -292,6 +297,16 @@ function goBack() {
             <StatusBadge :status="task.status" />
             <span class="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
             <Button v-if="showFeedback" variant="ghost" size="sm" title="变更反馈" @click="emit('feedback')">反馈</Button>
+            <Button
+              v-if="canPromote"
+              variant="ghost"
+              size="sm"
+              title="升格为需求"
+              data-testid="session-promote"
+              @click="emit('promote')"
+            >
+              升格
+            </Button>
             <Button variant="ghost" size="sm" title="删除任务" @click="emit('remove')">删除</Button>
           </div>
         </template>
@@ -359,6 +374,8 @@ function goBack() {
       :task="task"
       :agent-label="agentLabel"
       :agent-title="agentTitle"
+      :can-promote="canPromote"
+      @promote="closePopovers(); emit('promote')"
     />
 
     <!-- 其他任务下拉：挂在 header 上、右对齐（不是挂在 28px 的按钮上，

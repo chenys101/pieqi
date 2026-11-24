@@ -92,9 +92,11 @@ const showPromote = computed(() => canPromoteToRequirement(task.value))
           :compact="isMobile"
           :show-feedback="!isWide"
           :feedback-active="mobilePane === 'feedback'"
+          :can-promote="showPromote"
           @cancel="cancel"
           @remove="askRemove"
           @feedback="openFeedback"
+          @promote="promoteOpen = true"
         />
 
         <!-- 移动端切到「变更反馈」时，时间线整段让位（v-show：不卸载，切回来保留滚动位置） -->
@@ -146,27 +148,6 @@ const showPromote = computed(() => canPromoteToRequirement(task.value))
           >
             <ContentColumn :resizable="false">
               <PlanList :entries="task.plan.entries" />
-            </ContentColumn>
-          </div>
-
-          <!-- 短路径未挂需求：升格常驻（PE 入口拍板；非所有任务） -->
-          <div
-            v-if="showPromote"
-            class="shrink-0 border-t border-border bg-surface/95 px-3 py-2 backdrop-blur md:px-4"
-            data-testid="session-promote-bar"
-          >
-            <ContentColumn :resizable="false">
-              <div class="flex flex-wrap items-center gap-2">
-                <Button
-                  variant="primary"
-                  size="sm"
-                  data-testid="session-promote"
-                  @click="promoteOpen = true"
-                >
-                  升格为需求
-                </Button>
-                <span class="text-[11px] text-muted">短路径 · 未挂需求 · 打磨够了再点</span>
-              </div>
             </ContentColumn>
           </div>
 

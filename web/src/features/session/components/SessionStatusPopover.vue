@@ -9,11 +9,17 @@ import type { Task } from '@/types/task'
 import { STATUS_DOT, STATUS_LABELS } from '@/utils/format'
 import { timeAgo } from '@/utils/date'
 
-const props = defineProps<{
-  task: Task
-  agentLabel: string
-  agentTitle: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    task: Task
+    agentLabel: string
+    agentTitle: string
+    /** 短路径未挂需求：浮层底部次要「升格」，不占顶栏拇指区 */
+    canPromote?: boolean
+  }>(),
+  { canPromote: false },
+)
+const emit = defineEmits<{ promote: [] }>()
 
 const statusLabel = computed(() => STATUS_LABELS[props.task.status])
 const statusDotClass = computed(() => STATUS_DOT[props.task.status])
@@ -51,5 +57,14 @@ const statusDotRing = computed(() => (props.task.status === 'waiting_input' ? 'r
       <span class="shrink-0 text-text-tertiary">项目</span>
       <span class="min-w-0 truncate text-text" :title="task.projectPath || task.project">{{ task.project }}</span>
     </div>
+    <button
+      v-if="canPromote"
+      type="button"
+      class="mt-2 w-full rounded-md border border-border px-2 py-1.5 text-left text-[11px] text-text-secondary transition-colors hover:bg-elevated hover:text-text"
+      data-testid="session-promote"
+      @click="emit('promote')"
+    >
+      升格为需求
+    </button>
   </div>
 </template>
