@@ -73,7 +73,7 @@ type TaskRunner struct {
 	// 否则保持 Phase 1 claude -p 路径。新增字段零值默认走旧路径，不破坏 Phase 1。
 	agentMgr    agentRunner // nil = Phase 1 claude -p 路径（默认）
 	useACP      bool
-	permTimeout time.Duration // ACP 路径 WirePermission 超时；<=0 用默认（30min）
+	permTimeout time.Duration // ACP 路径 WirePermission 超时；<=0 用默认（2h，源自 pieqi.hook_timeout）
 
 	// ACP 路径免审名单：ToolKind 命中即自动放行（不中断等人工审批）。
 	// 由全局偏好（core.SettingsStore）推导，**运行期可改** —— 所以必须加锁：
@@ -415,7 +415,7 @@ func (tr *TaskRunner) snapshotDiffStat(t *model.Task) {
 // SetAgentManager 注入 AgentManager 并启用 ACP 路径（Task 4.4）。
 // useACP=true 且 mgr!=nil 时 run 走 ACP 路径；否则保持 Phase 1 claude -p 路径。
 // 不改 NewTaskRunner 签名，避免动所有调用方；由 Bridge 在启用 ACP 时显式注入。
-// permTimeout<=0 时 WirePermission 用其默认（30min）。
+// permTimeout<=0 时 WirePermission 用其默认（2h）。
 func (tr *TaskRunner) SetAgentManager(mgr agentRunner, useACP bool, permTimeout time.Duration) {
 	tr.agentMgr = mgr
 	tr.useACP = useACP

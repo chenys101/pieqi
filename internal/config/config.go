@@ -323,7 +323,10 @@ func Load(configPath string) (*Config, error) {
 	// 且其默认值里的 delete 属 L3，与"L3 永不放行"的硬边界矛盾。
 	v.SetDefault("pieqi.use_worktrees", true)
 	v.SetDefault("pieqi.cleanup_worktrees", true)
-	v.SetDefault("pieqi.hook_timeout", "30m")
+	// 2026-11-24：30m → 2h。一周日志里 12 次 approval TIMED OUT 全是"人不在电脑前"
+	// 而非"卡住"，30 分钟太容易误伤；超时后 agent 收 Deny、任务继续跑，代价却已经付出。
+	// 2h 覆盖一个午休/一段会议，超时前 5 分钟会经 IM 提醒一次（core.PermissionWire）。
+	v.SetDefault("pieqi.hook_timeout", "2h")
 	v.SetDefault("pieqi.hook_tools", []string{"Bash", "Write", "Edit", "NotebookEdit"})
 	v.SetDefault("pieqi.max_concurrent_per_project", 4)
 	v.SetDefault("pieqi.worktree_base", "") // 空 = 建议 <RepoPath>/.worktrees（WorktreeManager）

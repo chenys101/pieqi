@@ -32,9 +32,10 @@ type pendingDecision struct {
 }
 
 // NewHookService 创建 hook 服务。timeout 为等待决策上限，超时返回 deny。
+// 生产值来自 pieqi.hook_timeout（默认 2h）；<=0 时的兜底与 config 默认保持一致。
 func NewHookService(timeout time.Duration) *HookService {
 	if timeout <= 0 {
-		timeout = 30 * time.Minute
+		timeout = 2 * time.Hour
 	}
 	return &HookService{
 		pending: make(map[string]*pendingDecision),

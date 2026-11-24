@@ -407,6 +407,64 @@ func TestWirePermission_Timeout(t *testing.T) {
 	}
 }
 
+// TestPermReminderDelay 提醒延时：长超时留 5 分钟提前量，短超时按一半（不能为负或等于超时）。
+func TestPermReminderDelay(t *testing.T) {
+	cases := []struct {
+		timeout, want time.Duration
+	}{
+		{0, 0},
+		{-time.Minute, 0},
+		{2 * time.Hour, 2*time.Hour - 5*time.Minute},
+		{10 * time.Minute, 5 * time.Minute},
+		{4 * time.Minute, 2 * time.Minute},
+		{120 * time.Millisecond, 60 * time.Millisecond},
+	}
+	for _, c := range cases {
+		if got := permReminderDelay(c.timeout); got != c.want {
+			t.Errorf("permReminderDelay(%v)=%v want %v", c.timeout, got, c.want)
+		}
+	}
+}
+
+// TestWirePermission_ReminderBeforeTimeout 超时前提醒只发 IM，不推进状态：
+// 提醒到达后任务必须仍在 waiting_input，随后才按原样超时。
+//
+// 为什么要钉这条：提醒如果误走了 handleTimeout 的推进逻辑，用户会看到卡片突然消失、
+// 任务回 running（而 agent 已经收到 Deny）——比不提醒更糟。
+func TestWirePermission_ReminderBeforeTimeout(t *testing.T) {
+	fa, _, _, store, taskID, pw, notifyTexts := setupPermWire(t, 120*time.Millisecond)
+	defer pw.Unwire()
+
+	fa.emitPerm(permReq("req-R", "Bash", "execute", standardOptions()))
+	waitForStatus(t, store, taskID, model.TaskWaitingInput, time.Second)
+
+	waitFor(t, time.Second, "reminder notify", func() bool {
+		for _, txt := range *notifyTexts {
+			if strings.Contains(txt, "还有") && strings.Contains(txt, "超时") {
+				return true
+			}
+		}
+		return false
+	})
+	tt, _ := store.Get(taskID)
+	if tt.Status != model.TaskWaitingInput {
+		t.Fatalf("status=%q after reminder, want 仍 waiting_input", tt.Status)
+	}
+	if tt.CurrentDecision == nil {
+		t.Fatalf("reminder 清掉了 CurrentDecision（应只在超时时清）")
+	}
+	// 提醒不碰 adapter：Deny 仍未发生。
+	if got := fa.denyCount(); got != 0 {
+		t.Fatalf("deny calls=%d after reminder, want 0", got)
+	}
+
+	// 随后仍要正常超时。
+	waitForStatus(t, store, taskID, model.TaskRunning, time.Second)
+	if got := fa.denyCount(); got != 1 {
+		t.Fatalf("deny calls=%d after timeout, want 1", got)
+	}
+}
+
 // TestWirePermission_ResolveAfterTimeout 超时后再 Resolve：**幂等**（不报错、不驱动 adapter）。
 //
 // 为什么不报错（2026-10-23 改）：超时已经 Deny 过一次，agent 早就收到"拒绝"了。

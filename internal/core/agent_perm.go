@@ -6,8 +6,9 @@
 //     经 store.Update 持久化 + Publish task_updated（PWA 弹审批卡片，前端已支持 approve/deny），
 //     并经 notify 回调往 IM 原渠道推送（仿 TaskRunner.notifyWaitingInput 文案）。
 //   - 记录 reqID→options，供 Resolve 把用户的 approve/deny 映射为 ACP 的 allow/reject 选项 ID。
-//   - 启动超时定时器（参考 hook_timeout，默认 30min）：到期调 adapter.Deny + IM 通知超时，
-//     task 置回 running（agent 收到 Cancelled 后会改走它路，与 Phase 1 hook 超时语义一致）。
+//   - 启动超时定时器（取 pieqi.hook_timeout，默认 2h；超时前 5min 经 IM 提醒）：
+//     到期调 adapter.Deny + IM 通知超时，task 置回 running（agent 收到 Cancelled 后会改走
+//     它路，与 Phase 1 hook 超时语义一致）。
 //   - Resolve 成功后 task 回 running，停掉定时器。
 //
 // 依赖方向：core → agent（单向）。internal/agent 不 import internal/core，无循环。
@@ -30,8 +31,27 @@ import (
 	"go.uber.org/zap"
 )
 
-// 默认审批超时上限（与 HookService 默认 30min 对齐）。WirePermission 传 timeout<=0 时用之。
-const defaultPermissionTimeout = 30 * time.Minute
+// defaultPermissionTimeout WirePermission 未显式配置超时时的兜底。
+//
+// 生产值来自 pieqi.hook_timeout（默认 2h，见 config.SetDefault）；这里只是"配置给了
+// 非正数"时的安全网，与默认值保持一致，避免两条真相。
+const defaultPermissionTimeout = 2 * time.Hour
+
+// permReminderLead 超时前多久提醒。只有长超时才排提醒：
+// delay = timeout - min(lead, timeout/2)，即短超时按一半算，不会出现负数或与弹卡挤在一起。
+const permReminderLead = 5 * time.Minute
+
+// permReminderDelay 计算提醒定时器的延时；<=0 表示不排提醒。
+func permReminderDelay(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 0
+	}
+	lead := permReminderLead
+	if half := timeout / 2; half < lead {
+		lead = half
+	}
+	return timeout - lead
+}
 
 // 审批决策的三种判定结果（PermissionWire.Resolve / resolveLocked 的返回值）。
 //
@@ -175,6 +195,7 @@ type permPending struct {
 	summary   string                   // 决策摘要（buildPermSummary 结果），排队提升时复用
 	options   []agent.PermissionOption // 记录的 ACP 选项，供 Resolve 映射 approve/deny
 	timer     *time.Timer              // 超时定时器；到期调 adapter.Deny
+	remind    *time.Timer              // 超时前提醒定时器（IM）；与 timer 同生共灭
 	done      bool                     // 已被 Resolve 或超时处理（先到先得，另一方放弃）
 	// shownAt 是本请求**真正展示给用户**的时刻（show() 里赋值）。
 	//
@@ -194,7 +215,7 @@ type permPending struct {
 //  5. 启动超时定时器：到期 adapter.Deny + IM 通知超时 + task 回 running。
 //
 // notify 为 nil 表示无 IM 渠道（HTTP/CLI 来源），跳过 IM 推送。
-// timeout<=0 时取 defaultPermissionTimeout（30min）。
+// timeout<=0 时取 defaultPermissionTimeout（2h，见 pieqi.hook_timeout）。
 // autoApprove 为免审名单（按 ACP ToolKind 匹配）：命中的权限请求直接自动放行，不中断等人工审批。
 // logger 为 nil 时用 zap.NewNop()（静默）。
 //
@@ -262,9 +283,7 @@ func (pw *PermissionWire) Abandon(reqID string) {
 	}
 	entry.done = true
 	delete(pw.pending, reqID)
-	if entry.timer != nil {
-		entry.timer.Stop()
-	}
+	stopPermTimers(entry)
 	for i, r := range pw.queue {
 		if r == reqID {
 			pw.queue = append(pw.queue[:i], pw.queue[i+1:]...)
@@ -769,6 +788,15 @@ func (pw *PermissionWire) show(reqID, toolTitle, toolKind, summary string, segme
 				pw.handleTimeout(reqID)
 			})
 		}
+		// 超时前提醒：2h 的超时里人可能一直没看屏幕，只在到点才发"已自动拒绝"太晚。
+		// 提醒与超时同生共灭（Resolve / Unwire / 超时都要 Stop，见 stopPermTimersLocked）。
+		if entry.remind == nil {
+			if d := permReminderDelay(pw.timeout); d > 0 {
+				entry.remind = time.AfterFunc(d, func() {
+					pw.handleReminder(reqID)
+				})
+			}
+		}
 	}
 	queued := len(pw.queue)
 	pw.mu.Unlock()
@@ -968,9 +996,7 @@ func (pw *PermissionWire) resolveLocked(decisionID, choice string) (resolveResul
 
 	// 先到先得：标记 done 并摘除 entry，停定时器，确保超时回调不会重复驱动 adapter。
 	entry.done = true
-	if entry.timer != nil {
-		entry.timer.Stop()
-	}
+	stopPermTimers(entry)
 	delete(pw.pending, decisionID)
 	shownAt := entry.shownAt
 	wasDisplayed := pw.displayed == decisionID
@@ -1103,6 +1129,79 @@ func (pw *PermissionWire) redeliverSettled(decisionID, choice string, settled *s
 	}
 }
 
+// stopPermTimers 停掉一条请求的超时与提醒定时器。
+//
+// Stop 并发安全；已触发但还没跑到的回调会自己看 entry.done（先到先得闸门），
+// 所以这里不需要额外同步。
+func stopPermTimers(e *permPending) {
+	if e == nil {
+		return
+	}
+	if e.timer != nil {
+		e.timer.Stop()
+	}
+	if e.remind != nil {
+		e.remind.Stop()
+	}
+}
+
+// handleReminder 超时前提醒：只提醒，不推进任何状态。
+//
+// 为什么单独一条定时器：2h 的窗口里"到点才说已自动拒绝"等于没说。提醒走与超时
+// 同一个 notify 通道，带剩余时长与工具名，让不看面板的人也能判断要不要现在处理。
+func (pw *PermissionWire) handleReminder(reqID string) {
+	pw.mu.Lock()
+	entry, ok := pw.pending[reqID]
+	if !ok || entry.done || pw.closed {
+		pw.mu.Unlock()
+		return
+	}
+	left := pw.timeout - time.Since(entry.shownAt)
+	toolTitle := entry.toolTitle
+	pw.mu.Unlock()
+
+	if left <= 0 {
+		return // 已到点，交给 handleTimeout
+	}
+	t, ok := pw.store.Get(pw.taskID)
+	if !ok || t == nil {
+		return
+	}
+	pw.logger.Warn("approval approaching timeout (reminder sent)",
+		zap.String("task", pw.taskID),
+		zap.String("req", reqID),
+		zap.String("tool", toolTitle),
+		zap.Duration("left", left),
+		zap.Duration("timeout", pw.timeout),
+	)
+	pw.notifyReminder(t, toolTitle, left)
+}
+
+// notifyReminder 经 IM 提醒"审批快超时"。与 notifyTimeout 同门禁：无 IM 来源就不推。
+func (pw *PermissionWire) notifyReminder(t *model.Task, toolTitle string, left time.Duration) {
+	if pw.notify == nil || t == nil || t.OriginChannel == "" || t.OriginChatID == "" {
+		return
+	}
+	tool := ""
+	if s := strings.TrimSpace(toolTitle); s != "" {
+		tool = "（" + s + "）"
+	}
+	pw.notify(t, fmt.Sprintf("⏳ 任务 #%s 的审批%s还有 %s 超时，超时将自动拒绝",
+		shortID(t.ID), tool, humanDuration(left)))
+}
+
+// humanDuration 把剩余时长压成人话：>=1 分钟按分钟向上取整，否则按秒（最小 1 秒）。
+func humanDuration(d time.Duration) string {
+	if d >= time.Minute {
+		return fmt.Sprintf("%d 分钟", int((d+time.Minute-1)/time.Minute))
+	}
+	s := int((d + time.Second - 1) / time.Second)
+	if s < 1 {
+		s = 1
+	}
+	return fmt.Sprintf("%d 秒", s)
+}
+
 // handleTimeout 超时定时器回调：Deny agent + IM 通知超时 + task 回 running。
 // 先到先得：若已被 Resolve 处理则放弃。
 func (pw *PermissionWire) handleTimeout(reqID string) {
@@ -1114,6 +1213,7 @@ func (pw *PermissionWire) handleTimeout(reqID string) {
 	}
 	entry.done = true
 	delete(pw.pending, reqID)
+	stopPermTimers(entry)
 	// 超时即"已拒绝"：记进 settled，这样用户**事后**点那张卡（它还在屏幕上，
 	// 应用也还没收到 task_updated）时，得到的是"这一条已经超时被拒了"，
 	// 而不是 2026-10-23 那次会话里刷屏的 no pending。
@@ -1356,9 +1456,7 @@ func (pw *PermissionWire) Unwire() {
 	pw.mu.Unlock()
 
 	for _, e := range entries {
-		if e.timer != nil {
-			e.timer.Stop()
-		}
+		stopPermTimers(e)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = pw.adapter.Deny(ctx, e.reqID)
 		cancel()

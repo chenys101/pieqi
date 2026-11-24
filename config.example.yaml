@@ -61,7 +61,7 @@ pieqi:
   # 注：旧的 auto_approve_tools 已移除 —— 它从未生效（免审名单一直来自设置页的
   #     auto_approve_l0 / auto_approve_l1 开关，默认都开）。显式配置它只会得到一条弃用告警。
   cleanup_worktrees: true            # 任务完成即清 worktree（use_worktrees=false 时无操作）
-  hook_timeout: 30m                  # hook 等人类决策的上限
+  hook_timeout: 2h                   # 等人类决策的上限（审批卡 / PreToolUse hook）；超时前 5 分钟 IM 提醒
   hook_tools: [Bash, Write, Edit, NotebookEdit]   # PreToolUse 拦截的工具；读类不拦
   max_concurrent_per_project: 4      # 每项目并发上限
   # 注：pieqi.base_branch 已删除 —— 主分支是仓库属性（GitHub 常 main、业务仓常 master），

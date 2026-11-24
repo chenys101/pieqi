@@ -447,6 +447,14 @@ func (tr *TaskRunner) titleFromTaskAgent(ctx context.Context, t *model.Task) (st
 	return "", errTitleEmpty
 }
 
+// titleClaudeFallbackTimeout claude -p 兜底（第二级）的硬上限。
+//
+// 2026-11-24 由 60s 收到 5s。标题生成是异步的、不阻塞任务创建，但它会占一个 claude
+// 子进程；一周日志里 5 次 "title backend failed" 全是 cursor 先失败、兜底再白等一分钟。
+// 5s 只够"本机 claude 已热"的情况成功——冷启动必然放弃，这是刻意的取舍：
+// 宁可保留启发式标题，也不为一个标题挂一分钟子进程。若实测标题命中率明显下降，调到 10s。
+const titleClaudeFallbackTimeout = 5 * time.Second
+
 // titleFromClaudePrint 兜底：spawn `claude -p` 生成标题。
 //
 // 只在任务自己的 agent 不可用（或失败）时走到这里。它依赖 ~/.claude 里的凭据，
@@ -457,7 +465,7 @@ func (tr *TaskRunner) titleFromClaudePrint(ctx context.Context, t *model.Task) (
 	if dir == "" {
 		dir = t.ProjectPath
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, titleClaudeFallbackTimeout)
 	defer cancel()
 
 	bin := tr.titleClaudeBinary

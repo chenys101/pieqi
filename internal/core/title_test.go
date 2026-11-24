@@ -334,3 +334,11 @@ func TestGenerateTitle_FallsBackWhenAgentPathFails(t *testing.T) {
 	}
 }
 
+
+// TestTitleClaudeFallbackTimeoutBudget 钉住兜底上限：60s → 5s 是刻意取舍
+// （cursor 失败后不让标题链路再白等一分钟），有人改回 60s 时这里先响。
+func TestTitleClaudeFallbackTimeoutBudget(t *testing.T) {
+	if titleClaudeFallbackTimeout > 10*time.Second {
+		t.Fatalf("titleClaudeFallbackTimeout=%v，超过 10s 预算", titleClaudeFallbackTimeout)
+	}
+}
