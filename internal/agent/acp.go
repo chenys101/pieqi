@@ -583,8 +583,7 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 	go a.watchExit()
 
 	// initialize 握手（capabilities handshake），用 InitTimeout 兜底防止永久挂起。
-	initCtx, cancel := context.WithTimeout(ctx, a.cfg.InitTimeout)
-	defer cancel()
+	initCtx, cancelInit := context.WithTimeout(ctx, a.cfg.InitTimeout)
 	initResp, err := a.conn.Initialize(initCtx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		ClientInfo: &acp.Implementation{
@@ -601,10 +600,16 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 		// 读 initResp.AgentCapabilities.PromptCapabilities.Image，见 agentSupportsImagePrompt。
 	})
 	if err != nil {
+		cancelInit()
 		// 握手失败：统一走 Close 清理（杀进程 + markDone + 清 pending），避免与 watchExit 双重 close done。
 		a.Close(ctx)
-		return fmt.Errorf("acp: initialize (protocol v%d): %w", acp.ProtocolVersionNumber, err)
+		return wrapACPErrText(fmt.Sprintf("acp: initialize (protocol v%d)", acp.ProtocolVersionNumber), err)
 	}
+	// initialize 当场释放预算：下面的 authenticate 是**另一次网络往返**，
+	// 共用同一个 ctx 会让它只剩 initialize 用剩的残值 —— cursor 的 InitTimeout
+	// 就是 30s，initialize 慢一点 authenticate 立刻假超时（"context deadline exceeded"
+	// 却没有任何真实慢请求），2026-11-20 那 2 次就是这么来的。
+	cancelInit()
 	// 存下 agent 声明的能力，供 NewSession 决定续问走 session/load 还是 session/resume。
 	a.agentCaps = initResp.AgentCapabilities
 	// agent_caps 必须打进日志：续问走 load 还是 resume 完全由它决定，
@@ -619,7 +624,10 @@ func (a *ACPAgent) startInternal(ctx context.Context) error {
 		zap.Bool("prompt_image", agentSupportsImagePrompt(a.agentCaps)))
 
 	// Cursor：authMethods 非空时调 Authenticate；失败用固定文案，任务应 failed 而非挂起。
-	if err := a.authenticateAfterInit(initCtx, initResp); err != nil {
+	// 独立预算（InitTimeout），不与 initialize 共用 —— 见上面 cancelInit 处的说明。
+	authCtx, cancelAuth := context.WithTimeout(ctx, a.cfg.InitTimeout)
+	defer cancelAuth()
+	if err := a.authenticateAfterInit(authCtx, initResp); err != nil {
 		a.Close(ctx)
 		return err
 	}
@@ -1414,18 +1422,24 @@ func stopReasonErr(reason acp.StopReason) error {
 }
 
 // wrapACPPromptErr 包装 Prompt 错误；对端不认 sid 时抬 ErrSessionNotFound。
+//
+// 错误文本一律经 describeACPError 可读化：SDK 的 RequestError.Error() 是紧凑 JSON，
+// 原样透出会让用户看到 {"code":-32001,...} 这种机器码（2026-11-20 那 8 次额度失败
+// 在面板上就是这么显示的）。只改呈现、不改语义，且**不按 code 分流**。
 func wrapACPPromptErr(prefix string, err error) error {
 	if IsSessionNotFound(err) {
-		return fmt.Errorf("%w: %s: %v", ErrSessionNotFound, prefix, err)
+		// 抬哨兵，但把原错误**接在链上**（原来用 %v，errors.As 拿不回 RequestError，
+		// 排查时正是最需要看对端原始 code/data 的时候）。双 %w 是 Go 1.20+ 的能力。
+		return fmt.Errorf("%w: %w", ErrSessionNotFound, wrapACPErrText(prefix, err))
 	}
-	return fmt.Errorf("%s: %w", prefix, err)
+	return wrapACPErrText(prefix, err)
 }
 
 // wrapACPSessionOpenErr 包装 load/resume 错误；session not found 时抬 ErrSessionNotFound。
 func wrapACPSessionOpenErr(op, sid string, err error) error {
-	wrapped := fmt.Errorf("acp: %s session %s: %w", op, sid, err)
+	wrapped := wrapACPErrText(fmt.Sprintf("acp: %s session %s", op, sid), err)
 	if IsSessionNotFound(err) || IsSessionNotFound(wrapped) {
-		return fmt.Errorf("%w: %v", ErrSessionNotFound, wrapped)
+		return fmt.Errorf("%w: %w", ErrSessionNotFound, wrapped)
 	}
 	return wrapped
 }
