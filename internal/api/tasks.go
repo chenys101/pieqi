@@ -363,10 +363,10 @@ type interveneReq struct {
 	Model string `json:"model"`
 	// Images 随这条消息一起发出的图片（可选）。与 Model 同为**按轮**载荷，不落库。
 	//
-	// 只对终态/choice 的 append_prompt（走 Resume 起新进程）有意义。两类请求**不收图**：
-	//   - decision：那是回答一张审批卡，没有"这条消息"可言；
-	//   - running / waiting_input(approval)：走 stdin 注入，那是纯文本通道。
-	// 给这两类带图会被**明确 400**（而不是静默丢图，见 intervene 里的说明）。
+	// 凡走 ResumeRich 的 append_prompt 都可带图（终态续问 / choice 续跑 / **running 排队**）。
+	// 两类请求**不收图**，必须明确 400（见 intervene）：
+	//   - decision：回答审批卡，没有"这条消息"可言；
+	//   - waiting_input(approval)：进程仍活着等卡，只能 Intervene 批/拒，不能排队带图。
 	Images []imageReq `json:"images"`
 }
 
@@ -377,8 +377,9 @@ func (s *Server) intervene(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
-	// 终态任务（completed/failed/cancelled）允许 append_prompt 续问：走 Resume 复用 session 重跑一轮。
-	// decision 仅对 waiting_input 生效；running/waiting_input 的 append_prompt 走 stdin 注入。
+	// 终态 / running / waiting_input 可干预；pending 等其它态拒绝。
+	// append_prompt 凡 IsResumable 都走 ResumeRich（含 running 排队带图）；
+	// 仅 waiting_input(approval) 的 decision / 纯文本 stdin 仍走 Intervene。
 	isTerminal := t.Status == model.TaskCompleted || t.Status == model.TaskFailed || t.Status == model.TaskCancelled
 	if t.Status != model.TaskWaitingInput && t.Status != model.TaskRunning && !isTerminal {
 		c.JSON(http.StatusConflict, gin.H{"error": "task not interventionable: " + string(t.Status)})
@@ -439,16 +440,25 @@ func (s *Server) intervene(c *gin.Context) {
 		c.JSON(http.StatusAccepted, gin.H{"ok": true, "resumed": true})
 		return
 	}
-	// 运行中 / waiting_input(approval) 的输入走 stdin 注入，那是**纯文本通道**，
-	// 收不了图（见 interveneReq.Images 的说明）。带图到这里必须**明确拒绝**。
-	//
-	// 为什么不能放任它往下走：Intervene 收的是 model.Intervention，那个结构里
-	// 根本没有图片字段 —— 图会被**静默丢掉**，用户以为 agent 看到了图，
-	// 而它只会对着没图的上下文说些不相干的话。这正是 agent 层一直严防的失败模式
-	// （见 session.go「静默丢图是最坏的选择」），接口层不能自己制造一个。
+	// running（及 waiting_input 无 decision 的可续中间态）：append_prompt 统一走 ResumeRich
+	// 排队下一轮 —— 可带图。ACP 本就不支持 stdin 插话；print 路径的 stdin 插话也让位给
+	// 串行队列，避免"带图被拒 / 不带图却 stdin"两套语义。
+	if req.Kind == "append_prompt" && core.IsResumable(t) {
+		if err := s.runner.ResumeRich(id, req.Text, req.Model, reqImages); err != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		s.runner.RecordIntervention(id, model.Intervention{
+			TaskID: id, Kind: "append_prompt", Text: req.Text, Source: model.SourceHTTP,
+		})
+		c.JSON(http.StatusAccepted, gin.H{"ok": true, "resumed": true})
+		return
+	}
+	// 到这里只剩 waiting_input(approval)：只能 Intervene 批/拒。
+	// Intervene 的结构没有图片字段 —— 带图必须明确 400，绝不能静默丢图。
 	if len(reqImages) > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "运行中的任务不支持随消息发图（stdin 注入是纯文本通道）；请等该轮结束后再续问带图",
+			"error": "等待审批时不支持随消息发图；请先处理审批卡，或等本轮结束后再续问带图",
 		})
 		return
 	}

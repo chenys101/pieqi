@@ -228,12 +228,34 @@ describe('InterveneInput', () => {
     expect(c.host.querySelector('button[aria-label="发送"]')).toBeNull()
   })
 
-  it('运行中：textarea disabled 且只给「中止」', () => {
+  it('仅中止（不可发送）：textarea disabled 且只给「中止」', () => {
     const onCancel = vi.fn()
     const { host } = mount(InterveneInput, { canCancel: true, canSend: false, onCancel })
     expect(ta(host).disabled).toBe(true)
     ;(host.querySelector('button[aria-label="中止"]') as HTMLButtonElement).click()
     expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('运行中可发送：输入可写，中止与发送并存', async () => {
+    const onSend = vi.fn()
+    const onCancel = vi.fn()
+    const { host } = mount(InterveneInput, {
+      canCancel: true,
+      canSend: true,
+      canAttachImages: true,
+      onSend,
+      onCancel,
+    })
+    expect(ta(host).disabled).toBe(false)
+    expect(host.querySelector('button[aria-label="中止"]')).not.toBeNull()
+    expect(host.querySelector('button[aria-label="发送"]')).not.toBeNull()
+    expect(host.querySelector('[data-testid="composer-cancel"]')).not.toBeNull()
+    expect(host.querySelector('[data-testid="composer-add-image"]')).not.toBeNull()
+
+    await type(host, '排队带一句')
+    ;(host.querySelector('button[aria-label="发送"]') as HTMLButtonElement).click()
+    expect(onSend).toHaveBeenCalledWith('排队带一句', [])
+    expect(onCancel).not.toHaveBeenCalled()
   })
 
   it('终态：空文本不可发送，有文本才 emit send 并清空', async () => {
@@ -251,10 +273,11 @@ describe('InterveneInput', () => {
     expect(onSend).toHaveBeenCalledWith('补充一句', [])
   })
 
-  it('canSend=false 时不可发送（决策横幅未就绪）', async () => {
+  it('canSend=false 时不渲染发送钮（决策横幅未就绪）', async () => {
     const { host } = mount(InterveneInput, { canCancel: false, canSend: false })
     await type(host, '文字')
-    expect((host.querySelector('button[aria-label="发送"]') as HTMLButtonElement).disabled).toBe(true)
+    // 不可发时整枚发送钮不出现，避免摆一个永远 disabled 的诱饵
+    expect(host.querySelector('button[aria-label="发送"]')).toBeNull()
   })
 
   it('选择器在框内动作行、与发送按钮同一行（#lead 插槽），且在 textarea **下方**', async () => {
@@ -611,8 +634,13 @@ describe('InterveneInput 图片入口', () => {
     }
   })
 
-  // 运行中输入走的是纯文本 stdin 注入通道，收不了图 —— 与后端口径一致。
-  it('运行中（canCancel）不渲染图片入口', () => {
+  // running 可排队带图：canCancel+canSend 时入口应在。
+  it('运行中可发送时渲染图片入口', () => {
+    const { host } = mount(InterveneInput, { canCancel: true, canSend: true, canAttachImages: true })
+    expect(host.querySelector('[data-testid="composer-add-image"]')).not.toBeNull()
+  })
+
+  it('仅中止（不可发送）时不渲染图片入口', () => {
     const { host } = mount(InterveneInput, { canCancel: true, canSend: false, canAttachImages: true })
     expect(host.querySelector('[data-testid="composer-add-image"]')).toBeNull()
   })
@@ -707,9 +735,8 @@ describe('截图粘贴进输入框', () => {
     expect(err!.textContent).toContain('过大')
   })
 
-  // 运行中输入走纯文本 stdin 通道，收不了图 —— 与 v-if 的判据一致。
-  // 但粘贴是**用户主动动作**，静默失败会让他以为图已经贴上去了，必须给一句解释。
-  it('运行中粘贴 → 不出现缩略图，但给出解释（不是静默失败）', async () => {
+  // 不可发送时粘贴是**用户主动动作**，静默失败会让他以为图已经贴上去了，必须给一句解释。
+  it('不可发送时粘贴 → 不出现缩略图，但给出解释（不是静默失败）', async () => {
     const { host, pinia } = mount(InterveneInput, {
       canCancel: true,
       canSend: false,
@@ -720,7 +747,18 @@ describe('截图粘贴进输入框', () => {
     expect(host.querySelector('[data-testid="composer-images"]')).toBeNull()
     const toasts = useNotificationStore(pinia).toasts
     expect(toasts).toHaveLength(1)
-    expect(toasts[0].message).toContain('运行中无法追加图片')
+    expect(toasts[0].message).toContain('无法追加图片')
+  })
+
+  it('运行中可发送时粘贴 → 图片进入待发列表', async () => {
+    const { host } = mount(InterveneInput, {
+      canCancel: true,
+      canSend: true,
+      canAttachImages: true,
+    })
+    ta(host).dispatchEvent(pasteEvent(itemsClipboard(pngFile())))
+    await settle()
+    expect(host.querySelector('[data-testid="composer-images"]')).not.toBeNull()
   })
 
   it('不带图片的文本粘贴不产生任何图片痕迹', async () => {

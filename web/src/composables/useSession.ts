@@ -19,8 +19,15 @@ export function useSession(taskId: Ref<string>) {
   const session = computed(() => sessionStore.session(taskId.value))
   const events = computed(() => sessionStore.events(taskId.value))
 
-  /** 终态可续问（走 Resume）；运行态按钮为中止 */
-  const canSendPrompt = computed(() => (task.value ? isTerminalStatus(task.value.status) : false))
+  /**
+   * 可发补充：终态续问，或 running 排队下一轮（ResumeRich，可带图）。
+   * pending / waiting_input(approval) 不在此列 —— 前者尚无会话，后者先答审批卡。
+   */
+  const canSendPrompt = computed(() => {
+    if (!task.value) return false
+    const s = task.value.status
+    return isTerminalStatus(s) || s === 'running'
+  })
   const canCancel = computed(
     () => !!task.value && ['pending', 'running', 'waiting_input'].includes(task.value.status),
   )
@@ -38,15 +45,14 @@ export function useSession(taskId: Ref<string>) {
   const forceScroll = ref<string | null>(null)
 
   /**
-   * 追加 prompt：运行中 → stdin 注入；终态 → Resume 续问。
+   * 追加 prompt：终态 / running 都走 ResumeRich（running = 排队到本轮结束后）。
    * 成功后乐观插入用户气泡 + 思考占位（方案 §36）。
    *
    * model（可选）是**本轮**要用的模型（不透明选择值，见 GET /api/agents/{agent}/models）。
-   * 空 = 沿用会话当前路由。只对续问（Resume 起新一轮）有意义 —— 后端在纯 stdin 注入的
-   * 路径上不看它，故 UI 也只在可续问时给出这个选择器（见 InterveneInput）。
+   * 空 = 沿用会话当前路由。只对 Resume 起新一轮有意义。
    *
    * images（可选）随这条消息发出。**纯 base64**（见 imageAttach.ts 的说明）。
-   * 同样只对续问有意义：运行中的 stdin 注入是纯文本通道。
+   * running 也可带图（排队下一轮）；waiting_input(approval) 仍不收图。
    */
   async function submitPrompt(text: string, model?: string, images?: PendingImage[]) {
     const id = taskId.value

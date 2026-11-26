@@ -107,14 +107,14 @@ export interface IntervenePayload {
   text?: string
   /**
    * 本轮要用的模型（不透明串，见 GET /api/agents/{agent}/models）；不传 = 沿用会话当前。
-   * 只在续问（终态 Resume）这一轮生效 —— 那是唯一"起新一轮"的 append_prompt。
+   * 对 ResumeRich 路径生效（终态续问 / choice / running 排队）。
    */
   model?: string
   /**
    * 随这条消息发出的图片（纯 base64，**不带 data: 前缀**；见 imageAttach.ts）。
    *
    * 与 model 同为**按轮**载荷：只对 append_prompt 有意义，后端不落库
-   * （落库的只有"这条消息带了几张图"的元数据）。
+   * （落库的只有"这条消息带了几张图"的元数据）。running 亦可带图（排队下一轮）。
    */
   images?: ImagePayload[]
 }

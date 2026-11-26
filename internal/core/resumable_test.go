@@ -26,7 +26,7 @@ func TestIsResumable_WaitingInputWithoutDecision(t *testing.T) {
 	// 显式置空，复刻竞态：状态已落 waiting_input，decision 还没写进去。
 	task.CurrentDecision = nil
 
-	if !isResumable(task) {
+	if !IsResumable(task) {
 		t.Fatal("waiting_input 且无 decision 必须判为可续（快照竞态）—— " +
 			"判 false 会让自重启接续失败并把任务不可逆地标成 failed")
 	}
@@ -46,7 +46,7 @@ func TestIsResumable_ApprovalStillBlocked(t *testing.T) {
 			Kind: model.DecisionKindApproval,
 		},
 	}
-	if isResumable(task) {
+	if IsResumable(task) {
 		t.Fatal("路径 A（approval）不可续：进程还挂在 hook channel 上等决策，" +
 			"应走 Intervene 回答那张卡，而不是排一轮新输入")
 	}
@@ -63,7 +63,7 @@ func TestIsResumable_ChoiceAllowed(t *testing.T) {
 			Kind: model.DecisionKindChoice,
 		},
 	}
-	if !isResumable(task) {
+	if !IsResumable(task) {
 		t.Fatal("路径 B（choice）应可续：进程已 end_turn 退出，用户选完即续跑")
 	}
 }
@@ -73,7 +73,7 @@ func TestIsResumable_TerminalAndRunning(t *testing.T) {
 	for _, st := range []model.TaskStatus{
 		model.TaskCompleted, model.TaskFailed, model.TaskCancelled, model.TaskRunning,
 	} {
-		if !isResumable(&model.Task{ID: "t", Status: st}) {
+		if !IsResumable(&model.Task{ID: "t", Status: st}) {
 			t.Errorf("status=%s 应可续", st)
 		}
 	}
@@ -82,7 +82,7 @@ func TestIsResumable_TerminalAndRunning(t *testing.T) {
 // TestIsResumable_PendingNotResumable 未开始的任务不该被"续问"——
 // 它没有可续的上下文，应让用户正常跑首轮。
 func TestIsResumable_PendingNotResumable(t *testing.T) {
-	if isResumable(&model.Task{ID: "t", Status: model.TaskPending}) {
+	if IsResumable(&model.Task{ID: "t", Status: model.TaskPending}) {
 		t.Fatal("pending 不可续：尚无会话上下文，应走正常首轮执行")
 	}
 }

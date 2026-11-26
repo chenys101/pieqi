@@ -229,15 +229,14 @@ export interface InterveneRequestDto {
    * 本轮要用的模型（**不透明选择值**，见 GET /api/agents/{agent}/models）。
    * 空 = 沿用会话当前路由。
    *
-   * 只对 append_prompt 且在**续问路径**（终态 Resume / choice 续问）生效——
-   * 那才是"起新一轮"。运行中 append_prompt 只是往当前轮注入 stdin，后端不看这个字段。
+   * 对 append_prompt 的 ResumeRich 路径生效（终态 / choice / **running 排队**）。
    */
   model?: string
   /**
    * 随这条消息发出的图片（**纯 base64**，不带 data: 前缀）。
    *
    * 与 model 同为**按轮**载荷，不落库。只对 append_prompt 有意义：
-   * decision 是回答一张审批卡，运行中 append_prompt 走的是纯文本 stdin 通道。
+   * decision / waiting_input(approval) 不收图；running 可带图（排队下一轮）。
    */
   images?: ImageReqDto[]
 }

@@ -89,10 +89,10 @@ const agentInitial = computed(() => (props.agentLabel || '').slice(0, 1).toUpper
 const COMPOSER_MAX_HEIGHT = 66
 
 /**
- * 发送/中止按钮在不在输入区里：运行中（canCancel）整条输入框是禁用的，
- * 唯一可点的东西是「■ 中止」，它必须始终在 —— 那个分支保留 `rows=2` 的旧口径。
+ * 可写可发时用「发送态」行高（文字区封顶）；仅中止（pending / 等审批）保留旧 `rows=2`。
+ * running 现在 canSend=true：中止与发送并存，输入框保持可写以便排队带图。
  */
-const sendsInFooter = computed(() => !props.canCancel)
+const composing = computed(() => props.canSend)
 
 const text = ref('')
 const images = ref<PendingImage[]>([])
@@ -103,6 +103,12 @@ const imagePicker = ref<{ open: (data: DataTransfer) => void } | null>(null)
 const sendDisabled = computed(
   () => (!text.value.trim() && images.value.length === 0) || !props.canSend || submitting.value,
 )
+
+const placeholder = computed(() => {
+  if (!props.canSend) return '运行中… 可中止'
+  if (props.canCancel) return '发送补充（本轮结束后排队）… 可带图'
+  return '发送补充… 输入 / 触发命令/Skill'
+})
 
 async function onSend() {
   if (sendDisabled.value) return
@@ -123,23 +129,16 @@ function onPick(value: string) {
 }
 
 /**
- * 输入框里的粘贴：把事件转交给 ImagePicker（截图直接贴进来）。
+ * 输入框里的粘贴：转交 ImagePicker（截图直接贴进来）。
  *
- * ★ 与 `v-if="canAttachImages && !canCancel"` **刻意不一致**，两条判据各自成立：
- *
- *   - `!props.canCancel`（运行中）：这里是**主动功能**。运行中输入走的是纯文本 stdin 注入，
- *     收不了图，所以没有入口。但"想贴张图补充说明"是运行中很自然的动作 ——
- *     此时必须给一句**可执行的解释**，而不是让粘贴静默失败（用户会以为图已经贴上了）。
- *   - `canAttachImages`（agent 能力）：这里**不做分支**。当前该值在会话内恒定
- *     （同一个任务的 agent 不会中途换），所以与 v-if 的差异只在"还没加载出来"
- *     那一小段：那种情况下把图先收进缩略图条，等能力到位再发，比拒绝用户更合理，
- *     而且下面能力不足时会明确报错、也发不出去。
- *
- * picker 为 null 说明入口没渲染（disabled / 已满 8 张），那就是无事发生。
+ * 能发（canSend）时入口已渲染；不能发时若 agent 本可收图，给一句人话，
+ * 避免静默失败（用户会以为图已经贴上了）。
  */
 function onPaste(data: DataTransfer | null) {
-  if (props.canCancel) {
-    notify.push('运行中无法追加图片，请等本轮结束后再发送', 'info')
+  if (!props.canSend) {
+    if (props.canAttachImages) {
+      notify.push('当前无法追加图片，请先处理审批或等可发送后再试', 'info')
+    }
     return
   }
   if (data) imagePicker.value?.open(data)
@@ -169,12 +168,12 @@ function onPaste(data: DataTransfer | null) {
              框内翻页比"看不见时间线"更可接受。 -->
         <PromptInput
           v-model="text"
-          :rows="sendsInFooter ? 1 : 2"
-          :max-height="sendsInFooter ? COMPOSER_MAX_HEIGHT : undefined"
+          :rows="composing ? 1 : 2"
+          :max-height="composing ? COMPOSER_MAX_HEIGHT : undefined"
           aria-label="补充指令"
-          :placeholder="canCancel ? '运行中… 可中止' : '发送补充… 输入 / 触发命令/Skill'"
-          :disabled="canCancel"
-          @submit="!canCancel && onSend()"
+          :placeholder="placeholder"
+          :disabled="!composing"
+          @submit="composing && onSend()"
           @paste="onPaste"
         >
           <!-- #lead 行：加图按钮 + 模型选择器（都靠左，与右侧发送/中止同一行）。
@@ -182,7 +181,7 @@ function onPaste(data: DataTransfer | null) {
                塞进去会被推到最右、和发送按钮挤在一起。 -->
           <template #lead>
             <ImagePicker
-              v-if="canAttachImages && !canCancel"
+              v-if="canAttachImages && canSend"
               ref="imagePicker"
               v-model="images"
               :disabled="submitting"
@@ -222,20 +221,18 @@ function onPaste(data: DataTransfer | null) {
             />
           </template>
 
-        <!-- 双态按钮：中止 ■ / 发送 ✈，在框内**动作行**右侧
+        <!-- 动作行右侧：中止 ■ 与发送 ✈ 可并存（running 排队带图时）。
              视觉 36×36，命中区用伪元素外扩到 44×44（AC-R8-04 允许视觉 36）。
-             `@mousedown.prevent`：点按钮不该把输入框的焦点抢走（判据见 ModelPicker）。 -->
+             `@mousedown.prevent`：点按钮不该把输入框的焦点抢走（判据见 ModelPicker）。
+             仅中止时中止钮占 `composer-send`（布局锚点）；可发时发送钮占该锚点，
+             中止改用 `composer-cancel`，避免两个主按钮抢同一个 testid。 -->
         <template #actions>
-          <!-- `data-testid` 与 aria-label 各司其职：aria-label 是给读屏与既有用例的**语义名**，
-               testid 是给"几何/可点性"断言用的稳定锚点。测试里若按 `button[aria-label="发送"]`
-               取，那一刻**中止**态下什么都没有 —— 布局断言会随"任务是不是在跑"时红时绿
-               （2026-10-24 踩过）。两枚按钮共用 `composer-send` 这一个 id，语义就是"这一行的主按钮"。 -->
           <button
             v-if="canCancel"
             class="pointer-events-auto relative shrink-0 rounded-[var(--radius-sm)] bg-error/15 p-2.5 text-error transition-colors after:absolute after:-inset-1 after:content-[''] hover:bg-error/25 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40"
             title="中止生成"
             aria-label="中止"
-            data-testid="composer-send"
+            :data-testid="canSend ? 'composer-cancel' : 'composer-send'"
             @click="emit('cancel')"
             @mousedown.prevent
           >
@@ -244,7 +241,7 @@ function onPaste(data: DataTransfer | null) {
             </svg>
           </button>
           <button
-            v-else
+            v-if="canSend"
             class="pointer-events-auto relative shrink-0 rounded-[var(--radius-sm)] bg-accent p-2.5 text-white transition-opacity after:absolute after:-inset-1 after:content-[''] hover:opacity-90 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
             :disabled="sendDisabled"
             title="发送 (Ctrl+Enter)"

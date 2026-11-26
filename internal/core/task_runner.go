@@ -636,7 +636,7 @@ func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
 	return tr.ResumeRich(taskID, text, turnModel, nil)
 }
 
-// isResumable 判定某任务当前是否可被 Resume 接续一轮新输入。
+// IsResumable 判定某任务当前是否可被 Resume 接续一轮新输入。
 //
 // 三种可续：
 //   - 终态（completed / failed / cancelled）：常规续问；
@@ -658,7 +658,10 @@ func (tr *TaskRunner) Resume(taskID, text, turnModel string) error {
 //
 // ⚠️ 这个口子**不会**放行真正的路径 A：approval 态的 decision 必然非空，
 // 仍会被下面那条 Kind == choice 的分支排除，需要走 Intervene 回答那张卡。
-func isResumable(t *model.Task) bool {
+//
+// API 层 intervene 的 append_prompt 也靠它：可续 ⇒ ResumeRich（可带图排队）；
+// 不可续的 approval 等待仍走 Intervene，带图必须明确 400。
+func IsResumable(t *model.Task) bool {
 	switch t.Status {
 	case model.TaskCompleted, model.TaskFailed, model.TaskCancelled, model.TaskRunning:
 		return true
@@ -688,7 +691,7 @@ func (tr *TaskRunner) ResumeRich(taskID, text, turnModel string, images []agent.
 	if turnModel == "" {
 		turnModel = t.Model
 	}
-	if !isResumable(t) {
+	if !IsResumable(t) {
 		return fmt.Errorf("task not resumable: %s", t.Status)
 	}
 	// claude -p 路径收不了图（stream-json 的 user 消息只有文本）。**必须在任何状态
@@ -894,7 +897,7 @@ func (tr *TaskRunner) ResumeInterruptedWithInitiator(taskIDs []string, version, 
 		// 于是整条会话被判 failed（见 isResumable 的说明）。
 		// 现在 isResumable 已覆盖该中间态；这里再显式复核一次，是为了让
 		// "不可续"只在**确实**不该接续时才走失败分支。
-		if cur, ok := tr.store.Get(id); ok && cur != nil && !isResumable(cur) {
+		if cur, ok := tr.store.Get(id); ok && cur != nil && !IsResumable(cur) {
 			tr.logger.Info("resume interrupted task skipped (not resumable)",
 				zap.String("task", id), zap.String("status", string(cur.Status)))
 			// **跳过 ≠ 放着不管**（2026-10-13 事故的第二个缺口）。

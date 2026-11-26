@@ -246,7 +246,7 @@ describe('需求 2：中止入口唯一', () => {
     expect(cancelBtn).not.toBeNull()
     cancelBtn.click()
     expect(fromComposer).toBe(1)
-    // 运行中不给发送按钮（双态互斥）
+    // 仅中止、不可发送时不给发送钮（pending / 等审批）；running 可发送时中止+发送并存
     expect(composer.host.querySelector('button[aria-label="发送"]')).toBeNull()
   })
 })
