@@ -766,14 +766,13 @@ func (tr *TaskRunner) ResumeRich(taskID, text, turnModel string, images []agent.
 	return nil
 }
 
-// SupportsImagePrompt 报告某任务的会话此刻能否接收图片 prompt。
+// SupportsImagePrompt 报告某任务的**活会话**此刻能否接收图片 prompt。
 //
-// 无会话（还没跑过）/非 ACP 路径/对端没声明 → false。
+// 无会话（还没跑过 / 已被空闲回收）/非 ACP 路径/对端没声明 → false。
 //
-// ⚠️ 语义是"**此刻**能不能"，不是"这个任务支不支持"：能力来自 ACP 握手时对端的
-// 声明，而握手只在会话建立时发生一次。会话还没起时只能回答 false（保守侧）——
-// 前端据此隐藏入口，用户先发一条文本把会话建起来，入口就会出现。
-// 这比"乐观显示入口、点了报错"好：后者让用户以为功能坏了。
+// ⚠️ 这是握手级事实，不是"这个 agent 理论上能不能"。API 层在**无活会话**时
+// 会回落到 agent 目录的 ImagePrompt（见 api.taskImagePrompt），否则终态续问
+// 页会把加图入口藏掉，逼用户先发一条纯文本把会话拉起来。
 func (tr *TaskRunner) SupportsImagePrompt(taskID string) bool {
 	if !tr.useACP || tr.agentMgr == nil {
 		return false
@@ -782,6 +781,17 @@ func (tr *TaskRunner) SupportsImagePrompt(taskID string) bool {
 		return m.SupportsImagePrompt(taskID)
 	}
 	return false
+}
+
+// HasLiveAgentSession 报告该 task 此刻是否仍挂着 agent adapter（未被空闲回收）。
+//
+// 与 SupportsImagePrompt 搭配：有活会话却 Supports=false → 对端真没声明，别回落目录；
+// 无活会话 → API 才敢用目录 ImagePrompt 乐观显示入口（续问会重新 Open）。
+func (tr *TaskRunner) HasLiveAgentSession(taskID string) bool {
+	if tr.agentMgr == nil {
+		return false
+	}
+	return tr.agentMgr.Adapter(taskID) != nil
 }
 
 // ImageMeta 把待发图片转成可落事件的元数据（**不含 base64**，见 model.TaskImage）。

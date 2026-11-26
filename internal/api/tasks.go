@@ -312,21 +312,51 @@ func (s *Server) getTask(c *gin.Context) {
 
 // taskCapabilities GET /api/tasks/:id/capabilities：该任务会话**此刻**的能力位。
 //
-// 为什么单开一个接口而不是塞进 Task DTO：这些能力来自 ACP 握手（对端在 Initialize
-// 里声明什么），是**会话级的运行时事实**，而 Task 是持久化模型 —— 把运行时能力
-// 写进落盘结构，会立刻产生"磁盘上的那份说的和实际不符"（重启后会话没了，
-// 记录里却还写着支持收图）。
+// 为什么单开一个接口而不是塞进 Task DTO：活会话的能力来自 ACP 握手（对端在
+// Initialize 里声明什么），是**会话级的运行时事实**，而 Task 是持久化模型 ——
+// 把运行时能力写进落盘结构，会立刻产生"磁盘上的那份说的和实际不符"。
 //
 // 前端在进入详情页后问一次，据此决定要不要显示加图入口。
+// image_prompt 判据见 taskImagePrompt（活握手优先；无活会话回落目录）。
 func (s *Server) taskCapabilities(c *gin.Context) {
 	id := c.Param("id")
-	if _, ok := s.store.Get(id); !ok {
+	t, ok := s.store.Get(id)
+	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"image_prompt": s.runner.SupportsImagePrompt(id),
+		"image_prompt": s.taskImagePrompt(t),
 	})
+}
+
+// taskImagePrompt 决定会话页要不要露出加图入口。
+//
+//  1. 活会话握手声明可收图 → true；
+//  2. 仍有活会话但对端没声明 → false（目录说能也不算，真发会 4xx）；
+//  3. 无活会话（终态被回收 / 尚未首轮）→ 回落该 task.Agent 在目录里的 ImagePrompt。
+//     续问 / 排队会重新 Open，入口应与新建任务页一致，不能逼用户先发纯文本。
+func (s *Server) taskImagePrompt(t *model.Task) bool {
+	if t == nil {
+		return false
+	}
+	if s.runner.SupportsImagePrompt(t.ID) {
+		return true
+	}
+	if s.runner.HasLiveAgentSession(t.ID) {
+		return false
+	}
+	return s.catalogImagePrompt(t.Agent)
+}
+
+// catalogImagePrompt 查 agent 目录里该 name 的静态 ImagePrompt（新建任务页同源）。
+func (s *Server) catalogImagePrompt(agentName string) bool {
+	for _, a := range s.agentCatalog() {
+		if a.Name == agentName {
+			return a.ImagePrompt
+		}
+	}
+	return false
 }
 
 // backfillTitles POST /api/admin/backfill-titles：为所有"有 prompt 但没标题"的任务补标题。
